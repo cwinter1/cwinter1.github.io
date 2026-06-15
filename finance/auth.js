@@ -113,6 +113,7 @@
     if (user === USER && simpleHash(pass) === EXPECTED) {
       saveSession(pass);
       document.getElementById('wf-login').remove();
+      document.dispatchEvent(new Event('wfLoggedIn'));
     } else {
       document.getElementById('wf-err').style.display = 'block';
       document.getElementById('wf-pass').value = '';
