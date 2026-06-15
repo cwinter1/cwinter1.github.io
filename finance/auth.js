@@ -29,8 +29,8 @@
     } catch(e) { return false; }
   }
 
-  function saveSession() {
-    sessionStorage.setItem('wf_pass', pwd);
+  function saveSession(password) {
+    sessionStorage.setItem('wf_pass', password);
     sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ok: true, ts: Date.now() }));
   }
 
@@ -111,7 +111,7 @@
     const user = document.getElementById('wf-user').value.trim().toLowerCase();
     const pass = document.getElementById('wf-pass').value;
     if (user === USER && simpleHash(pass) === EXPECTED) {
-      saveSession();
+      saveSession(pass);
       document.getElementById('wf-login').remove();
     } else {
       document.getElementById('wf-err').style.display = 'block';
