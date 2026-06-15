@@ -30,6 +30,7 @@
   }
 
   function saveSession() {
+    sessionStorage.setItem('wf_pass', pwd);
     sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ok: true, ts: Date.now() }));
   }
 
