@@ -1,6 +1,5 @@
-// Winter Finance — Public Data Layer
-// All real data loaded from Google Drive via Apps Script
-// No financial data stored here
-// Apps Script URL: https://script.google.com/macros/s/AKfycbw-4NufDK5e1are3WU5AWVU53rPMfisP_Y16B5qdlYA40Ob5u44hNYY63RqY2oz0SN-2w/exec
-// Last updated: June 2026
-// Budget version: v2 — CC reduction plan applied
+// Winter Finance — Data placeholder
+// Real data loaded from Google Drive via Apps Script
+// No financial data stored in this public repository
+// Apps Script: https://script.google.com/macros/s/AKfycbzbNxVVoGwmwgEmjEYx9L2ktNZ8tF5eKevVthLb00MBVnFtXb3-9X45FxjjhPtC6ExN5w/exec
+// Last updated: June 2026 · v4
