@@ -4,7 +4,7 @@
 // The token is kept for this browser tab only and sent with each data request.
 // Nothing secret is stored in this file or anywhere in this repository.
 (function(){
-  const ENDPOINT = 'https://script.google.com/macros/s/AKfycby1CW3nl23yASIfz3BKF913dsGP28u7Salnk_KgmetxBctRpYo8NlCpDwAi-cNV_6PwPA/exec';
+  const ENDPOINT = 'https://script.google.com/macros/s/AKfycbyRXr2Bk6uhUoo_WaWg0YY0KiLPK_7r0wFBuQcM-EghFmqnkFpztTvCRj-Y2i2AQrlEQA/exec';
   const SESSION_KEY = 'wf_auth';
   const SESSION_TTL = 6 * 60 * 60 * 1000; // matches the server session length (6 hours)
   const origFetch = window.fetch.bind(window);
