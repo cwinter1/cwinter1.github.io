@@ -1,38 +1,59 @@
-// Winter Finance — Authentication
-// User: Chris | Password: winterfinance2026
+// Winter Finance — access gate
+// No password, hash or username is stored in this file or anywhere in this repository.
+// The key is checked by the private Apps Script; this page only keeps what the visitor
+// typed, for this browser tab, and sends it with each data request.
 (function(){
-  const USER = 'chris';
-  const PASS_HASH = '7fdab3f7'; // sha256 of winterfinance2026
+  const ENDPOINT = 'https://script.google.com/macros/s/AKfycbzXqNMR8ginRsz-k21oGbswPXMt1oIRZuQWNs33mdxCu2Am25DBDh6i_lSF8WXwlcP2fQ/exec';
   const SESSION_KEY = 'wf_auth';
   const SESSION_TTL = 8 * 60 * 60 * 1000; // 8 hours
-
-  // Simple hash function (not cryptographic, but sufficient for static site)
-  function simpleHash(str) {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash;
-    }
-    return Math.abs(hash).toString(16).padStart(8, '0');
-  }
-
-  const EXPECTED = simpleHash('winterfinance2026');
+  const origFetch = window.fetch.bind(window);
+  let reloadOnLogin = false;
 
   function checkSession() {
     try {
+      if (!sessionStorage.getItem('wf_pass')) return false;
       const s = sessionStorage.getItem(SESSION_KEY);
       if (!s) return false;
       const data = JSON.parse(s);
-      if (Date.now() - data.ts > SESSION_TTL) { sessionStorage.removeItem(SESSION_KEY); return false; }
+      if (Date.now() - data.ts > SESSION_TTL) { clearSession(); return false; }
       return data.ok === true;
     } catch(e) { return false; }
   }
 
-  function saveSession(password) {
-    sessionStorage.setItem('wf_pass', password);
+  function clearSession() {
+    try { sessionStorage.removeItem('wf_pass'); sessionStorage.removeItem(SESSION_KEY); } catch(e) {}
+  }
+
+  // wf_pass holds the URL-encoded key, because the pages append it to the request URL as-is.
+  function saveSession(encodedKey) {
+    sessionStorage.setItem('wf_pass', encodedKey);
     sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ok: true, ts: Date.now() }));
   }
+
+  function isUnauthorized(text) { return /^\s*\/\/\s*unauthorized/i.test(text || ''); }
+
+  // The Apps Script answers "// unauthorized" for a wrong key and the data otherwise.
+  async function accepted(encodedKey) {
+    const r = await origFetch(ENDPOINT + '?key=' + encodedKey);
+    const t = await r.text();
+    return !isUnauthorized(t) && /DATA\s*=/.test(t);
+  }
+
+  // If the key stops working (for example it was changed), drop the session and ask again.
+  window.fetch = function(input, init) {
+    const p = origFetch(input, init);
+    try {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (url.indexOf(ENDPOINT) === 0) {
+        p.then(function(res) {
+          return res.clone().text().then(function(t) {
+            if (isUnauthorized(t)) { clearSession(); reloadOnLogin = true; if (!document.getElementById('wf-login')) showLogin(); }
+          });
+        }).catch(function(){});
+      }
+    } catch(e) {}
+    return p;
+  };
 
   function showLogin() {
     document.body.style.display = 'none';
@@ -91,35 +112,43 @@
         <div class="wf-logo">WINTER</div>
         <div class="wf-sub">FAMILY FINANCE · PRIVATE</div>
         <div class="wf-field">
-          <label class="wf-label" for="wf-user">משתמש</label>
-          <input class="wf-input" id="wf-user" type="text" placeholder="username" autocomplete="username" />
-        </div>
-        <div class="wf-field">
           <label class="wf-label" for="wf-pass">סיסמה</label>
           <input class="wf-input" id="wf-pass" type="password" placeholder="password" autocomplete="current-password" />
         </div>
-        <button class="wf-btn" onclick="wfLogin()">כניסה</button>
-        <div class="wf-error" id="wf-err">שם משתמש או סיסמה שגויים</div>
+        <button class="wf-btn" id="wf-go">כניסה</button>
+        <div class="wf-error" id="wf-err">הסיסמה שגויה</div>
       </div>`;
     document.body.appendChild(overlay);
     document.body.style.display = '';
-    document.getElementById('wf-pass').addEventListener('keydown', e => { if(e.key==='Enter') wfLogin(); });
-    document.getElementById('wf-user').addEventListener('keydown', e => { if(e.key==='Enter') document.getElementById('wf-pass').focus(); });
+    const input = document.getElementById('wf-pass');
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') wfLogin(); });
+    document.getElementById('wf-go').addEventListener('click', wfLogin);
+    input.focus();
   }
 
-  window.wfLogin = function() {
-    const user = document.getElementById('wf-user').value.trim().toLowerCase();
-    const pass = document.getElementById('wf-pass').value;
-    if (user === USER && simpleHash(pass) === EXPECTED) {
-      saveSession(pass);
+  async function wfLogin() {
+    const input = document.getElementById('wf-pass');
+    const btn = document.getElementById('wf-go');
+    const err = document.getElementById('wf-err');
+    const key = input.value;
+    if (!key) return;
+    btn.disabled = true;
+    err.style.display = 'none';
+    let ok = false, netFail = false;
+    try { ok = await accepted(encodeURIComponent(key)); } catch(e) { netFail = true; }
+    btn.disabled = false;
+    if (ok) {
+      saveSession(encodeURIComponent(key));
       document.getElementById('wf-login').remove();
+      if (reloadOnLogin) { location.reload(); return; }
       document.dispatchEvent(new Event('wfLoggedIn'));
     } else {
-      document.getElementById('wf-err').style.display = 'block';
-      document.getElementById('wf-pass').value = '';
-      document.getElementById('wf-pass').focus();
+      err.textContent = netFail ? 'שגיאת רשת, נסו שוב' : 'הסיסמה שגויה';
+      err.style.display = 'block';
+      input.value = '';
+      input.focus();
     }
-  };
+  }
 
   if (!checkSession()) {
     if (document.readyState === 'loading') {
