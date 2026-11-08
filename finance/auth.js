@@ -3,7 +3,7 @@
 // The key is checked by the private Apps Script; this page only keeps what the visitor
 // typed, for this browser tab, and sends it with each data request.
 (function(){
-  const ENDPOINT = 'https://script.google.com/macros/s/AKfycbzXqNMR8ginRsz-k21oGbswPXMt1oIRZuQWNs33mdxCu2Am25DBDh6i_lSF8WXwlcP2fQ/exec';
+  const ENDPOINT = 'https://script.google.com/macros/s/AKfycby1CW3nl23yASIfz3BKF913dsGP28u7Salnk_KgmetxBctRpYo8NlCpDwAi-cNV_6PwPA/exec';
   const SESSION_KEY = 'wf_auth';
   const SESSION_TTL = 8 * 60 * 60 * 1000; // 8 hours
   const origFetch = window.fetch.bind(window);
