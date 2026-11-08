@@ -41,6 +41,14 @@ nav{background:var(--s);border-bottom:1px solid var(--bo);padding:0 20px;display
 .chart-wrap{height:180px;position:relative}
 .chart-wrap-sm{height:140px;position:relative}
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.live-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:14px;padding:16px}
+.live-bar{height:6px;background:var(--e);border-radius:3px;overflow:hidden;margin-top:8px}
+.live-bar>i{display:block;height:100%;background:var(--g);border-radius:3px}
+.live-bar>i.a{background:var(--aa)}.live-bar>i.r{background:var(--r)}
+.live-foot{padding:0 16px 14px;font-family:'IBM Plex Mono',monospace;font-size:.62rem;color:var(--m);letter-spacing:1px}
+.live-top{display:flex;gap:6px;flex-wrap:wrap;padding:0 16px 14px}
+.live-top span{font-family:'IBM Plex Mono',monospace;font-size:.66rem;color:var(--m);background:var(--e);border-radius:4px;padding:3px 8px}
+@media(max-width:500px){.live-grid{grid-template-columns:1fr 1fr}}
 @media(max-width:500px){.two-col{grid-template-columns:1fr}.month-grid{grid-template-columns:repeat(4,1fr)}}
 </style>
 </head>
@@ -67,6 +75,21 @@ nav{background:var(--s);border-bottom:1px solid var(--bo);padding:0 20px;display
 </div>
 
 <div class="wrap">
+
+  <!-- LIVE: current month so far (filled from DATA.live by the daily sync; hidden when absent) -->
+  <section id="liveSection" hidden>
+    <div class="sh"><h2>החודש עד היום</h2><div class="sl"></div><span class="badge" id="liveBadge"></span></div>
+    <div class="card" id="liveCard">
+      <div class="live-grid">
+        <div class="kpi"><div class="kv" id="lvSpent">—</div><div class="kl">הוצאות עד היום</div><div class="live-bar"><i id="lvBar"></i></div></div>
+        <div class="kpi"><div class="kv" id="lvPace">—</div><div class="kl">קצב לסוף חודש</div></div>
+        <div class="kpi"><div class="kv b" id="lvCard">—</div><div class="kl">מזה אשראי</div></div>
+        <div class="kpi"><div class="kv" id="lvClass">—</div><div class="kl">סווג</div></div>
+      </div>
+      <div class="live-top" id="lvCats"></div>
+      <div class="live-foot" id="lvFoot"></div>
+    </div>
+  </section>
 
   <!-- MONTHLY BALANCE -->
   <div class="sh"><h2>מאזן חודשי</h2><div class="sl"></div><span class="badge g">עודף / גרעון</span></div>
@@ -113,7 +136,7 @@ function loadData() {
     .then(function(r) { return r.text(); })
     .then(function(js) {
       try {
-        eval(js);
+        wfRunData(js);
         initCharts();
       } catch(e) {
         console.error("Data load error:", e);
@@ -129,6 +152,7 @@ if (sessionStorage.getItem("wf_pass")) {
 }
 
 function initCharts() {
+try { renderLive(DATA.live); } catch(e) { console.error('Live card error:', e); }
 const monthly = DATA.monthly;
 const labels   = monthly.map(m => m.label);
 const income = DATA.budget_amounts ? DATA.budget_amounts.income : 32311;
@@ -247,6 +271,41 @@ DATA.atomic_habits.forEach(h => {
   hl.appendChild(d);
 });
 } // end initCharts
+
+var CAT_HE = { groceries:'מכולת', restaurants:'מסעדות', fuel:'דלק', clothing:'ביגוד', entertainment:'בידור', kids_activities:'פעילויות ילדים',
+  health:'בריאות', utilities:'חשמל/מים/גז', building_fee:'ועד בית', travel:'נסיעות', shopping:'קניות', savings:'חיסכון', other:'אחר', unclassified:'לא מסווג' };
+function renderLive(L) {
+  var sec = document.getElementById('liveSection');
+  if (!L || typeof L.mtd_expenses !== 'number') { sec.hidden = true; return; }
+  var money = function(n) { return '₪' + Math.round(n).toLocaleString('he-IL'); };
+  var set = function(id, text, cls) {
+    var el = document.getElementById(id); el.textContent = text;
+    if (cls) el.className = 'kv ' + cls;
+  };
+  var pct = L.budget ? L.mtd_expenses / L.budget * 100 : null;
+  var tone = function(v) { return v == null ? '' : v > 100 ? 'r' : v >= 90 ? 'a' : 'g'; };
+  set('lvSpent', money(L.mtd_expenses), tone(pct));
+  var bar = document.getElementById('lvBar');
+  bar.style.width = (pct == null ? 0 : Math.min(100, pct)) + '%';
+  bar.className = tone(pct);
+  if (L.pace == null) { set('lvPace', 'אחרי ה-10', 'a'); }
+  else { set('lvPace', money(L.pace), tone(L.budget ? L.pace / L.budget * 100 : null)); }
+  set('lvCard', money(L.card || 0));
+  set('lvClass', L.classified_pct != null ? L.classified_pct + '%' : '—', L.classified_pct >= 90 ? 'g' : 'a');
+  var badge = document.getElementById('liveBadge');
+  badge.textContent = (L.month_label || '') + (pct != null ? ' · ' + Math.round(pct) + '% מהתקציב' : '');
+  badge.className = 'badge ' + (tone(pct) || 'b');
+  var cats = document.getElementById('lvCats'); cats.textContent = '';
+  Object.keys(L.cats || {}).slice(0, 5).forEach(function(k) {
+    var sp = document.createElement('span'); sp.textContent = (CAT_HE[k] || k) + ' ' + money(L.cats[k]); cats.appendChild(sp);
+  });
+  var foot = [];
+  if (L.data_through) foot.push('נתונים עד ' + L.data_through);
+  if (L.pending) foot.push(L.pending + ' ממתינים לאישור');
+  if (L.stale) foot.push('הנתונים לא עדכניים');
+  document.getElementById('lvFoot').textContent = foot.join(' · ');
+  sec.hidden = false;
+}
 </script>
 </body>
 </html>

@@ -3,6 +3,13 @@
 // Step 2: the visitor enters the code; the Apps Script returns a session token.
 // The token is kept for this browser tab only and sent with each data request.
 // Nothing secret is stored in this file or anywhere in this repository.
+// Runs the text of the data file and makes its DATA object global for the page.
+// (A plain eval() keeps a `const DATA = ...` private to the eval, so the page never sees it.)
+window.wfRunData = function(js) {
+  window.DATA = new Function(js + '\n;return DATA;')();
+  return window.DATA;
+};
+
 (function(){
   const ENDPOINT = 'https://script.google.com/macros/s/AKfycbyRXr2Bk6uhUoo_WaWg0YY0KiLPK_7r0wFBuQcM-EghFmqnkFpztTvCRj-Y2i2AQrlEQA/exec';
   const SESSION_KEY = 'wf_auth';
