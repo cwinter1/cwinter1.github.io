@@ -84,7 +84,7 @@
   function solid() { return months().filter(function (m) { return m.q === 'full'; }); }
 
   var NAV = [['index.html', 'תמונת מצב'], ['month.html', 'חודש'], ['week.html', 'שבוע'], ['trends.html', 'מגמות'],
-             ['overdraft.html', 'יציאה מהמינוס'], ['budget.html', 'תקציב'], ['budget-monthly.html', 'תקציב חודשי']];
+             ['overdraft.html', 'יציאה מהמינוס'], ['budget.html', 'תקציב'], ['budget-monthly.html', 'תשלומים קבועים']];
   function nav(active) {
     var el = document.getElementById('wfnav'); if (!el) return;
     el.innerHTML = '<span class="nb">כספים</span>' + NAV.map(function (n) {
