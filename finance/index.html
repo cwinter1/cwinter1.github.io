@@ -22,6 +22,9 @@
     <div class="legend"><span><i style="background:var(--income)"></i>הכנסה קבועה</span><span><i style="background:var(--expense)"></i>הוצאות</span><span><i style="background:var(--net)"></i>מאזן החודש</span><span><i style="background:var(--m);opacity:.5"></i>חודש חלקי (חסר מידע)</span></div>
     <div class="note" style="margin-top:12px" id="nIE"></div></div>
 
+  <div class="sec"><h2>מאזן חודשי</h2><span class="hint">בשקלים ובאחוזים מההכנסה. חודש חלקי מסומן, כי חסר בו מידע</span></div>
+  <div class="card2 scroll-x"><table class="tb" id="tBal"></table></div>
+
   <div class="sec"><h2>המינוס לאורך זמן</h2><span class="hint">בחשבון הבנק ואחרי כרטיסים שטרם חויבו</span></div>
   <div class="card2"><div class="chartbox"><canvas id="cOD"></canvas></div>
     <div class="legend"><span><i style="background:var(--net)"></i>חוב נטו</span><span><i style="background:var(--m)"></i>יתרת בנק</span><span><i style="background:var(--expense)"></i>מסגרת האשראי</span></div></div>
@@ -89,6 +92,20 @@ WF.boot(function (D) {
   document.getElementById('nIE').innerHTML = '<b>' + wr + ' מתוך ' + fullShown.length + ' חודשים מלאים</b> הסתיימו במינוס. ' +
     'ההכנסה כוללת משכורות וקצבאות קבועות; כסף חד-פעמי (החזרים, משיכות מחיסכון, הלוואות) לא נספר כהכנסה. ' +
     'חודשים בצבע בהיר חסר בהם מידע (למשל אוקטובר 2025: דף הבנק מתחיל ב-9 לחודש).';
+
+  // monthly balance table: amount and percentage
+  (function () {
+    var rows = H.filter(function (m) { return m.q === 'full' || m.q === 'partial'; }).slice(-12).reverse();
+    var html = '<tr><th>חודש</th><th class="n">הכנסה</th><th class="n">הוצאות</th><th class="n">מאזן</th><th class="n">% מההכנסה</th></tr>';
+    var sI = 0, sE = 0, n = 0;
+    rows.forEach(function (m) {
+      var b = m.inc - m.exp, p = m.inc ? b / m.inc * 100 : 0, cls = b >= 0 ? 'pos' : 'neg';
+      html += '<tr><td>' + WF.mLong(m.m) + (m.q === 'partial' ? ' <span class="tag warn">חלקי</span>' : '') + '</td><td class="n">' + WF.ilsText(m.inc) + '</td><td class="n">' + WF.ilsText(m.exp) + '</td><td class="n ' + cls + '"><b>' + (b >= 0 ? '+' : '') + WF.ilsText(b) + '</b></td><td class="n ' + cls + '">' + WF.pct(p) + '</td></tr>';
+      if (m.q === 'full') { sI += m.inc; sE += m.exp; n++; }
+    });
+    if (n) { var tb = sI - sE; html += '<tr style="font-weight:800"><td>ממוצע ' + n + ' חודשים מלאים</td><td class="n">' + WF.ilsText(sI / n) + '</td><td class="n">' + WF.ilsText(sE / n) + '</td><td class="n ' + (tb >= 0 ? 'pos' : 'neg') + '">' + (tb >= 0 ? '+' : '') + WF.ilsText(tb / n) + '</td><td class="n ' + (tb >= 0 ? 'pos' : 'neg') + '">' + WF.pct(sI ? tb / sI * 100 : 0) + '</td></tr>'; }
+    document.getElementById('tBal').innerHTML = html;
+  })();
 
   // chart 2: overdraft timeline
   var ser = po.series || [];
