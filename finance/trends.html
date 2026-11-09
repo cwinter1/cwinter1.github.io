@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>מגמות — איך כל קטגוריה משתנה</title>
+<script src="auth.js"></script>
+<link rel="stylesheet" href="wf.css">
+<script src="wf.js"></script>
+</head>
+<body>
+<nav id="wfnav"></nav>
+<div class="page">
+  <h1>מגמות לאורך זמן</h1>
+  <div class="lead" id="lead"></div>
+
+  <div class="grid g2" id="movers"></div>
+
+  <div class="sec"><h2>כל קטגוריה בנפרד</h2><span class="hint">חודשים מלאים בלבד · ממוצע, החודש האחרון והכיוון</span></div>
+  <div class="grid" id="cards" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr))"></div>
+
+  <div class="sec"><h2>מפת חום: קטגוריה לפי חודש</h2><span class="hint">צבע כהה = גבוה מהרגיל לאותה קטגוריה</span></div>
+  <div class="card2 scroll-x"><table class="tb heat" id="heat"></table></div>
+
+  <div class="note" style="margin-top:18px" id="notes"></div>
+</div>
+
+<script>
+WF.nav('trends.html');
+WF.boot(function (D) {
+  var all = WF.months().filter(function (m) { return m.q === 'full' || m.q === 'partial'; });
+  var full = all.filter(function (m) { return m.q === 'full'; }).slice(-12);
+  if (full.length < 4) { document.getElementById('lead').textContent = 'אין עדיין מספיק חודשים מלאים.'; return; }
+  document.getElementById('lead').textContent = 'מבוסס על ' + full.length + ' חודשים מלאים: ' + WF.mShort(full[0].m) + ' עד ' + WF.mShort(full[full.length - 1].m) + '.';
+
+  var cats = {}; full.forEach(function (m) { Object.keys(m.cats).forEach(function (c) { cats[c] = 1; }); });
+  var stats = Object.keys(cats).filter(function (c) { return c !== 'unclassified'; }).map(function (c) {
+    var v = full.map(function (m) { return m.cats[c] || 0; }), av = WF.avg(v), sl = WF.slope(v), last = v[v.length - 1];
+    var mx = Math.max.apply(null, v), mxm = full[v.indexOf(mx)].m;
+    return { c: c, v: v, avg: av, med: WF.median(v), slope: sl, last: last, max: mx, maxm: mxm, rel: av ? sl * v.length / av : 0 };
+  }).filter(function (s) { return s.avg > 150; });
+
+  // movers: biggest steady rise and fall (flex + living, per month over the period)
+  var movable = stats.filter(function (s) { return WF.group(s.c) !== 'fixed'; });
+  var up = movable.slice().sort(function (a, b) { return b.slope - a.slope; }).filter(function (s) { return s.slope > 20; }).slice(0, 4);
+  var dn = movable.slice().sort(function (a, b) { return a.slope - b.slope; }).filter(function (s) { return s.slope < -20; }).slice(0, 4);
+  function list(a, cls, none) {
+    return a.length ? '<table class="tb">' + a.map(function (s) {
+      return '<tr><td><span class="dot" style="background:' + WF.color(s.c) + '"></span>' + WF.name(s.c) + '</td><td class="n ' + cls + '">' + (s.slope > 0 ? '+' : '−') + WF.ilsText(Math.abs(s.slope)) + ' לחודש</td></tr>';
+    }).join('') + '</table>' : '<div class="empty">' + none + '</div>';
+  }
+  document.getElementById('movers').innerHTML =
+    '<div class="card2"><div class="k" style="color:var(--m);font-weight:600;margin-bottom:6px">עולות בקביעות ▲</div>' + list(up, 'neg', 'אין קטגוריה שעולה בבירור') + '</div>' +
+    '<div class="card2"><div class="k" style="color:var(--m);font-weight:600;margin-bottom:6px">יורדות בקביעות ▼</div>' + list(dn, 'pos', 'אין קטגוריה שיורדת בבירור') + '</div>';
+
+  // small multiples
+  var order = stats.slice().sort(function (a, b) { return b.avg - a.avg; });
+  document.getElementById('cards').innerHTML = order.map(function (s) {
+    var dir = Math.abs(s.rel) < 0.12 ? 'יציב' : (s.rel > 0 ? 'עולה' : 'יורד'), dc = dir === 'יציב' ? '' : (s.rel > 0 ? 'neg' : 'pos');
+    if (WF.group(s.c) === 'fixed') dc = '';
+    return '<div class="card2" style="padding:12px"><div style="display:flex;justify-content:space-between;align-items:center"><b><span class="dot" style="background:' + WF.color(s.c) + '"></span>' + WF.name(s.c) + '</b><span class="tag ' + (dc === 'neg' ? 'bad' : dc === 'pos' ? 'ok' : '') + '">' + dir + '</span></div>' +
+      WF.spark(s.v, WF.color(s.c), { w: 200, h: 44 }) +
+      '<div class="grid" style="grid-template-columns:repeat(3,1fr);gap:4px;margin-top:6px;font-size:.72rem;color:var(--m)"><div>ממוצע<br><b style="color:var(--t)" class="num">' + WF.ilsText(s.avg) + '</b></div><div>אחרון<br><b style="color:var(--t)" class="num">' + WF.ilsText(s.last) + '</b></div><div>שיא<br><b style="color:var(--t)" class="num">' + WF.ilsText(s.max) + '</b></div></div></div>';
+  }).join('');
+
+  // heatmap, own scale per category (median as the "normal")
+  var cols = all.slice(-14);
+  var head = '<tr><th>קטגוריה</th>' + cols.map(function (m) { return '<th class="n" style="text-align:center">' + WF.mShort(m.m).replace(' ', '<br>') + '</th>'; }).join('') + '</tr>';
+  var body = order.map(function (s) {
+    var med = s.med || s.avg;
+    return '<tr><td style="white-space:nowrap"><span class="dot" style="background:' + WF.color(s.c) + '"></span>' + WF.name(s.c) + '</td>' + cols.map(function (m) {
+      var v = m.cats[s.c] || 0, f = med ? v / med : 0, a = Math.max(0, Math.min(1, (f - 0.6) / 1.4));
+      var bg = v ? 'color-mix(in srgb, var(--expense) ' + Math.round(a * 70) + '%, transparent)' : 'transparent';
+      return '<td class="c" style="background:' + bg + '">' + (v ? (v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v) : '') + '</td>';
+    }).join('') + '</tr>';
+  }).join('');
+  document.getElementById('heat').innerHTML = head + body;
+
+  var partial = all.filter(function (m) { return m.q === 'partial'; }).map(function (m) { return WF.mShort(m.m); });
+  document.getElementById('notes').innerHTML = '<b>איך לקרוא:</b> "הכיוון" הוא שיפוע לאורך החודשים המלאים, לא קפיצה בודדת. חודש עם נסיעה או קייטנה יכול לעוות קטגוריה, ולכן יש גם שיא. ' +
+    (partial.length ? 'המפה כוללת גם חודשים חלקיים (' + partial.join(', ') + '), שחסר בהם מידע, והם מסומנים בסכומים נמוכים. ' : '') +
+    'ממאי 2026 ואילך הנתונים אוטומטיים; לפני כן הם נקראו מדפי החשבון והכרטיסים, ובכאל הסיווג חלקו זמני.';
+});
+</script>
+</body>
+</html>
