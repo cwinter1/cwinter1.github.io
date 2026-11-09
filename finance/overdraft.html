@@ -181,6 +181,10 @@ nav{background:var(--s);border-bottom:1px solid var(--bo);padding:0 20px;display
     <tbody id="capTable"></tbody></table></div>
   <div class="mnote" id="capNote"></div>
 
+  <div class="sh" style="margin-top:20px"><h2>נסיעות מתוכננות</h2><div class="sl"></div></div>
+  <div class="mcard"><table class="mtbl"><thead><tr><th>נסיעה</th><th>חודש</th><th>תקציב</th></tr></thead><tbody id="tripTable"></tbody></table></div>
+  <div class="mnote" id="tripNote"></div>
+
   <div class="sh" style="margin-top:20px"><h2>מתי יוצאים</h2><div class="sl"></div></div>
   <div class="mcard" style="padding:14px 12px"><div class="chart-wrap"><canvas id="projChart" role="img" aria-label="תחזית המינוס"></canvas></div></div>
   <div class="mcard" style="margin-top:10px"><table class="mtbl">
@@ -325,14 +329,21 @@ document.getElementById('capTable').innerHTML = rows.filter(r => r.avg || r.c.p2
   `<tr><td><b>סה"כ</b></td><td class="n">${fmt(avgExp)}</td><td class="n">${fmt(p1)}</td><td class="n">${fmt(p2)}</td><td class="n dpos">${fmt(avgExp - p2)}</td></tr>`;
 document.getElementById('capNote').innerHTML = `הממוצע כולל נסיעות (${fmt(tripAvg)}) וקייטנות (${fmt(campAvg)}) בחודש; בתוכנית הן מחוץ לתקציב השוטף. ההכנסה השוטפת בחישוב: ${fmt(avgInc)} בחודש (בלי הכנסות חד-פעמיות).`;
 
+// ── TRIPS ──
+document.getElementById('tripTable').innerHTML = (PL.trips || []).map(t => `<tr><td>${esc(t.name)}<div class="dmut" style="font-size:.66rem">${esc(t.note || '')}</div></td><td class="n">${mLabel(t.month)}</td><td class="n">${fmt(t.amt)}${t.est ? ' <span class="dmut" style="font-size:.62rem">הערכה</span>' : ''}</td></tr>`).join('') +
+  `<tr><td><b>סה"כ</b></td><td></td><td class="n"><b>${fmt((PL.trips || []).reduce((t, x) => t + x.amt, 0))}</b></td></tr>`;
+document.getElementById('tripNote').innerHTML = 'הטיסות של כל ארבע הנסיעות כבר שולמו וכבר נספרו בהוצאות של יולי–אוקטובר. הסכומים כאן הם מה שנשאר: מלונות, רכב, אוכל, כניסות. בתחזית הם יורדים בחודש הנסיעה.';
+
 // ── PROJECTION ──
 const horizon = 36;
 const wf = {}; PL.windfalls.forEach(w => { wf[w.month] = (wf[w.month] || 0) + w.amt; });
-function project(monthly) {
+const trips = PL.trips || [], tr = {}; trips.forEach(t => { tr[t.month] = (tr[t.month] || 0) + t.amt; });
+const tripsTotal = trips.reduce((t, x) => t + x.amt, 0);
+function project(monthly, withTrips) {
   const out = []; let bal = startNet, exit = null;
   for (let i = 1; i <= horizon; i++) {
     const k = addM(startKey, i);
-    bal += monthly(k) + (wf[k] || 0);
+    bal += monthly(k) + (wf[k] || 0) - (withTrips ? (tr[k] || 0) : 0);
     out.push([k, Math.round(bal)]);
     if (exit == null && bal >= 0) exit = k;
   }
@@ -341,17 +352,17 @@ function project(monthly) {
 const planM = k => (phaseOf(k).id === 1 ? sur1 : sur2);
 const ach = PL.achieve_pct / 100;
 const SC = [
-  {n: 'כמו עכשיו (עם נסיעות וקייטנות)', col: '#f87171', f: () => avgGap, s: () => avgGap},
-  {n: 'בלי נסיעות וקייטנות, בלי שינוי אחר', col: '#f7931e', f: () => runGap, s: () => runGap},
-  {n: `התוכנית, ${PL.achieve_pct}% מתקציבה`, col: '#60a5fa', f: k => runGap + ach * (planM(k) - runGap), s: () => runGap + ach * (sur2 - runGap)},
-  {n: 'התוכנית במלואה', col: '#4ade80', f: planM, s: () => sur2},
-].map(s => Object.assign(s, project(s.f)));
+  {n: 'כמו עכשיו (ההוצאות כוללות נסיעות וקייטנות)', col: '#f87171', t: false, f: () => avgGap, s: () => avgGap},
+  {n: 'בלי שינוי בהרגלים, עם הנסיעות המתוכננות', col: '#f7931e', t: true, f: () => runGap, s: () => runGap},
+  {n: `התוכנית, ${PL.achieve_pct}% מתקציבה, עם הנסיעות`, col: '#60a5fa', t: true, f: k => runGap + ach * (planM(k) - runGap), s: () => runGap + ach * (sur2 - runGap)},
+  {n: 'התוכנית במלואה, עם הנסיעות', col: '#4ade80', t: true, f: planM, s: () => sur2},
+].map(s => Object.assign(s, project(s.f, s.t)));
 document.getElementById('scenTable').innerHTML = SC.map(s => {
   const hit = P.limit && s.out.find(p => p[1] <= -P.limit);
   const exitTxt = s.exit ? `<b>${mFull(s.exit)}</b>` : `לא ב-${horizon} חודשים` + (hit ? ` · <span class="dneg">חוצים את המסגרת ${mLabel(hit[0])}</span>` : '');
   return `<tr><td><span class="dot" style="background:${s.col}"></span>${esc(s.n)}</td><td class="n ${s.s() < 0 ? 'dneg' : 'dpos'}">${sg(s.s())}</td><td>${exitTxt}</td></tr>`;
 }).join('');
-document.getElementById('scenNote').innerHTML = `נקודת ההתחלה: חוב נטו ${fmt(startNet)} ב-${esc(startDate)}. בונוסים בהנחה (כמו בשנה שעברה): ${PL.windfalls.map(w => `${fmt(w.amt)} ב${mLabel(w.month)}`).join(', ')}. ההנחות נמצאות בקובץ הנתונים ואפשר לשנות אותן.`;
+document.getElementById('scenNote').innerHTML = `נסיעות מתוכננות בתחזית: ${trips.map(t => `${esc(t.name)} ${fmt(t.amt)} ב${mLabel(t.month)}${t.est ? ' (הערכה)' : ''}`).join('; ')}. סה"כ ${fmt(tripsTotal)}. נקודת ההתחלה: חוב נטו ${fmt(startNet)} ב-${esc(startDate)}. בונוסים בהנחה (כמו בשנה שעברה): ${PL.windfalls.map(w => `${fmt(w.amt)} ב${mLabel(w.month)}`).join(', ')}. ההנחות נמצאות בקובץ הנתונים ואפשר לשנות אותן.`;
 const labels = SC[0].out.map(p => mLabel(p[0]));
 new Chart(document.getElementById('projChart'), {
   type: 'line',
