@@ -35,6 +35,19 @@
   <div class="sec"><h2>מה השתנה לאחרונה</h2><span class="hint" id="hMV"></span></div>
   <div class="card2 scroll-x"><table class="tb" id="tMV"></table></div>
 
+  <div class="sec"><h2>תזרים שכבות</h2><span class="hint" id="hWF"></span></div>
+  <div class="card2"><div class="chartbox"><canvas id="cWF"></canvas></div></div>
+  <div class="card2 scroll-x" style="margin-top:12px"><table class="tb" id="tWF"></table></div>
+
+  <div class="sec"><h2>יעדים קרובים</h2><span class="hint" id="hUP"></span></div>
+  <div class="card2" id="upBox"></div>
+
+  <div class="sec"><h2>פעילויות ילדים</h2><span class="hint" id="hKD"></span></div>
+  <div class="card2 scroll-x"><table class="tb" id="tKD"></table></div>
+
+  <div class="sec"><h2>ההרגלים של התוכנית</h2></div>
+  <div class="card2"><ol id="habits" style="margin:0;padding-inline-start:20px;line-height:1.8"></ol></div>
+
   <div class="sec"><h2>החודש עד היום</h2><span class="hint" id="hLive"></span></div>
   <div class="card2" id="live"></div>
 
@@ -169,6 +182,72 @@ WF.boot(function (D) {
       '<div class="bar" style="margin:14px 0 8px"><i style="width:' + pc.toFixed(0) + '%;background:' + col + '"></i></div>' +
       '<div class="legend">' + cats2.map(function (c) { return '<span><i style="background:' + WF.color(c) + '"></i>' + WF.name(c) + ' ' + WF.ils(live.cats[c]) + '</span>'; }).join('') + '</div>';
   }
+
+  // ---- layered cash flow: income, then what each layer takes, down to what is left (average of the plan's base months) ----
+  (function () {
+    var P = D.od_plan || {}, ms = (P.base_months || []), byM = {}; H.forEach(function (m) { byM[m.m] = m; });
+    var base = ms.map(function (k) { return byM[k]; }).filter(Boolean);
+    if (!base.length) { document.getElementById('hWF').textContent = 'אין חודשי בסיס'; return; }
+    var LAY = [
+      { n: 'משכנתא והלוואות', cats: ['mortgage', 'loans'], col: '#d65a52' },
+      { n: 'חשבונות קבועים וביטוחים', cats: ['utilities', 'insurance', 'building_fee', 'card_fee', 'interest'], col: '#d9a93b' },
+      { n: 'ילדים ובית ספר', cats: ['kids_activities', 'school', 'education'], col: '#5c8df0' },
+      { n: 'מחיה שוטפת', cats: ['groceries', 'health', 'fuel', 'transport'], col: '#3fb88f' },
+      { n: 'גמישות', cats: ['clothing', 'shopping', 'restaurants', 'entertainment', 'transfers', 'other', 'cash', 'savings', 'unclassified'], col: '#a08df0' },
+      { n: 'נסיעות וקייטנות', cats: ['travel', 'camps'], col: '#2fb3d1' }];
+    var inc = WF.avg(base.map(function (m) { return m.inc; }));
+    var capOf = {}; (P.caps || []).forEach(function (c) { capOf[c.cat] = c.p2; });
+    var rows = LAY.map(function (l) {
+      var v = WF.avg(base.map(function (m) { return l.cats.reduce(function (s, c) { return s + (m.cats[c] || 0); }, 0); }));
+      var cap = l.cats.reduce(function (s, c) { return s + (capOf[c] || 0); }, 0);
+      return { n: l.n, v: v, cap: cap, col: l.col };
+    });
+    var spent = rows.reduce(function (s, r) { return s + r.v; }, 0), rest = inc - spent, run = inc;
+    var labs = ['הכנסה'].concat(rows.map(function (r) { return r.n; })).concat([rest >= 0 ? 'נשאר' : 'חסר']);
+    var pts = [[0, inc]], cols = [WF.css('--income')];
+    rows.forEach(function (r) { pts.push([run - r.v, run]); run -= r.v; cols.push(r.col); });
+    pts.push([Math.min(0, rest), Math.max(0, rest)]); cols.push(rest >= 0 ? WF.css('--income') : WF.css('--expense'));
+    WF.chartDefaults();
+    new Chart(document.getElementById('cWF'), {
+      type: 'bar', data: { labels: labs, datasets: [{ data: pts, backgroundColor: cols, borderRadius: 4 }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false },
+        tooltip: { rtl: true, callbacks: { label: function (c) { var p = c.raw; return WF.ilsText(Math.abs(p[1] - p[0])); } } } },
+        scales: { y: { ticks: { callback: function (v) { return WF.k(v, 0); } }, grid: { color: WF.css('--bo') } }, x: { grid: { display: false } } } }
+    });
+    document.getElementById('hWF').textContent = 'ממוצע ' + base.length + ' חודשי בסיס (' + WF.mShort(base[0].m) + '–' + WF.mShort(base[base.length - 1].m) + ')';
+    var t = '<tr><th>שכבה</th><th class="n">בחודש</th><th class="n">% מההכנסה</th><th class="n hs">תקרה 2027</th></tr>' +
+      '<tr style="font-weight:700"><td><span class="dot" style="background:var(--income)"></span>הכנסה</td><td class="n pos">' + WF.ilsText(inc) + '</td><td class="n">100%</td><td class="n hs"></td></tr>';
+    rows.forEach(function (r) { t += '<tr><td><span class="dot" style="background:' + r.col + '"></span>' + r.n + '</td><td class="n">' + WF.ilsText(r.v) + '</td><td class="n">' + WF.pct(inc ? r.v / inc * 100 : 0) + '</td><td class="n hs">' + (r.cap ? WF.ilsText(r.cap) : '—') + '</td></tr>'; });
+    t += '<tr style="font-weight:800"><td>' + (rest >= 0 ? 'נשאר' : 'חסר') + '</td><td class="n ' + (rest >= 0 ? 'pos' : 'neg') + '">' + (rest >= 0 ? '+' : '') + WF.ilsText(rest) + '</td><td class="n ' + (rest >= 0 ? 'pos' : 'neg') + '">' + WF.pct(inc ? rest / inc * 100 : 0) + '</td><td class="n hs"></td></tr>';
+    document.getElementById('tWF').innerHTML = t;
+  })();
+
+  // ---- upcoming commitments and trips, and how far the net debt is from the plan's gate ----
+  (function () {
+    var P = D.od_plan || {}, po = D.position || {}, cur = (live && live.month) || '', trips = (P.trips || []).filter(function (t) { return !cur || t.month >= cur; }).sort(function (a, b) { return a.month < b.month ? -1 : 1; });
+    var net = Math.abs(po.net || 0), gate = P.trip_fund_rule_below || 0, h = '';
+    if (gate && net) { var pc = Math.max(0, Math.min(100, (1 - (net - gate) / net) * 100)); h += '<div style="margin-bottom:14px"><b>חוב נטו ' + WF.ilsText(net) + '</b> · היעד לפני נסיעה חדשה: מתחת ל-' + WF.ilsText(gate) + ' · נשאר לצמצם ' + WF.ilsText(Math.max(0, net - gate)) + '<div class="bar" style="margin-top:8px"><i style="width:' + pc.toFixed(0) + '%;background:var(--net)"></i></div></div>'; }
+    h += trips.length ? '<table class="tb">' + trips.map(function (t) { return '<tr><td>' + WF.mShort(t.month) + '</td><td>' + WF.esc(t.name) + '</td><td class="n">' + WF.ilsText(t.amt) + (t.est ? ' <span class="tag">הערכה</span>' : '') + '</td></tr>'; }).join('') + '</table>' : '<div class="empty">אין נסיעות או התחייבויות מתוכננות</div>';
+    document.getElementById('upBox').innerHTML = h;
+    document.getElementById('hUP').textContent = trips.length + ' פריטים בתוכנית';
+  })();
+
+  // ---- kids' activities: what each child does and what it costs now ----
+  (function () {
+    var R = D.recurring; if (!R) return;
+    var kids = R.items.filter(function (i) { return i.group === 'kids' || i.group === 'school'; }), tot = 0;
+    var t = '<tr><th>ילד/ה</th><th>פעילות</th><th class="n">בחודש</th></tr>';
+    kids.sort(function (a, b) { return (a.owner ? 0 : 1) - (b.owner ? 0 : 1); }).forEach(function (i) {
+      var r = WF.rate(i, R.months); tot += r;
+      t += '<tr><td>' + (i.owner ? WF.esc(i.owner) : '<span style="color:var(--m)">משותף</span>') + '</td><td><bdi>' + WF.esc(i.name) + '</bdi>' + (i.annual ? ' <span class="tag">שנתי</span>' : '') + '</td><td class="n">' + (r ? WF.ilsText(r) : '—') + '</td></tr>';
+    });
+    t += '<tr style="font-weight:800"><td colspan="2">סך הכול בחודש</td><td class="n">' + WF.ilsText(tot) + '</td></tr>';
+    document.getElementById('tKD').innerHTML = t;
+    document.getElementById('hKD').textContent = 'פעילויות ובית ספר; סעיף שנתי מחולק ל-12';
+  })();
+
+  // ---- the habits: the plan's own rules ----
+  document.getElementById('habits').innerHTML = ((D.od_plan && D.od_plan.rules) || []).map(function (r) { return '<li><b>' + WF.esc(r.t) + '</b><div style="color:var(--m);font-size:.88rem">' + WF.esc(r.d) + '</div></li>'; }).join('');
 
   var prov = H.filter(function (m) { return m.q === 'cards'; }).length;
   document.getElementById('foot').innerHTML = '<b>מקורות:</b> ממאי 2026 ואילך הנתונים מגיעים אוטומטית מהבנק והכרטיסים. לפני כן הם נקראו מדפי החשבון של הבנק ודפי הכרטיסים (אמקס וכאל) ומתעדכנים רק כשמוסיפים דפים. ' +

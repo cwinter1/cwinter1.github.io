@@ -57,6 +57,17 @@
   function mShort(ym) { var m = +ym.slice(5, 7); return HEB_SHORT[m - 1] + ' ' + ym.slice(2, 4); }
   function mLong(ym) { var m = +ym.slice(5, 7); return HEB_LONG[m - 1] + ' ' + ym.slice(0, 4); }
 
+  // Current monthly rate of a fixed item (see recurring in the data): the latest charge; a bimonthly bill is halved;
+  // a yearly item is its yearly sum / 12; a seasonal item is the average of its last four charges.
+  function rate(it, ms) {
+    var all = ms.map(function (m) { return (it.m && it.m[m]) || 0; }), n = all.filter(function (x) { return x > 0; });
+    if (!n.length) return 0;
+    var s = n.reduce(function (p, x) { return p + x; }, 0);
+    if (it.annual) return (it.yearly || s) / 12;
+    var r = it.variable ? n.slice(-4).reduce(function (p, x) { return p + x; }, 0) / Math.min(4, n.length) : n[n.length - 1];
+    return r / (it.period || 1);
+  }
+
   function sum(a) { return a.reduce(function (s, x) { return s + x; }, 0); }
   function avg(a) { return a.length ? sum(a) / a.length : 0; }
   function median(a) { if (!a.length) return 0; var b = a.slice().sort(function (x, y) { return x - y; }), i = b.length >> 1; return b.length % 2 ? b[i] : (b[i - 1] + b[i]) / 2; }
@@ -90,17 +101,52 @@
     var el = document.getElementById('wfnav'); if (!el) return;
     el.innerHTML = '<span class="nb">כספים</span>' + NAV.map(function (n) {
       return '<a class="nl' + (n[0] === active ? ' act' : '') + '" href="' + n[0] + '">' + n[1] + '</a>';
-    }).join('');
+    }).join('') + '<span class="nsp"></span><span class="nst" id="wfstamp"></span><button class="nrf" id="wfrefresh" title="רענון נתונים" aria-label="רענון נתונים">↻</button>';
+    var b = document.getElementById('wfrefresh'); if (b) b.onclick = function () { b.classList.add('spin'); location.reload(); };
+  }
+
+  // A visible message under the navigation: stale data, missing blocks, or a failed load (with a retry button).
+  function banner(msg, retry) {
+    var el = document.getElementById('wfbanner');
+    if (!el) {
+      el = document.createElement('div'); el.id = 'wfbanner'; el.className = 'wfb';
+      var nv = document.getElementById('wfnav');
+      if (nv && nv.parentNode) nv.parentNode.insertBefore(el, nv.nextSibling); else document.body.insertBefore(el, document.body.firstChild);
+    }
+    el.innerHTML = '<span>' + esc(msg) + '</span>' + (retry ? ' <button onclick="location.reload()">נסו שוב</button>' : '');
+    el.hidden = false;
+  }
+
+  var REQUIRED = ['history', 'weeks', 'live', 'od_plan', 'position', 'recurring'];   // blocks every page may rely on
+  var AUTO_MS = 15 * 60 * 1000;                                                      // visible pages reload themselves this often
+
+  function stampAndChecks(D) {
+    var live = D.live || {}, upd = live.as_of || (D.meta && D.meta.updated) || '';
+    var st = document.getElementById('wfstamp');
+    if (st && upd) st.textContent = 'נתונים עד ' + upd.slice(8, 10) + '.' + upd.slice(5, 7);
+    var miss = REQUIRED.filter(function (k) { return !D[k]; });
+    if (miss.length) { banner('בקובץ הנתונים חסרים חלקים (' + miss.join(', ') + '), ולכן חלק מהעמודים יהיו ריקים. הריצה הבאה תתקן.'); return; }
+    var dt = live.data_through || upd;
+    if (dt) { var age = (Date.now() - new Date(dt + 'T12:00:00').getTime()) / 86400000; if (age > 3.5) banner('הנתונים לא התעדכנו מאז ' + dt.slice(8, 10) + '.' + dt.slice(5, 7) + '. ייתכן שהריצה היומית לא רצה.'); }
   }
 
   function boot(render) {                     // same login hand-off as the older pages (auth.js)
+    var t0 = Date.now();
     function load() {
-      fetch(DATA_URL + '?key=' + (sessionStorage.getItem('wf_pass') || ''))
+      fetch(DATA_URL + '?key=' + encodeURIComponent(sessionStorage.getItem('wf_pass') || '') + '&_=' + Date.now(), { cache: 'no-store' })
         .then(function (r) { return r.text(); })
-        .then(function (js) { wfRunData(js); render(window.DATA); })
-        .catch(function (e) { console.error('load failed', e); });
+        .then(function (js) {
+          if (/^\s*\/\/\s*unauthorized/i.test(js)) return;                       // auth.js shows the login box and reloads after it
+          if (/^\s*\/\/\s*error/i.test(js)) { banner('השרת לא מצא קובץ נתונים תקין.', true); return; }
+          wfRunData(js);
+          stampAndChecks(window.DATA);
+          try { render(window.DATA); }
+          catch (e) { console.error('render failed', e); banner('שגיאה בהצגת העמוד. הנתונים נטענו, אבל משהו בהם לא כצפוי.', true); }
+        })
+        .catch(function (e) { console.error('load failed', e); banner('לא הצלחנו לטעון את הנתונים.', true); });
     }
     if (sessionStorage.getItem('wf_pass')) load(); else document.addEventListener('wfLoggedIn', load);
+    setInterval(function () { if (!document.hidden && Date.now() - t0 > AUTO_MS) location.reload(); }, 60000);
   }
 
   function chartDefaults() {
@@ -115,5 +161,5 @@
 
   window.WF = { CAT: CAT, GROUPS: GROUPS, name: name, color: color, group: group, esc: esc, ils: ils, ilsText: ilsText, k: k, pct: pct,
     mShort: mShort, mLong: mLong, sum: sum, avg: avg, median: median, slope: slope, spark: spark, months: months, solid: solid,
-    nav: nav, boot: boot, chartDefaults: chartDefaults, css: css, n0: n0 };
+    nav: nav, boot: boot, banner: banner, rate: rate, chartDefaults: chartDefaults, css: css, n0: n0 };
 })();
