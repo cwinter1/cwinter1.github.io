@@ -10,6 +10,7 @@
     utilities:       ['חשבונות הבית', '#d9a93b', 'fixed'],
     insurance:       ['ביטוחים', '#c78bd1', 'fixed'],
     building_fee:    ['ועד בית ועירייה', '#9aa3ad', 'fixed'],
+    school:          ['בית ספר', '#5fb0a5', 'fixed'],
     card_fee:        ['עמלות כרטיס', '#8b95a1', 'fixed'],
     interest:        ['ריבית מינוס', '#b86a6a', 'fixed'],
     groceries:       ['סופר ומכולת', '#3fb88f', 'living'],
