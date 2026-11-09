@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>חודש — הכנסות והוצאות לפי קטגוריה</title>
+<script src="auth.js"></script>
+<link rel="stylesheet" href="wf.css">
+<script src="wf.js"></script>
+</head>
+<body>
+<nav id="wfnav"></nav>
+<div class="page">
+  <h1>חודש: הכנסות והוצאות</h1>
+  <div class="lead">בחרו חודש כדי לראות מה נכנס, על מה הלך הכסף, ואיך זה משתווה לחודש הקודם ולממוצע.</div>
+  <div class="chips" id="chips"></div>
+  <div class="note" id="quality" hidden></div>
+
+  <div class="grid g4" id="kpis" style="margin-top:12px"></div>
+
+  <div class="sec"><h2>הכנסות</h2><span class="hint" id="hInc"></span></div>
+  <div class="card2" id="inc"></div>
+
+  <div class="sec"><h2>הוצאות לפי קטגוריה</h2><span class="hint" id="hExp"></span></div>
+  <div class="card2 scroll-x"><table class="tb" id="tExp"></table></div>
+
+  <div class="sec"><h2>העסקים הגדולים בחודש</h2><span class="hint">לפי סכום</span></div>
+  <div class="card2 scroll-x"><table class="tb" id="tTop"></table></div>
+</div>
+
+<script>
+WF.nav('month.html');
+var MERCH = { 'ועד - קיטנות': 'ועד: קייטנות קיץ', 'נופש - ועד': 'ועד: נופש' };
+var INC = { 'בטוח לאומי חד': 'ביטוח לאומי', 'מפייבוקס שלי': 'העברות Paybox', 'ני"ע-דיבידנד': 'דיבידנד ני"ע', 'ני"ע-מכירה': 'מכירת ני"ע', 'שי-הועד הארצי': 'שי מוועד', 'החזר חיוב-טכני': 'החזר חיוב טכני', 'העברה-נייד': 'העברה בנייד', 'אמריקן אקספרס': 'זיכוי אמריקן אקספרס', 'ישראכרט': 'זיכוי ישראכרט', 'כאל': 'זיכוי כאל' };
+WF.boot(function (D) {
+  var H = WF.months().filter(function (m) { return m.q !== 'cards'; }), det = D.month_detail || {};
+  var sel = null;
+  var order = H.slice().reverse();
+  function pick(ym) { sel = ym; draw(); }
+
+  function chips() {
+    document.getElementById('chips').innerHTML = order.map(function (m) {
+      return '<span class="chip' + (m.m === sel ? ' on' : '') + '" data-m="' + m.m + '">' + WF.mShort(m.m) + (m.q === 'live' ? ' · עד היום' : '') + '</span>';
+    }).join('');
+    Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (el) { el.onclick = function () { pick(el.getAttribute('data-m')); }; });
+  }
+
+  function draw() {
+    chips();
+    var i = H.findIndex(function (m) { return m.m === sel; }), m = H[i], prev = H[i - 1];
+    var past = H.slice(Math.max(0, i - 6), i).filter(function (x) { return x.q === 'full'; });
+    var bal = m.inc - m.exp;
+
+    var qn = document.getElementById('quality');
+    var msgs = { partial: 'בחודש הזה חסר מידע (דף בנק או כרטיס), ולכן הסכומים נמוכים מהאמת.', live: 'החודש עדיין לא נגמר, הסכומים עד היום בלבד.' };
+    qn.hidden = !msgs[m.q]; qn.textContent = msgs[m.q] || '';
+
+    function d(cur, ref) { if (ref == null) return ''; var x = cur - ref; return '<span class="' + (x > 0 ? 'neg' : 'pos') + '">' + (x > 0 ? '▲ ' : '▼ ') + WF.ilsText(Math.abs(x)) + '</span>'; }
+    function dInc(cur, ref) { if (ref == null) return ''; var x = cur - ref; return '<span class="' + (x >= 0 ? 'pos' : 'neg') + '">' + (x >= 0 ? '▲ ' : '▼ ') + WF.ilsText(Math.abs(x)) + '</span>'; }
+    var avgExp = past.length ? WF.avg(past.map(function (x) { return x.exp; })) : null;
+    var avgInc = past.length ? WF.avg(past.map(function (x) { return x.inc; })) : null;
+    function k(t, v, sub, cls) { return '<div class="kpi2"><div class="k">' + t + '</div><div class="v ' + (cls || '') + '">' + v + '</div><div class="d">' + (sub || '') + '</div></div>'; }
+    document.getElementById('kpis').innerHTML =
+      k('הכנסה קבועה', WF.k(m.inc), prev ? 'מול חודש קודם ' + dInc(m.inc, prev.inc) : '', 'pos') +
+      k('הוצאות', WF.k(m.exp), prev ? 'מול חודש קודם ' + d(m.exp, prev.exp) : '', 'neg') +
+      k('מאזן', (bal >= 0 ? '+' : '') + WF.k(bal), avgExp != null ? 'ממוצע חצי שנה: ' + WF.k(avgInc - avgExp) : '', bal >= 0 ? 'pos' : 'neg') +
+      k('כרטיס מול בנק', WF.k(m.card, 0) + ' / ' + WF.k(m.bank, 0), 'הוצאות בכרטיסים / ישירות מהחשבון');
+
+    // income
+    var src = (m.src || []).map(function (s) {
+      var pc = m.inc ? s[1] / m.inc * 100 : 0;
+      return '<tr><td>' + WF.esc(INC[s[0]] || s[0]) + '</td><td class="n">' + WF.ilsText(s[1]) + '</td><td style="width:38%"><div class="bar"><i style="width:' + pc.toFixed(0) + '%;background:var(--income)"></i></div></td></tr>';
+    }).join('');
+    document.getElementById('hInc').textContent = m.inc1 ? 'לא כולל ' + WF.ilsText(m.inc1) + ' כסף חד-פעמי' : '';
+    document.getElementById('inc').innerHTML = src ? '<table class="tb">' + src + '</table>' : '<div class="empty">אין נתוני הכנסה לחודש הזה</div>';
+
+    // expenses by category, grouped
+    var cats = Object.keys(m.cats).filter(function (c) { return m.cats[c] > 0; });
+    var byG = {}; cats.forEach(function (c) { (byG[WF.group(c)] = byG[WF.group(c)] || []).push(c); });
+    var rows = '<tr><th>קטגוריה</th><th class="n">סכום</th><th class="n hs">% מההוצאות</th><th class="n">מול קודם</th><th class="n hs">מול ממוצע</th><th class="hs">12 חודשים</th></tr>';
+    var series12 = H.filter(function (x) { return x.q !== 'live' || x.m === m.m; }).slice(-12);
+    ['fixed', 'living', 'flex', 'travel'].forEach(function (g) {
+      if (!byG[g]) return;
+      var tot = byG[g].reduce(function (s, c) { return s + m.cats[c]; }, 0);
+      rows += '<tr><td colspan="6" class="grp" style="background:var(--e);font-weight:700;padding:6px 8px">' + WF.GROUPS[g] + ' · ' + WF.ilsText(tot) + '</td></tr>';
+      byG[g].sort(function (a, b) { return m.cats[b] - m.cats[a]; }).forEach(function (c) {
+        var v = m.cats[c], pv = prev ? (prev.cats[c] || 0) : null;
+        var av = past.length ? WF.avg(past.map(function (x) { return x.cats[c] || 0; })) : null;
+        rows += '<tr><td><span class="dot" style="background:' + WF.color(c) + '"></span>' + WF.name(c) + '</td><td class="n">' + WF.ilsText(v) + '</td><td class="n">' + (m.exp ? (v / m.exp * 100).toFixed(0) : 0) + '%</td>' +
+          '<td class="n">' + (pv == null ? '' : d(v, pv)) + '</td><td class="n">' + (av == null ? '' : d(v, av)) + '</td><td style="width:90px">' + WF.spark(series12.map(function (x) { return x.cats[c] || 0; }), WF.color(c), { w: 90, h: 26 }) + '</td></tr>';
+      });
+    });
+    document.getElementById('tExp').innerHTML = rows;
+    document.getElementById('hExp').textContent = 'חץ אדום = יותר מהקודם, ירוק = פחות';
+
+    var top = (det[m.m] && det[m.m].top) || [];
+    document.getElementById('tTop').innerHTML = top.length ?
+      '<tr><th>עסק</th><th>קטגוריה</th><th class="n">פעמים</th><th class="n">סכום</th></tr>' + top.slice(0, 12).map(function (t) {
+        return '<tr><td>' + WF.esc(MERCH[t.m] || t.m) + '</td><td><span class="dot" style="background:' + WF.color(t.cat) + '"></span>' + WF.name(t.cat) + '</td><td class="n">' + t.n + '</td><td class="n">' + WF.ilsText(t.amt) + '</td></tr>';
+      }).join('') : '<tr><td class="empty">אין פירוט עסקים לחודש הזה</td></tr>';
+  }
+
+  var def = H.filter(function (m) { return m.q === 'full'; }).slice(-1)[0] || H[H.length - 1];
+  sel = def ? def.m : null; if (sel) draw();
+});
+</script>
+</body>
+</html>
