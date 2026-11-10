@@ -69,6 +69,19 @@
     return r / (it.period || 1);
   }
 
+  // ── overdraft plan: any number of phases. Before the first phase: the first. After the last, or in a gap: the latest phase that has started.
+  function phaseOf(plan, ym) {
+    var ph = ((plan && plan.phases) || []).slice().sort(function (x, y) { return x.from < y.from ? -1 : 1; });
+    if (!ph.length) return null;
+    for (var i = 0; i < ph.length; i++) if (ym >= ph[i].from && ym <= ph[i].to) return ph[i];
+    var started = ph.filter(function (p) { return p.from <= ym; });
+    return started.length ? started[started.length - 1] : ph[0];
+  }
+  // a category's cap in a phase: p<id>, else the nearest earlier phase's value
+  function capIn(c, id) {
+    for (var i = +id; i >= 1; i--) if (c['p' + i] != null) return c['p' + i];
+    return 0;
+  }
   function sum(a) { return a.reduce(function (s, x) { return s + x; }, 0); }
   function avg(a) { return a.length ? sum(a) / a.length : 0; }
   function median(a) { if (!a.length) return 0; var b = a.slice().sort(function (x, y) { return x - y; }), i = b.length >> 1; return b.length % 2 ? b[i] : (b[i - 1] + b[i]) / 2; }
@@ -160,7 +173,7 @@
   }
   function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 
-  window.WF = { CAT: CAT, GROUPS: GROUPS, name: name, color: color, group: group, esc: esc, ils: ils, ilsText: ilsText, k: k, pct: pct,
+  window.WF = { phaseOf: phaseOf, capIn: capIn, CAT: CAT, GROUPS: GROUPS, name: name, color: color, group: group, esc: esc, ils: ils, ilsText: ilsText, k: k, pct: pct,
     mShort: mShort, mLong: mLong, sum: sum, avg: avg, median: median, slope: slope, spark: spark, months: months, solid: solid,
     nav: nav, boot: boot, banner: banner, rate: rate, chartDefaults: chartDefaults, css: css, n0: n0 };
 })();
