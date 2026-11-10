@@ -93,6 +93,17 @@
     return head + '<div style="max-height:340px;overflow-y:auto">' + body + '</div>';
   }
 
+  // the same list for one category over a date range (a week): from s to e inclusive (YYYY-MM-DD)
+  function drillRangeHTML(cat, s, e) {
+    var list = ((window.DATA || {}).charges || []).filter(function (c) { return c[1] === cat && c[0] >= s && c[0] <= e; }).sort(function (a, b) { return Math.abs(b[3]) - Math.abs(a[3]); });
+    var head = '<div style="font-size:.78rem;color:var(--m);margin-bottom:6px">' + esc(name(cat)) + ' · ' + s.slice(8) + '/' + s.slice(5, 7) + '–' + e.slice(8) + '/' + e.slice(5, 7) + '</div>';
+    if (!list.length) return head + '<div class="empty">אין עסקאות בקטגוריה הזו בשבוע הזה, או שאין פירוט לתקופה (קיים מיוני 2026)</div>';
+    var tot = list.reduce(function (t, c) { return t + c[3]; }, 0);
+    return head + '<div style="max-height:340px;overflow-y:auto"><table class="tb">' + list.map(function (c) {
+      return '<tr><td class="n" style="white-space:nowrap;color:var(--m)">' + c[0].slice(8) + '/' + c[0].slice(5, 7) + '</td><td>' + esc(c[2]) + '</td><td class="n">' + ilsText(c[3]) + '</td></tr>';
+    }).join('') + '<tr style="font-weight:700"><td></td><td>' + list.length + ' עסקאות</td><td class="n">' + ilsText(tot) + '</td></tr></table></div>';
+  }
+
   // ── overdraft plan: any number of phases. Before the first phase: the first. After the last, or in a gap: the latest phase that has started.
   function phaseOf(plan, ym) {
     var ph = ((plan && plan.phases) || []).slice().sort(function (x, y) { return x.from < y.from ? -1 : 1; });
@@ -197,7 +208,7 @@
   }
   function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 
-  window.WF = { charges: charges, drillHTML: drillHTML, phaseOf: phaseOf, capIn: capIn, CAT: CAT, GROUPS: GROUPS, name: name, color: color, group: group, esc: esc, ils: ils, ilsText: ilsText, k: k, pct: pct,
+  window.WF = { charges: charges, drillHTML: drillHTML, drillRangeHTML: drillRangeHTML, phaseOf: phaseOf, capIn: capIn, CAT: CAT, GROUPS: GROUPS, name: name, color: color, group: group, esc: esc, ils: ils, ilsText: ilsText, k: k, pct: pct,
     mShort: mShort, mLong: mLong, sum: sum, avg: avg, median: median, slope: slope, spark: spark, months: months, solid: solid,
     nav: nav, boot: boot, banner: banner, rate: rate, chartDefaults: chartDefaults, css: css, n0: n0 };
 })();
