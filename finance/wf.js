@@ -24,6 +24,7 @@
     shopping:        ['קניות ובית', '#d77fb4', 'flex'],
     restaurants:     ['מסעדות ובתי קפה', '#e3a63f', 'flex'],
     entertainment:   ['בילויים', '#e58fa0', 'flex'],
+    subscriptions:   ['מנויים', '#c9a0dc', 'flex'],
     transfers:       ['העברות לאנשים', '#8f9bb3', 'flex'],
     other:           ['אחר', '#9b9486', 'flex'],
     cash:            ['מזומן', '#a39f6a', 'flex'],
