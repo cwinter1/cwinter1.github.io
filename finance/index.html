@@ -166,24 +166,25 @@ WF.boot(function (D) {
   var gall = gtot.reduce(function (s, x) { return s + x; }, 0);
   document.getElementById('lGR').innerHTML = groups.map(function (g, i) { var sh = gall ? gvals[i].reduce(function (s, x) { return s + x; }, 0) / gall * 100 : 0; return '<span><i style="background:' + gcol[g] + '"></i>' + WF.GROUPS[g] + ' · ' + Math.round(sh) + '%</span>'; }).join('');
 
-  // what changed: last 3 full months vs the 3 before
-  var a = solid.slice(-3), b = solid.slice(-6, -3), mv = [];
-  if (a.length === 3 && b.length === 3) {
-    var cats = {}; a.concat(b).forEach(function (m) { Object.keys(m.cats).forEach(function (c) { cats[c] = 1; }); });
+  // what changed: this month so far vs the average of the last 3 full months (pro-rated to today)
+  var a = solid.slice(-3), mv = [];
+  if (a.length === 3 && live && live.cats) {
+    var nowD = new Date(), frac = nowD.getDate() / new Date(nowD.getFullYear(), nowD.getMonth() + 1, 0).getDate();
+    var cats = {}; a.forEach(function (m) { Object.keys(m.cats).forEach(function (c) { cats[c] = 1; }); }); Object.keys(live.cats).forEach(function (c) { cats[c] = 1; });
     Object.keys(cats).forEach(function (c) {
       if (WF.group(c) === 'fixed' || c === 'unclassified') return;
-      var va = WF.avg(a.map(function (m) { return m.cats[c] || 0; })), vb = WF.avg(b.map(function (m) { return m.cats[c] || 0; }));
-      mv.push({ c: c, a: va, b: vb, d: va - vb });
+      var va = WF.avg(a.map(function (m) { return m.cats[c] || 0; })), vn = live.cats[c] || 0;
+      mv.push({ c: c, a: va, n: vn, d: vn - va * frac });
     });
     mv.sort(function (x, y) { return Math.abs(y.d) - Math.abs(x.d); });
-    document.getElementById('hMV').textContent = 'ממוצע חודשי: ' + WF.mShort(a[0].m) + '–' + WF.mShort(a[2].m) + ' מול ' + WF.mShort(b[0].m) + '–' + WF.mShort(b[2].m);
-    document.getElementById('tMV').innerHTML = '<tr><th>קטגוריה</th><th class="n">לפני</th><th class="n">עכשיו</th><th class="n">שינוי</th></tr>' +
+    document.getElementById('hMV').textContent = 'החודש עד היום מול ממוצע חודשי ' + WF.mShort(a[0].m) + '–' + WF.mShort(a[2].m);
+    document.getElementById('tMV').innerHTML = '<tr><th>קטגוריה</th><th class="n">ממוצע חודשי</th><th class="n">חודש זה</th><th class="n">שינוי</th></tr>' +
       mv.slice(0, 9).map(function (r) {
         var cls = r.d > 0 ? 'neg' : 'pos', arrow = r.d > 0 ? '▲' : '▼';
-        return '<tr><td><span class="dot" style="background:' + WF.color(r.c) + '"></span>' + WF.name(r.c) + '</td><td class="n">' + WF.ilsText(r.b) + '</td><td class="n">' + WF.ilsText(r.a) +
+        return '<tr><td><span class="dot" style="background:' + WF.color(r.c) + '"></span>' + WF.name(r.c) + '</td><td class="n">' + WF.ilsText(r.a) + '</td><td class="n">' + WF.ilsText(r.n) +
           '</td><td class="n ' + cls + '">' + arrow + ' ' + WF.ilsText(Math.abs(r.d)) + '</td></tr>';
-      }).join('');
-  } else document.getElementById('tMV').innerHTML = '<tr><td class="empty">אין מספיק חודשים מלאים להשוואה</td></tr>';
+      }).join('') + '<tr><td class="empty" colspan="4">השינוי הוא מול הקצב הרגיל עד היום בחודש (הממוצע כפול חלק החודש שחלף).</td></tr>';
+  } else document.getElementById('tMV').innerHTML = '<tr><td class="empty">אין מספיק נתונים להשוואה</td></tr>';
 
   // live month
   if (live) {
