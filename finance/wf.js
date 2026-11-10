@@ -69,6 +69,30 @@
     return r / (it.period || 1);
   }
 
+  // ── click-through: the individual charges behind a number (private data written by the daily sync) ──
+  function charges(cat, fromYm, toYm) {
+    var D = window.DATA || {}, to = toYm || fromYm;
+    return (D.charges || []).filter(function (c) { return c[1] === cat && c[0].slice(0, 7) >= fromYm && c[0].slice(0, 7) <= to; });
+  }
+  // the list for one category in one month: every charge (name, amount, date), biggest first; for months before the sync kept
+  // individual charges, the top businesses of that month instead
+  function drillHTML(cat, ym) {
+    var D = window.DATA || {}, list = charges(cat, ym).sort(function (a, b) { return Math.abs(b[3]) - Math.abs(a[3]); });
+    var head = '<div style="font-size:.78rem;color:var(--m);margin-bottom:6px">' + esc(name(cat)) + ' · ' + mLong(ym) + '</div>', body;
+    if (list.length) {
+      var tot = list.reduce(function (s, c) { return s + c[3]; }, 0);
+      body = '<table class="tb">' + list.map(function (c) {
+        return '<tr><td class="n" style="white-space:nowrap;color:var(--m)">' + c[0].slice(8) + '/' + c[0].slice(5, 7) + '</td><td>' + esc(c[2]) + '</td><td class="n">' + ilsText(c[3]) + '</td></tr>';
+      }).join('') + '<tr style="font-weight:700"><td></td><td>' + list.length + ' עסקאות</td><td class="n">' + ilsText(tot) + '</td></tr></table>';
+    } else {
+      var top = (((D.month_detail || {})[ym] || {}).top || []).filter(function (t) { return t.cat === cat; });
+      body = top.length ? '<table class="tb">' + top.map(function (t) { return '<tr><td>' + esc(t.m) + '</td><td class="n">' + t.n + ' פעמים</td><td class="n">' + ilsText(t.amt) + '</td></tr>'; }).join('') +
+        '</table><div style="font-size:.72rem;color:var(--m);margin-top:6px">לחודש הזה יש רק העסקים הגדולים. פירוט כל העסקאות קיים מיוני 2026.</div>'
+        : '<div class="empty">אין פירוט עסקאות לחודש הזה</div>';
+    }
+    return head + '<div style="max-height:340px;overflow-y:auto">' + body + '</div>';
+  }
+
   // ── overdraft plan: any number of phases. Before the first phase: the first. After the last, or in a gap: the latest phase that has started.
   function phaseOf(plan, ym) {
     var ph = ((plan && plan.phases) || []).slice().sort(function (x, y) { return x.from < y.from ? -1 : 1; });
@@ -173,7 +197,7 @@
   }
   function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 
-  window.WF = { phaseOf: phaseOf, capIn: capIn, CAT: CAT, GROUPS: GROUPS, name: name, color: color, group: group, esc: esc, ils: ils, ilsText: ilsText, k: k, pct: pct,
+  window.WF = { charges: charges, drillHTML: drillHTML, phaseOf: phaseOf, capIn: capIn, CAT: CAT, GROUPS: GROUPS, name: name, color: color, group: group, esc: esc, ils: ils, ilsText: ilsText, k: k, pct: pct,
     mShort: mShort, mLong: mLong, sum: sum, avg: avg, median: median, slope: slope, spark: spark, months: months, solid: solid,
     nav: nav, boot: boot, banner: banner, rate: rate, chartDefaults: chartDefaults, css: css, n0: n0 };
 })();
