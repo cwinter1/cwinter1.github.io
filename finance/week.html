@@ -20,12 +20,14 @@
 
   <div class="sec"><h2>לפי קטגוריה</h2><span class="hint" id="hCat"></span></div>
   <div class="card2 scroll-x"><table class="tb" id="tCat"></table></div>
+  <div class="card2" id="catDetail" hidden style="margin-top:8px"></div>
 
   <div class="sec"><h2>הציון לאורך השבועות</h2><span class="hint">אחוז הקטגוריות שעמדו בתקציב</span></div>
   <div class="card2"><div class="empty" id="cSmsg" hidden>הציון הראשון יופיע בסוף השבוע הנוכחי, ומשם הגרף יתמלא שבוע אחרי שבוע.</div><div class="chartbox" id="cSbox"><canvas id="cS"></canvas></div></div>
 
   <div class="sec"><h2>היסטוריה: איפה עמדנו בתקציב ואיפה חרגנו</h2><span class="hint" id="hHist"></span></div>
   <div class="card2 scroll-x"><table class="tb heat" id="tHist"></table></div>
+  <div class="card2" id="histDetail" hidden style="margin-top:8px"></div>
 
   <div class="sec"><h2>איך זה עובד</h2></div>
   <div class="note" id="how"></div>
@@ -100,13 +102,13 @@ WF.boot(function (D) {
       var lab = !W.scored ? '' : f > 1 ? '<span class="tag bad">חריגה</span>' : f > el + 0.15 && w.open ? '<span class="tag warn">מהר מדי</span>' : '<span class="tag ok">בתקציב</span>';
       var hist = weeks.slice(Math.max(0, sel - 7), sel + 1).map(function (x) { return x.cats[r.c] || 0; });
       var sub = r.extra ? '' : '<div style="font-size:.72rem;color:var(--m)">בסיס ' + WF.ilsText(r.base) + (Math.abs(r.carry) >= 1 ? ' · <span class="' + (r.carry > 0 ? 'pos' : 'neg') + '">' + (r.carry > 0 ? '+' : '−') + WF.ilsText(Math.abs(r.carry)) + ' מהעבר</span>' : '') + '</div>';
-      rows += '<tr><td><span class="dot" style="background:' + WF.color(r.c) + '"></span>' + WF.name(r.c) + (r.extra ? ' <span class="tag">לא בתקציב</span>' : '') + '</td>' +
+      rows += '<tr class="rw" data-c="' + r.c + '" data-w="' + sel + '" style="cursor:pointer"><td><span class="dot" style="background:' + WF.color(r.c) + '"></span>' + WF.name(r.c) + (r.extra ? ' <span class="tag">לא בתקציב</span>' : '') + '</td>' +
         '<td class="n">' + (r.eff ? WF.ilsText(r.eff) : '—') + sub + '</td><td class="n">' + WF.ilsText(r.spent) + '</td><td class="n ' + (r.eff - r.spent < 0 ? 'neg' : '') + '">' + (r.eff ? WF.ilsText(r.eff - r.spent) : '') + '</td>' +
         '<td><div class="bar"><i style="width:' + Math.min(100, f * 100).toFixed(0) + '%;background:' + col + '"></i></div><div style="margin-top:4px">' + lab + '</div></td>' +
         '<td class="hs" style="width:90px">' + WF.spark(hist, WF.color(r.c), { w: 90, h: 26 }) + '</td></tr>';
     });
-    document.getElementById('tCat').innerHTML = rows;
-    document.getElementById('hCat').textContent = 'שלב ' + phaseOf(w.s.slice(0, 7)) + ' בתוכנית · ' + rng(w);
+    document.getElementById('tCat').innerHTML = rows; document.getElementById('catDetail').hidden = true;
+    document.getElementById('hCat').textContent = 'שלב ' + phaseOf(w.s.slice(0, 7)) + ' בתוכנית · ' + rng(w) + ' · לחצו על קטגוריה לפירוט';
 
     var closed = calc.map(function (x, i) { return { x: x, w: weeks[i] }; }).filter(function (o) { return !o.x.open && o.x.scored; });
     if (chart) { chart.destroy(); chart = null; }
@@ -135,7 +137,7 @@ WF.boot(function (D) {
       var cells = cols.map(function (i) {
         var r = calc[i].rows.filter(function (y) { return y.c === c; })[0];
         if (!r) return '<td class="c"></td>'; tot++; if (r.ok) oks++;
-        return '<td class="c" title="' + WF.ilsText(r.spent) + ' מתוך ' + WF.ilsText(r.eff) + '" style="color:var(--' + (r.ok ? 'income' : 'expense') + ');font-weight:700">' + (r.ok ? '✓' : '✗') + '</td>';
+        return '<td class="c" data-c="' + c + '" data-w="' + i + '" title="' + WF.ilsText(r.spent) + ' מתוך ' + WF.ilsText(r.eff) + '" style="cursor:pointer;color:var(--' + (r.ok ? 'income' : 'expense') + ');font-weight:700">' + (r.ok ? '✓' : '✗') + '</td>';
       }).join('');
       return '<tr><td style="white-space:nowrap"><span class="dot" style="background:' + WF.color(c) + '"></span>' + WF.name(c) + '</td><td class="n"><b>' + oks + '/' + tot + '</b></td>' + cells + '</tr>';
     }).join('');
@@ -145,10 +147,22 @@ WF.boot(function (D) {
       return '<td class="c" style="color:var(--' + (calc[i].totOk ? 'income' : 'expense') + ');font-weight:700">' + (calc[i].totOk ? '✓' : '✗') + '</td>';
     }).join('') + '</tr>';
     document.getElementById('tHist').innerHTML = head + body + foot;
-    document.getElementById('hHist').textContent = cols.length + ' שבועות שנסגרו · מהחדש לישן, מימין לשמאל';
+    document.getElementById('hHist').textContent = cols.length + ' שבועות שנסגרו · מהחדש לישן, מימין לשמאל · לחצו על ✓ או ✗ לפירוט העסקאות';
   }
 
   document.getElementById('how').innerHTML = '<b>התקציב השבועי</b> הוא התקרה החודשית של התוכנית כפול 12 לחלק ל-52. <b>מה שלא נוצל</b> בשבוע עובר לשבוע הבא ומגדיל אותו (עד תוספת של תקציב שבועי אחד). <b>חריגה</b> נגרעת מהשבוע הבא ומקטינה אותו (עד שלושה רבעים ממנו). הציון הוא אחוז הקטגוריות שהגיעו עד התקציב בשבוע, כולל מה שנצבר. חיובים קבועים (משכנתא, הלוואות, חשבונות, ביטוחים, ועד) ונסיעות מתוכננות לא נספרים. <b>השבוע הפתוח</b> מוצג בזמן אמת ולא נכנס לספירה עד שהוא נסגר. <b>הניקוד מתחיל ביום ראשון 8.11</b>, וההעברה מתחילה מאפס. שבועות קודמים מוצגים להשוואה בלבד, בלי ציון.';
+  document.getElementById('tCat').onclick = function (ev) {
+    var tr = ev.target.closest('tr[data-c]'); if (!tr) return;
+    var w = weeks[+tr.getAttribute('data-w')], box = document.getElementById('catDetail');
+    box.hidden = false; box.innerHTML = WF.drillRangeHTML(tr.getAttribute('data-c'), w.s, w.e);
+    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  };
+  document.getElementById('tHist').onclick = function (ev) {
+    var td = ev.target.closest('td[data-c]'); if (!td) return;
+    var w = weeks[+td.getAttribute('data-w')], box = document.getElementById('histDetail');
+    box.hidden = false; box.innerHTML = WF.drillRangeHTML(td.getAttribute('data-c'), w.s, w.e);
+    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  };
   draw(); history();
 });
 </script>
