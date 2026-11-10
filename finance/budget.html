@@ -53,25 +53,28 @@ WF.boot(function (D) {
   base.forEach(function (k2) { var d = det[k2]; if (!d) return; d.top.forEach(function (t) { var o = mer[t.cat] = mer[t.cat] || {}; o[t.m] = (o[t.m] || 0) + t.amt / B.length; }); });
   var MERCH = { 'ועד - קיטנות': 'ועד: תשלום בית ספר' };
 
+  var curYm = (live && live.month) || new Date().toISOString().slice(0, 7);
+  var phNow = WF.phaseOf(P, curYm), phs = (P.phases || []), phLast = phs.length ? phs[phs.length - 1] : phNow;
+  var capNow = function (c) { return WF.capIn(c, phNow ? phNow.id : 1); }, capEnd = function (c) { return WF.capIn(c, phLast ? phLast.id : 1); };
   var caps = (P.caps || []).filter(function (c) { return c.cat !== 'travel'; });
-  var GROUP = ['fixed', 'living', 'flex'], rows = '<tr><th>קטגוריה</th><th class="n">ממוצע בפועל</th><th class="n">תקרה נוב׳–דצמ׳</th><th class="n hs">תקרה 2027</th><th class="n hs">החודש עד היום</th><th>מצב</th></tr>';
+  var GROUP = ['fixed', 'living', 'flex'], rows = '<tr><th>קטגוריה</th><th class="n">ממוצע בפועל</th><th class="n">תקרה עכשיו (שלב ' + (phNow ? phNow.id : 1) + ')</th><th class="n hs">תקרה בשלב האחרון</th><th class="n hs">החודש עד היום</th><th>מצב</th></tr>';
   var tot = { avg: 0, p1: 0, p2: 0 }, idx = 0;
   GROUP.forEach(function (g) {
     var list = caps.filter(function (c) { return WF.group(c.cat) === g; }).sort(function (a, b) { return avgCat(b.cat) - avgCat(a.cat); });
     if (!list.length) return;
-    var sa = 0, s1 = 0, s2 = 0; list.forEach(function (c) { sa += avgCat(c.cat); s1 += c.p1; s2 += c.p2; });
-    rows += '<tr><td colspan="6" style="background:var(--e);font-weight:700;padding:6px 8px">' + WF.GROUPS[g] + ' · ממוצע ' + WF.ilsText(sa) + ' · תקרה 2027 ' + WF.ilsText(s2) + '</td></tr>';
+    var sa = 0, s1 = 0, s2 = 0; list.forEach(function (c) { sa += avgCat(c.cat); s1 += capNow(c); s2 += capEnd(c); });
+    rows += '<tr><td colspan="6" style="background:var(--e);font-weight:700;padding:6px 8px">' + WF.GROUPS[g] + ' · ממוצע ' + WF.ilsText(sa) + ' · תקרה בשלב האחרון ' + WF.ilsText(s2) + '</td></tr>';
     list.forEach(function (c) {
-      var a = avgCat(c.cat), over = a > c.p2 * 1.02, near = !over && a > c.p2 * 0.9;
-      tot.avg += a; tot.p1 += c.p1; tot.p2 += c.p2;
-      var lab = c.kind === 'fixed' ? '<span class="tag">קבוע</span>' : c.kind === 'result' ? '<span class="tag">תוצאה</span>' : over ? '<span class="tag bad">מעל התקרה ב-' + WF.ilsText(a - c.p2) + '</span>' : near ? '<span class="tag warn">קרוב לתקרה</span>' : '<span class="tag ok">בתקרה</span>';
+      var a = avgCat(c.cat), cn = capNow(c), over = a > cn * 1.02, near = !over && a > cn * 0.9;
+      tot.avg += a; tot.p1 += cn; tot.p2 += capEnd(c);
+      var lab = c.kind === 'fixed' ? '<span class="tag">קבוע</span>' : c.kind === 'result' ? '<span class="tag">תוצאה</span>' : over ? '<span class="tag bad">מעל התקרה ב-' + WF.ilsText(a - cn) + '</span>' : near ? '<span class="tag warn">קרוב לתקרה</span>' : '<span class="tag ok">בתקרה</span>';
       var ms = Object.keys(mer[c.cat] || {}).sort(function (x, y) { return mer[c.cat][y] - mer[c.cat][x]; }).slice(0, 6);
-      rows += '<tr class="rw" data-i="' + idx + '" style="cursor:pointer"><td><span class="dot" style="background:' + WF.color(c.cat) + '"></span>' + WF.name(c.cat) + (ms.length ? ' <span style="color:var(--m);font-size:.75rem">▾</span>' : '') + '</td><td class="n">' + WF.ilsText(a) + '</td><td class="n">' + WF.ilsText(c.p1) + '</td><td class="n hs">' + WF.ilsText(c.p2) + '</td><td class="n hs">' + WF.ilsText(liveCats[c.cat] || 0) + '</td><td>' + lab + '</td></tr>';
+      rows += '<tr class="rw" data-i="' + idx + '" style="cursor:pointer"><td><span class="dot" style="background:' + WF.color(c.cat) + '"></span>' + WF.name(c.cat) + (ms.length ? ' <span style="color:var(--m);font-size:.75rem">▾</span>' : '') + '</td><td class="n">' + WF.ilsText(a) + '</td><td class="n">' + WF.ilsText(cn) + '</td><td class="n hs">' + WF.ilsText(capEnd(c)) + '</td><td class="n hs">' + WF.ilsText(liveCats[c.cat] || 0) + '</td><td>' + lab + '</td></tr>';
       if (ms.length) rows += '<tr class="dt" id="dt' + idx + '" hidden><td colspan="6" style="background:var(--e);font-size:.82rem;color:var(--m)">' + ms.map(function (m) { return WF.esc(MERCH[m] || m) + ' <b class="num" style="color:var(--t)">' + WF.ilsText(mer[c.cat][m]) + '</b>'; }).join(' · ') + '<br>ממוצע חודשי בארבעת החודשים, מתוך העסקים הגדולים בכל חודש.</td></tr>';
       idx++;
     });
   });
-  rows += '<tr style="font-weight:800"><td>סך הכול</td><td class="n">' + WF.ilsText(tot.avg) + '</td><td class="n">' + WF.ilsText(tot.p1) + '</td><td class="n hs">' + WF.ilsText(tot.p2) + '</td><td class="n hs">' + WF.ilsText(live.mtd_expenses || 0) + '</td><td>' + (tot.avg > tot.p2 ? '<span class="tag bad">מעל התקרות ב-' + WF.ilsText(tot.avg - tot.p2) + '</span>' : '<span class="tag ok">בתקרות</span>') + '</td></tr>';
+  rows += '<tr style="font-weight:800"><td>סך הכול</td><td class="n">' + WF.ilsText(tot.avg) + '</td><td class="n">' + WF.ilsText(tot.p1) + '</td><td class="n hs">' + WF.ilsText(tot.p2) + '</td><td class="n hs">' + WF.ilsText(live.mtd_expenses || 0) + '</td><td>' + (tot.avg > tot.p1 ? '<span class="tag bad">מעל התקרות ב-' + WF.ilsText(tot.avg - tot.p1) + '</span>' : '<span class="tag ok">בתקרות</span>') + '</td></tr>';
   document.getElementById('tCat').innerHTML = rows;
   Array.prototype.forEach.call(document.querySelectorAll('tr.rw'), function (r) {
     r.onclick = function () { var d = document.getElementById('dt' + r.getAttribute('data-i')); if (d) d.hidden = !d.hidden; };
@@ -89,9 +92,10 @@ WF.boot(function (D) {
     if (p > 0) out0 += '<tr><td><span class="dot" style="background:' + WF.color('school') + '"></span><b>' + WF.esc(i.name) + '</b>' + (i.note ? '<div style="font-size:.8rem;color:var(--m)">' + WF.esc(i.note) + '</div>' : '') + '</td><td class="n">' + WF.ilsText(p) + '</td></tr>';
   });
   var campMonths = WF.months().filter(function (m) { return (m.cats.camps || 0) > 0; });
-  if (campMonths.length) out0 += '<tr><td><span class="dot" style="background:' + WF.color('camps') + '"></span><b>קייטנות קיץ, שלושה ילדים</b><div style="font-size:.8rem;color:var(--m)">' + WF.ilsText(campMonths[campMonths.length - 1].cats.camps) + ' בחודש ב-' + campMonths.map(function (m) { return WF.mShort(m.m); }).join(', ') + (camp && camp.note ? ' (' + WF.esc(camp.note) + ')' : '') + '</div></td><td class="n">' + WF.ilsText(WF.sum(campMonths.map(function (m) { return m.cats.camps; }))) + '</td></tr>';
+  if (campMonths.length) out0 += '<tr><td><span class="dot" style="background:' + WF.color('camps') + '"></span><b>קייטנות קיץ 2026, שלושה ילדים (בעבר)</b><div style="font-size:.8rem;color:var(--m)">' + WF.ilsText(campMonths[campMonths.length - 1].cats.camps) + ' בחודש ב-' + campMonths.map(function (m) { return WF.mShort(m.m); }).join(', ') + (camp && camp.note ? ' (' + WF.esc(camp.note) + ')' : '') + '</div></td><td class="n">' + WF.ilsText(WF.sum(campMonths.map(function (m) { return m.cats.camps; }))) + '</td></tr>';
   out += out0;
   (P.trips || []).forEach(function (t) { out += '<tr><td><span class="dot" style="background:' + WF.color('travel') + '"></span><b>' + WF.esc(t.name) + '</b> · ' + WF.mShort(t.month) + (t.note ? '<div style="font-size:.8rem;color:var(--m)">' + WF.esc(t.note) + '</div>' : '') + '</td><td class="n">' + WF.ilsText(t.amt) + (t.est ? ' <span class="tag">הערכה</span>' : '') + '</td></tr>'; });
+  if (P.trips_yearly) out += '<tr><td><span class="dot" style="background:' + WF.color('travel') + '"></span><b>' + WF.esc(P.trips_yearly.name) + '</b> · ' + P.trips_yearly.months.length + ' בשנה, מ־' + WF.mShort(P.trips_yearly.from) + '<div style="font-size:.8rem;color:var(--m)">' + WF.esc(P.trips_yearly.note || '') + '</div></td><td class="n">' + WF.ilsText(P.trips_yearly.amt) + ' <span class="tag">הערכה, כל אחד</span></td></tr>';
   document.getElementById('out').innerHTML = out + '</table>';
 
   document.getElementById('rules').innerHTML = (P.rules || []).map(function (r) { return '<li><b>' + WF.esc(r.t) + '</b><div style="color:var(--m);font-size:.88rem">' + WF.esc(r.d) + '</div></li>'; }).join('');
