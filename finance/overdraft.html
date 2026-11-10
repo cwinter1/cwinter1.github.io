@@ -236,7 +236,7 @@ details.fold>.fbody{border:1px solid var(--bo);border-top:0;border-radius:0 0 va
 <details class="fold"><summary>מה לא בתוכנית ואפשר לשקול</summary><div class="fbody">  <div class="mcard" style="padding:12px 16px"><div class="mnote" style="margin:0;line-height:1.7">
     <b>משיכה מקרן ההשתלמות.</b> אם הכספים נזילים, משיכה חד-פעמית מקטינה את המינוס מיד. לא נכנסה לחישוב כי אין לי את היתרה.<br>
     <b>הלוואה במקום המינוס.</b> שווה רק אם הריבית נמוכה מהריבית שהבנק גובה על המינוס היום (למעלה). כדאי לבדוק אחרי שהמאזן החודשי חיובי, כדי שהתשלום החודשי לא יגדיל את המינוס.<br>
-    <b>חיסכון ונסיעות חדשות.</b> אין חיסכון ואין נסיעה חדשה עד שהמינוס יורד. רק הנסיעות המתוכננות בטבלה למעלה.<br>
+    <b>חיסכון.</b> אין חיסכון חדש עד שהמינוס יורד. הנסיעות העתידיות מפורטות בטבלת הנסיעות למעלה.<br>
     <b>הכנסה.</b> התוכנית לא מניחה שינוי בהכנסה. כל תוספת (בונוס, שעות, החזר) נכנסת לפי כלל 1.
   </div></div>
 </div></details>
@@ -372,6 +372,7 @@ document.getElementById('capNote').innerHTML = `הממוצע כולל נסיעו
 // ── TRIPS ──
 document.getElementById('tripTable').innerHTML = (PL.trips || []).map(t => `<tr><td>${esc(t.name)}<div class="dmut" style="font-size:.66rem">${esc(t.note || '')}</div></td><td class="n">${mLabel(t.month)}</td><td class="n">${fmt(t.amt)}${t.est ? ' <span class="dmut" style="font-size:.62rem">הערכה</span>' : ''}</td></tr>`).join('') +
   `<tr><td><b>סה"כ</b></td><td></td><td class="n"><b>${fmt((PL.trips || []).reduce((t, x) => t + x.amt, 0))}</b></td></tr>`;
+if (PL.trips_yearly) document.getElementById('tripTable').insertAdjacentHTML('beforeend', `<tr><td>${esc(PL.trips_yearly.name)}<div class="dmut" style="font-size:.66rem">${esc(PL.trips_yearly.note || '')}</div></td><td class="n">${PL.trips_yearly.months.map(m => HEB_FULL[+m - 1]).join(', ')}, מ־${mLabel(PL.trips_yearly.from)}</td><td class="n">${fmt(PL.trips_yearly.amt)} <span class="dmut" style="font-size:.62rem">הערכה, כל אחד</span></td></tr>`);
 document.getElementById('tripNote').innerHTML = 'הטיסות של כל ארבע הנסיעות כבר שולמו וכבר נספרו בהוצאות של יולי–אוקטובר. הסכומים כאן הם מה שנשאר: מלונות, רכב, אוכל, כניסות. בתחזית הם יורדים בחודש הנסיעה. הספה נספרת כולה בחודש הרכישה, גם כשהתשלומים מתפרשים על כמה חודשים.';
 
 // ── PROJECTION: from the last complete month-end (the low point of the month), not from "today after payday" ──
@@ -382,6 +383,9 @@ const tripsTotal = trips.reduce((t, x) => t + x.amt, 0);
 const doneKeys = Object.keys(endPt).sort().filter(k => k < curKey);
 const anchorKey = doneKeys.length ? doneKeys[doneKeys.length - 1] : startKey;
 const anchorNet = doneKeys.length ? endPt[anchorKey][2] : startNet;
+// future yearly trips (an estimate, from the plan data): added to the forecast in their months
+const TY = PL.trips_yearly || null;
+if (TY) for (let i = 1; i <= horizon; i++) { const k = addM(anchorKey, i); if (k >= TY.from && TY.months.indexOf(k.slice(5, 7)) >= 0) tr[k] = (tr[k] || 0) + TY.amt; }
 function project(monthly, withTrips) {
   const out = []; let bal = anchorNet, exit = null;
   for (let i = 1; i <= horizon; i++) {
@@ -442,7 +446,7 @@ function showPlan(pct) {
   big.className = 'ans-a' + (withT.exit ? '' : ' none');
   const lines = [];
   lines.push(`אם מצליחים רק 80%: ${exitTxt(atPct(.8, true).exit)} · 60%: ${exitTxt(atPct(.6, true).exit)} · 40%: ${exitTxt(atPct(.4, true).exit)}.`);
-  if (withT.exit && noT.exit && tripsTotal) { const d = monthsBetween(noT.exit, withT.exit); if (d > 0) lines.push(`הנסיעות המתוכננות (${fmt(tripsTotal)}) מוסיפות כ־${d} חודשים. בלי הנסיעות: ${mFull(noT.exit)}.`); }
+  if (withT.exit && noT.exit && (tripsTotal || TY)) { const d = monthsBetween(noT.exit, withT.exit); if (d > 0) lines.push(`הנסיעות בתחזית מוסיפות כ־${d} חודשים. בלי נסיעות: ${mFull(noT.exit)}.`); }
   lines.push('זה יעד, לא מה שקורה היום. "יוצאים" אומר שגם בסוף החודש, כשהחוב בנקודה הנמוכה שלו, הוא כבר מעל האפס.');
   document.getElementById('exitSub').innerHTML = lines.map(esc).join('<br>');
   projChart.data.datasets[2].data = series(withT);
@@ -472,7 +476,7 @@ const slider = document.getElementById('ach');
 slider.value = '100';
 slider.addEventListener('input', () => showPlan(+slider.value));
 showPlan(+slider.value);
-document.getElementById('scenNote').innerHTML = `איך קוראים: הגרף מודד בסוף כל חודש, כשהחוב בנקודה הנמוכה שלו. המספר בראש העמוד (חוב נטו היום) נמדד אחרי המשכורות, ולכן הוא נראה טוב יותר. "היתרה משתנה" אומר כמה היתרה זזה בכל חודש. הנסיעות המתוכננות (בפירוט למטה) נספרות בחודש הנסיעה. נקודת ההתחלה: סוף ${HEB_FULL[+anchorKey.slice(5, 7) - 1]}, חוב נטו ${fmt(anchorNet)}. ${PL.windfalls.length ? `בונוסים בהנחה: ${PL.windfalls.map(w => fmt(w.amt) + ' ב' + mLabel(w.month)).join('; ')}. ` : 'התחזית לא כוללת בונוסים או הכנסות חדשות. '}היא גם לא כוללת קייטנות קיץ: אם יהיו, מוסיפים אותן כהתחייבות מתוכננת.`;
+document.getElementById('scenNote').innerHTML = `איך קוראים: הגרף מודד בסוף כל חודש, כשהחוב בנקודה הנמוכה שלו. המספר בראש העמוד (חוב נטו היום) נמדד אחרי המשכורות, ולכן הוא נראה טוב יותר. "היתרה משתנה" אומר כמה היתרה זזה בכל חודש. הנסיעות (בפירוט למטה) נספרות בחודש הנסיעה. נקודת ההתחלה: סוף ${HEB_FULL[+anchorKey.slice(5, 7) - 1]}, חוב נטו ${fmt(anchorNet)}. ${PL.windfalls.length ? `בונוסים בהנחה: ${PL.windfalls.map(w => fmt(w.amt) + ' ב' + mLabel(w.month)).join('; ')}. ` : 'התחזית לא כוללת בונוסים או הכנסות חדשות. '}היא גם לא כוללת קייטנות קיץ: אם יהיו, מוסיפים אותן כהתחייבות מתוכננת.`;
 
 // ── MONTH SO FAR vs the plan ──
 const mtdBox = document.getElementById('mtdBox');
@@ -515,6 +519,7 @@ const rows4 = [
 ];
 document.getElementById('lights').innerHTML = rows4.join('');
 document.getElementById('rulesTop').innerHTML = PL.rules.slice(0, 5).map((r, i) => `<div class="rl"><div class="rn">${i + 1}</div><div><div class="rt">${esc(r.t)}</div><div class="rd">${esc(r.d)}</div></div></div>`).join('');
+document.getElementById('rulesTop').insertAdjacentHTML('beforeend', PL.trips_note ? `<div class="rl"><div class="rn">✈</div><div><div class="rt">נסיעות</div><div class="rd">${esc(PL.trips_note)}</div></div></div>` : '');
 document.getElementById('ladder').innerHTML = PH.map(p => `<div class="step${p.id === curPhase.id ? ' now' : ''}"><div class="pc">${p.pct ? p.pct + '%' : p.id}</div><div><div class="tt">שלב ${p.id} · ${esc(p.name)}${p.id === curPhase.id ? '<span class="nw">עכשיו</span>' : ''}</div><div class="dd">${mLabel(p.from)} – ${mLabel(p.to)}. ${esc(p.goal)}</div></div></div>`).join('');
 });
 </script>
