@@ -14,7 +14,9 @@ window.wfRunData = function(js) {
   const ENDPOINT = 'https://script.google.com/macros/s/AKfycbyRXr2Bk6uhUoo_WaWg0YY0KiLPK_7r0wFBuQcM-EghFmqnkFpztTvCRj-Y2i2AQrlEQA/exec';
   const SESSION_KEY = 'wf_auth';
   const SESSION_TTL = 6 * 60 * 60 * 1000; // matches the server session length (6 hours)
+  const CACHE_KEY = 'wf_data_cache';    // the data-text cache kept by wf.js; it must never outlive the session
   const origFetch = window.fetch.bind(window);
+  let memToken = '';                     // used only when sessionStorage cannot be written (private mode, blocked storage)
   let reloadOnLogin = false;
   let pendingEmail = '';
 
@@ -30,14 +32,24 @@ window.wfRunData = function(js) {
   }
 
   function clearSession() {
-    try { sessionStorage.removeItem('wf_pass'); sessionStorage.removeItem(SESSION_KEY); } catch(e) {}
+    memToken = '';
+    try { sessionStorage.removeItem('wf_pass'); } catch(e) {}
+    try { sessionStorage.removeItem(SESSION_KEY); } catch(e) {}
+    try { sessionStorage.removeItem(CACHE_KEY); } catch(e) {}
   }
 
-  // "wf_pass" holds the session token; the pages append it to data requests as ?key=
+  // "wf_pass" holds the session token; the pages append it to data requests as ?key=.
+  // If storage is unavailable the token lives in memory for this page only (the visitor logs in again on the next page).
   function saveSession(token) {
-    sessionStorage.setItem('wf_pass', token);
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ok: true, ts: Date.now() }));
+    memToken = token;
+    try {
+      sessionStorage.setItem('wf_pass', token);
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ok: true, ts: Date.now() }));
+    } catch(e) {}
   }
+  window.wfToken = function() {
+    try { return sessionStorage.getItem('wf_pass') || memToken; } catch(e) { return memToken; }
+  };
 
   function isUnauthorized(text) { return /^\s*\/\/\s*unauthorized/i.test(text || ''); }
 
