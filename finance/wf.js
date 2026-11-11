@@ -150,8 +150,8 @@
     var el = document.getElementById('wfnav'); if (!el) return;
     el.innerHTML = '<span class="nb">כספים</span>' + NAV.map(function (n) {
       return '<a class="nl' + (n[0] === active ? ' act' : '') + '" href="' + n[0] + '">' + n[1] + '</a>';
-    }).join('') + '<span class="nsp"></span><span class="nst" id="wfstamp"></span><button class="nrf" id="wfrefresh" title="רענון נתונים" aria-label="רענון נתונים">↻</button>';
-    var b = document.getElementById('wfrefresh'); if (b) b.onclick = function () { b.classList.add('spin'); location.reload(); };
+    }).join('') + '<span class="nsp"></span><span class="nst" id="wfstamp"></span><span class="nst nsc" id="wfcached" hidden></span><button class="nrf" id="wfrefresh" title="רענון נתונים" aria-label="רענון נתונים">↻</button>';
+    var b = document.getElementById('wfrefresh'); if (b) b.onclick = function () { b.classList.add('spin'); hardReload(); };
   }
 
   // A visible message under the navigation: stale data, missing blocks, or a failed load (with a retry button).
@@ -162,12 +162,51 @@
       var nv = document.getElementById('wfnav');
       if (nv && nv.parentNode) nv.parentNode.insertBefore(el, nv.nextSibling); else document.body.insertBefore(el, document.body.firstChild);
     }
-    el.innerHTML = '<span>' + esc(msg) + '</span>' + (retry ? ' <button onclick="location.reload()">נסו שוב</button>' : '');
+    el.innerHTML = '<span>' + esc(msg) + '</span>' + (retry ? ' <button type="button">נסו שוב</button>' : '');
+    var rb = el.querySelector('button'); if (rb) rb.onclick = hardReload;
+    el.hidden = false;
+  }
+
+  // ── session cache: the data text is kept in sessionStorage (this tab only) so a page change does not download it again.
+  // Every storage call is guarded: if storage is blocked or full, the page simply fetches as before.
+  var CACHE_KEY = 'wf_data_cache';            // one key, value {ts, text}; auth.js removes it with the session
+  var CACHE_MS = 15 * 60 * 1000;              // an entry older than this is never used
+  var AUTO_MS = CACHE_MS;                     // visible pages reload themselves this often, counted from when the data was fetched
+  var dataTs = 0;                             // when the data now on screen was fetched (the cache entry's ts, or the fetch time)
+
+  function cacheClear() { try { sessionStorage.removeItem(CACHE_KEY); } catch (e) {} }
+  function hardReload() { cacheClear(); location.reload(); }
+  function token() {
+    if (window.wfToken) return window.wfToken();
+    try { return sessionStorage.getItem('wf_pass') || ''; } catch (e) { return ''; }
+  }
+  function sessionStart() {                   // when this login began (auth.js writes it with the token)
+    try { var a = JSON.parse(sessionStorage.getItem('wf_auth')); return a && a.ok === true && typeof a.ts === 'number' ? a.ts : 0; }
+    catch (e) { return 0; }
+  }
+  function looksLikeData(t) { return typeof t === 'string' && /(^|\n)\s*const\s+DATA\s*=/.test(t); }
+  function cacheRead() {                      // the entry, or null (a bad or expired entry is removed)
+    try {
+      if (!sessionStorage.getItem('wf_pass')) return null;
+      var raw = sessionStorage.getItem(CACHE_KEY); if (raw == null) return null;
+      var e = JSON.parse(raw), now = Date.now(), start = sessionStart();
+      if (e && typeof e.ts === 'number' && now - e.ts >= 0 && now - e.ts < CACHE_MS && start && e.ts >= start && looksLikeData(e.text)) return e;
+    } catch (e) {}
+    cacheClear(); return null;
+  }
+  function cacheWrite(text) {
+    try { sessionStorage.setItem(CACHE_KEY, JSON.stringify({ ts: dataTs, text: text })); }
+    catch (e) { cacheClear(); }               // full or blocked: drop any older entry so it cannot be served by mistake
+  }
+  function showCached(ts) {                   // small note next to the date stamp: this view comes from the tab's memory
+    var el = document.getElementById('wfcached'); if (!el) return;
+    var m = Math.floor((Date.now() - ts) / 60000);
+    el.innerHTML = esc('נשמרו לפני ' + (m < 1 ? 'רגע' : m + ' דק׳') + ' · ↻ לרענון');
+    el.title = 'הנתונים נשמרו בדפדפן בלשונית הזו. לחצו על ↻ כדי לטעון אותם מחדש.';
     el.hidden = false;
   }
 
   var REQUIRED = ['history', 'weeks', 'live', 'od_plan', 'position', 'recurring'];   // blocks every page may rely on
-  var AUTO_MS = 15 * 60 * 1000;                                                      // visible pages reload themselves this often
 
   function stampAndChecks(D) {
     var live = D.live || {}, upd = live.as_of || (D.meta && D.meta.updated) || '';
@@ -181,21 +220,39 @@
 
   function boot(render) {                     // same login hand-off as the older pages (auth.js)
     var t0 = Date.now();
-    function load() {
-      fetch(DATA_URL + '?key=' + encodeURIComponent(sessionStorage.getItem('wf_pass') || '') + '&_=' + Date.now(), { cache: 'no-store' })
+    function show() {
+      stampAndChecks(window.DATA);
+      try { render(window.DATA); }
+      catch (e) { console.error('render failed', e); banner('שגיאה בהצגת העמוד. הנתונים נטענו, אבל משהו בהם לא כצפוי.', true); }
+    }
+    function fresh() {
+      fetch(DATA_URL + '?key=' + encodeURIComponent(token()) + '&_=' + Date.now(), { cache: 'no-store' })
         .then(function (r) { return r.text(); })
         .then(function (js) {
-          if (/^\s*\/\/\s*unauthorized/i.test(js)) return;                       // auth.js shows the login box and reloads after it
-          if (/^\s*\/\/\s*error/i.test(js)) { banner('השרת לא מצא קובץ נתונים תקין.', true); return; }
+          if (/^\s*\/\/\s*unauthorized/i.test(js)) { cacheClear(); return; }   // auth.js shows the login box and reloads after it
+          if (/^\s*\/\/\s*error/i.test(js)) { cacheClear(); banner('השרת לא מצא קובץ נתונים תקין.', true); return; }
           wfRunData(js);
-          stampAndChecks(window.DATA);
-          try { render(window.DATA); }
-          catch (e) { console.error('render failed', e); banner('שגיאה בהצגת העמוד. הנתונים נטענו, אבל משהו בהם לא כצפוי.', true); }
+          dataTs = Date.now();
+          if (looksLikeData(js)) cacheWrite(js); else cacheClear();
+          show();
         })
         .catch(function (e) { console.error('load failed', e); banner('לא הצלחנו לטעון את הנתונים.', true); });
     }
-    if (sessionStorage.getItem('wf_pass')) load(); else document.addEventListener('wfLoggedIn', load);
-    setInterval(function () { if (!document.hidden && Date.now() - t0 > AUTO_MS) location.reload(); }, 60000);
+    function load() {
+      var hit = cacheRead();
+      if (!hit) { fresh(); return; }
+      // A cached answer is instant, so wait for the page to finish parsing (some pages call WF.nav() after WF.boot()).
+      var useIt = function () {
+        try { wfRunData(hit.text); } catch (e) { cacheClear(); fresh(); return; }   // unreadable entry: fetch instead
+        dataTs = hit.ts; show(); showCached(hit.ts);
+      };
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', useIt); else useIt();
+    }
+    function stale() { return Date.now() - (dataTs || t0) > AUTO_MS; }
+    if (token()) load(); else document.addEventListener('wfLoggedIn', load);
+    setInterval(function () { if (!document.hidden && stale()) hardReload(); }, 60000);
+    // a page restored from the back/forward cache keeps its old data on screen: re-check its age and the login
+    window.addEventListener('pageshow', function (ev) { if (ev.persisted && (stale() || !token())) hardReload(); });
   }
 
   function chartDefaults() {
