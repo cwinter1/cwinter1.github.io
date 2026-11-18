@@ -1,0 +1,863 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 09 — SIEM: KQL &amp; SPL</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 09 — SIEM: KQL &amp; SPL</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="09" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 09 — SIEM: KQL &amp; SPL</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 3 — Log Analysis &amp; SIEM</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: SIEM investigation / SC-200: KQL, Sentinel queries / GCIA: Log correlation</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>3 Sigma rules translated to live KQL → deployed detections</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W05 (ATT&amp;CK), W08 (log sources, Sysmon dataset)</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — KQL Fundamentals</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="09-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=L1Av7vlrhkU" target="_blank" rel="noopener"><b>KQL For Beginners | Kusto Query Language (Cybersecurity 2026)</b><small>Josh Madakor</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=KQL%20Kusto%20Query%20Language%20tutorial%20Microsoft%20Sentinel%20beginner" target="_blank" rel="noopener">KQL Kusto Query Language tutorial Microsoft Sentinel beginner</a></p></div>
+<hr />
+<h3>Concept 1 — KQL Syntax and the Pipe Model</h3>
+<p>Kusto Query Language (KQL) is Microsoft's query language used in Azure Monitor, Microsoft Sentinel, and Defender. It uses a left-to-right pipe model: data flows from a source table through a series of operators, each transforming the result.</p>
+<pre><code>TableName
+| operator1 arguments
+| operator2 arguments
+| operator3 arguments
+</code></pre><p>This is identical to a Unix shell pipeline or a pandas method chain — each step receives the output of the previous step and passes its output to the next. KQL is declarative: you describe what you want, not how to compute it.</p>
+<p>Core operators every analyst needs:</p>
+<ul>
+<li><code>where</code> — filter rows (like SQL WHERE)</li>
+<li><code>project</code> — select columns (like SQL SELECT)</li>
+<li><code>extend</code> — add computed columns (like pandas assign)</li>
+<li><code>summarize</code> — aggregate (like SQL GROUP BY)</li>
+<li><code>sort by</code> — order results</li>
+<li><code>top N by</code> — return top N rows</li>
+<li><code>join</code> — combine two tables</li>
+</ul>
+<p>Data engineering analogy: KQL is dbt + SQL combined. The pipe chain maps directly to a dbt model chain.</p>
+<p><strong>Example:</strong></p>
+<pre><code>// KQL — Find failed logons in the last 24 hours
+SecurityEvent
+| where TimeGenerated &gt; ago(24h)
+| where EventID == 4625
+| where AccountType == &quot;User&quot;
+| project TimeGenerated, Account, WorkstationName, IpAddress, LogonTypeName
+| sort by TimeGenerated desc
+</code></pre><p><strong>Exercise:</strong>
+Translate the following SQL to KQL:</p>
+<pre><code>SELECT Account, COUNT(*) as failure_count
+FROM SecurityEvent
+WHERE EventID = 4625
+  AND TimeGenerated &gt; NOW() - INTERVAL 1 HOUR
+GROUP BY Account
+HAVING COUNT(*) &gt; 5
+ORDER BY failure_count DESC
+</code></pre><p>Write the equivalent KQL. Expected output: table of accounts with failure_count &gt; 5, sorted descending</p>
+<hr />
+<h3>Concept 2 — where, project, extend, summarize</h3>
+<p>These four operators handle 90% of detection queries. Understanding their semantics precisely prevents common mistakes.</p>
+<p><code>where</code> filters rows. Multiple conditions in one <code>where</code> are ANDed. Use <code>or</code> explicitly.
+<code>project</code> keeps only listed columns and drops the rest. <code>project-away</code> drops listed columns and keeps the rest.
+<code>extend</code> adds new columns without removing existing ones — unlike <code>project</code>.
+<code>summarize</code> collapses rows. Every column not in the <code>by</code> clause must be an aggregation. The result has one row per unique combination of <code>by</code> columns.</p>
+<p><strong>Example:</strong></p>
+<pre><code>// Brute force detector — accounts with &gt; 5 failures in 10 min windows
+SecurityEvent
+| where EventID == 4625
+| where TimeGenerated &gt; ago(1d)
+| extend TimeWindow = bin(TimeGenerated, 10m)
+| summarize
+    failure_count = count(),
+    distinct_ips = dcount(IpAddress)
+    by Account, TimeWindow
+| where failure_count &gt; 5
+| sort by failure_count desc
+
+// Python equivalent (pandas) for local testing
+import pandas as pd
+
+def brute_force_detector(df: pd.DataFrame, window: str = &quot;10min&quot;, threshold: int = 5) -&gt; pd.DataFrame:
+    failures = df[df[&quot;EventID&quot;] == 4625].copy()
+    failures[&quot;TimeWindow&quot;] = failures[&quot;TimeGenerated&quot;].dt.floor(window)
+    result = (
+        failures.groupby([&quot;Account&quot;, &quot;TimeWindow&quot;])
+        .agg(failure_count=(&quot;EventID&quot;, &quot;count&quot;), distinct_ips=(&quot;IpAddress&quot;, &quot;nunique&quot;))
+        .reset_index()
+    )
+    return result[result[&quot;failure_count&quot;] &gt; threshold].sort_values(&quot;failure_count&quot;, ascending=False)
+</code></pre><p><strong>Exercise:</strong>
+Write a Python function <code>kql_to_pandas_summarize(df: pd.DataFrame) -&gt; pd.DataFrame</code> that replicates this KQL:</p>
+<pre><code>SecurityEvent
+| where EventID == 4688
+| summarize process_count = count(), unique_users = dcount(Account) by CommandLine
+| where process_count &gt; 3
+| top 10 by process_count desc
+</code></pre><p>Use the W08 Sysmon dataset as input (adapt field names). Return a DataFrame.
+Expected output: top 10 command lines by frequency with count and unique user columns</p>
+<hr />
+<h3>Concept 3 — Time Functions and Windowing</h3>
+<p>Detection queries are almost always time-bounded. KQL time functions are first-class:</p>
+<ul>
+<li><code>ago(Xh)</code> / <code>ago(Xd)</code> — relative time from now</li>
+<li><code>bin(TimeGenerated, 1h)</code> — floor timestamp to nearest hour bucket</li>
+<li><code>datetime(2024-03-15)</code> — literal datetime</li>
+<li><code>between(datetime(X) .. datetime(Y))</code> — time range</li>
+<li><code>startofday(now())</code> — today's midnight</li>
+<li><code>format_datetime(ts, &quot;yyyy-MM-dd HH:mm&quot;)</code> — format for display</li>
+</ul>
+<p>Windowing with <code>bin()</code> is the key to time-series detection. It groups events into fixed buckets so you can count per-window and spot volume anomalies.</p>
+<p><strong>Example:</strong></p>
+<pre><code>// Hourly logon failure counts — spot brute force timing
+SecurityEvent
+| where TimeGenerated &gt; ago(7d)
+| where EventID == 4625
+| summarize hourly_failures = count() by bin(TimeGenerated, 1h), Account
+| where hourly_failures &gt; 20
+| sort by TimeGenerated desc
+
+// Python equivalent
+def hourly_failure_count(df: pd.DataFrame, threshold: int = 20) -&gt; pd.DataFrame:
+    df = df[df[&quot;EventID&quot;] == 4625].copy()
+    df[&quot;hour_bucket&quot;] = df[&quot;TimeGenerated&quot;].dt.floor(&quot;h&quot;)
+    result = (
+        df.groupby([&quot;hour_bucket&quot;, &quot;Account&quot;])
+        .size()
+        .reset_index(name=&quot;hourly_failures&quot;)
+    )
+    return result[result[&quot;hourly_failures&quot;] &gt; threshold].sort_values(&quot;TimeGenerated&quot; if &quot;TimeGenerated&quot; in result.columns else &quot;hour_bucket&quot;, ascending=False)
+</code></pre><p><strong>Exercise:</strong>
+Write <code>spike_detector(df: pd.DataFrame, event_id: int, window: str, multiplier: float) -&gt; pd.DataFrame</code> that identifies time windows where event count exceeds <code>multiplier</code> times the mean count for that event_id. Return windows where a spike was detected with columns: bucket, count, mean_count, spike_ratio.
+Expected output: DataFrame showing buckets with count &gt; mean * multiplier</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can translate natural-language detection requirements directly to KQL queries.
+<strong>Threat:</strong> Attackers who know your KQL queries can craft activity that stays just below every threshold.
+<strong>Opportunity:</strong> Use an LLM as a KQL co-pilot: describe the attack pattern in English, get a draft query, then tune thresholds against your own data.
+<strong>Prompt to try:</strong> <code>&quot;Write a KQL query for Microsoft Sentinel that detects PowerShell executing Base64-encoded commands. The query should: use the SecurityEvent table, filter for EventID 4688, search CommandLine for encoded patterns, extract the decoded payload using base64_decode_tostring(), and summarize by account and host over 24h.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Advanced KQL for Detection</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="09-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=6h451YyWox0" target="_blank" rel="noopener"><b>Master KQL Advanced Queries: Join Operator and Join Kinds Explained with Demo</b><small>Cloud 360 Training</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=KQL%20advanced%20joins%20let%20statements%20detection%20rules%20Microsoft%20Sentinel" target="_blank" rel="noopener">KQL advanced joins let statements detection rules Microsoft Sentinel</a></p></div>
+<hr />
+<h3>Concept 1 — let Statements and Query Modularity</h3>
+<p><code>let</code> binds a name to a value, table, or function. It's the KQL equivalent of a CTE or a pandas variable assignment. Complex detection queries use <code>let</code> to define reusable sub-queries, lookups, and parameters.</p>
+<pre><code>let threshold = 5;
+let suspicious_ips = datatable(ip:string) [&quot;10.0.0.99&quot;, &quot;192.168.1.200&quot;];
+let recent_failures =
+    SecurityEvent
+    | where EventID == 4625
+    | where TimeGenerated &gt; ago(1h);
+recent_failures
+| where IpAddress in (suspicious_ips)
+| summarize count() by Account, IpAddress
+| where count_ &gt; threshold
+</code></pre><p><code>let</code> with a tabular expression creates a named intermediate result — exactly like a CTE. Multiple <code>let</code> statements can reference each other (as long as there are no cycles).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Python equivalent of KQL let + join pattern
+def kql_let_pattern(events_df: pd.DataFrame, suspicious_ips: list[str], threshold: int = 5) -&gt; pd.DataFrame:
+    # let recent_failures = ...
+    recent_failures = events_df[
+        (events_df[&quot;EventID&quot;] == 4625) &amp;
+        (events_df[&quot;TimeGenerated&quot;] &gt; pd.Timestamp.now() - pd.Timedelta(hours=1))
+    ]
+    # where IpAddress in (suspicious_ips)
+    filtered = recent_failures[recent_failures[&quot;IpAddress&quot;].isin(suspicious_ips)]
+    # summarize count() by Account, IpAddress
+    result = (
+        filtered.groupby([&quot;Account&quot;, &quot;IpAddress&quot;])
+        .size()
+        .reset_index(name=&quot;count_&quot;)
+    )
+    return result[result[&quot;count_&quot;] &gt; threshold]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>build_ip_allowlist_query(df: pd.DataFrame, allowlist: list[str]) -&gt; pd.DataFrame</code> that simulates a KQL query with <code>let allowlist = datatable(...)</code>. Filter EventID 4624 (success) for source IPs NOT in the allowlist. Summarize: count per IP, first seen, last seen. Return IPs not in allowlist sorted by count descending.
+Expected output: DataFrame of off-allowlist logon source IPs with first/last seen timestamps</p>
+<hr />
+<h3>Concept 2 — join in KQL</h3>
+<p>KQL supports multiple join flavors. The most used in detection work:</p>
+<table>
+<thead>
+<tr>
+<th>Flavor</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>inner</code></td>
+<td>Keep rows where key exists in both tables (default)</td>
+</tr>
+<tr>
+<td><code>leftouter</code></td>
+<td>Keep all left rows; null right fields if no match</td>
+</tr>
+<tr>
+<td><code>leftanti</code></td>
+<td>Keep left rows with NO match in right (allowlist exclusion)</td>
+</tr>
+<tr>
+<td><code>rightsemi</code></td>
+<td>Keep right rows that have a match in left</td>
+</tr>
+</tbody>
+</table>
+<p>The <code>leftanti</code> join is extremely useful for detection: &quot;show me processes not in my known-good baseline.&quot; It's the KQL expression of allowlist-based detection.</p>
+<p><strong>Example:</strong></p>
+<pre><code>// Find logons from accounts that have NOT logged in before (new accounts)
+let known_accounts =
+    SecurityEvent
+    | where TimeGenerated between (ago(30d) .. ago(1d))
+    | where EventID == 4624
+    | summarize by Account;
+SecurityEvent
+| where TimeGenerated &gt; ago(1d)
+| where EventID == 4624
+| join kind=leftanti known_accounts on Account
+| project TimeGenerated, Account, IpAddress, WorkstationName
+
+// Python equivalent
+def new_account_logons(df: pd.DataFrame) -&gt; pd.DataFrame:
+    cutoff = pd.Timestamp.now()
+    historical = df[
+        (df[&quot;TimeGenerated&quot;] &lt; cutoff - pd.Timedelta(days=1)) &amp;
+        (df[&quot;TimeGenerated&quot;] &gt; cutoff - pd.Timedelta(days=30)) &amp;
+        (df[&quot;EventID&quot;] == 4624)
+    ][&quot;Account&quot;].unique()
+    recent = df[
+        (df[&quot;TimeGenerated&quot;] &gt; cutoff - pd.Timedelta(days=1)) &amp;
+        (df[&quot;EventID&quot;] == 4624)
+    ]
+    return recent[~recent[&quot;Account&quot;].isin(historical)]
+</code></pre><p><strong>Exercise:</strong>
+Implement <code>detect_new_processes(df: pd.DataFrame, baseline_days: int = 7) -&gt; pd.DataFrame</code> using the leftanti pattern. The baseline is all unique process hashes seen in the past <code>baseline_days</code>. Return processes seen in the most recent day that are NOT in the baseline, with columns: UtcTime, Image, Hashes, User, CommandLine.
+Expected output: DataFrame of previously unseen process hashes from the last 24h</p>
+<hr />
+<h3>Concept 3 — Regex and String Operations in KQL</h3>
+<p>Detection rules frequently need pattern matching — extracting substrings, matching suspicious patterns, parsing fields from unstructured strings. KQL string operators:</p>
+<ul>
+<li><code>contains</code> — case-insensitive substring match</li>
+<li><code>has</code> — word boundary match (faster than contains for whole words)</li>
+<li><code>matches regex</code> — full regex match</li>
+<li><code>extract(regex, group, field)</code> — pull a capture group from a string</li>
+<li><code>parse</code> — extract multiple fields by pattern</li>
+<li><code>base64_decode_tostring()</code> — decode base64 (catches encoded PowerShell)</li>
+</ul>
+<p><strong>Example:</strong></p>
+<pre><code>// Detect encoded PowerShell
+SecurityEvent
+| where EventID == 4688
+| where CommandLine matches regex @&quot;-[Ee][Nn][Cc][Oo][Dd][Ee][Dd][Cc][Oo][Mm][Mm][Aa][Nn][Dd]&quot;
+| extend decoded_cmd = base64_decode_tostring(extract(@&quot;-[Ee]nc\w*\s+([A-Za-z0-9+/=]+)&quot;, 1, CommandLine))
+| project TimeGenerated, Account, CommandLine, decoded_cmd
+
+// Python equivalent
+import base64, re
+
+def detect_encoded_powershell(df: pd.DataFrame) -&gt; pd.DataFrame:
+    pattern = re.compile(r&quot;-[Ee][Nn][Cc][Oo][Dd][Ee][Dd][Cc][Oo][Mm][Mm][Aa][Nn][Dd]&quot;)
+    b64_pattern = re.compile(r&quot;-[Ee]nc\w*\s+([A-Za-z0-9+/=]+)&quot;, re.IGNORECASE)
+    
+    mask = df[&quot;CommandLine&quot;].str.contains(pattern, regex=True, na=False)
+    result = df[mask].copy()
+    
+    def decode_b64(cmd: str) -&gt; str:
+        m = b64_pattern.search(cmd)
+        if m:
+            try:
+                return base64.b64decode(m.group(1)).decode(&quot;utf-16-le&quot;, errors=&quot;replace&quot;)
+            except Exception:
+                return &quot;&lt;decode_error&gt;&quot;
+        return &quot;&quot;
+    
+    result[&quot;decoded_cmd&quot;] = result[&quot;CommandLine&quot;].apply(decode_b64)
+    return result[[&quot;UtcTime&quot;, &quot;User&quot;, &quot;CommandLine&quot;, &quot;decoded_cmd&quot;]]
+</code></pre><p><strong>Exercise:</strong>
+Write <code>extract_parent_child_pairs(df: pd.DataFrame) -&gt; pd.DataFrame</code> that uses the Sysmon dataset to find all unique (parent_name, process_name) pairs where the parent is an Office application (<code>winword.exe</code>, <code>excel.exe</code>, <code>outlook.exe</code>, <code>onenote.exe</code>) and the child is a shell (<code>cmd.exe</code>, <code>powershell.exe</code>, <code>wscript.exe</code>, <code>cscript.exe</code>). Return with count, sorted descending.
+Expected output: DataFrame with parent_name, process_name, spawn_count — flagging macro-based spawning</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can explain what a KQL query does in plain English, and suggest improvements.
+<strong>Threat:</strong> Security teams sometimes deploy queries they don't fully understand, leading to false confidence in broken detections.
+<strong>Opportunity:</strong> Use an LLM to peer-review detection queries: &quot;Does this query have any logic gaps? What would an attacker need to do to evade it?&quot;
+<strong>Prompt to try:</strong> <code>&quot;Review this KQL detection query for logical gaps and evasion scenarios. For each evasion, suggest a KQL fix. Also explain what the query does in 2 sentences for a non-technical stakeholder.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — SPL: Splunk Processing Language</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="09-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=mT2UYhUA-hQ" target="_blank" rel="noopener"><b>Top Splunk Search Commands Every SOC Analyst Should Know</b><small>Mohd Maaz</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Splunk%20SPL%20tutorial%20detection%20SOC%20analyst%20search%20commands" target="_blank" rel="noopener">Splunk SPL tutorial detection SOC analyst search commands</a></p></div>
+<hr />
+<h3>Concept 1 — SPL Fundamentals</h3>
+<p>Splunk Processing Language (SPL) is Splunk's query language. Like KQL, it uses a pipe model, but the data model is different: Splunk indexes raw text events and extracts fields at search time using regex patterns defined in <code>props.conf</code> and <code>transforms.conf</code>.</p>
+<p>SPL syntax:</p>
+<pre><code>index=windows EventCode=4625
+| stats count by user, src_ip
+| where count &gt; 5
+| sort -count
+</code></pre><p>Key differences from KQL:</p>
+<ul>
+<li><code>index=</code> instead of a table name (Splunk indexes, not tables)</li>
+<li><code>EventCode</code> not <code>EventID</code> (Splunk's default field name from Windows TA)</li>
+<li><code>stats</code> is the aggregate operator (like KQL <code>summarize</code>)</li>
+<li><code>eval</code> adds computed fields (like KQL <code>extend</code>)</li>
+<li>Field names are case-insensitive</li>
+<li>Time range set in the search UI or with <code>earliest=</code> / <code>latest=</code></li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Translate SPL to Python pandas — same conceptual operations
+SPL_QUERY = &quot;&quot;&quot;
+index=windows EventCode=4625
+| stats count as failure_count, dc(src_ip) as unique_ips by user
+| where failure_count &gt; 10
+| sort -failure_count
+&quot;&quot;&quot;
+
+def spl_equivalent(df: pd.DataFrame) -&gt; pd.DataFrame:
+    # index=windows EventCode=4625
+    filtered = df[(df[&quot;index&quot;] == &quot;windows&quot;) &amp; (df[&quot;EventCode&quot;] == 4625)]
+    # stats count, dc(src_ip) by user
+    result = filtered.groupby(&quot;user&quot;).agg(
+        failure_count=(&quot;EventCode&quot;, &quot;count&quot;),
+        unique_ips=(&quot;src_ip&quot;, &quot;nunique&quot;)
+    ).reset_index()
+    # where failure_count &gt; 10
+    result = result[result[&quot;failure_count&quot;] &gt; 10]
+    return result.sort_values(&quot;failure_count&quot;, ascending=False)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Translate this SPL to a Python function:</p>
+<pre><code>index=sysmon EventCode=1
+| eval parent_name=mvindex(split(ParentImage, &quot;\\&quot;), -1)
+| eval process_name=mvindex(split(Image, &quot;\\&quot;), -1)
+| stats count by parent_name, process_name
+| where count &gt; 1
+| sort -count
+</code></pre><p>Write <code>spl_parent_child_stats(df: pd.DataFrame) -&gt; pd.DataFrame</code>.
+Expected output: parent_name, process_name, count — sorted descending</p>
+<hr />
+<h3>Concept 2 — SPL stats, eval, rex</h3>
+<p>The three most-used SPL commands after <code>search</code>:</p>
+<p><strong>stats</strong> — aggregate with functions: <code>count</code>, <code>dc</code> (distinct count), <code>sum</code>, <code>avg</code>, <code>min</code>, <code>max</code>, <code>list</code>, <code>values</code>, <code>earliest</code>, <code>latest</code>.</p>
+<p><strong>eval</strong> — compute new fields: <code>eval risk = if(failure_count &gt; 10, &quot;HIGH&quot;, &quot;LOW&quot;)</code>. Supports regex, math, string functions.</p>
+<p><strong>rex</strong> — extract fields from raw text using named capture groups: <code>rex field=CommandLine &quot;(?i)-enc\s+(?P&lt;encoded_payload&gt;[A-Za-z0-9+/=]+)&quot;</code>. Named groups become new fields.</p>
+<p><strong>Example:</strong></p>
+<pre><code>// Risk scoring in SPL
+index=windows (EventCode=4625 OR EventCode=4688)
+| eval event_type=case(EventCode=4625, &quot;failed_logon&quot;, EventCode=4688, &quot;process_create&quot;, true(), &quot;other&quot;)
+| stats count by event_type, ComputerName
+| eval risk_score=case(
+    event_type=&quot;failed_logon&quot; AND count &gt; 20, 3,
+    event_type=&quot;failed_logon&quot; AND count &gt; 5, 2,
+    true(), 1)
+| sort -risk_score
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def spl_risk_score(df: pd.DataFrame) -&gt; pd.DataFrame:
+    df = df[df[&quot;EventCode&quot;].isin([4625, 4688])].copy()
+    df[&quot;event_type&quot;] = df[&quot;EventCode&quot;].map({4625: &quot;failed_logon&quot;, 4688: &quot;process_create&quot;})
+    agg = df.groupby([&quot;event_type&quot;, &quot;ComputerName&quot;]).size().reset_index(name=&quot;count&quot;)
+    
+    def score(row):
+        if row[&quot;event_type&quot;] == &quot;failed_logon&quot; and row[&quot;count&quot;] &gt; 20:
+            return 3
+        if row[&quot;event_type&quot;] == &quot;failed_logon&quot; and row[&quot;count&quot;] &gt; 5:
+            return 2
+        return 1
+    
+    agg[&quot;risk_score&quot;] = agg.apply(score, axis=1)
+    return agg.sort_values(&quot;risk_score&quot;, ascending=False)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>spl_rex_extract(df: pd.DataFrame) -&gt; pd.DataFrame</code> that uses Python regex to simulate SPL <code>rex</code> on the CommandLine field — extract any Base64 string (20+ chars) after <code>-enc</code> or <code>-EncodedCommand</code>. Add it as <code>encoded_payload</code>. Return records where extraction succeeded.
+Expected output: DataFrame with encoded_payload column populated from regex extraction</p>
+<hr />
+<h3>Concept 3 — SPL vs KQL Decision Guide</h3>
+<p>Both languages appear in job descriptions and certifications. SC-200 is KQL-native (Sentinel). BTL1 labs use Splunk. Many organizations run both.</p>
+<table>
+<thead>
+<tr>
+<th>Criterion</th>
+<th>KQL (Sentinel)</th>
+<th>SPL (Splunk)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>License model</td>
+<td>Consumption-based (GB/day)</td>
+<td>Per-GB or workload</td>
+</tr>
+<tr>
+<td>Field extraction</td>
+<td>Schema at ingest</td>
+<td>Schema at search time</td>
+</tr>
+<tr>
+<td>Data types</td>
+<td>Strongly typed</td>
+<td>Weakly typed</td>
+</tr>
+<tr>
+<td>Join syntax</td>
+<td>Explicit, typed</td>
+<td><code>lookup</code> + <code>join</code></td>
+</tr>
+<tr>
+<td>Time functions</td>
+<td><code>ago()</code>, <code>bin()</code></td>
+<td><code>earliest=</code>, <code>bucket</code></td>
+</tr>
+<tr>
+<td>ML integration</td>
+<td>Native anomalies</td>
+<td>MLTK app</td>
+</tr>
+<tr>
+<td>Israeli prevalence</td>
+<td>High (Microsoft 365 dominant)</td>
+<td>High (enterprise SIEM)</td>
+</tr>
+</tbody>
+</table>
+<p>The conceptual skills transfer. If you can write a KQL brute-force detector, you can write the SPL equivalent with the same logic — only syntax changes.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Side-by-side translation helper
+QUERY_MAP = {
+    &quot;kql&quot;: {
+        &quot;time_filter&quot;: &quot;| where TimeGenerated &gt; ago(24h)&quot;,
+        &quot;aggregate&quot;: &quot;| summarize count() by Account&quot;,
+        &quot;filter_result&quot;: &quot;| where count_ &gt; 5&quot;,
+        &quot;sort&quot;: &quot;| sort by count_ desc&quot;,
+    },
+    &quot;spl&quot;: {
+        &quot;time_filter&quot;: &quot;earliest=-24h&quot;,
+        &quot;aggregate&quot;: &quot;| stats count by Account&quot;,
+        &quot;filter_result&quot;: &quot;| where count &gt; 5&quot;,
+        &quot;sort&quot;: &quot;| sort -count&quot;,
+    },
+}
+
+def translate_brute_force(lang: str) -&gt; str:
+    q = QUERY_MAP.get(lang, {})
+    if lang == &quot;kql&quot;:
+        return f&quot;SecurityEvent\n| where EventID == 4625\n{q[&#x27;time_filter&#x27;]}\n{q[&#x27;aggregate&#x27;]}\n{q[&#x27;filter_result&#x27;]}\n{q[&#x27;sort&#x27;]}&quot;
+    return f&quot;index=windows EventCode=4625 {q[&#x27;time_filter&#x27;]}\n{q[&#x27;aggregate&#x27;]}\n{q[&#x27;filter_result&#x27;]}\n{q[&#x27;sort&#x27;]}&quot;
+
+print(translate_brute_force(&quot;kql&quot;))
+print(translate_brute_force(&quot;spl&quot;))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a <code>QueryTranslator</code> class with method <code>translate(kql_query: str, target: str) -&gt; str</code>. Implement basic pattern replacement: <code>TimeGenerated</code> → <code>_time</code>, <code>summarize count() by</code> → <code>stats count by</code>, <code>where EventID ==</code> → <code>EventCode=</code>, <code>sort by</code> → <code>sort -</code>, <code>ago(</code> → <code>earliest=-</code>. Return the translated SPL string.
+Expected output: rough SPL approximation of input KQL; not perfect but structurally correct</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can translate KQL to SPL and vice versa with high accuracy.
+<strong>Threat:</strong> Organizations using both SIEMs create detection gaps when rules exist in only one platform — attackers targeting cross-platform blind spots.
+<strong>Opportunity:</strong> Use an LLM to maintain parity between your KQL and SPL detection libraries automatically.
+<strong>Prompt to try:</strong> <code>&quot;Translate this KQL query to SPL (Splunk). Preserve the logic exactly, map field names using Splunk's Windows TA defaults (e.g., EventCode not EventID), and note any SPL limitations that prevent exact translation.&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Writing Sigma Rules</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="09-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=Sigma%20rules%20detection%20engineering%20tutorial%20SOC%20convert%20SIEM" target="_blank" rel="noopener">Sigma rules detection engineering tutorial SOC convert SIEM</a></p></div>
+<hr />
+<h3>Concept 1 — Sigma Rule Structure</h3>
+<p>Sigma is a generic YAML format for writing detection rules that compile to any SIEM query language. A Sigma rule describes <em>what</em> to detect; a compiler converts it to KQL, SPL, Elasticsearch DSL, or any other target.</p>
+<p>Rule anatomy:</p>
+<pre><code>title: Descriptive title
+id: uuid4
+status: experimental | test | stable
+description: What does this rule detect?
+references: [links]
+author: name
+date: YYYY/MM/DD
+tags:
+  - attack.technique_id
+logsource:
+  category: process_creation | network_connection | etc.
+  product: windows | linux | etc.
+detection:
+  selection:
+    FieldName|modifier: value
+  condition: selection
+falsepositives: [known FPs]
+level: informational | low | medium | high | critical
+</code></pre><p>The <code>detection</code> section is the core. <code>selection</code> defines field-value conditions. <code>condition</code> composes them with <code>and</code>, <code>or</code>, <code>not</code>, <code>1 of</code>, <code>all of</code>.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Sigma rule — Mimikatz execution (simplified)
+title: Mimikatz Credential Dumping
+id: a4b7c2d1-8e3f-4a91-b012-c3d456e789f0
+status: test
+description: Detects execution of Mimikatz or commands associated with credential dumping
+references:
+  - https://attack.mitre.org/techniques/T1003/001/
+author: Detection Engineer
+date: 2024/03/15
+tags:
+  - attack.credential_access
+  - attack.t1003.001
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_image:
+    Image|endswith: &#x27;\mimikatz.exe&#x27;
+  selection_cmdline:
+    CommandLine|contains:
+      - &#x27;sekurlsa::logonpasswords&#x27;
+      - &#x27;lsadump::sam&#x27;
+      - &#x27;privilege::debug&#x27;
+  condition: selection_image or selection_cmdline
+falsepositives:
+  - Security testing
+level: critical
+</code></pre><p><strong>Exercise:</strong>
+Write a Sigma rule YAML (as a Python string or actual YAML file) for detecting PowerShell with encoded commands (EventID 4688 or Sysmon EID 1). Use: CommandLine contains <code>-EncodedCommand</code> or <code>-enc</code>. Tag as T1059.001. Set level to high.
+Expected output: valid Sigma YAML with all required fields populated</p>
+<hr />
+<h3>Concept 2 — Sigma Modifiers</h3>
+<p>Sigma field modifiers extend basic equality matching with powerful options:</p>
+<table>
+<thead>
+<tr>
+<th>Modifier</th>
+<th>Behavior</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>contains</code></td>
+<td>substring match</td>
+<td><code>CommandLine|contains: 'mimikatz'</code></td>
+</tr>
+<tr>
+<td><code>startswith</code></td>
+<td>prefix match</td>
+<td><code>Image|startswith: 'C:\Temp'</code></td>
+</tr>
+<tr>
+<td><code>endswith</code></td>
+<td>suffix match</td>
+<td><code>Image|endswith: '\cmd.exe'</code></td>
+</tr>
+<tr>
+<td><code>re</code></td>
+<td>regex</td>
+<td><code>CommandLine|re: '-[Ee]nc\w*\s+'</code></td>
+</tr>
+<tr>
+<td><code>all</code></td>
+<td>all values must match</td>
+<td><code>CommandLine|contains|all: ['powershell', '-enc']</code></td>
+</tr>
+<tr>
+<td><code>base64offset</code></td>
+<td>detect base64 variants</td>
+<td><code>CommandLine|base64offset|contains: 'IEX'</code></td>
+</tr>
+<tr>
+<td><code>cidr</code></td>
+<td>IP range</td>
+<td><code>DestinationIp|cidr: '10.0.0.0/8'</code></td>
+</tr>
+<tr>
+<td><code>windash</code></td>
+<td>matches <code>-</code> or <code>/</code> variants</td>
+<td><code>CommandLine|windash|contains: '/c'</code></td>
+</tr>
+</tbody>
+</table>
+<p>The <code>base64offset\|contains</code> modifier is particularly powerful for detecting encoded PowerShell <code>IEX</code> (Invoke-Expression) regardless of padding offset.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Simulate Sigma modifier matching in Python
+import re
+
+def sigma_contains(field_value: str, pattern: str) -&gt; bool:
+    return pattern.lower() in field_value.lower()
+
+def sigma_endswith(field_value: str, suffix: str) -&gt; bool:
+    return field_value.lower().endswith(suffix.lower())
+
+def sigma_re(field_value: str, pattern: str) -&gt; bool:
+    return bool(re.search(pattern, field_value, re.IGNORECASE))
+
+def apply_sigma_rule(event: dict) -&gt; bool:
+    &quot;&quot;&quot;Simulate the Mimikatz Sigma rule detection logic.&quot;&quot;&quot;
+    image = event.get(&quot;Image&quot;, &quot;&quot;)
+    cmdline = event.get(&quot;CommandLine&quot;, &quot;&quot;)
+    
+    selection_image = sigma_endswith(image, &quot;\\mimikatz.exe&quot;)
+    selection_cmdline = any(
+        sigma_contains(cmdline, kw)
+        for kw in [&quot;sekurlsa::logonpasswords&quot;, &quot;lsadump::sam&quot;, &quot;privilege::debug&quot;]
+    )
+    return selection_image or selection_cmdline
+
+events = [
+    {&quot;Image&quot;: &quot;C:\\Tools\\mimikatz.exe&quot;, &quot;CommandLine&quot;: &quot;mimikatz.exe&quot;},
+    {&quot;Image&quot;: &quot;C:\\Windows\\cmd.exe&quot;, &quot;CommandLine&quot;: &quot;privilege::debug&quot;},
+    {&quot;Image&quot;: &quot;C:\\Windows\\explorer.exe&quot;, &quot;CommandLine&quot;: &quot;ls&quot;},
+]
+for e in events:
+    print(apply_sigma_rule(e), e[&quot;CommandLine&quot;])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Implement <code>SigmaRule</code> as a Python dataclass with fields: title, detection_selection (dict of field → list of values), condition (str), level (str). Add a <code>match(event: dict) -&gt; bool</code> method that evaluates a simple selection with <code>contains</code> logic. Test against 5 events where 2 should match.
+Expected output: <code>True</code> for matching events, <code>False</code> for non-matching</p>
+<hr />
+<h3>Concept 3 — Sigma to KQL Compilation</h3>
+<p>The Sigma compiler (pySigma) converts rules to target query languages. Understanding the compilation output helps you debug rules and verify correctness.</p>
+<p>A Sigma <code>process_creation</code> rule with <code>logsource.product: windows</code> compiles to:</p>
+<ul>
+<li><strong>Sentinel/KQL</strong>: queries the <code>DeviceProcessEvents</code> or <code>SecurityEvent</code> table</li>
+<li><strong>Splunk SPL</strong>: queries <code>index=windows</code> with Windows TA field names</li>
+<li><strong>Elasticsearch</strong>: generates a DSL query against ECS-mapped indices</li>
+</ul>
+<p>The compilation maps:</p>
+<ul>
+<li>Sigma field <code>CommandLine</code> → KQL field <code>ProcessCommandLine</code> (DeviceProcessEvents) or <code>CommandLine</code> (SecurityEvent)</li>
+<li>Sigma field <code>Image</code> → KQL field <code>FolderPath</code> or <code>NewProcessName</code></li>
+<li>Sigma <code>contains</code> modifier → KQL <code>has</code> or <code>contains</code> operator</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Manual Sigma → KQL translation function (simplified)
+SIGMA_TO_KQL_FIELDS = {
+    &quot;CommandLine&quot;: &quot;CommandLine&quot;,
+    &quot;Image&quot;: &quot;NewProcessName&quot;,
+    &quot;ParentImage&quot;: &quot;ParentProcessName&quot;,
+    &quot;User&quot;: &quot;Account&quot;,
+}
+
+def sigma_selection_to_kql(selection: dict) -&gt; str:
+    conditions = []
+    for field_spec, values in selection.items():
+        if &quot;|&quot; in field_spec:
+            field, modifier = field_spec.split(&quot;|&quot;, 1)
+        else:
+            field, modifier = field_spec, &quot;equals&quot;
+        
+        kql_field = SIGMA_TO_KQL_FIELDS.get(field, field)
+        
+        if isinstance(values, list):
+            if modifier == &quot;contains&quot;:
+                parts = [f&#x27;{kql_field} contains &quot;{v}&quot;&#x27; for v in values]
+                conditions.append(&quot;(&quot; + &quot; or &quot;.join(parts) + &quot;)&quot;)
+            elif modifier == &quot;endswith&quot;:
+                parts = [f&#x27;{kql_field} endswith &quot;{v}&quot;&#x27; for v in values]
+                conditions.append(&quot;(&quot; + &quot; or &quot;.join(parts) + &quot;)&quot;)
+        else:
+            conditions.append(f&#x27;{kql_field} == &quot;{values}&quot;&#x27;)
+    
+    return &quot; and &quot;.join(conditions)
+
+selection = {
+    &quot;CommandLine|contains&quot;: [&quot;sekurlsa::logonpasswords&quot;, &quot;privilege::debug&quot;],
+}
+print(sigma_selection_to_kql(selection))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>sigma_selection_to_kql</code> to handle <code>startswith</code> modifier and to combine multiple selection blocks using OR (condition: <code>selection_a or selection_b</code>). Write <code>compile_sigma_to_kql(rule: dict) -&gt; str</code> that takes a Sigma rule dict and returns a complete KQL <code>where</code> clause.
+Expected output: KQL string like <code>where (CommandLine contains &quot;...&quot; or ...) or (Image endswith &quot;...&quot;)</code></p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can write Sigma rules from a description of an attack technique in plain English.
+<strong>Threat:</strong> Attackers enumerate public Sigma rule repositories (sigma, MITRE CAR) to understand what defenders can detect — then craft evasions.
+<strong>Opportunity:</strong> Use an LLM to generate Sigma rule skeletons for techniques not yet covered in your detection library.
+<strong>Prompt to try:</strong> <code>&quot;Write a Sigma rule to detect [specific MITRE ATT&amp;CK technique]. Include: logsource for Windows process_creation, a detection selection covering the most common indicators, at least 2 MITRE ATT&amp;CK tags, 3 known false positive scenarios, and set an appropriate severity level. Output valid YAML.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Deploying Detections</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="09-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=ulrOu2ZnjVw" target="_blank" rel="noopener"><b>Microsoft Sentinel : Analytics Rules | Threat Detection | Scheduled Rules | Anomaly</b><small>CyberPlatter</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Microsoft%20Sentinel%20scheduled%20alert%20rules%20KQL%20deployment%20analytics" target="_blank" rel="noopener">Microsoft Sentinel scheduled alert rules KQL deployment analytics</a></p></div>
+<hr />
+<h3>Concept 1 — Sentinel Analytics Rules</h3>
+<p>In Microsoft Sentinel, detections run as <strong>Analytics Rules</strong>. Each rule has:</p>
+<ul>
+<li>A KQL query that runs on a schedule</li>
+<li>A time window (how far back to look)</li>
+<li>An evaluation frequency (how often to run)</li>
+<li>An entity mapping (which fields map to IP, Account, Host entities)</li>
+<li>An alert threshold (minimum results to fire)</li>
+<li>A severity level and MITRE ATT&amp;CK tactic/technique mapping</li>
+</ul>
+<p>Rule types:</p>
+<ul>
+<li><strong>Scheduled</strong> — KQL query runs on a schedule; most common</li>
+<li><strong>NRT (Near-Real-Time)</strong> — runs every minute with 5-min lookback; low latency</li>
+<li><strong>Fusion</strong> — ML-based correlation across multiple signals</li>
+<li><strong>Anomaly</strong> — built-in ML; no KQL required</li>
+</ul>
+<p>For the Royal Road this week, the deliverable is 3 Scheduled rules deployed (or exported as ARM templates if no Sentinel workspace is available).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Sentinel rule definition as Python dict (maps to ARM template)
+def build_sentinel_rule(
+    display_name: str,
+    kql_query: str,
+    severity: str,
+    tactics: list[str],
+    techniques: list[str],
+    frequency_minutes: int = 60,
+    lookback_hours: int = 24,
+) -&gt; dict:
+    return {
+        &quot;kind&quot;: &quot;Scheduled&quot;,
+        &quot;properties&quot;: {
+            &quot;displayName&quot;: display_name,
+            &quot;description&quot;: f&quot;Detection rule: {display_name}&quot;,
+            &quot;severity&quot;: severity,
+            &quot;enabled&quot;: True,
+            &quot;query&quot;: kql_query,
+            &quot;queryFrequency&quot;: f&quot;PT{frequency_minutes}M&quot;,
+            &quot;queryPeriod&quot;: f&quot;PT{lookback_hours}H&quot;,
+            &quot;triggerOperator&quot;: &quot;GreaterThan&quot;,
+            &quot;triggerThreshold&quot;: 0,
+            &quot;tactics&quot;: tactics,
+            &quot;techniques&quot;: techniques,
+            &quot;suppressionEnabled&quot;: False,
+        }
+    }
+
+rule = build_sentinel_rule(
+    display_name=&quot;Brute Force - Multiple Failed Logons&quot;,
+    kql_query=&quot;SecurityEvent | where EventID == 4625 | summarize count() by Account | where count_ &gt; 10&quot;,
+    severity=&quot;Medium&quot;,
+    tactics=[&quot;CredentialAccess&quot;],
+    techniques=[&quot;T1110&quot;],
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>export_rules_to_json(rules: list[dict], output_path: str) -&gt; None</code> that takes a list of rule dicts (built by <code>build_sentinel_rule</code>) and writes them to a JSON file structured as an ARM template array. Then write <code>validate_rule(rule: dict) -&gt; list[str]</code> that checks: query is non-empty, severity is one of [Informational, Low, Medium, High], frequency &lt;= 24h, at least one tactic.
+Expected output: JSON file written; validator returns <code>[]</code> for valid rules</p>
+<hr />
+<h3>Concept 2 — Translating 3 Sigma Rules to KQL</h3>
+<p>This concept covers the full workflow: take a Sigma rule, compile it to KQL, tune the query, and package it as a Sentinel rule definition.</p>
+<p>Workflow:</p>
+<ol>
+<li>Pick a Sigma rule (from sigma repository or custom)</li>
+<li>Identify the logsource table mapping (Security vs DeviceProcessEvents vs Sysmon)</li>
+<li>Translate detection fields using the field mapping</li>
+<li>Test the KQL against sample data (W08 Parquet dataset)</li>
+<li>Package as a Sentinel rule with metadata</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Three rules to translate (Sigma YAML → KQL)
+RULE_DEFINITIONS = [
+    {
+        &quot;sigma_id&quot;: &quot;rule-001&quot;,
+        &quot;title&quot;: &quot;PowerShell Encoded Command Execution&quot;,
+        &quot;table&quot;: &quot;SecurityEvent&quot;,
+        &quot;kql&quot;: &quot;&quot;&quot;SecurityEvent
+| where EventID == 4688
+| where CommandLine matches regex @&#x27;(?i)-[Ee]nc[A-Za-z]*\\s+[A-Za-z0-9+/=]{20,}&#x27;
+| project TimeGenerated, Account, NewProcessName, CommandLine, Computer
+| extend decoded = base64_decode_tostring(extract(@&#x27;(?i)-enc\\w*\\s+([A-Za-z0-9+/=]+)&#x27;, 1, CommandLine))&quot;&quot;&quot;,
+        &quot;severity&quot;: &quot;High&quot;,
+        &quot;tactics&quot;: [&quot;Execution&quot;],
+        &quot;techniques&quot;: [&quot;T1059.001&quot;],
+    },
+    {
+        &quot;sigma_id&quot;: &quot;rule-002&quot;,
+        &quot;title&quot;: &quot;Mimikatz Credential Access&quot;,
+        &quot;table&quot;: &quot;SecurityEvent&quot;,
+        &quot;kql&quot;: &quot;&quot;&quot;SecurityEvent
+| where EventID == 4688
+| where NewProcessName endswith &#x27;\\\\mimikatz.exe&#x27;
+    or CommandLine has_any (&#x27;sekurlsa::logonpasswords&#x27;, &#x27;lsadump::sam&#x27;, &#x27;privilege::debug&#x27;)
+| project TimeGenerated, Account, NewProcessName, CommandLine, Computer&quot;&quot;&quot;,
+        &quot;severity&quot;: &quot;Critical&quot;,
+        &quot;tactics&quot;: [&quot;CredentialAccess&quot;],
+        &quot;techniques&quot;: [&quot;T1003.001&quot;],
+    },
+    {
+        &quot;sigma_id&quot;: &quot;rule-003&quot;,
+        &quot;title&quot;: &quot;Brute Force - Failed Logons&quot;,
+        &quot;table&quot;: &quot;SecurityEvent&quot;,
+        &quot;kql&quot;: &quot;&quot;&quot;SecurityEvent
+| where EventID == 4625
+| where TimeGenerated &gt; ago(1h)
+| summarize failure_count = count(), distinct_ips = dcount(IpAddress) by Account, bin(TimeGenerated, 10m)
+| where failure_count &gt; 10&quot;&quot;&quot;,
+        &quot;severity&quot;: &quot;Medium&quot;,
+        &quot;tactics&quot;: [&quot;CredentialAccess&quot;],
+        &quot;techniques&quot;: [&quot;T1110&quot;],
+    },
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using <code>RULE_DEFINITIONS</code> and <code>build_sentinel_rule</code> from Concept 1, write <code>deploy_all_rules(rules: list[dict], output_dir: str) -&gt; None</code> that creates one JSON file per rule named <code>{sigma_id}_{title_slug}.json</code>. Validate each rule before writing. Print a summary: <code>&quot;Deployed N rules, M failed validation&quot;</code>.
+Expected output: 3 JSON files in output_dir; console summary printed</p>
+<hr />
+<h3>Concept 3 — Alert Tuning and False Positive Management</h3>
+<p>A deployed detection that fires constantly on false positives gets ignored — alert fatigue kills detection programs. Tuning is the process of adding exclusions to reduce noise without removing true positive coverage.</p>
+<p>Tuning strategies:</p>
+<ol>
+<li><strong>Allowlist exclusion</strong> (<code>where Account !in (known_service_accounts)</code>)</li>
+<li><strong>Network scope restriction</strong> (<code>where IpAddress startswith &quot;10.&quot;</code>)</li>
+<li><strong>Time-based exclusion</strong> (<code>where dayofweek(TimeGenerated) != 0</code> — exclude weekends)</li>
+<li><strong>Threshold adjustment</strong> — raise minimum count to reduce noise</li>
+<li><strong>Context enrichment</strong> — join against asset inventory to exclude known-safe hosts</li>
+</ol>
+<p>Each tuning exception must be documented: why it was added, when to review it, what attack scenario it could mask.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>TUNING_LOG = [
+    {
+        &quot;rule_id&quot;: &quot;rule-001&quot;,
+        &quot;exclusion&quot;: &quot;Account in (&#x27;svc_deploy&#x27;, &#x27;svc_backup&#x27;)&quot;,
+        &quot;reason&quot;: &quot;Deployment pipeline uses encoded PowerShell legitimately&quot;,
+        &quot;added&quot;: &quot;2024-03-15&quot;,
+        &quot;review_date&quot;: &quot;2024-09-15&quot;,
+        &quot;risk&quot;: &quot;Attacker compromising svc_deploy would evade rule&quot;,
+    },
+]
+
+def add_tuning_exception(rule_kql: str, exclusion_clause: str, log_entry: dict) -&gt; str:
+    &quot;&quot;&quot;Append a where exclusion clause and log the tuning decision.&quot;&quot;&quot;
+    tuned_kql = rule_kql + f&quot;\n| where not ({exclusion_clause})&quot;
+    TUNING_LOG.append(log_entry)
+    return tuned_kql
+
+tuned = add_tuning_exception(
+    &quot;SecurityEvent | where EventID == 4688&quot;,
+    &quot;Account in (&#x27;svc_deploy&#x27;)&quot;,
+    {&quot;rule_id&quot;: &quot;rule-001&quot;, &quot;exclusion&quot;: &quot;Account in (&#x27;svc_deploy&#x27;)&quot;, &quot;reason&quot;: &quot;CI/CD pipeline&quot;}
+)
+print(tuned)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>generate_tuning_report(rules: list[dict], tuning_log: list[dict]) -&gt; str</code> that returns a markdown-formatted report listing each rule, its current exclusions (from tuning_log), and the risk note for each exclusion. One rule per section. Return the full markdown string.
+Expected output: formatted markdown string with one section per rule showing exclusions and risk notes</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can classify alert noise and suggest tuning exclusions by analyzing false positive patterns.
+<strong>Threat:</strong> Over-tuning a detection rule to silence noise creates coverage gaps — attackers who study alert behavior can craft activity that exactly matches excluded patterns.
+<strong>Opportunity:</strong> Feed a week of alert data (account names, IPs, hosts that fired the rule) to an LLM and ask it to identify safe exclusion candidates with low blast radius.
+<strong>Prompt to try:</strong> <code>&quot;Here are 50 recent alerts from a brute-force detection rule. Most are false positives. Analyze the patterns and suggest specific tuning exclusions (account names, IP ranges, time windows) with the minimum risk of creating detection gaps. For each suggestion, explain what attack scenario it might mask.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 09</h2>
+<p><strong>Task:</strong> Translate 3 Sigma rules to live KQL and package them as Sentinel rule definitions.
+<strong>Builds on:</strong> W08 Sysmon Parquet dataset (test your KQL against local pandas equivalents)
+<strong>Deliverable:</strong> <code>detections/rules/</code> folder containing 3 JSON files — one per rule — each a valid Sentinel Scheduled Analytics Rule ARM structure.</p>
+<p>Minimum rule set:</p>
+<ol>
+<li>PowerShell encoded command execution (T1059.001) — High</li>
+<li>Mimikatz or credential dumping keywords (T1003.001) — Critical</li>
+<li>Brute force failed logons (T1110) — Medium</li>
+</ol>
+<p>Each JSON file must include: displayName, severity, KQL query, queryFrequency, queryPeriod, tactics, techniques.</p>
+<p><strong>Stretch goal:</strong> Write a Python script <code>validate_detections.py</code> that reads all JSON files in <code>detections/rules/</code>, runs <code>validate_rule()</code> on each, and prints a pass/fail report. Add it to the Royal Road test suite.</p>
+<div class="pager"><a class="btn ghost" href="week-08.html">&larr; Week 08</a><a class="btn ghost" href="week-10.html">Week 10 &rarr;</a></div>
+</main></body></html>

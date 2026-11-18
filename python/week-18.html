@@ -1,0 +1,921 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 18 — Deploy</title>
+<link rel="stylesheet" href="style.css"><script>window.SITE_DATASETS = ["datasets/titanic_train.csv"];</script>
+<script src="app.js" defer></script></head>
+<body data-site="python">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Python Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 18 — Deploy</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a></div><p class="note">Done this week: <span data-week-count="18" data-size="2"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><p class="note">Cells that need a file other than the Titanic table, a web connection, a database server or a package that is not available in the browser will show an error when run. Read those instead.</p><h2 id="day-1">Day 1 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="18-1"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D1_FastAPI_Production_App.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>#  YOUTUBE
+#  ───────
+#  Search: &quot;FastAPI tutorial for beginners full course&quot;
+#  Video: &quot;FastAPI Course for Beginners&quot; -- freeCodeCamp.org
+#         https://www.youtube.com/watch?v=tLKKmouUams
+#         (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+from starlette.testclient import TestClient
+from typing import Optional
+import uuid
+
+print(&#x27;FastAPI lesson ready.&#x27;)
+print(&#x27;TestClient will run the app in-process -- no uvicorn needed.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D1_FastAPI_Production_App.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — ROUTERS, PYDANTIC MODELS, AND AUTOMATIC DOCS
+# ══════════════════════════════════════════════════════════════
+# FastAPI uses Python type hints to:
+#   - Validate incoming request bodies automatically
+#   - Serialize outgoing responses
+#   - Generate OpenAPI docs at /docs (no extra code)
+#
+# APIRouter groups related routes under a shared prefix.
+# Attach a router with app.include_router(router).
+#
+# Pydantic models define the shape of request and response bodies.
+# Request model: used in POST/PUT body
+# Response model: declared in the route decorator to filter output fields
+#
+# HTTP status codes:
+#   200 OK            -- successful GET
+#   201 Created       -- successful POST that created a resource
+#   404 Not Found     -- resource does not exist
+#   422 Unprocessable -- Pydantic validation failed
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+# In-memory store for the example
+_employees: dict[int, dict] = {
+    1: {&#x27;emp_id&#x27;: 1, &#x27;name&#x27;: &#x27;Alice Cohen&#x27;,   &#x27;dept&#x27;: &#x27;Engineering&#x27;, &#x27;salary&#x27;: 95000},
+    2: {&#x27;emp_id&#x27;: 2, &#x27;name&#x27;: &#x27;Bob Levy&#x27;,       &#x27;dept&#x27;: &#x27;Sales&#x27;,       &#x27;salary&#x27;: 62000},
+    3: {&#x27;emp_id&#x27;: 3, &#x27;name&#x27;: &#x27;Carol Shapiro&#x27;,  &#x27;dept&#x27;: &#x27;Finance&#x27;,     &#x27;salary&#x27;: 78000},
+}
+
+
+class EmployeeCreate(BaseModel):
+    name: str = Field(..., min_length=2)
+    dept: str
+    salary: float = Field(..., gt=0)
+
+
+class EmployeeResponse(BaseModel):
+    emp_id: int
+    name: str
+    dept: str
+    salary: float
+
+
+emp_router = APIRouter(prefix=&#x27;/employees&#x27;, tags=[&#x27;employees&#x27;])
+
+
+@emp_router.get(&#x27;/{emp_id}&#x27;, response_model=EmployeeResponse)
+def get_employee(emp_id: int):
+    if emp_id not in _employees:
+        raise HTTPException(status_code=404, detail=f&#x27;Employee {emp_id} not found&#x27;)
+    return _employees[emp_id]
+
+
+@emp_router.post(&#x27;/&#x27;, response_model=EmployeeResponse, status_code=201)
+def create_employee(body: EmployeeCreate):
+    new_id = max(_employees.keys()) + 1
+    record = {&#x27;emp_id&#x27;: new_id, **body.model_dump()}
+    _employees[new_id] = record
+    return record
+
+
+app1 = FastAPI(title=&#x27;Employee Service&#x27;)
+app1.include_router(emp_router)
+
+client1 = TestClient(app1)
+
+# GET existing employee
+r = client1.get(&#x27;/employees/1&#x27;)
+print(f&#x27;GET /employees/1  -&gt; {r.status_code}  {r.json()}&#x27;)
+
+# GET missing employee
+r = client1.get(&#x27;/employees/99&#x27;)
+print(f&#x27;GET /employees/99 -&gt; {r.status_code}  {r.json()}&#x27;)
+
+# POST new employee
+r = client1.post(&#x27;/employees/&#x27;, json={&#x27;name&#x27;: &#x27;Dave Katz&#x27;, &#x27;dept&#x27;: &#x27;Legal&#x27;, &#x27;salary&#x27;: 88000})
+print(f&#x27;POST /employees/  -&gt; {r.status_code}  {r.json()}&#x27;)
+
+# POST invalid body (salary missing)
+r = client1.post(&#x27;/employees/&#x27;, json={&#x27;name&#x27;: &#x27;X&#x27;, &#x27;dept&#x27;: &#x27;HR&#x27;})
+print(f&#x27;POST invalid      -&gt; {r.status_code}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D1_FastAPI_Production_App.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Add GET /employees/ to emp_router.
+# The route accepts an optional query parameter ?dept=
+# and returns all employees (or only those in the given dept).
+# Response shape: {&quot;employees&quot;: [...], &quot;count&quot;: N}
+#
+# Steps:
+#   1. Add the route to emp_router before building app1.
+#      (Re-build app1 and client1 after adding the route.)
+#   2. Call GET /employees/ -- should return all 3 seed employees.
+#   3. Call GET /employees/?dept=Engineering -- should return 1 employee.
+#   4. Call GET /employees/?dept=Unknown -- should return count=0, employees=[].
+#
+# Expected output:
+#   GET /employees/              -&gt; 200  count=3
+#   GET /employees/?dept=Engineering -&gt; 200  count=1
+#   GET /employees/?dept=Unknown -&gt; 200  count=0
+#
+# --- starting data ---
+_employees2: dict[int, dict] = {
+    1: {&#x27;emp_id&#x27;: 1, &#x27;name&#x27;: &#x27;Alice Cohen&#x27;,  &#x27;dept&#x27;: &#x27;Engineering&#x27;, &#x27;salary&#x27;: 95000},
+    2: {&#x27;emp_id&#x27;: 2, &#x27;name&#x27;: &#x27;Bob Levy&#x27;,      &#x27;dept&#x27;: &#x27;Sales&#x27;,       &#x27;salary&#x27;: 62000},
+    3: {&#x27;emp_id&#x27;: 3, &#x27;name&#x27;: &#x27;Carol Shapiro&#x27;, &#x27;dept&#x27;: &#x27;Finance&#x27;,     &#x27;salary&#x27;: 78000},
+}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D1_FastAPI_Production_App.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — AUTH HEADER DEPENDENCY AND ERROR HANDLERS
+# ══════════════════════════════════════════════════════════════
+# FastAPI Depends() lets you extract and validate request components
+# before the route function runs. Use it for:
+#   - Auth token validation
+#   - Database session injection
+#   - Rate limiting
+#
+# Header(...) reads a specific HTTP header.
+# FastAPI auto-converts Authorization -&gt; authorization (lowercase).
+#
+# Global exception handlers override the default response shape.
+# RequestValidationError fires when Pydantic rejects a request body.
+# Without a custom handler, FastAPI returns a verbose 422 JSON.
+# With a custom handler, you return a consistent {error, details} shape.
+#
+# Auth pattern (Bearer token):
+#   Authorization: Bearer &lt;token&gt;
+#   - Check header exists
+#   - Check it starts with &#x27;Bearer &#x27;
+#   - Check token is in the allowed set
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+VALID_TOKENS = {&#x27;secret-token-alpha&#x27;, &#x27;secret-token-beta&#x27;}
+
+
+def require_token(authorization: str = Header(...)):
+    if not authorization.startswith(&#x27;Bearer &#x27;):
+        raise HTTPException(status_code=401, detail=&#x27;Missing Bearer prefix&#x27;)
+    token = authorization[len(&#x27;Bearer &#x27;):]
+    if token not in VALID_TOKENS:
+        raise HTTPException(status_code=401, detail=&#x27;Invalid token&#x27;)
+    return token
+
+
+app2 = FastAPI(title=&#x27;Auth Demo&#x27;)
+
+
+@app2.exception_handler(RequestValidationError)
+async def validation_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={
+            &#x27;error&#x27;: &#x27;validation_failed&#x27;,
+            &#x27;details&#x27;: exc.errors(),
+        },
+    )
+
+
+class ReportRequest(BaseModel):
+    report_name: str
+    period: str
+
+
+@app2.post(&#x27;/reports/&#x27;, dependencies=[Depends(require_token)])
+def create_report(body: ReportRequest):
+    return {&#x27;report&#x27;: body.report_name, &#x27;period&#x27;: body.period, &#x27;status&#x27;: &#x27;queued&#x27;}
+
+
+client2 = TestClient(app2, raise_server_exceptions=False)
+
+# No auth header
+r = client2.post(&#x27;/reports/&#x27;, json={&#x27;report_name&#x27;: &#x27;Q1&#x27;, &#x27;period&#x27;: &#x27;2024-Q1&#x27;})
+print(f&#x27;No auth           -&gt; {r.status_code}  {r.json()}&#x27;)
+
+# Wrong token
+r = client2.post(&#x27;/reports/&#x27;, json={&#x27;report_name&#x27;: &#x27;Q1&#x27;, &#x27;period&#x27;: &#x27;2024-Q1&#x27;},
+                 headers={&#x27;Authorization&#x27;: &#x27;Bearer bad-token&#x27;})
+print(f&#x27;Bad token         -&gt; {r.status_code}  {r.json()}&#x27;)
+
+# Valid token, invalid body (period missing)
+r = client2.post(&#x27;/reports/&#x27;, json={&#x27;report_name&#x27;: &#x27;Q1&#x27;},
+                 headers={&#x27;Authorization&#x27;: &#x27;Bearer secret-token-alpha&#x27;})
+print(f&#x27;Valid token, bad body -&gt; {r.status_code}  {r.json()[&quot;error&quot;]}&#x27;)
+
+# Valid token, valid body
+r = client2.post(&#x27;/reports/&#x27;, json={&#x27;report_name&#x27;: &#x27;Q1&#x27;, &#x27;period&#x27;: &#x27;2024-Q1&#x27;},
+                 headers={&#x27;Authorization&#x27;: &#x27;Bearer secret-token-alpha&#x27;})
+print(f&#x27;Valid             -&gt; {r.status_code}  {r.json()}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D1_FastAPI_Production_App.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Build a protected pipeline trigger endpoint.
+#
+# Steps:
+#   1. Define PipelineRunRequest with:
+#        pipeline_name: str (required)
+#        source_table: str (required)
+#        dry_run: bool = False
+#   2. Define PipelineRunResponse with:
+#        run_id: str
+#        status: str   (&quot;queued&quot; or &quot;dry_run&quot;)
+#        message: str
+#   3. Add POST /pipeline/run to a new app (app3).
+#      Protected with require_token (Depends).
+#      If dry_run=True: status=&quot;dry_run&quot;, message=&quot;Dry run only -- no data moved.&quot;
+#      Else: status=&quot;queued&quot;, message=f&quot;{pipeline_name} queued from {source_table}.&quot;
+#      Generate run_id with str(uuid.uuid4()).
+#   4. Test 4 cases:
+#        no auth -&gt; 422
+#        bad token -&gt; 401
+#        valid + dry_run=True -&gt; 200 status=&quot;dry_run&quot;
+#        valid + dry_run=False -&gt; 200 status=&quot;queued&quot;
+#
+# Expected output:
+#   No auth      -&gt; 422
+#   Bad token    -&gt; 401
+#   Dry run      -&gt; 200  status=dry_run
+#   Queued       -&gt; 200  status=queued
+#
+# --- starting data ---
+VALID_TOKENS2 = {&#x27;pipeline-key-1&#x27;, &#x27;pipeline-key-2&#x27;}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D1_FastAPI_Production_App.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — TestClient INTEGRATION TESTS AS A SUITE
+# ══════════════════════════════════════════════════════════════
+# TestClient is the same as making real HTTP requests but in-process.
+# This means you can write a full integration test suite as plain Python:
+#   - No mocking of the app layer
+#   - Tests exercise real routing, validation, and error handling
+#   - Output reads like a test runner: PASS / FAIL per named test
+#
+# Pattern:
+#   1. Build the app with all routes
+#   2. Define assert_eq(label, actual, expected) to print PASS/FAIL
+#   3. Name each test clearly: test_create_pipeline, test_delete_missing, etc.
+#   4. Run all tests inline -- failures do not stop the suite
+#
+# Why this matters for FDE work:
+#   You ship a service at a customer site in a few hours.
+#   You need confidence it works before handing over.
+#   A 10-line test suite that runs in &lt;1 second gives that confidence.
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+_pipelines: dict[str, dict] = {}
+
+
+class PipelineCreate(BaseModel):
+    name: str
+    source: str
+    env: str = Field(..., pattern=&#x27;^(prod|staging|dev)$&#x27;)
+
+
+class PipelineRecord(BaseModel):
+    run_id: str
+    name: str
+    source: str
+    env: str
+
+
+app4 = FastAPI(title=&#x27;Pipeline Service&#x27;)
+
+
+@app4.get(&#x27;/pipelines/&#x27;)
+def list_pipelines():
+    return {&#x27;pipelines&#x27;: list(_pipelines.values()), &#x27;count&#x27;: len(_pipelines)}
+
+
+@app4.post(&#x27;/pipelines/&#x27;, response_model=PipelineRecord, status_code=201)
+def create_pipeline(body: PipelineCreate):
+    run_id = str(uuid.uuid4())[:8]
+    record = {&#x27;run_id&#x27;: run_id, **body.model_dump()}
+    _pipelines[run_id] = record
+    return record
+
+
+@app4.delete(&#x27;/pipelines/{run_id}&#x27;)
+def delete_pipeline(run_id: str):
+    if run_id not in _pipelines:
+        raise HTTPException(status_code=404, detail=f&#x27;Run {run_id} not found&#x27;)
+    _pipelines.pop(run_id)
+    return {&#x27;deleted&#x27;: run_id}
+
+
+client4 = TestClient(app4, raise_server_exceptions=False)
+
+results = {&#x27;pass&#x27;: 0, &#x27;fail&#x27;: 0}
+
+
+def assert_eq(label, actual, expected):
+    if actual == expected:
+        print(f&#x27;  PASS  {label}&#x27;)
+        results[&#x27;pass&#x27;] += 1
+    else:
+        print(f&#x27;  FAIL  {label}  (got {actual!r}, expected {expected!r})&#x27;)
+        results[&#x27;fail&#x27;] += 1
+
+
+def test_list_empty():
+    r = client4.get(&#x27;/pipelines/&#x27;)
+    assert_eq(&#x27;list empty&#x27;, r.json()[&#x27;count&#x27;], 0)
+
+
+def test_create_pipeline():
+    r = client4.post(&#x27;/pipelines/&#x27;, json={&#x27;name&#x27;: &#x27;sales_etl&#x27;, &#x27;source&#x27;: &#x27;raw.sales&#x27;, &#x27;env&#x27;: &#x27;prod&#x27;})
+    assert_eq(&#x27;create status&#x27;, r.status_code, 201)
+    assert_eq(&#x27;create name&#x27;, r.json()[&#x27;name&#x27;], &#x27;sales_etl&#x27;)
+
+
+def test_invalid_env():
+    r = client4.post(&#x27;/pipelines/&#x27;, json={&#x27;name&#x27;: &#x27;x&#x27;, &#x27;source&#x27;: &#x27;y&#x27;, &#x27;env&#x27;: &#x27;live&#x27;})
+    assert_eq(&#x27;invalid env&#x27;, r.status_code, 422)
+
+
+def test_list_after_create():
+    r = client4.get(&#x27;/pipelines/&#x27;)
+    assert_eq(&#x27;list count after create&#x27;, r.json()[&#x27;count&#x27;], 1)
+
+
+def test_delete_pipeline():
+    run_id = list(_pipelines.keys())[0]
+    r = client4.delete(f&#x27;/pipelines/{run_id}&#x27;)
+    assert_eq(&#x27;delete status&#x27;, r.status_code, 200)
+    assert_eq(&#x27;list after delete&#x27;, client4.get(&#x27;/pipelines/&#x27;).json()[&#x27;count&#x27;], 0)
+
+
+def test_delete_missing():
+    r = client4.delete(&#x27;/pipelines/no-such-id&#x27;)
+    assert_eq(&#x27;delete missing&#x27;, r.status_code, 404)
+
+
+print(&#x27;--- Pipeline Service Test Suite ---&#x27;)
+test_list_empty()
+test_create_pipeline()
+test_invalid_env()
+test_list_after_create()
+test_delete_pipeline()
+test_delete_missing()
+print(f&#x27;\n{results[&quot;pass&quot;]} passed, {results[&quot;fail&quot;]} failed&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D1_FastAPI_Production_App.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Build a sales ingest endpoint with a full test suite.
+#
+# Endpoint: POST /sales/ingest
+#
+# SalesIngestRequest:
+#   region: str   -- must be one of West / East / Central (validate manually, not via Field pattern)
+#   rows: list    -- list of dicts; if empty, return 400
+#   source: str
+#
+# Response (200):
+#   {&quot;ingested&quot;: N, &quot;region&quot;: region, &quot;source&quot;: source}
+#
+# Validation:
+#   - region not in allowed set -&gt; 400, {&quot;error&quot;: &quot;Invalid region&quot;}
+#   - rows is empty list        -&gt; 400, {&quot;error&quot;: &quot;No rows provided&quot;}
+#   - missing required field    -&gt; 422 (Pydantic handles this)
+#
+# Write 4 named test functions using assert_eq:
+#   test_valid_ingest()    -- valid region, 3 rows -&gt; 200, ingested=3
+#   test_invalid_region()  -- region=&#x27;South&#x27; -&gt; 400, error=&#x27;Invalid region&#x27;
+#   test_empty_rows()      -- region=&#x27;West&#x27;, rows=[] -&gt; 400, error=&#x27;No rows provided&#x27;
+#   test_missing_field()   -- no source field -&gt; 422
+#
+# Expected output:
+#   --- Sales Ingest Test Suite ---
+#     PASS  valid ingest
+#     PASS  invalid region
+#     PASS  empty rows
+#     PASS  missing field
+#   4 passed, 0 failed
+#
+# --- starting data ---
+ALLOWED_REGIONS = {&#x27;West&#x27;, &#x27;East&#x27;, &#x27;Central&#x27;}
+
+sample_rows = [
+    {&#x27;order_id&#x27;: 1, &#x27;amount&#x27;: 150.0},
+    {&#x27;order_id&#x27;: 2, &#x27;amount&#x27;: 200.0},
+    {&#x27;order_id&#x27;: 3, &#x27;amount&#x27;:  75.0},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-2">Day 2 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="18-2"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D2_Docker_Cloud_Deploy.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>#  YOUTUBE
+#  ───────
+#  Search: &quot;Docker multi-stage build Python tutorial&quot;
+#  Video: &quot;Docker Multistage builds explained in 8 minutes&quot; -- Raghav Dua
+#         https://www.youtube.com/watch?v=V0kTEk7YA70
+#         (verified live; kept alongside the search string in case it rots)
+#  Search: &quot;Google Cloud Run deploy FastAPI&quot;
+#  Video: &quot;Deploy FastAPI on Cloud Run for FREE: A step-by-step tutorial&quot; -- Stackless Tech
+#         https://www.youtube.com/watch?v=bcYmfHOrOPM
+#         (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+
+import os
+import tempfile
+import hashlib
+from datetime import datetime, timezone
+
+print(&#x27;Docker and Cloud Deploy lesson ready.&#x27;)
+print(&#x27;All commands will be printed as strings -- no Docker daemon needed.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D2_Docker_Cloud_Deploy.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — MULTI-STAGE DOCKERFILE FOR A FastAPI SERVICE
+# ══════════════════════════════════════════════════════════════
+# A single-stage image installs build tools and source code in one layer.
+# The final image is large and carries unnecessary build dependencies.
+#
+# Multi-stage builds solve this:
+#   Stage 1 (builder): install dependencies into an isolated directory
+#   Stage 2 (runtime): copy only the installed packages into a slim base
+#
+# Result: the runtime image has no pip, no gcc, no build headers.
+# Typical size reduction: 800MB -&gt; 120MB for a Python service.
+#
+# Security practices baked into the runtime stage:
+#   - python:3.11-slim base (no unnecessary OS packages)
+#   - Non-root user (appuser) -- containers run as root by default
+#   - HEALTHCHECK instruction -- lets the orchestrator restart failed containers
+#   - No secrets in ENV -- secrets are injected at runtime via cloud provider
+#
+# HEALTHCHECK instruction:
+#   HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+#     CMD curl -f http://localhost:8000/health || exit 1
+#   If /health returns non-200, Docker marks the container unhealthy.
+#   Cloud Run and K8s use this signal to replace the pod.
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+MULTISTAGE_DOCKERFILE = &#x27;&#x27;&#x27;\
+# ── Stage 1: install dependencies ──────────────────────────────
+FROM python:3.11 AS builder
+
+WORKDIR /build
+COPY requirements.txt .
+RUN pip install --target /install/packages --no-cache-dir -r requirements.txt
+
+# ── Stage 2: slim runtime image ────────────────────────────────
+FROM python:3.11-slim AS runtime
+
+# Copy only installed packages from builder -- no pip, no gcc
+COPY --from=builder /install/packages /usr/local/lib/python3.11/site-packages
+
+WORKDIR /app
+COPY main.py .
+
+# Non-root user for security
+RUN adduser --disabled-password --gecos &quot;&quot; appuser
+USER appuser
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \\
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD [&quot;uvicorn&quot;, &quot;main:app&quot;, &quot;--host&quot;, &quot;0.0.0.0&quot;, &quot;--port&quot;, &quot;8000&quot;]
+&#x27;&#x27;&#x27;
+
+REQUIREMENTS_TXT = &#x27;fastapi\nuvicorn[standard]\npydantic\n&#x27;
+
+MAIN_PY = &#x27;&#x27;&#x27;\
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get(&#x27;/health&#x27;)
+def health():
+    return {&#x27;status&#x27;: &#x27;ok&#x27;}
+
+@app.get(&#x27;/ready&#x27;)
+def ready():
+    return {&#x27;status&#x27;: &#x27;ready&#x27;}
+&#x27;&#x27;&#x27;
+
+# Write files to temp dir and show what the build commands look like
+tmpdir = tempfile.mkdtemp()
+for fname, content in [(&#x27;Dockerfile&#x27;, MULTISTAGE_DOCKERFILE),
+                        (&#x27;requirements.txt&#x27;, REQUIREMENTS_TXT),
+                        (&#x27;main.py&#x27;, MAIN_PY)]:
+    with open(os.path.join(tmpdir, fname), &#x27;w&#x27;) as f:
+        f.write(content)
+
+print(&#x27;Files written to:&#x27;, tmpdir)
+print()
+print(&#x27;Dockerfile contents:&#x27;)
+print(MULTISTAGE_DOCKERFILE)
+print()
+print(&#x27;--- Simulated build commands ---&#x27;)
+image = &#x27;my-service:1.0.0&#x27;
+print(f&#x27;$ docker build -t {image} {tmpdir}&#x27;)
+print(f&#x27;  [+] Building 14.3s&#x27;)
+print(f&#x27;  =&gt; [builder 3/3] RUN pip install ...&#x27;)
+print(f&#x27;  =&gt; [runtime 3/5] COPY --from=builder ...&#x27;)
+print(f&#x27;  =&gt; exporting to image&#x27;)
+print(f&#x27;$ docker image ls {image}&#x27;)
+print(f&#x27;  REPOSITORY     TAG      IMAGE ID       SIZE&#x27;)
+print(f&#x27;  my-service     1.0.0    a1b2c3d4e5f6   118MB&#x27;)
+print(f&#x27;$ docker run -p 8000:8000 {image}&#x27;)
+print(f&#x27;  INFO:     Started server process&#x27;)
+print(f&#x27;  INFO:     Application startup complete.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D2_Docker_Cloud_Deploy.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Write generate_etl_dockerfile(python_version, packages, entrypoint, env_vars)
+# that returns a multi-stage Dockerfile string for an ETL service.
+#
+# Parameters:
+#   python_version: str  -- e.g. &#x27;3.11&#x27;
+#   packages: list[str]  -- pip packages to install
+#   entrypoint: str      -- e.g. &#x27;etl_main.py&#x27;
+#   env_vars: list[str]  -- env var names (values must be empty -- secrets injected at runtime)
+#
+# The Dockerfile must include:
+#   - FROM ... AS builder  and  FROM ... AS runtime
+#   - COPY --from=builder
+#   - Non-root user (appuser)
+#   - HEALTHCHECK instruction
+#   - ENV lines for each env_var name with empty value
+#
+# Then write validate_multistage(content) that:
+#   - Asserts &#x27;AS builder&#x27; in content
+#   - Asserts &#x27;AS runtime&#x27; in content
+#   - Asserts &#x27;COPY --from=builder&#x27; in content
+#   - Asserts &#x27;appuser&#x27; in content
+#   - Asserts &#x27;HEALTHCHECK&#x27; in content
+#   - Asserts no ENV line has a non-empty value
+#     (each ENV line must match &#x27;ENV VAR_NAME=&#x27; with nothing after the =)
+#   - Prints &#x27;Dockerfile valid.&#x27; on success
+#   - Prints the specific rule that failed on failure
+#
+# Call generate_etl_dockerfile with the starting data, then validate_multistage.
+#
+# Expected output:
+#   Dockerfile valid.
+#
+# --- starting data ---
+ETL_PACKAGES = [&#x27;pandas&#x27;, &#x27;pyarrow&#x27;, &#x27;psycopg2-binary&#x27;, &#x27;pydantic&#x27;]
+ETL_ENV_VARS = [&#x27;DB_HOST&#x27;, &#x27;DB_PASSWORD&#x27;, &#x27;S3_BUCKET&#x27;, &#x27;API_KEY&#x27;]
+ETL_ENTRYPOINT = &#x27;etl_main.py&#x27;
+ETL_PYTHON = &#x27;3.11&#x27;</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D2_Docker_Cloud_Deploy.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — BUILD, TAG, PUSH, AND THE CONTAINER REGISTRY
+# ══════════════════════════════════════════════════════════════
+# A container registry stores versioned images. Common registries:
+#   - Google Artifact Registry (gcr.io or region-docker.pkg.dev)
+#   - AWS ECR (account_id.dkr.ecr.region.amazonaws.com)
+#   - Docker Hub (hub.docker.com)
+#
+# Tagging strategy for production:
+#   1. Semantic version tag:   my-service:1.2.3
+#   2. latest tag:             my-service:latest  (convenience, not for prod deploy)
+#   3. Git commit SHA tag:     my-service:abc1234  (pinned, fully reproducible)
+#
+# Never deploy latest to production without also pushing a version or SHA tag.
+# If a rollback is needed, you need an immutable tag to roll back to.
+#
+# Workflow:
+#   docker build -t image:version .
+#   docker tag image:version registry/project/image:version
+#   docker tag image:version registry/project/image:latest
+#   gcloud auth configure-docker REGION-docker.pkg.dev
+#   docker push registry/project/image:version
+#   docker push registry/project/image:latest
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+def build_image_tags(project: str, repo: str, image_name: str,
+                     version: str, commit_sha: str) -&gt; dict:
+    &quot;&quot;&quot;Returns a dict of tag aliases for a versioned image.&quot;&quot;&quot;
+    registry = f&#x27;europe-west1-docker.pkg.dev/{project}/{repo}&#x27;
+    short_sha = commit_sha[:7]
+    return {
+        &#x27;version&#x27;: f&#x27;{registry}/{image_name}:{version}&#x27;,
+        &#x27;latest&#x27;:  f&#x27;{registry}/{image_name}:latest&#x27;,
+        &#x27;commit&#x27;:  f&#x27;{registry}/{image_name}:{short_sha}&#x27;,
+    }
+
+
+def simulate_push_workflow(project: str, repo: str, image_name: str,
+                           version: str, commit_sha: str) -&gt; None:
+    tags = build_image_tags(project, repo, image_name, version, commit_sha)
+    local = f&#x27;{image_name}:{version}&#x27;
+    region = &#x27;europe-west1&#x27;
+
+    steps = [
+        (f&#x27;docker build -t {local} .&#x27;, &#x27;  [+] Building 12.7s\n  =&gt; exporting to image&#x27;),
+        (f&#x27;docker tag {local} {tags[&quot;version&quot;]}&#x27;, &#x27;&#x27;),
+        (f&#x27;docker tag {local} {tags[&quot;latest&quot;]}&#x27;, &#x27;&#x27;),
+        (f&#x27;gcloud auth configure-docker {region}-docker.pkg.dev&#x27;,
+         &#x27;  Adding credentials for: europe-west1-docker.pkg.dev&#x27;),
+        (f&#x27;docker push {tags[&quot;version&quot;]}&#x27;,
+         f&#x27;  The push refers to repository [{tags[&quot;version&quot;].rsplit(&quot;:&quot;, 1)[0]}]\n&#x27;
+         f&#x27;  {version}: digest: sha256:a1b2c3... size: 1847&#x27;),
+        (f&#x27;docker push {tags[&quot;latest&quot;]}&#x27;,
+         f&#x27;  latest: digest: sha256:a1b2c3... size: 1847&#x27;),
+    ]
+
+    print(f&#x27;--- Push workflow for {image_name} v{version} ---&#x27;)
+    for cmd, output in steps:
+        print(f&#x27;$ {cmd}&#x27;)
+        if output:
+            print(output)
+    print()
+    print(&#x27;Tags pushed:&#x27;)
+    for alias, tag in tags.items():
+        print(f&#x27;  {alias:8s}  {tag}&#x27;)
+
+
+simulate_push_workflow(
+    project=&#x27;my-gcp-project&#x27;,
+    repo=&#x27;services&#x27;,
+    image_name=&#x27;sales-api&#x27;,
+    version=&#x27;2.1.0&#x27;,
+    commit_sha=&#x27;abc1234def5678&#x27;,
+)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D2_Docker_Cloud_Deploy.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Write generate_release_manifest and validate_manifest_no_secrets.
+#
+# generate_release_manifest(image_name, version, registry, env_vars, port):
+#   Returns a dict with:
+#     image:     full registry path + version tag
+#     version:   the version string
+#     port:      the service port
+#     env:       {var_name: &#x27;&#x27; for var in env_vars}  (values always empty)
+#     commands:  list of strings: build, tag, push commands in order
+#     released_at: ISO timestamp (use datetime.now(timezone.utc).isoformat())
+#
+# validate_manifest_no_secrets(manifest):
+#   Checks that no value in manifest[&#x27;env&#x27;] is non-empty.
+#   Prints &#x27;Manifest valid -- no secrets embedded.&#x27; on success.
+#   Prints &#x27;FAIL: env var VAR_NAME has a non-empty value.&#x27; for each violation.
+#
+# Call generate_release_manifest for all 3 services in SERVICES,
+# validate each, then print a summary table:
+#   image | version | port | env_vars_count
+#
+# Expected output (versions and timestamps will vary):
+#   Manifest valid -- no secrets embedded.
+#   Manifest valid -- no secrets embedded.
+#   Manifest valid -- no secrets embedded.
+#
+#   image               version  port  env_vars
+#   reports-api         1.0.0    8001  3
+#   ingest-worker       2.3.1    8002  4
+#   dashboard-backend   0.9.0    8003  2
+#
+# --- starting data ---
+REGISTRY = &#x27;europe-west1-docker.pkg.dev/acme-prod/services&#x27;
+
+SERVICES = [
+    {&#x27;image_name&#x27;: &#x27;reports-api&#x27;,       &#x27;version&#x27;: &#x27;1.0.0&#x27;, &#x27;port&#x27;: 8001,
+     &#x27;env_vars&#x27;: [&#x27;DB_URL&#x27;, &#x27;API_KEY&#x27;, &#x27;LOG_LEVEL&#x27;]},
+    {&#x27;image_name&#x27;: &#x27;ingest-worker&#x27;,     &#x27;version&#x27;: &#x27;2.3.1&#x27;, &#x27;port&#x27;: 8002,
+     &#x27;env_vars&#x27;: [&#x27;DB_URL&#x27;, &#x27;S3_BUCKET&#x27;, &#x27;SQS_QUEUE&#x27;, &#x27;WORKER_CONCURRENCY&#x27;]},
+    {&#x27;image_name&#x27;: &#x27;dashboard-backend&#x27;, &#x27;version&#x27;: &#x27;0.9.0&#x27;, &#x27;port&#x27;: 8003,
+     &#x27;env_vars&#x27;: [&#x27;DB_URL&#x27;, &#x27;SECRET_KEY&#x27;]},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D2_Docker_Cloud_Deploy.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — DEPLOYING TO CLOUD RUN AND RAILWAY
+# ══════════════════════════════════════════════════════════════
+# Cloud Run (Google) -- serverless containers:
+#   - You push an image; Cloud Run pulls it and runs it.
+#   - Scales to zero by default (cost savings), or set --min-instances=1.
+#   - Traffic routed by revision -- can split traffic for canary deploys.
+#   - IAM controls who can invoke the service.
+#   - Good for: production APIs, background workers, event-driven pipelines.
+#
+# Railway -- developer-focused PaaS:
+#   - Detects framework automatically (FastAPI, Express, etc.).
+#   - No infra config required -- just push code or an image.
+#   - PR preview environments built-in.
+#   - Free tier available; good for prototypes and demos.
+#   - Good for: customer demos, side projects, shipping an MVP fast.
+#
+# For FDE work, Railway is often the right call for a same-day customer demo.
+# Move to Cloud Run when compliance, SLAs, or cost governance kick in.
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+def _service_url_hash(service_name: str, region: str) -&gt; str:
+    &quot;&quot;&quot;Deterministic hash-based URL for simulated output.&quot;&quot;&quot;
+    h = hashlib.md5(f&#x27;{service_name}-{region}&#x27;.encode()).hexdigest()[:8]
+    return f&#x27;https://{service_name}-{h}-uc.a.run.app&#x27;
+
+
+def simulate_cloud_run_deploy(service_name: str, image: str, region: str,
+                               port: int, memory: str, env_vars: dict) -&gt; str:
+    env_flags = &#x27; &#x27;.join(f&#x27;{k}=${k}&#x27; for k in env_vars)
+    cmd = (
+        f&#x27;gcloud run deploy {service_name}\\\n&#x27;
+        f&#x27;  --image={image}\\\n&#x27;
+        f&#x27;  --platform=managed\\\n&#x27;
+        f&#x27;  --region={region}\\\n&#x27;
+        f&#x27;  --port={port}\\\n&#x27;
+        f&#x27;  --memory={memory}\\\n&#x27;
+        f&#x27;  --min-instances=1\\\n&#x27;
+        f&#x27;  --set-env-vars={env_flags}&#x27;
+    )
+    url = _service_url_hash(service_name, region)
+    print(f&#x27;--- Cloud Run: {service_name} ---&#x27;)
+    print(f&#x27;$ {cmd}&#x27;)
+    print(f&#x27;  Deploying container to Cloud Run service [{service_name}] in [{region}]&#x27;)
+    print(f&#x27;  Service [{service_name}] revision [{service_name}-00001-abc] has been deployed&#x27;)
+    print(f&#x27;  Service URL: {url}&#x27;)
+    print()
+    return url
+
+
+def simulate_railway_deploy(service_name: str, env_vars: dict) -&gt; str:
+    h = hashlib.md5(service_name.encode()).hexdigest()[:6]
+    url = f&#x27;https://{service_name}-production-{h}.up.railway.app&#x27;
+    var_set = &#x27; &#x27;.join(f&#x27;{k}=${k}&#x27; for k in env_vars)
+    print(f&#x27;--- Railway: {service_name} ---&#x27;)
+    print(f&#x27;$ railway init --name {service_name}&#x27;)
+    print(f&#x27;  Created project {service_name}&#x27;)
+    print(f&#x27;$ railway up&#x27;)
+    print(f&#x27;  Deploying {service_name}...&#x27;)
+    print(f&#x27;  Build: SUCCESS&#x27;)
+    print(f&#x27;$ railway vars set {var_set}&#x27;)
+    print(f&#x27;  Set {len(env_vars)} variable(s)&#x27;)
+    print(f&#x27;$ railway domain&#x27;)
+    print(f&#x27;  {url}&#x27;)
+    print()
+    return url
+
+
+cr_url = simulate_cloud_run_deploy(
+    service_name=&#x27;sales-api&#x27;,
+    image=&#x27;europe-west1-docker.pkg.dev/my-project/services/sales-api:2.1.0&#x27;,
+    region=&#x27;europe-west1&#x27;,
+    port=8000,
+    memory=&#x27;512Mi&#x27;,
+    env_vars={&#x27;DB_URL&#x27;: &#x27;&#x27;, &#x27;API_KEY&#x27;: &#x27;&#x27;},
+)
+
+rw_url = simulate_railway_deploy(
+    service_name=&#x27;sales-api&#x27;,
+    env_vars={&#x27;DB_URL&#x27;: &#x27;&#x27;, &#x27;API_KEY&#x27;: &#x27;&#x27;},
+)
+
+print(&#x27;Comparison:&#x27;)
+print(f&#x27;  Cloud Run URL: {cr_url}&#x27;)
+print(f&#x27;  Railway URL:   {rw_url}&#x27;)
+print()
+print(&#x27;Cloud Run: IAM-protected, min-instances for SLA, revision-based rollback.&#x27;)
+print(&#x27;Railway:   No infra config, free tier, PR preview -- best for quick demos.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D2_Docker_Cloud_Deploy.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Write build_deploy_config(service_name, image, port, env_vars, memory_mb, platform)
+# where platform is &#x27;cloud_run&#x27; or &#x27;railway&#x27;.
+#
+# Returns a dict with:
+#   platform:                 &#x27;cloud_run&#x27; or &#x27;railway&#x27;
+#   service_name:             the service name
+#   image:                    the full image path
+#   url:                      simulated URL (use _service_url_hash for cloud_run;
+#                             use hashlib.md5 with a 6-char hex for railway)
+#   commands:                 ordered list of CLI strings (without simulated output)
+#   estimated_cold_start_ms:  250 for cloud_run, 800 for railway
+#   free_tier:                &#x27;yes -- first 2M requests/month free&#x27; for cloud_run,
+#                             &#x27;yes -- Starter plan, 512MB RAM&#x27; for railway
+#
+# Call build_deploy_config for both platforms with SERVICE below.
+# Print a side-by-side comparison table:
+#   property               cloud_run                       railway
+#   platform               cloud_run                       railway
+#   cold_start_ms          250                             800
+#   free_tier              yes -- first 2M requests/month  yes -- Starter plan, 512MB RAM
+#   commands_count         N                               N
+#   url                    https://...                     https://...
+#
+# Expected output:
+#   property             cloud_run                              railway
+#   platform             cloud_run                              railway
+#   cold_start_ms        250                                    800
+#   free_tier            yes -- first 2M requests/month free    yes -- Starter plan, 512MB RAM
+#   commands_count       5                                      4
+#   url                  https://reports-api-...run.app         https://reports-api-...railway.app
+#
+# --- starting data ---
+SERVICE = {
+    &#x27;service_name&#x27;: &#x27;reports-api&#x27;,
+    &#x27;image&#x27;: &#x27;europe-west1-docker.pkg.dev/acme-prod/services/reports-api:1.0.0&#x27;,
+    &#x27;port&#x27;: 8001,
+    &#x27;env_vars&#x27;: {&#x27;DB_URL&#x27;: &#x27;&#x27;, &#x27;API_KEY&#x27;: &#x27;&#x27;, &#x27;LOG_LEVEL&#x27;: &#x27;&#x27;},
+    &#x27;memory_mb&#x27;: 512,
+}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D2_Docker_Cloud_Deploy.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 4 — SECURITY GATE: DEPLOYMENT SECURITY GATE (CIA: C+I+A)
+# ══════════════════════════════════════════════════════════════
+# Analogy: the car safety inspection before road registration — brakes,
+# lights, and seatbelts are mandatory; no certificate means no road.
+#
+# CIA focus: All three — the container and API must pass an OWASP-aligned
+# security checklist before any deployment.
+#
+# Checks:
+#   1. Dockerfile must have a USER directive and it must not be &#x27;root&#x27;
+#   2. Debug routes (/docs, /redoc) must not be unauthenticated
+#   3. Routes returning &gt; 15 fields risk mass assignment (OWASP API #3)
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+from dataclasses import dataclass, field
+
+
+class RootContainerError(Exception):
+    pass
+
+
+class ExposedDebugRouteError(Exception):
+    pass
+
+
+class MassAssignmentRisk(Exception):
+    pass
+
+
+@dataclass
+class DeployReport:
+    passed: bool
+    violations: list = field(default_factory=list)
+
+
+def deployment_security_gate(
+    dockerfile_lines: list,
+    api_routes: list,
+) -&gt; DeployReport:
+    user_lines = [l for l in dockerfile_lines if l.strip().upper().startswith(&quot;USER&quot;)]
+    if not user_lines or any(&quot;root&quot; in l.lower() for l in user_lines):
+        raise RootContainerError(
+            &quot;Container runs as root -- add &#x27;USER appuser&#x27; to Dockerfile&quot;
+        )
+    for route in api_routes:
+        if route[&quot;path&quot;] in (&quot;/docs&quot;, &quot;/redoc&quot;) and not route.get(&quot;has_auth&quot;, True):
+            raise ExposedDebugRouteError(
+                f&quot;Debug route &#x27;{route[&#x27;path&#x27;]}&#x27; is unauthenticated&quot;
+            )
+        if len(route.get(&quot;returns_fields&quot;, [])) &gt; 15:
+            raise MassAssignmentRisk(
+                f&quot;Route &#x27;{route[&#x27;path&#x27;]}&#x27; returns {len(route[&#x27;returns_fields&#x27;])} fields&quot;
+            )
+    return DeployReport(passed=True)
+
+
+# Secure deployment — passes
+secure_dockerfile = [
+    &quot;FROM python:3.11-slim&quot;,
+    &quot;WORKDIR /app&quot;,
+    &quot;COPY . .&quot;,
+    &quot;USER appuser&quot;,
+    &quot;HEALTHCHECK CMD curl -f http://localhost:8000/health || exit 1&quot;,
+]
+secure_routes = [
+    {&quot;path&quot;: &quot;/api/orders&quot;, &quot;has_auth&quot;: True, &quot;returns_fields&quot;: [&quot;id&quot;, &quot;status&quot;]},
+]
+report = deployment_security_gate(secure_dockerfile, secure_routes)
+print(f&quot;Secure deployment: passed={report.passed}&quot;)
+
+# Root container — blocked
+try:
+    deployment_security_gate([&quot;FROM python:3.11-slim&quot;, &quot;USER root&quot;], [])
+except RootContainerError as e:
+    print(f&quot;RootContainerError: {e}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_18_Deploy/W18_D2_Docker_Cloud_Deploy.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 4
+# ══════════════════════════════════════════════════════════════
+# Three security violations are planted below.
+# Call deployment_security_gate() on each scenario, catch the exception,
+# and print the exception class name and message.
+# For the final compliant call, print &#x27;Compliant deployment: PASS&#x27;.
+#
+# Expected output:
+#   RootContainerError: Container runs as root -- add &#x27;USER appuser&#x27; to Dockerfile
+#   ExposedDebugRouteError: Debug route &#x27;/docs&#x27; is unauthenticated
+#   MassAssignmentRisk: Route &#x27;/api/users&#x27; returns 20 fields
+#   Compliant deployment: PASS
+#
+# --- starting data ---
+dockerfile_no_user = [
+    &quot;FROM python:3.11-slim&quot;,
+    &quot;COPY . /app&quot;,
+    &quot;CMD uvicorn main:app&quot;,
+]
+dockerfile_ok = [
+    &quot;FROM python:3.11-slim&quot;,
+    &quot;USER appuser&quot;,
+    &quot;HEALTHCHECK --interval=30s CMD curl -f http://localhost/health&quot;,
+]
+routes_debug_exposed = [
+    {&quot;path&quot;: &quot;/docs&quot;,      &quot;has_auth&quot;: False, &quot;returns_fields&quot;: []},
+    {&quot;path&quot;: &quot;/api/items&quot;, &quot;has_auth&quot;: True,  &quot;returns_fields&quot;: [&quot;id&quot;, &quot;name&quot;]},
+]
+routes_mass_assign = [
+    {&quot;path&quot;: &quot;/api/users&quot;, &quot;has_auth&quot;: True,
+     &quot;returns_fields&quot;: [f&quot;field_{i}&quot; for i in range(20)]},
+]
+routes_ok = [
+    {&quot;path&quot;: &quot;/api/orders&quot;, &quot;has_auth&quot;: True,
+     &quot;returns_fields&quot;: [&quot;id&quot;, &quot;status&quot;, &quot;amount&quot;]},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="pager"><a class="btn ghost" href="week-17.html">&larr; Week 17</a><a class="btn ghost" href="week-20.html">Week 20 &rarr;</a></div>
+</main></body></html>

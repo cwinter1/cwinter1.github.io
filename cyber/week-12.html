@@ -1,0 +1,1041 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 12 — Detection Methodology</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 12 — Detection Methodology</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="12" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 12 — Detection Methodology</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 4 — Detection Engineering</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Detection engineering process / SC-200: Detection coverage assessment / GCIA: Intrusion detection methodology</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>Coverage dashboard → ATT&amp;CK gap report + detection backlog</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W05 (ATT&amp;CK framework), W09 (KQL), W10 (Sigma + CI), W11 (behavioral baseline)</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Threat Modeling for Detection</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=rEnJYNkUde0" target="_blank" rel="noopener"><b>STRIDE Threat Modeling for Beginners - In 20 Minutes</b><small>Netsec Explained</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=threat%20modeling%20detection%20engineering%20STRIDE%20MITRE%20ATT%26CK%20coverage" target="_blank" rel="noopener">threat modeling detection engineering STRIDE MITRE ATT&amp;CK coverage</a></p></div>
+<hr />
+<h3>Concept 1 — Threat Modeling vs. Vulnerability Assessment</h3>
+<p>Vulnerability assessment answers: &quot;what weaknesses exist in our systems?&quot; Threat modeling answers: &quot;what attacks are most likely against our specific environment, and which should we detect first?&quot;</p>
+<p>Detection engineering starts with threat modeling because you cannot write rules for everything. A 500-technique ATT&amp;CK matrix with no prioritization produces a backlog that never gets finished. Threat modeling narrows the field to the techniques most relevant to your industry, adversary profile, and asset inventory.</p>
+<p>The STRIDE model (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege) maps cleanly to ATT&amp;CK tactics: Spoofing → Initial Access / Defense Evasion, Tampering → Persistence / Impact, Repudiation → Defense Evasion (log clearing), Information Disclosure → Collection / Exfiltration, DoS → Impact, Elevation of Privilege → Privilege Escalation.</p>
+<p>Data engineering analogy: threat modeling is the requirements-gathering phase before building a pipeline. You would not build ingestion infrastructure for every possible data source — you prioritize based on business value. Detection is the same: prioritize based on attacker likelihood and business impact.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import List
+
+@dataclass
+class ThreatModel:
+    environment: str
+    industry: str
+    crown_jewels: List[str]          # high-value assets
+    primary_adversary_profiles: List[str]  # e.g. [&quot;ransomware&quot;, &quot;APT&quot;, &quot;insider&quot;]
+    relevant_techniques: List[str] = field(default_factory=list)
+
+    def summarize(self) -&gt; str:
+        return (
+            f&quot;Environment: {self.environment} | Industry: {self.industry}\n&quot;
+            f&quot;Crown jewels: {&#x27;, &#x27;.join(self.crown_jewels)}\n&quot;
+            f&quot;Adversary profiles: {&#x27;, &#x27;.join(self.primary_adversary_profiles)}\n&quot;
+            f&quot;Relevant techniques: {len(self.relevant_techniques)}&quot;
+        )
+
+model = ThreatModel(
+    environment=&quot;corporate Windows AD + Azure&quot;,
+    industry=&quot;financial services&quot;,
+    crown_jewels=[&quot;Active Directory&quot;, &quot;payment processing DB&quot;, &quot;customer PII store&quot;],
+    primary_adversary_profiles=[&quot;ransomware&quot;, &quot;APT financial&quot;, &quot;insider threat&quot;],
+    relevant_techniques=[&quot;T1078&quot;, &quot;T1003&quot;, &quot;T1486&quot;, &quot;T1071&quot;, &quot;T1021&quot;],
+)
+print(model.summarize())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Create a <code>ThreatModel</code> for an Israeli e-commerce company. Crown jewels: payment system, customer database, source code repo. Adversary profiles: ransomware, hacktivists, supply chain attackers. Map each adversary profile to at least two ATT&amp;CK techniques manually. Print the summary and a second section listing &quot;adversary → techniques&quot; as a formatted table.
+Expected output: summary block printed, then a formatted table mapping each adversary to 2+ technique IDs</p>
+<hr />
+<h3>Concept 2 — Asset-Centric Prioritization</h3>
+<p>Not all assets carry equal detection value. A domain controller compromise enables full network takeover; a developer workstation compromise is serious but limited. Prioritizing detection coverage by asset criticality ensures that the highest-value targets get the deepest rule coverage first.</p>
+<p>Asset tiers:</p>
+<ul>
+<li><strong>Tier 1 (Crown Jewel)</strong>: domain controllers, PKI servers, payment systems, prod databases — detect everything</li>
+<li><strong>Tier 2 (Critical)</strong>: jump hosts, build servers, admin workstations — detect lateral movement and privilege escalation</li>
+<li><strong>Tier 3 (Standard)</strong>: end-user workstations — detect initial access and execution</li>
+</ul>
+<p>Each detection rule should be tagged with the asset tiers it covers. A rule that only fires on Tier 3 assets is lower priority to develop than one covering Tier 1 assets.</p>
+<p>Data engineering analogy: SLA tiers in a data pipeline — Tier 1 tables have real-time monitoring and PagerDuty alerts; Tier 3 tables have daily checks and email reports. Same concept applied to detection coverage.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from enum import IntEnum
+from dataclasses import dataclass
+from typing import List
+
+class AssetTier(IntEnum):
+    CROWN_JEWEL = 1
+    CRITICAL = 2
+    STANDARD = 3
+
+@dataclass
+class Asset:
+    name: str
+    tier: AssetTier
+    detection_techniques: List[str] = None
+
+    def __post_init__(self):
+        if self.detection_techniques is None:
+            self.detection_techniques = []
+
+    def coverage_required(self) -&gt; str:
+        requirements = {
+            AssetTier.CROWN_JEWEL: &quot;full ATT&amp;CK coverage + behavioral baselines&quot;,
+            AssetTier.CRITICAL: &quot;lateral movement + privilege escalation coverage&quot;,
+            AssetTier.STANDARD: &quot;initial access + execution coverage&quot;,
+        }
+        return requirements[self.tier]
+
+assets = [
+    Asset(&quot;dc01.corp.local&quot;, AssetTier.CROWN_JEWEL),
+    Asset(&quot;jump-host-01&quot;, AssetTier.CRITICAL),
+    Asset(&quot;dev-workstation-42&quot;, AssetTier.STANDARD),
+]
+
+for asset in assets:
+    print(f&quot;{asset.name} (Tier {asset.tier.value}): {asset.coverage_required()}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Build a function <code>prioritize_assets(assets: List[Asset]) -&gt; dict</code> that groups assets by tier and returns a dict with keys <code>&quot;tier_1&quot;</code>, <code>&quot;tier_2&quot;</code>, <code>&quot;tier_3&quot;</code> each containing the asset names in that tier. Then calculate the percentage of assets at each tier. Print the grouped dict and the percentages. Use the three assets from the example above plus two more of your own choosing.
+Expected output: dict with tier keys → asset name lists; percentage line per tier (e.g., &quot;Tier 1: 20% (1 of 5 assets)&quot;)</p>
+<hr />
+<h3>Concept 3 — Detection Requirements Document</h3>
+<p>A detection requirements document (DRD) defines what a detection must do before implementation begins. Writing the DRD prevents scope creep, ensures the right log sources are available, and provides a pass/fail acceptance test when the rule is reviewed.</p>
+<p>Minimum DRD fields:</p>
+<ul>
+<li><strong>Technique</strong>: ATT&amp;CK technique ID and name</li>
+<li><strong>Scenario</strong>: specific attacker behavior being detected (not the general technique)</li>
+<li><strong>Trigger condition</strong>: what exact event combination fires the alert</li>
+<li><strong>Log source required</strong>: what logs must be ingested (Sysmon event 1, Windows Security 4624, etc.)</li>
+<li><strong>False positive expected</strong>: known benign events that match</li>
+<li><strong>Acceptance test</strong>: how to verify the rule fires on a known-malicious sample</li>
+</ul>
+<p>Data engineering analogy: a DRD is the same as a data contract — it specifies schema, SLA, and acceptance criteria before the pipeline is built.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class DetectionRequirement:
+    rule_id: str
+    technique_id: str
+    technique_name: str
+    scenario: str
+    trigger_condition: str
+    log_sources: List[str]
+    false_positives: List[str]
+    acceptance_test: str
+    tier_coverage: List[int]  # which asset tiers this covers
+
+    def to_markdown(self) -&gt; str:
+        tiers = &quot;, &quot;.join(f&quot;Tier {t}&quot; for t in self.tier_coverage)
+        fps = &quot;\n&quot;.join(f&quot;  - {fp}&quot; for fp in self.false_positives)
+        sources = &quot;, &quot;.join(self.log_sources)
+        return f&quot;&quot;&quot;## {self.rule_id}: {self.technique_name} ({self.technique_id})
+**Scenario:** {self.scenario}
+**Trigger:** {self.trigger_condition}
+**Log sources:** {sources}
+**False positives:**
+{fps}
+**Acceptance test:** {self.acceptance_test}
+**Asset coverage:** {tiers}&quot;&quot;&quot;
+
+drd = DetectionRequirement(
+    rule_id=&quot;DRD-001&quot;,
+    technique_id=&quot;T1059.001&quot;,
+    technique_name=&quot;PowerShell Execution&quot;,
+    scenario=&quot;Encoded PowerShell command executed from non-admin context&quot;,
+    trigger_condition=&quot;Process: powershell.exe with CommandLine containing &#x27;-enc&#x27; or &#x27;-EncodedCommand&#x27;&quot;,
+    log_sources=[&quot;Sysmon Event ID 1&quot;, &quot;Windows Security 4688&quot;],
+    false_positives=[&quot;IT admin scripts&quot;, &quot;Software deployment tools (SCCM, Intune)&quot;],
+    acceptance_test=&quot;Run &#x27;powershell -enc aQBlAHgA&#x27; on test host; alert must fire within 30 seconds&quot;,
+    tier_coverage=[1, 2, 3],
+)
+print(drd.to_markdown())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a <code>DetectionRequirement</code> for detecting <code>T1003.001</code> (LSASS Memory Dumping). Scenario: procdump or comsvcs.dll used to dump LSASS. Trigger: process access to lsass.exe or <code>MiniDump</code> in command line. Identify two log sources. List three false positives. Write an acceptance test. Print as markdown.
+Expected output: formatted markdown block for the LSASS dumping DRD</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can draft Detection Requirements Documents from a technique ID, reducing analyst time from 30 minutes to 5 minutes per DRD.
+<strong>Threat:</strong> LLM-generated DRDs may omit environment-specific false positives, leading to high-noise rules deployed without proper review.
+<strong>Opportunity:</strong> Use an LLM to generate a DRD draft from a technique ID, then require an analyst to review and annotate false positives before the rule enters the pipeline.
+<strong>Prompt to try:</strong> <code>&quot;Generate a Detection Requirements Document for MITRE ATT&amp;CK technique T1053.005 (Scheduled Task/Job). Include: scenario description, exact trigger conditions, required log sources (Windows Event IDs and/or Sysmon event IDs), top 5 expected false positives in a corporate environment, and a concrete acceptance test I can run on a test VM. Format as a structured document with labeled sections.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — ATT&amp;CK Coverage Mapping</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=76n6jTTiOU8" target="_blank" rel="noopener"><b>Using MITRE&#x27;s ATT&amp;CK Navigator for Gap Analysis</b><small>Raiders of the Lost ARP</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=ATT%26CK%20coverage%20mapping%20Navigator%20layer%20detection%20gap%20analysis" target="_blank" rel="noopener">ATT&amp;CK coverage mapping Navigator layer detection gap analysis</a></p></div>
+<hr />
+<h3>Concept 1 — Coverage Matrix Construction</h3>
+<p>An ATT&amp;CK coverage matrix maps your existing detection rules to the techniques they cover. It reveals which techniques have no coverage (gaps), which have one rule (single point of failure), and which have multiple overlapping rules (robust coverage).</p>
+<p>Coverage levels per technique:</p>
+<ul>
+<li><strong>0 — No coverage</strong>: no rule exists; attacker executes technique undetected</li>
+<li><strong>1 — Partial</strong>: a rule exists but only covers one sub-technique or one log source</li>
+<li><strong>2 — Good</strong>: rule covers the main scenario with validated false positive tuning</li>
+<li><strong>3 — Robust</strong>: multiple rules from different data sources; behavioral + signature coverage</li>
+</ul>
+<p>Building the matrix requires two inputs: a list of your deployed rules (with technique tags) and the full ATT&amp;CK technique list for your scope. The gap is every technique in the full list not covered by any deployed rule.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List, Dict
+from collections import defaultdict
+
+@dataclass
+class DeployedRule:
+    rule_id: str
+    title: str
+    techniques: List[str]   # ATT&amp;CK technique IDs
+    data_sources: List[str]
+    status: str             # &quot;production&quot; | &quot;experimental&quot; | &quot;disabled&quot;
+
+def build_coverage_matrix(
+    rules: List[DeployedRule],
+    technique_scope: List[str],
+) -&gt; Dict[str, dict]:
+    coverage: Dict[str, dict] = {}
+    technique_to_rules: Dict[str, List[str]] = defaultdict(list)
+
+    for rule in rules:
+        if rule.status == &quot;production&quot;:
+            for technique in rule.techniques:
+                technique_to_rules[technique].append(rule.rule_id)
+
+    for technique in technique_scope:
+        rule_ids = technique_to_rules.get(technique, [])
+        count = len(rule_ids)
+        coverage[technique] = {
+            &quot;rule_count&quot;: count,
+            &quot;rules&quot;: rule_ids,
+            &quot;level&quot;: 0 if count == 0 else (1 if count == 1 else (2 if count == 2 else 3)),
+        }
+    return coverage
+
+rules = [
+    DeployedRule(&quot;SIG-001&quot;, &quot;PowerShell Encoded Command&quot;, [&quot;T1059.001&quot;], [&quot;Sysmon&quot;], &quot;production&quot;),
+    DeployedRule(&quot;SIG-002&quot;, &quot;LSASS Access&quot;, [&quot;T1003.001&quot;], [&quot;Sysmon&quot;], &quot;production&quot;),
+    DeployedRule(&quot;SIG-003&quot;, &quot;Scheduled Task Creation&quot;, [&quot;T1053.005&quot;], [&quot;Windows Security&quot;], &quot;production&quot;),
+    DeployedRule(&quot;BEH-001&quot;, &quot;Rare Process Execution&quot;, [&quot;T1059.001&quot;, &quot;T1204.002&quot;], [&quot;Sysmon&quot;], &quot;production&quot;),
+]
+
+scope = [&quot;T1059.001&quot;, &quot;T1003.001&quot;, &quot;T1053.005&quot;, &quot;T1078&quot;, &quot;T1021.001&quot;, &quot;T1204.002&quot;]
+matrix = build_coverage_matrix(rules, scope)
+
+for technique, data in matrix.items():
+    print(f&quot;{technique}: level={data[&#x27;level&#x27;]} | rules={data[&#x27;rules&#x27;] or &#x27;NONE&#x27;}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend the example: add 3 more deployed rules of your own for techniques <code>T1078</code> (Valid Accounts), <code>T1021.001</code> (RDP), and a second rule for <code>T1059.001</code>. Rebuild the matrix. Then write a function <code>coverage_summary(matrix) -&gt; dict</code> that returns <code>{&quot;covered&quot;: N, &quot;partial&quot;: N, &quot;no_coverage&quot;: N}</code> counts. Print the updated matrix and the summary.
+Expected output: matrix with updated level values; summary dict with counts adding up to 6 (total techniques in scope)</p>
+<hr />
+<h3>Concept 2 — Gap Analysis Methodology</h3>
+<p>A gap analysis compares your current coverage matrix against a target coverage model. The target model defines what coverage level you need for each technique based on your threat model.</p>
+<p>Gap analysis steps:</p>
+<ol>
+<li>Define target coverage level per technique (from your threat model and asset tiers)</li>
+<li>Subtract actual coverage from target coverage to get the gap score</li>
+<li>Sort by gap score descending — the top of the list is your detection backlog</li>
+<li>For each gap, estimate effort (hours) to close it based on log source availability</li>
+</ol>
+<p>Gap scoring formula:</p>
+<pre><code>gap_score = (target_level - actual_level) × asset_tier_weight
+</code></pre><p>Where <code>asset_tier_weight</code> = 3 for Tier 1, 2 for Tier 2, 1 for Tier 3.</p>
+<p>A Tier 1 technique with zero coverage targeting target level 3 scores <code>(3-0) × 3 = 9</code> — highest urgency.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import Dict
+
+@dataclass
+class TechniqueTarget:
+    technique_id: str
+    target_level: int
+    asset_tier: int
+
+def gap_analysis(
+    coverage_matrix: Dict[str, dict],
+    targets: list[TechniqueTarget],
+) -&gt; list[dict]:
+    gaps = []
+    tier_weights = {1: 3, 2: 2, 3: 1}
+
+    for target in targets:
+        tid = target.technique_id
+        actual = coverage_matrix.get(tid, {}).get(&quot;level&quot;, 0)
+        gap = target.target_level - actual
+        if gap &gt; 0:
+            weight = tier_weights.get(target.asset_tier, 1)
+            gaps.append({
+                &quot;technique&quot;: tid,
+                &quot;actual_level&quot;: actual,
+                &quot;target_level&quot;: target.target_level,
+                &quot;gap&quot;: gap,
+                &quot;asset_tier&quot;: target.asset_tier,
+                &quot;gap_score&quot;: gap * weight,
+            })
+
+    return sorted(gaps, key=lambda x: x[&quot;gap_score&quot;], reverse=True)
+
+targets = [
+    TechniqueTarget(&quot;T1059.001&quot;, target_level=3, asset_tier=1),
+    TechniqueTarget(&quot;T1003.001&quot;, target_level=3, asset_tier=1),
+    TechniqueTarget(&quot;T1053.005&quot;, target_level=2, asset_tier=2),
+    TechniqueTarget(&quot;T1078&quot;,     target_level=3, asset_tier=1),
+    TechniqueTarget(&quot;T1021.001&quot;, target_level=2, asset_tier=2),
+    TechniqueTarget(&quot;T1204.002&quot;, target_level=2, asset_tier=3),
+]
+
+# Use the coverage_matrix from Concept 1 (rebuild inline here for standalone execution)
+from collections import defaultdict
+coverage_matrix_example = {
+    &quot;T1059.001&quot;: {&quot;level&quot;: 3},
+    &quot;T1003.001&quot;: {&quot;level&quot;: 1},
+    &quot;T1053.005&quot;: {&quot;level&quot;: 1},
+    &quot;T1078&quot;:     {&quot;level&quot;: 0},
+    &quot;T1021.001&quot;: {&quot;level&quot;: 0},
+    &quot;T1204.002&quot;: {&quot;level&quot;: 1},
+}
+
+gaps = gap_analysis(coverage_matrix_example, targets)
+for g in gaps:
+    print(f&quot;{g[&#x27;technique&#x27;]}: gap={g[&#x27;gap&#x27;]} | score={g[&#x27;gap_score&#x27;]} | tier={g[&#x27;asset_tier&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+The gap analysis above produces a prioritized list. Write a function <code>estimate_effort(gap: dict) -&gt; int</code> that returns estimated hours to close the gap: base hours = <code>gap['gap'] * 8</code>, reduced by 25% if actual_level &gt; 0 (partial coverage means some work already done), and multiplied by 1.5 if asset_tier == 1 (Tier 1 gaps require extra review cycles). Apply it to each gap and print a final table: technique | gap_score | estimated_hours.
+Expected output: table with all gaps + effort estimates; Tier 1 zero-coverage gaps should have the highest hour estimates</p>
+<hr />
+<h3>Concept 3 — Navigator Layer JSON</h3>
+<p>The ATT&amp;CK Navigator is the standard tool for visualizing coverage. It reads a JSON layer file where each technique has a score and an optional color. You can generate Navigator layers programmatically from your coverage matrix.</p>
+<p>A Navigator layer JSON has this structure:</p>
+<pre><code>{
+  &quot;name&quot;: &quot;Coverage Layer&quot;,
+  &quot;versions&quot;: {&quot;attack&quot;: &quot;14&quot;, &quot;navigator&quot;: &quot;4.9&quot;},
+  &quot;domain&quot;: &quot;enterprise-attack&quot;,
+  &quot;techniques&quot;: [
+    {&quot;techniqueID&quot;: &quot;T1059.001&quot;, &quot;score&quot;: 3, &quot;color&quot;: &quot;#00ff00&quot;},
+    {&quot;techniqueID&quot;: &quot;T1078&quot;,     &quot;score&quot;: 0, &quot;color&quot;: &quot;#ff0000&quot;}
+  ]
+}
+</code></pre><p>Score colors: 0 = red (no coverage), 1 = orange, 2 = yellow, 3 = green. This gives SOC leadership an at-a-glance coverage picture during monthly reviews.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+from typing import Dict
+
+SCORE_COLORS = {
+    0: &quot;#ff4444&quot;,   # red — no coverage
+    1: &quot;#ff9900&quot;,   # orange — partial
+    2: &quot;#ffee00&quot;,   # yellow — good
+    3: &quot;#66cc44&quot;,   # green — robust
+}
+
+def generate_navigator_layer(
+    coverage_matrix: Dict[str, dict],
+    layer_name: str = &quot;Detection Coverage&quot;,
+) -&gt; dict:
+    techniques = []
+    for technique_id, data in coverage_matrix.items():
+        level = data.get(&quot;level&quot;, 0)
+        techniques.append({
+            &quot;techniqueID&quot;: technique_id,
+            &quot;score&quot;: level,
+            &quot;color&quot;: SCORE_COLORS[level],
+            &quot;comment&quot;: f&quot;Rules: {len(data.get(&#x27;rules&#x27;, []))}&quot;,
+            &quot;enabled&quot;: True,
+        })
+
+    return {
+        &quot;name&quot;: layer_name,
+        &quot;versions&quot;: {&quot;attack&quot;: &quot;14&quot;, &quot;navigator&quot;: &quot;4.9&quot;},
+        &quot;domain&quot;: &quot;enterprise-attack&quot;,
+        &quot;description&quot;: f&quot;Auto-generated coverage layer: {len(techniques)} techniques&quot;,
+        &quot;techniques&quot;: techniques,
+        &quot;gradient&quot;: {&quot;colors&quot;: [&quot;#ff4444&quot;, &quot;#66cc44&quot;], &quot;minValue&quot;: 0, &quot;maxValue&quot;: 3},
+    }
+
+coverage_sample = {
+    &quot;T1059.001&quot;: {&quot;level&quot;: 3, &quot;rules&quot;: [&quot;SIG-001&quot;, &quot;BEH-001&quot;]},
+    &quot;T1003.001&quot;: {&quot;level&quot;: 1, &quot;rules&quot;: [&quot;SIG-002&quot;]},
+    &quot;T1078&quot;:     {&quot;level&quot;: 0, &quot;rules&quot;: []},
+}
+
+layer = generate_navigator_layer(coverage_sample, &quot;SOC Coverage — Q2 2024&quot;)
+print(json.dumps(layer, indent=2))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the full six-technique coverage matrix from Concept 1 (after your additions), generate a Navigator layer JSON and write it to <code>coverage_layer.json</code> in the current directory. Then print a coverage summary line: &quot;N/6 techniques covered (L3: A, L2: B, L1: C, L0: D)&quot;.
+Expected output: <code>coverage_layer.json</code> written; summary line printed with counts matching your matrix</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can suggest which ATT&amp;CK techniques are most commonly exploited in your industry, helping prioritize the gap analysis target list without manual threat intel research.
+<strong>Threat:</strong> An attacker who compromises a security tool's API key can read your coverage matrix, learning exactly which techniques you cannot detect.
+<strong>Opportunity:</strong> Ask an LLM to generate a ranked list of high-priority techniques for your threat profile, then feed the output directly into your target model builder.
+<strong>Prompt to try:</strong> <code>&quot;I am building detection coverage for a financial services company in Israel with Active Directory + Azure AD. My current ATT&amp;CK coverage is zero across all techniques. Give me the top 15 techniques I should prioritize first, ordered by likelihood of use by ransomware and APT threat actors targeting this sector. For each technique, specify: technique ID, why it is high-priority for this environment, and the minimum log source I need to detect it. Format as a markdown table.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — Detection Backlog Management</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=detection%20engineering%20backlog%20prioritization%20sprint%20planning%20SOC" target="_blank" rel="noopener">detection engineering backlog prioritization sprint planning SOC</a></p></div>
+<hr />
+<h3>Concept 1 — Detection Backlog as a Product Backlog</h3>
+<p>Detection engineering teams that work without a structured backlog ship rules reactively — after incidents — rather than proactively covering known threats. Treating the detection backlog like a software product backlog (with priority scores, story points, acceptance criteria, and sprint assignments) brings the same velocity improvements that engineering teams get from Agile.</p>
+<p>Each backlog item is a detection requirement (from W12 Day 1) plus:</p>
+<ul>
+<li><strong>Priority score</strong>: calculated from gap analysis (Day 2 Concept 2)</li>
+<li><strong>Effort estimate</strong>: hours to write, test, tune, and deploy the rule</li>
+<li><strong>Status</strong>: backlog / in-progress / review / deployed / tuning</li>
+<li><strong>Sprint</strong>: which sprint it is assigned to (if using 2-week cycles)</li>
+<li><strong>Dependencies</strong>: log sources that must be available before work can start</li>
+</ul>
+<p>Data engineering analogy: a data platform backlog has pipeline requests with business value estimates and engineering effort. Detection backlog items are the same structure — value (risk reduction) vs. cost (engineering hours).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Optional
+from enum import Enum
+
+class BacklogStatus(str, Enum):
+    BACKLOG = &quot;backlog&quot;
+    IN_PROGRESS = &quot;in_progress&quot;
+    REVIEW = &quot;review&quot;
+    DEPLOYED = &quot;deployed&quot;
+    TUNING = &quot;tuning&quot;
+
+@dataclass
+class BacklogItem:
+    item_id: str
+    technique_id: str
+    title: str
+    priority_score: float       # from gap analysis gap_score
+    effort_hours: int
+    status: BacklogStatus = BacklogStatus.BACKLOG
+    sprint: Optional[int] = None
+    log_source_available: bool = True
+    assignee: Optional[str] = None
+
+    def roi_score(self) -&gt; float:
+        &quot;&quot;&quot;Risk reduction per engineering hour.&quot;&quot;&quot;
+        return round(self.priority_score / max(self.effort_hours, 1), 3)
+
+backlog = [
+    BacklogItem(&quot;DET-012&quot;, &quot;T1078&quot;,     &quot;Valid Account Detection — AD&quot;,  9, 16),
+    BacklogItem(&quot;DET-013&quot;, &quot;T1003.001&quot;, &quot;LSASS Dump — Behavioral&quot;,       6, 12),
+    BacklogItem(&quot;DET-014&quot;, &quot;T1021.001&quot;, &quot;Lateral Movement via RDP&quot;,       4,  8),
+    BacklogItem(&quot;DET-015&quot;, &quot;T1204.002&quot;, &quot;User Execution Malicious File&quot;,  1,  8),
+]
+
+sorted_backlog = sorted(backlog, key=lambda x: x.roi_score(), reverse=True)
+for item in sorted_backlog:
+    print(f&quot;{item.item_id} | {item.technique_id} | ROI={item.roi_score()} | {item.effort_hours}h&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add four more <code>BacklogItem</code> entries to the backlog (choose any four ATT&amp;CK techniques with realistic priority and effort values). Then write a function <code>assign_sprint(backlog: List[BacklogItem], sprint_capacity_hours: int) -&gt; List[BacklogItem]</code> that assigns items to sprint 1 (highest ROI first) until capacity is reached, leaving the rest as sprint 2. Print the sprint 1 and sprint 2 assignments with total hours per sprint.
+Expected output: sprint 1 items with hours summing to ≤ capacity; sprint 2 contains the remainder</p>
+<hr />
+<h3>Concept 2 — MoSCoW Prioritization for Detections</h3>
+<p>MoSCoW (Must Have / Should Have / Could Have / Won't Have) is a simple qualitative prioritization framework. It complements the quantitative gap score by adding business context: regulatory requirements force certain detections into &quot;Must Have&quot; regardless of ROI score.</p>
+<p>Detection MoSCoW mapping:</p>
+<ul>
+<li><strong>Must Have</strong>: regulatory compliance (PCI-DSS requires detecting T1078 account abuse), active incident response requirements, Tier 1 asset coverage</li>
+<li><strong>Should Have</strong>: high gap score techniques not covered by compliance requirements</li>
+<li><strong>Could Have</strong>: medium gap score, coverage improvement from L1 to L2</li>
+<li><strong>Won't Have (this sprint)</strong>: Tier 3-only techniques with low gap scores, log source not yet available</li>
+</ul>
+<p>Combining MoSCoW with ROI score: Must-Have items go to sprint 1 regardless of ROI. Within each MoSCoW bucket, order by ROI score.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from enum import Enum
+from typing import List
+
+class MoSCoW(str, Enum):
+    MUST = &quot;Must Have&quot;
+    SHOULD = &quot;Should Have&quot;
+    COULD = &quot;Could Have&quot;
+    WONT = &quot;Won&#x27;t Have&quot;
+
+@dataclass
+class PrioritizedItem:
+    item_id: str
+    technique_id: str
+    title: str
+    moscow: MoSCoW
+    roi_score: float
+
+def prioritize_by_moscow(items: List[PrioritizedItem]) -&gt; dict:
+    result = {bucket: [] for bucket in MoSCoW}
+    for item in items:
+        result[item.moscow].append(item)
+    for bucket in result:
+        result[bucket].sort(key=lambda x: x.roi_score, reverse=True)
+    return result
+
+items = [
+    PrioritizedItem(&quot;DET-012&quot;, &quot;T1078&quot;,     &quot;Valid Account&quot;,        MoSCoW.MUST,   0.562),
+    PrioritizedItem(&quot;DET-013&quot;, &quot;T1003.001&quot;, &quot;LSASS Dump&quot;,           MoSCoW.MUST,   0.500),
+    PrioritizedItem(&quot;DET-014&quot;, &quot;T1021.001&quot;, &quot;RDP Lateral Movement&quot;, MoSCoW.SHOULD, 0.500),
+    PrioritizedItem(&quot;DET-015&quot;, &quot;T1204.002&quot;, &quot;User Exec File&quot;,       MoSCoW.COULD,  0.125),
+    PrioritizedItem(&quot;DET-016&quot;, &quot;T1566.001&quot;, &quot;Spearphishing Link&quot;,   MoSCoW.SHOULD, 0.350),
+]
+
+prioritized = prioritize_by_moscow(items)
+for bucket, bucket_items in prioritized.items():
+    print(f&quot;\n{bucket.value}:&quot;)
+    for i in bucket_items:
+        print(f&quot;  {i.item_id}: {i.title} (ROI={i.roi_score})&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a <code>Won't Have</code> item (<code>DET-017</code>, <code>T1595.001</code>, &quot;Active Scanning&quot;, ROI=0.05 — log source unavailable) and a second <code>Must Have</code> item (<code>DET-018</code>, <code>T1110.001</code>, &quot;Password Spraying&quot;, ROI=0.75 — PCI-DSS required). Rebuild the prioritized output. Then print the sprint plan: sprint 1 = all Must Have items; sprint 2 = Should Have items sorted by ROI; sprint 3 = Could Have items. Won't Have items are listed separately at the end.
+Expected output: three sprint sections + Won't Have section, all with item IDs and technique IDs</p>
+<hr />
+<h3>Concept 3 — Dependency Tracking for Detection Work</h3>
+<p>Detection work has dependencies that stall progress when not tracked explicitly. The three most common blockers:</p>
+<ol>
+<li><strong>Log source not available</strong>: a Sigma rule is written, but the log source was never configured — the rule cannot be tested or deployed</li>
+<li><strong>Infrastructure dependency</strong>: a new SIEM workspace needs to be provisioned before queries can be deployed</li>
+<li><strong>Baseline dependency</strong>: a behavioral detection requires 30 days of baseline data before it can fire</li>
+</ol>
+<p>Tracking dependencies on each backlog item prevents sprint planning failures where 40% of sprint items are immediately blocked. The dependency check runs before sprint planning: blocked items are automatically pushed to a future sprint after their dependency resolves.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import List, Optional
+
+@dataclass
+class Dependency:
+    dep_id: str
+    description: str
+    resolved: bool = False
+    blocker_type: str = &quot;log_source&quot;  # &quot;log_source&quot; | &quot;infrastructure&quot; | &quot;baseline&quot;
+
+@dataclass
+class BacklogItemWithDeps:
+    item_id: str
+    technique_id: str
+    title: str
+    roi_score: float
+    dependencies: List[Dependency] = field(default_factory=list)
+
+    def is_blocked(self) -&gt; bool:
+        return any(not dep.resolved for dep in self.dependencies)
+
+    def blocking_deps(self) -&gt; List[str]:
+        return [dep.description for dep in self.dependencies if not dep.resolved]
+
+items = [
+    BacklogItemWithDeps(
+        &quot;DET-012&quot;, &quot;T1078&quot;, &quot;Valid Account Detection&quot;, roi_score=0.562,
+        dependencies=[Dependency(&quot;DEP-01&quot;, &quot;Sysmon GPO deployed to all DCs&quot;, resolved=True)],
+    ),
+    BacklogItemWithDeps(
+        &quot;DET-019&quot;, &quot;T1070.001&quot;, &quot;Log Clearing Detection&quot;, roi_score=0.400,
+        dependencies=[
+            Dependency(&quot;DEP-02&quot;, &quot;Windows Security audit policy updated&quot;, resolved=False, blocker_type=&quot;infrastructure&quot;),
+        ],
+    ),
+    BacklogItemWithDeps(
+        &quot;BEH-002&quot;, &quot;T1021.001&quot;, &quot;RDP Baseline Anomaly&quot;, roi_score=0.300,
+        dependencies=[
+            Dependency(&quot;DEP-03&quot;, &quot;30-day RDP baseline collection complete&quot;, resolved=False, blocker_type=&quot;baseline&quot;),
+        ],
+    ),
+]
+
+ready = [i for i in items if not i.is_blocked()]
+blocked = [i for i in items if i.is_blocked()]
+
+print(&quot;Ready for sprint:&quot;)
+for item in ready:
+    print(f&quot;  {item.item_id}: {item.title}&quot;)
+
+print(&quot;\nBlocked:&quot;)
+for item in blocked:
+    print(f&quot;  {item.item_id}: {item.title}&quot;)
+    for dep in item.blocking_deps():
+        print(f&quot;    BLOCKED: {dep}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add <code>DEP-04</code> to <code>DET-012</code>: &quot;Sysmon schema version 15 verified on all hosts&quot; — resolved=False. Now DET-012 is also blocked. Rebuild the ready/blocked output. Then write a function <code>resolve_dependency(items, dep_id)</code> that sets resolved=True for the given dep_id across all items and returns the count of items that became unblocked as a result. Call it with <code>dep_id=&quot;DEP-04&quot;</code> and print how many items unblocked.
+Expected output: initially 0 items ready; after resolving DEP-04, DET-012 unblocks; function prints &quot;1 item unblocked&quot;</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can estimate effort hours for detection backlog items by reasoning about rule complexity, required tuning, and log source maturity.
+<strong>Threat:</strong> LLM effort estimates that are systematically too optimistic lead to sprint planning failures and analyst burnout when rules require more tuning than estimated.
+<strong>Opportunity:</strong> Use an LLM to generate rough effort estimates as a starting point, then calibrate against historical sprint velocity data.
+<strong>Prompt to try:</strong> <code>&quot;Estimate the engineering effort (in hours) to write, test, tune, and deploy a production Sigma rule for the following ATT&amp;CK technique in a Microsoft Sentinel environment: T1055 (Process Injection). Break down the estimate into: (1) rule authoring, (2) test environment validation, (3) false positive tuning, (4) peer review and documentation. Assume the analyst has 6 months of Sigma experience and Sysmon is already deployed. Give a low/medium/high estimate range and explain the main uncertainty driver.&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Detection Quality Metrics</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=detection%20engineering%20metrics%20signal%20noise%20ratio%20MTTD%20MTTR%20SOC%20KPIs" target="_blank" rel="noopener">detection engineering metrics signal noise ratio MTTD MTTR SOC KPIs</a></p></div>
+<hr />
+<h3>Concept 1 — Signal-to-Noise Ratio and Alert Fidelity</h3>
+<p>A detection rule that fires constantly with mostly false positives is worse than no rule: it trains analysts to ignore alerts, creates alert fatigue, and masks real detections in the noise. Signal-to-noise ratio (SNR) measures the proportion of true positive alerts vs. total alerts for a given rule.</p>
+<pre><code>SNR = true_positives / (true_positives + false_positives)
+</code></pre><p>Target SNR thresholds:</p>
+<ul>
+<li><strong>Production rule</strong>: SNR ≥ 0.80 (at most 1 in 5 alerts is a false positive)</li>
+<li><strong>Experimental rule</strong>: SNR ≥ 0.50 acceptable during tuning</li>
+<li><strong>Below 0.20</strong>: rule must be disabled or fundamentally redesigned</li>
+</ul>
+<p>Alert volume also matters independently: a rule with SNR=0.90 that fires 1,000 times per day still generates 100 false positives daily. Alert volume × SNR = analyst workload.</p>
+<p>Data engineering analogy: SNR is the same as data quality score — precision and recall applied to a detection pipeline instead of a ML model.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class RuleMetrics:
+    rule_id: str
+    title: str
+    true_positives: int
+    false_positives: int
+    total_alerts_30d: int
+
+    def snr(self) -&gt; float:
+        total = self.true_positives + self.false_positives
+        if total == 0:
+            return 0.0
+        return round(self.true_positives / total, 3)
+
+    def daily_fp_volume(self) -&gt; float:
+        return round(self.false_positives / 30, 1)
+
+    def status(self) -&gt; str:
+        s = self.snr()
+        if s &gt;= 0.80:
+            return &quot;PRODUCTION&quot;
+        elif s &gt;= 0.50:
+            return &quot;TUNING&quot;
+        else:
+            return &quot;DISABLE&quot;
+
+rules = [
+    RuleMetrics(&quot;SIG-001&quot;, &quot;PowerShell Encoded&quot;,    tp=45, fp=5,   total_alerts_30d=50),
+    RuleMetrics(&quot;SIG-003&quot;, &quot;Scheduled Task&quot;,        tp=12, fp=88,  total_alerts_30d=100),
+    RuleMetrics(&quot;BEH-001&quot;, &quot;Rare Process Exec&quot;,     tp=8,  fp=2,   total_alerts_30d=10),
+]
+
+for r in rules:
+    print(f&quot;{r.rule_id}: SNR={r.snr()} | daily FPs={r.daily_fp_volume()} | {r.status()}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add two more <code>RuleMetrics</code> entries: one healthy production rule and one that should be disabled. Write a function <code>snr_report(rules: List[RuleMetrics]) -&gt; dict</code> that returns <code>{&quot;production&quot;: [...], &quot;tuning&quot;: [...], &quot;disable&quot;: [...]}</code> with rule IDs grouped by status. Print the report and total analyst workload (sum of daily FP volume across all production rules).
+Expected output: grouped report dict; total daily FP workload printed as a single line</p>
+<hr />
+<h3>Concept 2 — Mean Time to Detect (MTTD) and Mean Time to Respond (MTTR)</h3>
+<p>MTTD measures the average time between an attacker beginning a technique and the first alert firing. MTTR measures from alert creation to incident containment. These are the two most important SOC KPIs tracked by leadership and reported to compliance auditors.</p>
+<p>MTTD has two components:</p>
+<ul>
+<li><strong>Detection latency</strong>: time between the malicious event and the alert firing (a rule running every 15 minutes has a minimum 15-minute detection latency)</li>
+<li><strong>Triage latency</strong>: time between alert creation and an analyst beginning investigation</li>
+</ul>
+<p>Reducing MTTD: run high-fidelity critical rules in real-time (streaming) rather than on a schedule; ensure Tier 1 alerts bypass the queue and go directly to an analyst.</p>
+<p>Data engineering analogy: MTTD is pipeline SLA latency. A batch pipeline running every 4 hours has a maximum data freshness SLA of 4 hours. Real-time streaming pipelines bring SLA to seconds — but at higher cost.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import List
+import statistics
+
+@dataclass
+class IncidentTimeline:
+    incident_id: str
+    attack_start: datetime
+    first_alert: datetime
+    analyst_begin: datetime
+    contained: datetime
+
+    def mttd_minutes(self) -&gt; float:
+        return (self.first_alert - self.attack_start).total_seconds() / 60
+
+    def triage_lag_minutes(self) -&gt; float:
+        return (self.analyst_begin - self.first_alert).total_seconds() / 60
+
+    def mttr_minutes(self) -&gt; float:
+        return (self.contained - self.attack_start).total_seconds() / 60
+
+base = datetime(2024, 3, 15, 10, 0, 0)
+
+incidents = [
+    IncidentTimeline(&quot;IR-001&quot;, base,
+        first_alert=base + timedelta(minutes=4),
+        analyst_begin=base + timedelta(minutes=18),
+        contained=base + timedelta(hours=2)),
+    IncidentTimeline(&quot;IR-002&quot;, base + timedelta(hours=5),
+        first_alert=base + timedelta(hours=5, minutes=12),
+        analyst_begin=base + timedelta(hours=5, minutes=35),
+        contained=base + timedelta(hours=8)),
+    IncidentTimeline(&quot;IR-003&quot;, base + timedelta(hours=10),
+        first_alert=base + timedelta(hours=10, minutes=1),
+        analyst_begin=base + timedelta(hours=10, minutes=8),
+        contained=base + timedelta(hours=11, minutes=30)),
+]
+
+mttd_values = [i.mttd_minutes() for i in incidents]
+mttr_values = [i.mttr_minutes() for i in incidents]
+
+print(f&quot;Mean MTTD: {statistics.mean(mttd_values):.1f} min&quot;)
+print(f&quot;Mean MTTR: {statistics.mean(mttr_values):.1f} min&quot;)
+print(f&quot;Triage lag range: {min(i.triage_lag_minutes() for i in incidents):.0f}–{max(i.triage_lag_minutes() for i in incidents):.0f} min&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add three more <code>IncidentTimeline</code> entries simulating a bad week: MTTD &gt; 60 min for one, triage lag &gt; 90 min for another, MTTR &gt; 8 hours for the third. Recalculate mean MTTD and MTTR for all six incidents. Then write a function <code>sla_check(incidents, mttd_sla_minutes, mttr_sla_minutes) -&gt; dict</code> that returns <code>{&quot;mttd_breaches&quot;: N, &quot;mttr_breaches&quot;: N}</code> and print the SLA check with thresholds MTTD=30 min, MTTR=240 min.
+Expected output: updated means + SLA breach counts reflecting the bad week additions</p>
+<hr />
+<h3>Concept 3 — Detection Coverage Score</h3>
+<p>A coverage score is a single number that summarizes the quality of your detection program for a given time period. It combines breadth (how many techniques covered) and depth (coverage level) into a normalized 0–100 score for executive reporting.</p>
+<pre><code>coverage_score = Σ(actual_level / max_level × technique_weight) / Σ(technique_weights) × 100
+</code></pre><p>Where <code>technique_weight</code> = asset_tier_weight × technique_prevalence_weight. A Tier 1 technique with high attacker prevalence has the highest weight.</p>
+<p>A coverage score above 70 indicates a mature detection program. Below 40 indicates reactive-only detection. Tracking the score monthly shows program improvement or regression.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List, Dict
+
+MAX_COVERAGE_LEVEL = 3
+
+@dataclass
+class WeightedTechnique:
+    technique_id: str
+    asset_tier_weight: int   # 3=T1, 2=T2, 1=T3
+    prevalence_weight: int   # 1–5 (5 = commonly exploited in wild)
+    actual_level: int        # 0–3
+
+    def weight(self) -&gt; float:
+        return self.asset_tier_weight * self.prevalence_weight
+
+    def contribution(self) -&gt; float:
+        return (self.actual_level / MAX_COVERAGE_LEVEL) * self.weight()
+
+def coverage_score(techniques: List[WeightedTechnique]) -&gt; float:
+    total_possible = sum(t.weight() for t in techniques)
+    achieved = sum(t.contribution() for t in techniques)
+    return round((achieved / total_possible) * 100, 1) if total_possible &gt; 0 else 0.0
+
+techniques = [
+    WeightedTechnique(&quot;T1059.001&quot;, asset_tier_weight=3, prevalence_weight=5, actual_level=3),
+    WeightedTechnique(&quot;T1003.001&quot;, asset_tier_weight=3, prevalence_weight=5, actual_level=1),
+    WeightedTechnique(&quot;T1078&quot;,     asset_tier_weight=3, prevalence_weight=4, actual_level=0),
+    WeightedTechnique(&quot;T1053.005&quot;, asset_tier_weight=2, prevalence_weight=3, actual_level=1),
+    WeightedTechnique(&quot;T1021.001&quot;, asset_tier_weight=2, prevalence_weight=4, actual_level=0),
+    WeightedTechnique(&quot;T1204.002&quot;, asset_tier_weight=1, prevalence_weight=3, actual_level=1),
+]
+
+score = coverage_score(techniques)
+print(f&quot;Detection Coverage Score: {score}/100&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Simulate a program improvement: create a second list of <code>WeightedTechnique</code> objects where <code>T1078</code> moves from level 0 to level 2, <code>T1021.001</code> moves from level 0 to level 1, and <code>T1003.001</code> moves from level 1 to level 2. Calculate and print the before and after coverage score, and the improvement delta. Then print which technique's improvement contributed the most points (calculate per-technique delta).
+Expected output: before score, after score, delta, and which technique moved the score most</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can generate natural-language explanations of coverage score changes for executive briefings, translating raw numbers into business risk language.
+<strong>Threat:</strong> Overreliance on a single coverage score can create a false sense of security if the weighting model is miscalibrated — executives see 70/100 and assume adequate protection.
+<strong>Opportunity:</strong> Use an LLM to draft the &quot;detection program health&quot; section of a monthly security report from raw metrics (score, MTTD, MTTR, SNR values).
+<strong>Prompt to try:</strong> <code>&quot;Write a 3-paragraph executive security briefing for March 2024 based on these detection program metrics: Coverage Score improved from 38 to 51 (target: 70). Mean MTTD improved from 28 to 11 minutes. Mean MTTR stayed flat at 4.2 hours. 3 rules disabled for low SNR (&lt;0.20). Top gap: T1078 (Valid Accounts) still at zero coverage. Format for a non-technical CISO audience: start with the business risk implication, then progress, then the single most important next action.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Coverage Dashboard and Reporting</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=aOkq_UShp6A" target="_blank" rel="noopener"><b>Detection Coverage with Falcon Next-Gen SIEM</b><small>CrowdStrike</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=detection%20coverage%20dashboard%20Python%20ATT%26CK%20gap%20report%20security%20metrics%20visualization" target="_blank" rel="noopener">detection coverage dashboard Python ATT&amp;CK gap report security metrics visualization</a></p></div>
+<hr />
+<h3>Concept 1 — Building a Coverage Dashboard in Python</h3>
+<p>A coverage dashboard aggregates all metrics computed in Days 2–4 into a single report: matrix coverage levels, gap scores, SNR by rule, MTTD/MTTR trends, coverage score. The dashboard is a Python script that reads your rule repository and generates a markdown report file.</p>
+<p>The output format for a detection program dashboard:</p>
+<ol>
+<li><strong>Executive summary</strong>: coverage score, MTTD, MTTR</li>
+<li><strong>Coverage matrix</strong>: technique-by-technique table</li>
+<li><strong>Gap report</strong>: prioritized backlog with effort estimates</li>
+<li><strong>Rule health</strong>: SNR and alert volume per deployed rule</li>
+<li><strong>Trend line</strong>: coverage score month-over-month</li>
+</ol>
+<p>A Python-generated markdown report can be committed to the rules repository alongside the Sigma rules, making coverage reporting part of the CI pipeline (automatically regenerated on every merge).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List, Dict
+from datetime import date
+
+@dataclass
+class DashboardData:
+    report_date: date
+    coverage_score: float
+    mean_mttd_minutes: float
+    mean_mttr_minutes: float
+    techniques: List[dict]   # each: {id, level, rule_count}
+    rules: List[dict]        # each: {id, title, snr, daily_fp}
+    top_gaps: List[dict]     # each: {technique, gap_score, effort_hours}
+
+def render_markdown_report(data: DashboardData) -&gt; str:
+    lines = [
+        f&quot;# Detection Coverage Report — {data.report_date}&quot;,
+        &quot;&quot;,
+        &quot;## Executive Summary&quot;,
+        f&quot;| Metric | Value |&quot;,
+        f&quot;|--------|-------|&quot;,
+        f&quot;| Coverage Score | {data.coverage_score}/100 |&quot;,
+        f&quot;| Mean MTTD | {data.mean_mttd_minutes:.1f} min |&quot;,
+        f&quot;| Mean MTTR | {data.mean_mttr_minutes:.1f} min |&quot;,
+        &quot;&quot;,
+        &quot;## Coverage Matrix&quot;,
+        &quot;| Technique | Level | Rules |&quot;,
+        &quot;|-----------|-------|-------|&quot;,
+    ]
+    for t in data.techniques:
+        bar = &quot;█&quot; * t[&quot;level&quot;] + &quot;░&quot; * (3 - t[&quot;level&quot;])
+        lines.append(f&quot;| {t[&#x27;id&#x27;]} | {bar} ({t[&#x27;level&#x27;]}/3) | {t[&#x27;rule_count&#x27;]} |&quot;)
+
+    lines += [
+        &quot;&quot;,
+        &quot;## Top Gaps (Prioritized Backlog)&quot;,
+        &quot;| Technique | Gap Score | Est. Hours |&quot;,
+        &quot;|-----------|-----------|------------|&quot;,
+    ]
+    for g in data.top_gaps:
+        lines.append(f&quot;| {g[&#x27;technique&#x27;]} | {g[&#x27;gap_score&#x27;]} | {g[&#x27;effort_hours&#x27;]}h |&quot;)
+
+    lines += [
+        &quot;&quot;,
+        &quot;## Rule Health&quot;,
+        &quot;| Rule ID | Title | SNR | Daily FPs |&quot;,
+        &quot;|---------|-------|-----|-----------|&quot;,
+    ]
+    for r in data.rules:
+        health = &quot;GOOD&quot; if r[&quot;snr&quot;] &gt;= 0.80 else (&quot;TUNE&quot; if r[&quot;snr&quot;] &gt;= 0.50 else &quot;DISABLE&quot;)
+        lines.append(f&quot;| {r[&#x27;id&#x27;]} | {r[&#x27;title&#x27;]} | {r[&#x27;snr&#x27;]} ({health}) | {r[&#x27;daily_fp&#x27;]} |&quot;)
+
+    return &quot;\n&quot;.join(lines)
+
+sample = DashboardData(
+    report_date=date(2024, 3, 15),
+    coverage_score=51.0,
+    mean_mttd_minutes=11.0,
+    mean_mttr_minutes=252.0,
+    techniques=[
+        {&quot;id&quot;: &quot;T1059.001&quot;, &quot;level&quot;: 3, &quot;rule_count&quot;: 2},
+        {&quot;id&quot;: &quot;T1003.001&quot;, &quot;level&quot;: 1, &quot;rule_count&quot;: 1},
+        {&quot;id&quot;: &quot;T1078&quot;,     &quot;level&quot;: 0, &quot;rule_count&quot;: 0},
+    ],
+    rules=[
+        {&quot;id&quot;: &quot;SIG-001&quot;, &quot;title&quot;: &quot;PowerShell Encoded&quot;, &quot;snr&quot;: 0.900, &quot;daily_fp&quot;: 0.2},
+        {&quot;id&quot;: &quot;SIG-003&quot;, &quot;title&quot;: &quot;Scheduled Task&quot;,     &quot;snr&quot;: 0.120, &quot;daily_fp&quot;: 2.9},
+    ],
+    top_gaps=[
+        {&quot;technique&quot;: &quot;T1078&quot;,     &quot;gap_score&quot;: 9, &quot;effort_hours&quot;: 36},
+        {&quot;technique&quot;: &quot;T1021.001&quot;, &quot;gap_score&quot;: 4, &quot;effort_hours&quot;: 12},
+    ],
+)
+
+report = render_markdown_report(sample)
+print(report)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>render_markdown_report</code> to add a fifth section: <strong>Month-over-Month Trend</strong>. The function should accept an optional <code>trend: List[dict]</code> parameter where each entry is <code>{&quot;month&quot;: &quot;2024-01&quot;, &quot;score&quot;: 38.0}</code>. If provided, render a table; if None, skip the section. Test with three months of trend data showing coverage score increasing from 38 → 45 → 51.
+Expected output: full markdown report with the trend section appended; verify the score progression is visible in the table</p>
+<hr />
+<h3>Concept 2 — Automated Gap Report Generation</h3>
+<p>The gap report is the most actionable output of the coverage process. It answers the question a detection engineering manager needs every sprint: &quot;what should the team work on next and why?&quot; Automating gap report generation from the rules repository eliminates manual tracking and ensures the report is always current.</p>
+<p>Gap report automation pipeline:</p>
+<ol>
+<li>Read all Sigma rules from the <code>rules/</code> directory</li>
+<li>Parse technique IDs from each rule's <code>tags</code> field</li>
+<li>Aggregate into a coverage matrix (same as Day 2 Concept 1)</li>
+<li>Run gap analysis against target model</li>
+<li>Write <code>GAP_REPORT.md</code> to the repository root</li>
+</ol>
+<p>This pipeline runs as a GitHub Actions job on every PR merge to the main branch, keeping the gap report fresh without any manual steps.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os
+from pathlib import Path
+from typing import List, Dict
+from datetime import date
+
+def extract_technique_from_tag(tag: str) -&gt; str | None:
+    &quot;&quot;&quot;Convert &#x27;attack.t1059_001&#x27; → &#x27;T1059.001&#x27;&quot;&quot;&quot;
+    if not tag.startswith(&quot;attack.t&quot;):
+        return None
+    raw = tag.replace(&quot;attack.t&quot;, &quot;T&quot;).replace(&quot;_&quot;, &quot;.&quot;)
+    parts = raw.split(&quot;.&quot;)
+    if len(parts) == 2:
+        return f&quot;T{parts[0][1:]}.{parts[1]}&quot;
+    return raw
+
+def parse_sigma_tags(rule_text: str) -&gt; List[str]:
+    &quot;&quot;&quot;Extract technique IDs from a Sigma rule YAML string.&quot;&quot;&quot;
+    techniques = []
+    in_tags = False
+    for line in rule_text.splitlines():
+        stripped = line.strip()
+        if stripped == &quot;tags:&quot;:
+            in_tags = True
+            continue
+        if in_tags:
+            if stripped.startswith(&quot;- &quot;):
+                tag = stripped[2:]
+                tech = extract_technique_from_tag(tag)
+                if tech:
+                    techniques.append(tech)
+            elif not stripped.startswith(&quot;-&quot;) and &quot;:&quot; in stripped:
+                break
+    return techniques
+
+sample_rule_yaml = &quot;&quot;&quot;
+title: PowerShell Encoded Command
+tags:
+    - attack.execution
+    - attack.t1059_001
+logsource:
+    category: process_creation
+detection:
+    selection:
+        CommandLine|contains: &#x27;-enc&#x27;
+    condition: selection
+&quot;&quot;&quot;
+
+techniques = parse_sigma_tags(sample_rule_yaml)
+print(f&quot;Extracted techniques: {techniques}&quot;)
+
+def generate_gap_report_from_rules_dir(
+    rules_dir: str,
+    target_techniques: List[str],
+    output_path: str,
+) -&gt; int:
+    &quot;&quot;&quot;Parse all .yml files in rules_dir, build matrix, write GAP_REPORT.md.&quot;&quot;&quot;
+    covered: Dict[str, int] = {}
+    rules_path = Path(rules_dir)
+
+    if rules_path.exists():
+        for rule_file in rules_path.glob(&quot;**/*.yml&quot;):
+            text = rule_file.read_text(encoding=&quot;utf-8&quot;)
+            for tech in parse_sigma_tags(text):
+                covered[tech] = covered.get(tech, 0) + 1
+
+    gaps = [t for t in target_techniques if t not in covered or covered[t] == 0]
+
+    lines = [
+        f&quot;# Detection Gap Report — {date.today()}&quot;,
+        f&quot;&quot;,
+        f&quot;Techniques in scope: {len(target_techniques)}&quot;,
+        f&quot;Techniques with coverage: {len(target_techniques) - len(gaps)}&quot;,
+        f&quot;Gaps (no coverage): {len(gaps)}&quot;,
+        &quot;&quot;,
+        &quot;## Uncovered Techniques&quot;,
+        &quot;| Technique | Status |&quot;,
+        &quot;|-----------|--------|&quot;,
+    ]
+    for t in sorted(gaps):
+        lines.append(f&quot;| {t} | NO COVERAGE |&quot;)
+
+    Path(output_path).write_text(&quot;\n&quot;.join(lines), encoding=&quot;utf-8&quot;)
+    return len(gaps)
+
+gap_count = generate_gap_report_from_rules_dir(
+    rules_dir=&quot;rules/&quot;,
+    target_techniques=[&quot;T1059.001&quot;, &quot;T1003.001&quot;, &quot;T1078&quot;, &quot;T1021.001&quot;, &quot;T1053.005&quot;],
+    output_path=&quot;GAP_REPORT.md&quot;,
+)
+print(f&quot;Gap report written. {gap_count} uncovered techniques.&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>generate_gap_report_from_rules_dir</code> to also list partially covered techniques (covered by exactly one rule) in a separate &quot;Partial Coverage&quot; section. Add a third section &quot;Well Covered&quot; (two or more rules). Test by creating an in-memory dict <code>covered = {&quot;T1059.001&quot;: 2, &quot;T1003.001&quot;: 1, &quot;T1078&quot;: 0, &quot;T1021.001&quot;: 0, &quot;T1053.005&quot;: 1}</code> and running the function with this dict rather than reading the filesystem (refactor the function to accept an optional <code>coverage_override</code> parameter). Print the resulting markdown content.
+Expected output: report with three sections (No Coverage, Partial, Well Covered) populated correctly from the override dict</p>
+<hr />
+<h3>Concept 3 — Stakeholder Reporting and Communication</h3>
+<p>Detection engineers own technical execution; stakeholders own budget, headcount, and risk acceptance. Translating coverage metrics into business risk language is a critical skill that separates a detection engineer from a detection engineering leader.</p>
+<p>Stakeholder communication principles:</p>
+<ol>
+<li><strong>Lead with risk, not technique IDs</strong>: &quot;An attacker who steals valid credentials (T1078) is undetectable for an average of 45 minutes&quot; is more actionable than &quot;T1078 gap score = 9&quot;</li>
+<li><strong>Quantify the gap in business terms</strong>: if mean dwell time for ransomware is 14 days without detection, and your coverage closes that to 2 days, you can estimate the cost reduction</li>
+<li><strong>One ask per report</strong>: each report should have a single, specific action requested of the stakeholder — not a list of ten problems</li>
+</ol>
+<p>The three-section stakeholder report structure:</p>
+<ol>
+<li><strong>Status</strong>: where we are (coverage score, MTTD, MTTR)</li>
+<li><strong>Risk</strong>: what the gaps mean in business terms (specific attack scenario + estimated dwell time)</li>
+<li><strong>Ask</strong>: one concrete decision or resource request</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class RiskNarrative:
+    technique_id: str
+    business_risk: str          # plain-English risk sentence
+    estimated_dwell_minutes: int
+    remediation_ask: str
+    cost_estimate_hours: int
+
+def render_stakeholder_brief(
+    coverage_score: float,
+    mean_mttd: float,
+    top_risks: List[RiskNarrative],
+    primary_ask: str,
+) -&gt; str:
+    lines = [
+        &quot;# Detection Program — Monthly Stakeholder Brief&quot;,
+        &quot;&quot;,
+        &quot;## Status&quot;,
+        f&quot;Coverage Score: {coverage_score}/100  |  Mean MTTD: {mean_mttd:.0f} min&quot;,
+        &quot;&quot;,
+        &quot;## Top Risks&quot;,
+    ]
+    for risk in top_risks[:3]:
+        lines += [
+            f&quot;**{risk.technique_id}** — {risk.business_risk}&quot;,
+            f&quot;Estimated undetected dwell time: {risk.estimated_dwell_minutes} min&quot;,
+            f&quot;Remediation: {risk.remediation_ask} ({risk.cost_estimate_hours}h)&quot;,
+            &quot;&quot;,
+        ]
+    lines += [
+        &quot;## Ask&quot;,
+        primary_ask,
+    ]
+    return &quot;\n&quot;.join(lines)
+
+risks = [
+    RiskNarrative(&quot;T1078&quot;, &quot;Attacker with stolen credentials moves laterally undetected until manual discovery&quot;, 2880, &quot;Deploy Valid Account detection rules (DET-012)&quot;, 16),
+    RiskNarrative(&quot;T1003.001&quot;, &quot;Credential dumping from LSASS detected by single signature rule only — renaming the tool bypasses detection&quot;, 45, &quot;Add behavioral LSASS detection layer (DET-013)&quot;, 12),
+]
+
+brief = render_stakeholder_brief(51.0, 11.0, risks, &quot;Approve 32 engineering hours in Q2 to close the top-2 Tier 1 detection gaps.&quot;)
+print(brief)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>weekly_status_email(coverage_score, prev_score, mttd, mttr, top_gap_technique, top_gap_risk_sentence) -&gt; str</code> that produces a concise 5-line email body suitable for a Monday morning status email to a security manager. The email must: state the coverage score and whether it improved or declined, state MTTD and MTTR, name the top gap in plain English, and close with one action item. Write two test calls: one showing improvement week-over-week, one showing regression.
+Expected output: two email body strings; improvement case uses positive framing, regression case flags urgency</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can generate business-language risk narratives from raw technique IDs and coverage levels, turning a coverage matrix into a stakeholder-ready report in seconds.
+<strong>Threat:</strong> Auto-generated risk narratives may not reflect the specific environment — a generic &quot;credential dumping risk&quot; narrative may not match the actual attacker TTPs targeting your sector.
+<strong>Opportunity:</strong> Use an LLM to draft the risk narrative section of the monthly stakeholder report, then have the detection engineer review and annotate with environment-specific context before sending.
+<strong>Prompt to try:</strong> <code>&quot;Convert these raw detection metrics into a 5-sentence executive risk summary for a financial services CISO: Coverage Score = 51/100, MTTD = 11 minutes, MTTR = 252 minutes, biggest gap = T1078 (Valid Accounts) with zero detection coverage, second gap = T1021.001 (RDP lateral movement) with zero coverage. Lead with the most dangerous scenario enabled by these gaps. Use business risk language, not ATT&amp;CK terminology. End with a single recommended action.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 12</h2>
+<p><strong>Task:</strong> Build a complete detection methodology pipeline that produces an ATT&amp;CK gap report and detection backlog from a set of Sigma rules and a threat model.
+<strong>Builds on:</strong> W10 rules/ directory (Sigma rules with technique tags) + W11 behavioral detector (adds to coverage) + W09 deployed KQL rules (counted as coverage)
+<strong>Deliverable:</strong> <code>methodology/coverage_dashboard.py</code> — a standalone Python module containing:</p>
+<ul>
+<li><code>build_coverage_matrix(rules, technique_scope)</code> — maps deployed rules to technique coverage levels</li>
+<li><code>gap_analysis(coverage_matrix, targets)</code> — scores and prioritizes gaps</li>
+<li><code>generate_navigator_layer(coverage_matrix, layer_name)</code> — outputs Navigator JSON</li>
+<li><code>coverage_score(techniques)</code> — computes weighted 0–100 score</li>
+<li><code>render_markdown_report(data)</code> — produces full dashboard markdown</li>
+<li><code>__main__</code> block that reads <code>rules/*.yml</code>, runs the pipeline, writes <code>GAP_REPORT.md</code> and <code>coverage_layer.json</code>, and prints the coverage score</li>
+</ul>
+<p>Script must be runnable standalone: <code>python coverage_dashboard.py</code>
+Expected output when run: &quot;Coverage score: N/100 | Gaps: M techniques | Reports written: GAP_REPORT.md, coverage_layer.json&quot;</p>
+<p><strong>Stretch goal:</strong> Add month-over-month trend tracking: write coverage scores to <code>coverage_history.json</code> (append each run's date + score). Load history on the next run and print the trend. Add a <code>--baseline</code> CLI flag that resets the history file — use <code>argparse</code>.</p>
+<div class="pager"><a class="btn ghost" href="week-11.html">&larr; Week 11</a><a class="btn ghost" href="week-13.html">Week 13 &rarr;</a></div>
+</main></body></html>

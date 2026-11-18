@@ -1,0 +1,3133 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 12 — Capstone</title>
+<link rel="stylesheet" href="style.css"><script>window.SITE_DATASETS = ["datasets/titanic_train.csv"];</script>
+<script src="app.js" defer></script></head>
+<body data-site="python">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Python Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 12 — Capstone</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a><a class="btn ghost" href="#day-6">Day 6</a><a class="btn ghost" href="#day-7">Day 7</a><a class="btn ghost" href="#day-8">Day 8</a></div><p class="note">Done this week: <span data-week-count="12" data-size="8"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><p class="note">Cells that need a file other than the Titanic table, a web connection, a database server or a package that is not available in the browser will show an error when run. Read those instead.</p><h2 id="day-1">Day 1 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-1"> Mark this day done</label><pre class="box"># ══════════════════════════════════════════════════════════════
+#  WEEK 12  |  BONUS  |  SELF-HEALING ETL PIPELINE
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Build a multi-stage ETL pipeline that never crashes -- it logs,
+#     recovers, and explains every error in plain English
+#  2. Integrate an LLM at 4 key points in the pipeline lifecycle
+#  3. Use Parquet as the standard output format (Silver layer)
+#  4. Query Silver layer data with DuckDB (local Athena equivalent)
+#  5. Generate human-readable audit logs via LLM
+#
+#  ARCHITECTURE (simulation mode -- no cloud required)
+#  ────────────────────────────────────────────────────
+#
+#    Raw CSV/JSON files (local)
+#          |
+#          v
+#    Stage 1: LLM Pre-Validation -- inspect sample, flag anomalies
+#          |
+#          v
+#    Bronze layer (local folder -- simulates MinIO/S3)
+#          |
+#          v
+#    Stage 2: ETL -- detect schema drift, LLM semantic mapping, clean
+#          |
+#          v
+#    Silver layer (Parquet files -- simulates MinIO/S3)
+#          |
+#          v
+#    Stage 3: DuckDB query layer (simulates AWS Athena)
+#          |
+#          v
+#    Stage 4: NL Audit Log (JSON file -- LLM-generated entries)
+#
+#  SETUP
+#  ─────
+#  pip install langchain-groq langchain-core pydantic python-dotenv
+#             pandas pyarrow duckdb
+#
+#  Optional (for LLM stages): copy nl_sql_app/.env.example to .env
+#  and add your Groq API key. All LLM stages gracefully skip if key is absent.
+#
+#  TIME:  ~90 minutes
+#
+#  ─────────────────────────────────────────────────────────────
+#  ARCHITECTURE DECISION
+#  ─────────────────────
+#  Choosing between: AWS Glue vs Python scripts vs Spark for ETL.
+#  Rule of thumb: use Python scripts when data fits in memory (&lt;10GB).
+#  Move to Spark when you need distributed processing across a cluster.
+#  Use Glue when you need serverless ETL with AWS-native scheduling.
+#
+# ══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_ETL_Self_Healing_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os
+import json
+import pandas as pd
+import duckdb
+import tempfile
+import traceback
+from datetime import datetime
+from dotenv import load_dotenv
+from pydantic import BaseModel
+
+load_dotenv()
+GROQ_API_KEY = os.environ.get(&#x27;GROQ_API_KEY&#x27;, &#x27;&#x27;)
+
+# Pipeline output directories (simulate Bronze/Silver layers)
+BRONZE_DIR = os.path.join(tempfile.gettempdir(), &#x27;etl_pipeline&#x27;, &#x27;bronze&#x27;)
+SILVER_DIR = os.path.join(tempfile.gettempdir(), &#x27;etl_pipeline&#x27;, &#x27;silver&#x27;)
+AUDIT_FILE = os.path.join(tempfile.gettempdir(), &#x27;etl_pipeline&#x27;, &#x27;audit_log.json&#x27;)
+
+os.makedirs(BRONZE_DIR, exist_ok=True)
+os.makedirs(SILVER_DIR, exist_ok=True)
+
+print(&#x27;=== Self-Healing ETL Pipeline ===&#x27;)
+print(f&#x27;Bronze dir : {BRONZE_DIR}&#x27;)
+print(f&#x27;Silver dir : {SILVER_DIR}&#x27;)
+print(f&#x27;Audit file : {AUDIT_FILE}&#x27;)
+print(f&#x27;Groq key   : {&quot;set&quot; if GROQ_API_KEY else &quot;not set -- LLM stages will use mock responses&quot;}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 -- THE FOUR LLM INTEGRATION STAGES
+# ══════════════════════════════════════════════════════════════
+#
+#  Traditional ETL: Extract -&gt; Transform -&gt; Load
+#  Self-healing ETL adds LLM intelligence at 4 points:
+#
+#  STAGE 1 -- PRE-VALIDATION (before Bronze)
+#    LLM inspects a data sample and flags anomalies BEFORE the
+#    pipeline processes anything. Catches bad data at the source.
+#    Returns: quality_score (0-10), anomalies list, recommendation.
+#
+#  STAGE 2 -- SEMANTIC SCHEMA MAPPING (Bronze -&gt; Silver)
+#    When column names change (schema drift), instead of crashing,
+#    the LLM maps the new names to the expected ones.
+#    Example: &#x27;customer_id&#x27; and &#x27;user_id&#x27; are probably the same thing.
+#
+#  STAGE 3 -- ERROR REMEDIATION (any stage)
+#    If any stage fails, the traceback is sent to the LLM which
+#    explains the error in plain English and suggests a fix.
+#    The pipeline logs the explanation instead of just re-raising.
+#
+#  STAGE 4 -- NL AUDIT LOGGING (after each stage)
+#    Instead of &#x27;processed 1000 rows&#x27;, the LLM writes:
+#    &#x27;Successfully processed 1,000 HR records. 38 were quarantined
+#     due to missing salary fields.&#x27;
+#    This goes into a JSON audit file alongside standard logs.
+#
+#  EXAMPLE -- Pydantic models for each stage ───────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_ETL_Self_Healing_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ── Pydantic models for pipeline data contracts ───────────────
+
+class ValidationReport(BaseModel):
+    &quot;&quot;&quot;Stage 1: pre-validation result.&quot;&quot;&quot;
+    schema_match:   bool
+    anomalies:      list
+    quality_score:  int   # 0-10
+    recommendation: str
+
+
+class SchemaMappingResult(BaseModel):
+    &quot;&quot;&quot;Stage 2: schema drift resolution.&quot;&quot;&quot;
+    drift_detected: bool
+    column_mapping: dict   # {&#x27;new_name&#x27;: &#x27;expected_name&#x27;, ...}
+    confidence:     str    # &#x27;high&#x27; | &#x27;medium&#x27; | &#x27;low&#x27;
+
+
+class RemediationReport(BaseModel):
+    &quot;&quot;&quot;Stage 3: error explanation.&quot;&quot;&quot;
+    explanation:   str
+    suggested_fix: str
+
+
+class AuditEntry(BaseModel):
+    &quot;&quot;&quot;Stage 4: one audit log entry.&quot;&quot;&quot;
+    stage:     str
+    nl_entry:  str
+    timestamp: str
+
+
+print(&#x27;Pydantic models loaded:&#x27;)
+print(&#x27;  ValidationReport  -- Stage 1 pre-validation&#x27;)
+print(&#x27;  SchemaMappingResult -- Stage 2 schema drift&#x27;)
+print(&#x27;  RemediationReport -- Stage 3 error explanation&#x27;)
+print(&#x27;  AuditEntry        -- Stage 4 NL audit log&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 -- THE SELF-HEALING PATTERN
+# ══════════════════════════════════════════════════════════════
+#
+#  A self-healing pipeline NEVER crashes the entire run because of
+#  a single bad record or unexpected column name.
+#
+#  Key design rules:
+#
+#  1. QUARANTINE bad records instead of dropping them
+#     Bad rows go to a &#x27;quarantine&#x27; file, not to the trash.
+#     You can review and reprocess them later.
+#
+#  2. EXPLAIN failures before continuing
+#     Every except block calls the LLM to explain the traceback.
+#     Engineers get plain English, not cryptic stack traces.
+#
+#  3. LOG every run with a structured audit trail
+#     {stage, records_in, records_out, errors, duration_s, nl_entry}
+#     Both for machines (JSON) and humans (NL sentence).
+#
+#  4. DEGRADE GRACEFULLY when LLM is unavailable
+#     If GROQ_API_KEY is not set, use rule-based fallbacks.
+#     The pipeline still runs -- just without AI-enhanced logging.
+#
+#  EXAMPLE -- the self-healing try/except pattern ──────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_ETL_Self_Healing_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ── Self-healing wrapper pattern ─────────────────────────────
+
+def get_llm():
+    &quot;&quot;&quot;Return a Groq LLM if key is set, otherwise None.&quot;&quot;&quot;
+    if not GROQ_API_KEY:
+        return None
+    from langchain_groq import ChatGroq
+    return ChatGroq(model=&#x27;llama-3.1-70b-versatile&#x27;, api_key=GROQ_API_KEY, temperature=0)
+
+
+def explain_error(tb_text: str, stage: str) -&gt; RemediationReport:
+    &quot;&quot;&quot;Ask the LLM to explain a traceback. Falls back to a template.&quot;&quot;&quot;
+    llm = get_llm()
+    if not llm:
+        return RemediationReport(
+            explanation=f&#x27;Stage {stage} failed. Check the traceback above for details.&#x27;,
+            suggested_fix=&#x27;Review the traceback and fix the root cause in the source data or code.&#x27;
+        )
+    from langchain_core.messages import HumanMessage
+    prompt = (
+        f&#x27;You are a senior data engineer. Pipeline stage {stage!r} failed.\n\n&#x27;
+        f&#x27;Traceback:\n{tb_text}\n\n&#x27;
+        &#x27;Respond ONLY with JSON: {&quot;explanation&quot;: &quot;...&quot;, &quot;suggested_fix&quot;: &quot;...&quot;}&#x27;
+    )
+    raw = llm.invoke([HumanMessage(content=prompt)]).content
+    s = raw.find(&#x27;{&#x27;); e = raw.rfind(&#x27;}&#x27;) + 1
+    return RemediationReport(**json.loads(raw[s:e]))
+
+
+# ── Demo: catch + explain an error ───────────────────────────
+try:
+    result = {&#x27;data&#x27;: [1, 2, 3]}[&#x27;missing_key&#x27;]  # intentional KeyError
+except Exception:
+    tb = traceback.format_exc()
+    report = explain_error(tb, &#x27;extract&#x27;)
+    print(&#x27;Error explanation:&#x27;)
+    print(f&#x27;  {report.explanation}&#x27;)
+    print(f&#x27;  Suggested fix: {report.suggested_fix}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 -- BRONZE / SILVER / GOLD DATA LAKE ARCHITECTURE
+# ══════════════════════════════════════════════════════════════
+#
+#  Data lakes organize files into three quality tiers:
+#
+#  BRONZE (raw layer)
+#    Exact copy of the source data, never modified.
+#    Retained indefinitely for audit and reprocessing.
+#    Format: original CSV, JSON, or Parquet as received.
+#    Production: s3://bucket/bronze/YYYY/MM/DD/filename
+#
+#  SILVER (clean layer)
+#    Validated, schema-aligned, deduplicated records.
+#    Bad rows are quarantined, not deleted.
+#    Format: Parquet (compressed, typed, queryable).
+#    Production: s3://bucket/silver/entity/YYYY/MM/
+#
+#  GOLD (business layer) -- not built in this project
+#    Aggregated, business-ready tables.
+#    Joins, groupBys, and metrics applied.
+#    Used by BI tools (Grafana, Tableau, Power BI).
+#    Production: s3://bucket/gold/report_name/
+#
+#  Simulation in this project:
+#    Bronze: tempdir/etl_pipeline/bronze/  (raw CSV copy)
+#    Silver: tempdir/etl_pipeline/silver/  (clean Parquet)
+#    Gold:   DuckDB queries on Silver files  (on demand)
+#
+#  EXAMPLE ----------------------------------------------------------</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_ETL_Self_Healing_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ── Bronze/Silver layer demo ──────────────────────────────────
+import os
+import pandas as pd
+
+# Show the directory structure of the simulated data lake
+print(&#x27;Data lake directory structure (simulated):&#x27;)
+print(f&#x27;  Bronze: {BRONZE_DIR}&#x27;)
+print(f&#x27;  Silver: {SILVER_DIR}&#x27;)
+print()
+
+# Write a raw file to Bronze (exact copy, no transformation)
+sample_raw = pd.DataFrame({
+    &#x27;employee_id&#x27;: [1, 2, 3],
+    &#x27;name&#x27;: [&#x27;Alice&#x27;, &#x27;Bob&#x27;, &#x27;Carol&#x27;],
+    &#x27;salary&#x27;: [95000, 72000, 85000],
+})
+bronze_path = os.path.join(BRONZE_DIR, &#x27;demo_raw.parquet&#x27;)
+sample_raw.to_parquet(bronze_path, index=False)
+
+# Write a cleaned file to Silver (validated, typed)
+sample_clean = sample_raw.copy()
+silver_demo_path = os.path.join(SILVER_DIR, &#x27;demo_clean.parquet&#x27;)
+sample_clean.to_parquet(silver_demo_path, index=False)
+
+print(&#x27;Bronze layer (raw):&#x27;)
+print(f&#x27;  {bronze_path}&#x27;)
+print(f&#x27;  Rows: {len(pd.read_parquet(bronze_path))}&#x27;)
+print()
+print(&#x27;Silver layer (clean):&#x27;)
+print(f&#x27;  {silver_demo_path}&#x27;)
+print(f&#x27;  Rows: {len(pd.read_parquet(silver_demo_path))}&#x27;)
+print()
+print(&#x27;Rule: Bronze is immutable. Silver may have fewer rows (quarantine applied).&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  TASK 1 -- STAGE 1: LLM PRE-VALIDATION
+# ══════════════════════════════════════════════════════════════
+#
+#  Write validate_raw_data(df: pd.DataFrame, sample_size: int = 20)
+#  -&gt; ValidationReport that:
+#
+#    1. Takes a sample of the DataFrame (first sample_size rows)
+#    2. Builds a prompt asking the LLM to check against the schema:
+#         employee_id (int), name (str), department (str),
+#         salary (float &gt; 0), email (valid email with @),
+#         hire_date (ISO date string)
+#    3. If GROQ_API_KEY is set: call Groq, parse JSON into ValidationReport
+#    4. If not set: inspect the sample manually (check for None, negative
+#       salary, missing @) and return a ValidationReport with those findings
+#    5. Print the report and return it
+#
+#  Then call validate_raw_data(raw_hr_data) on the starting data.
+#
+#  Expected output:
+#    Pre-validation result:
+#    Quality score : 4/10
+#    Schema match  : False
+#    Anomalies     : 3 found
+#      - salary -500 is invalid (negative)
+#      - email &#x27;not-valid&#x27; missing @
+#      - name is None
+#    Recommendation: Fix invalid salary, email, and null name before ingesting.
+#
+# --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_ETL_Self_Healing_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+
+# Raw HR data with intentional quality issues
+raw_hr_data = pd.DataFrame({
+    &#x27;employee_id&#x27;: [1, 2, 3, 4, 5, 6],
+    &#x27;name&#x27;:        [&#x27;Alice&#x27;, &#x27;Bob&#x27;, None, &#x27;Dave&#x27;, &#x27;Eve&#x27;, &#x27;Frank&#x27;],
+    &#x27;department&#x27;:  [&#x27;Engineering&#x27;, &#x27;Sales&#x27;, &#x27;Finance&#x27;, &#x27;Engineering&#x27;, &#x27;HR&#x27;, &#x27;Sales&#x27;],
+    &#x27;salary&#x27;:      [95000.0, 72000.0, 85000.0, -500.0, 68000.0, 0.0],
+    &#x27;email&#x27;:       [&#x27;alice@co.com&#x27;, &#x27;bob@co.com&#x27;, &#x27;carol@co.com&#x27;, &#x27;not-valid&#x27;, &#x27;eve@co.com&#x27;, &#x27;frank@co.com&#x27;],
+    &#x27;hire_date&#x27;:   [&#x27;2022-03-01&#x27;, &#x27;2021-06-15&#x27;, &#x27;2023-01-10&#x27;, &#x27;2020-09-01&#x27;, &#x27;2024-02-20&#x27;, &#x27;2019-11-05&#x27;],
+})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  TASK 2 -- STAGE 2: DETECT AND MAP SCHEMA DRIFT
+# ══════════════════════════════════════════════════════════════
+#
+#  Write detect_and_map_schema(df: pd.DataFrame, expected_cols: set)
+#  -&gt; tuple[pd.DataFrame, SchemaMappingResult] that:
+#
+#    1. Detect drift: compare set(df.columns) vs expected_cols
+#    2. If no drift: return (df, SchemaMappingResult(drift_detected=False,
+#       column_mapping={}, confidence=&#x27;high&#x27;))
+#    3. If drift detected and GROQ_API_KEY is set:
+#       a. Build a prompt asking the LLM to map new column names to
+#          expected names (return JSON: {new_name: expected_name, ...})
+#       b. Apply the mapping to rename columns in the DataFrame
+#       c. Return (renamed_df, SchemaMappingResult(drift_detected=True,
+#          column_mapping=mapping, confidence=&#x27;high&#x27;))
+#    4. If drift detected and no GROQ key: use simple heuristics
+#       (if a new name contains a substring of an expected name, map it)
+#       Return with confidence=&#x27;low&#x27;
+#
+#  Call detect_and_map_schema(drifted_df, EXPECTED_COLS) on the starting data.
+#
+#  Expected output:
+#    Drift detected: True
+#    Mapping applied:
+#      customer_id -&gt; employee_id
+#      full_name   -&gt; name
+#      dept        -&gt; department
+#    DataFrame columns after mapping: [&#x27;employee_id&#x27;, &#x27;name&#x27;, &#x27;department&#x27;, ...]
+#
+# --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_ETL_Self_Healing_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+
+EXPECTED_COLS = {&#x27;employee_id&#x27;, &#x27;name&#x27;, &#x27;department&#x27;, &#x27;salary&#x27;, &#x27;email&#x27;, &#x27;hire_date&#x27;}
+
+# Simulates a source system that renamed its columns
+drifted_df = pd.DataFrame({
+    &#x27;customer_id&#x27;: [1, 2, 3],      # was: employee_id
+    &#x27;full_name&#x27;:   [&#x27;Alice&#x27;, &#x27;Bob&#x27;, &#x27;Carol&#x27;],  # was: name
+    &#x27;dept&#x27;:        [&#x27;Eng&#x27;, &#x27;Sales&#x27;, &#x27;Finance&#x27;], # was: department
+    &#x27;salary&#x27;:      [95000, 72000, 85000],
+    &#x27;email&#x27;:       [&#x27;alice@co.com&#x27;, &#x27;bob@co.com&#x27;, &#x27;carol@co.com&#x27;],
+    &#x27;hire_date&#x27;:   [&#x27;2022-03-01&#x27;, &#x27;2021-06-15&#x27;, &#x27;2023-01-10&#x27;],
+})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  TASK 3 -- STAGE 3: TRANSFORM AND SAVE TO SILVER LAYER
+# ══════════════════════════════════════════════════════════════
+#
+#  Write transform_to_parquet(df: pd.DataFrame, output_path: str)
+#  -&gt; dict that:
+#
+#    1. Clean the DataFrame:
+#       a. Drop rows where salary &lt;= 0
+#       b. Drop rows where email does not contain &#x27;@&#x27;
+#       c. Drop rows where name is None
+#       d. Quarantine the dropped rows -- save to output_path + &#x27;_quarantine.parquet&#x27;
+#
+#    2. Save the clean rows to output_path (Parquet format)
+#
+#    3. Verify: reload from output_path, confirm row count matches
+#
+#    4. Return a stats dict:
+#       {&#x27;records_in&#x27;: N, &#x27;records_out&#x27;: M, &#x27;quarantined&#x27;: Q,
+#        &#x27;output_path&#x27;: output_path, &#x27;quarantine_path&#x27;: ...}
+#
+#  Call transform_to_parquet(raw_hr_data, silver_path) on the starting data.
+#
+#  Expected output:
+#    Transform stats:
+#      Records in       : 6
+#      Records out      : 3
+#      Quarantined      : 3
+#      Silver path      : .../etl_pipeline/silver/hr_employees.parquet
+#      Quarantine path  : .../etl_pipeline/silver/hr_employees_quarantine.parquet
+#
+# --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_ETL_Self_Healing_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+import os
+
+silver_path = os.path.join(SILVER_DIR, &#x27;hr_employees.parquet&#x27;)
+
+# Use raw_hr_data from TASK 1 as input
+# (raw_hr_data has 3 bad rows: negative salary, missing @, None name)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  TASK 4 -- STAGE 4: QUERY THE SILVER LAYER WITH DUCKDB
+# ══════════════════════════════════════════════════════════════
+#
+#  Write query_silver_layer(parquet_path: str, sql: str) -&gt; pd.DataFrame
+#  that executes the given SQL against the Parquet file using DuckDB.
+#
+#  The function must:
+#    1. Use duckdb.sql(f&quot;... FROM &#x27;{parquet_path}&#x27; ...&quot;).df()
+#    2. Wrap in try/except -- if the query fails, call explain_error()
+#       from CONCEPT 2 and raise a ValueError with the explanation
+#
+#  Then run these two queries and print results:
+#    a. Average salary per department (GROUP BY + AVG)
+#    b. Employees sorted by salary descending
+#
+#  Expected output:
+#    Average salary by department:
+#    department  avg_salary
+#    Engineering  95000.0
+#    Finance      85000.0
+#    HR           68000.0
+#
+#    Employees by salary:
+#    name      department  salary
+#    Alice     Engineering  95000.0
+#    Carol     Finance      85000.0
+#    Eve       HR           68000.0
+#
+# --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_ETL_Self_Healing_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import duckdb
+
+# Use silver_path from TASK 3
+# (points to the clean Parquet file in SILVER_DIR)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  TASK 5 -- WIRE ALL STAGES INTO run_pipeline()
+# ══════════════════════════════════════════════════════════════
+#
+#  Write run_pipeline(input_csv_path: str) -&gt; list that:
+#
+#  1. Extract: read the CSV into a DataFrame, save raw copy to BRONZE_DIR
+#
+#  2. Stage 1 - Pre-Validation:
+#     Call validate_raw_data(df). If quality_score &lt; 5, log a warning
+#     but continue (do not abort -- self-healing means we proceed).
+#
+#  3. Stage 2 - Schema mapping:
+#     Call detect_and_map_schema(df, EXPECTED_COLS). Apply the result.
+#
+#  4. Stage 3 - Transform:
+#     Call transform_to_parquet(df, silver_path). Collect stats.
+#
+#  5. Stage 4 - Audit logging:
+#     For each completed stage, generate a NL audit entry:
+#       - If GROQ_API_KEY set: call LLM with stage stats dict
+#       - If not set: build a template sentence from the stats
+#     Write all entries to AUDIT_FILE as a JSON list.
+#
+#  6. Return the list of AuditEntry objects
+#
+#  Then:
+#    a. Write pipeline_csv to a temp file and call run_pipeline()
+#    b. Print all audit entries
+#    c. Run one DuckDB query on the Silver layer output
+#
+#  Expected output:
+#    Pipeline completed.
+#
+#    Audit log:
+#      [extract]   Read 8 records from employees_raw.csv.
+#      [validate]  Quality score 4/10. 3 anomalies found.
+#      [transform] 5 records saved to Silver. 3 quarantined.
+#      [query]     Average salary: Engineering=$95,000, Sales=$72,000.
+#    Audit written to: .../audit_log.json
+#
+# --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_ETL_Self_Healing_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os
+import pandas as pd
+import tempfile
+
+# Raw input data -- simulates a CSV delivered by the upstream HR system
+pipeline_data = {
+    &#x27;employee_id&#x27;: [1, 2, 3, 4, 5, 6, 7, 8],
+    &#x27;name&#x27;:        [&#x27;Alice&#x27;, &#x27;Bob&#x27;, None, &#x27;Dave&#x27;, &#x27;Eve&#x27;, &#x27;Frank&#x27;, &#x27;Grace&#x27;, &#x27;Hank&#x27;],
+    &#x27;department&#x27;:  [&#x27;Engineering&#x27;, &#x27;Sales&#x27;, &#x27;Finance&#x27;, &#x27;Engineering&#x27;, &#x27;HR&#x27;, &#x27;Sales&#x27;, &#x27;Engineering&#x27;, &#x27;Finance&#x27;],
+    &#x27;salary&#x27;:      [95000.0, 72000.0, 85000.0, -500.0, 68000.0, 0.0, 91000.0, 78000.0],
+    &#x27;email&#x27;:       [&#x27;alice@co.com&#x27;, &#x27;bob@co.com&#x27;, &#x27;carol@co.com&#x27;, &#x27;not-valid&#x27;,
+                    &#x27;eve@co.com&#x27;, &#x27;frank@co.com&#x27;, &#x27;grace@co.com&#x27;, &#x27;hank@co.com&#x27;],
+    &#x27;hire_date&#x27;:   [&#x27;2022-03-01&#x27;, &#x27;2021-06-15&#x27;, &#x27;2023-01-10&#x27;, &#x27;2020-09-01&#x27;,
+                    &#x27;2024-02-20&#x27;, &#x27;2019-11-05&#x27;, &#x27;2023-08-12&#x27;, &#x27;2022-07-30&#x27;],
+}
+
+# Write to a temp CSV to simulate an upstream file delivery
+pipeline_csv = os.path.join(tempfile.gettempdir(), &#x27;employees_raw.csv&#x27;)
+pd.DataFrame(pipeline_data).to_csv(pipeline_csv, index=False)
+print(f&#x27;Input CSV written: {pipeline_csv}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-2">Day 2 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-2"> Mark this day done</label><pre class="box"># ══════════════════════════════════════════════════════════════
+#  WEEK 12  |  BONUS  |  TALK TO ANY DATABASE USING AI
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Build a FastAPI service that accepts natural-language questions
+#  2. Wire LangChain tool calling to a local SQLite database via Groq
+#  3. Use Python decorators (@tool, @app.get) as production patterns
+#  4. Apply context managers (with sqlite3.connect) for safe DB access
+#  5. Add type hints to every function signature
+#  6. Build a Streamlit frontend that queries the FastAPI backend
+#
+#  ARCHITECTURE
+#  ────────────
+#  Streamlit (app.py)
+#      POST /query {&quot;question&quot;: &quot;...&quot;}
+#          FastAPI (backend.py)
+#              LangChain AgentExecutor (Groq llama-3.1-70b-versatile)
+#                  Tool 1: get_schema()  → reads SQLite schema
+#                  Tool 2: run_sql(sql)  → executes SELECT only
+#              {&quot;sql&quot;: &quot;SELECT ...&quot;, &quot;results&quot;: [...]}
+#          Streamlit: st.dataframe(results) + st.code(sql)
+#
+#  SETUP (run once before starting the app)
+#  ─────────────────────────────────────────
+#  pip install fastapi uvicorn langchain langchain-groq langchain-core
+#              streamlit python-dotenv pydantic requests
+#
+#  1. Copy nl_sql_app/.env.example to nl_sql_app/.env, add your Groq key
+#     Get a free key at: https://console.groq.com
+#  2. python nl_sql_app/seed_data.py
+#  3. uvicorn nl_sql_app.backend:app --reload --port 8000
+#  4. streamlit run nl_sql_app/app.py   (separate terminal)
+#
+#  TIME:  ~60 minutes
+#
+#  ─────────────────────────────────────────────────────────────
+#  ARCHITECTURE DECISION
+#  ─────────────────────
+#  Choosing between: OpenAI GPT-4o vs Groq llama-3.1-70b vs local Ollama.
+#  Rule of thumb: use Groq for fast, free development — near-GPT-4 quality
+#  at zero cost during prototyping. Move to GPT-4o for production accuracy.
+#  Use Ollama when data must not leave the local machine (air-gapped systems).
+#
+# ══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_NL_SQL_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import sqlite3
+import json
+import os
+import time
+import tempfile
+from datetime import datetime
+
+print(&quot;=&quot; * 62)
+print(&quot;  NL-SQL PROJECT — Notebook walkthrough&quot;)
+print(&quot;=&quot; * 62)
+print()
+print(&quot;This notebook explains the architecture of nl_sql_app/.&quot;)
+print(&quot;Read each concept, then complete the TASK sections.&quot;)
+print(&quot;The real app runs in backend.py + app.py.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — PYTHON DECORATORS
+# ══════════════════════════════════════════════════════════════
+#
+#  A decorator is a function that wraps another function to add
+#  behavior before or after it runs — without modifying the
+#  original function&#x27;s code.
+#
+#  Syntax:
+#    @decorator_name
+#    def my_function():
+#        ...
+#
+#  This is exactly equivalent to:
+#    my_function = decorator_name(my_function)
+#
+#  The @ symbol is syntactic sugar. The decorator receives the
+#  function as an argument and returns a (possibly modified) version.
+#
+#  In this project, decorators appear in two places:
+#
+#    1. @tool (from LangChain)
+#       Registers a Python function as a callable tool that the LLM
+#       can request to invoke. LangChain reads the function name,
+#       type hints, and docstring to build the tool&#x27;s schema.
+#
+#    2. @app.get(&quot;/health&quot;) and @app.post(&quot;/query&quot;) (from FastAPI)
+#       Register a Python function as an HTTP route handler.
+#       FastAPI reads the type hints and Pydantic return type to
+#       generate automatic API documentation at /docs.
+#
+#  EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_NL_SQL_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import functools
+import time as _time
+
+# ── Decorator example: log_calls ─────────────────────────────
+def log_calls(func):
+    &quot;&quot;&quot;Decorator: prints the function name and execution time.&quot;&quot;&quot;
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        t0 = _time.time()
+        result = func(*args, **kwargs)
+        ms = round((_time.time() - t0) * 1000, 1)
+        print(f&quot;  [log_calls] {func.__name__}() ran in {ms} ms&quot;)
+        return result
+    return wrapper
+
+
+@log_calls
+def fetch_top_products(limit: int = 5) -&gt; list:
+    &quot;&quot;&quot;Return the top N products.&quot;&quot;&quot;
+    products = [&quot;Laptop Pro&quot;, &quot;Monitor 27in&quot;, &quot;Mechanical Keyboard&quot;,
+                &quot;USB Hub&quot;, &quot;Webcam HD&quot;, &quot;Mouse Wireless&quot;]
+    return products[:limit]
+
+
+@log_calls
+def count_users() -&gt; int:
+    &quot;&quot;&quot;Return the user count.&quot;&quot;&quot;
+    return 10
+
+
+products = fetch_top_products(3)
+user_count = count_users()
+
+print(f&quot;\nTop 3 products : {products}&quot;)
+print(f&quot;User count     : {user_count}&quot;)
+print()
+print(&quot;@log_calls added timing output WITHOUT changing the function bodies.&quot;)
+print(&quot;That is the decorator pattern.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ── How @tool and @app.post work in this project ─────────────
+#
+#  @tool (backend.py)
+#  ------------------
+#  @tool
+#  def run_sql(sql: str) -&gt; str:
+#      &quot;&quot;&quot;Run a SELECT query and return results as JSON.
+#         Only SELECT queries are permitted.&quot;&quot;&quot;
+#      ...
+#
+#  LangChain reads the docstring to build the tool description.
+#  The LLM receives: name, parameter schema, and description.
+#  It decides which tool to call — your code runs the actual function.
+#
+#  @app.post (backend.py)
+#  ----------------------
+#  @app.post(&quot;/query&quot;, response_model=QueryResponse)
+#  def query(req: QueryRequest) -&gt; QueryResponse:
+#      ...
+#
+#  FastAPI registers this as the handler for POST /query.
+#  response_model=QueryResponse tells FastAPI to validate the
+#  return value and document the response shape at /docs.</pre><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — CONTEXT MANAGERS
+# ══════════════════════════════════════════════════════════════
+#
+#  A context manager defines what happens when you enter and exit
+#  a &#x27;with&#x27; block. Python guarantees the exit code runs even if
+#  an exception is raised inside the block.
+#
+#  Syntax:
+#    with some_resource as variable:
+#        # use variable here
+#    # resource is automatically released here, even on error
+#
+#  sqlite3.connect used as a context manager:
+#    - On normal exit : commits the transaction
+#    - On exception   : rolls back the transaction
+#    - Always         : closes the connection
+#
+#  Without a context manager you must call conn.close() manually.
+#  In production pipelines that run thousands of queries, a
+#  leaked connection exhausts the pool and brings down the service.
+#
+#  EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_NL_SQL_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ── Context manager demo ──────────────────────────────────────
+with sqlite3.connect(&quot;:memory:&quot;) as demo_conn:
+    cur = demo_conn.cursor()
+    cur.execute(&quot;&quot;&quot;
+        CREATE TABLE products (
+            id    INTEGER PRIMARY KEY,
+            name  TEXT,
+            price REAL
+        )
+    &quot;&quot;&quot;)
+    cur.executemany(&quot;INSERT INTO products VALUES (?,?,?)&quot;, [
+        (1, &quot;Laptop Pro&quot;,   1299.0),
+        (2, &quot;Monitor 27in&quot;,  399.0),
+        (3, &quot;USB Hub&quot;,        49.99),
+    ])
+    cur.execute(&quot;SELECT * FROM products WHERE price &gt; 100&quot;)
+    rows = cur.fetchall()
+
+# Connection is closed here automatically.
+print(&quot;Products above $100:&quot;)
+for row in rows:
+    print(f&quot;  id={row[0]}  name={row[1]}  price=${row[2]:.2f}&quot;)
+
+print()
+print(&quot;The &#x27;with&#x27; block closed the connection automatically.&quot;)
+print(&quot;No conn.close() call was needed.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — TYPE HINTS
+# ══════════════════════════════════════════════════════════════
+#
+#  Type hints annotate variables and function signatures with the
+#  expected type. Python does not enforce them at runtime, but:
+#
+#    - VS Code uses them to catch mistakes as you type
+#    - FastAPI and Pydantic enforce them at runtime
+#    - LangChain uses them to build tool parameter schemas
+#
+#  Syntax:
+#    variable: type = value
+#    def func(param: type) -&gt; return_type:
+#
+#  Types used in this project:
+#    str           plain string
+#    int           integer
+#    float         floating-point number
+#    list[dict]    a list where every element is a dict
+#    dict          a dictionary with unspecified key/value types
+#
+#  Pydantic enforces type hints at runtime:
+#    class QueryRequest(BaseModel):
+#        question: str         # FastAPI rejects non-string values
+#    class QueryResponse(BaseModel):
+#        sql:        str
+#        results:    list[dict]
+#        latency_ms: float
+#
+#  EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_NL_SQL_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ── Type hints example ────────────────────────────────────────
+def summarize_orders(orders: list, min_amount: float = 0.0) -&gt; dict:
+    &quot;&quot;&quot;
+    Summarize a list of order dicts.
+    Returns count, total, and average for orders above min_amount.
+    &quot;&quot;&quot;
+    filtered = [o for o in orders if o[&quot;amount&quot;] &gt;= min_amount]
+    total: float = sum(o[&quot;amount&quot;] for o in filtered)
+    count: int = len(filtered)
+    average: float = round(total / count, 2) if count else 0.0
+    return {&quot;count&quot;: count, &quot;total&quot;: total, &quot;average&quot;: average}
+
+
+sample_orders: list = [
+    {&quot;id&quot;: 1, &quot;product&quot;: &quot;Laptop Pro&quot;,   &quot;amount&quot;: 1299.0},
+    {&quot;id&quot;: 2, &quot;product&quot;: &quot;USB Hub&quot;,       &quot;amount&quot;:   49.99},
+    {&quot;id&quot;: 3, &quot;product&quot;: &quot;Monitor 27in&quot;, &quot;amount&quot;:  399.0},
+    {&quot;id&quot;: 4, &quot;product&quot;: &quot;Mouse&quot;,        &quot;amount&quot;:   39.99},
+]
+
+all_orders: dict = summarize_orders(sample_orders)
+big_orders: dict = summarize_orders(sample_orders, min_amount=100.0)
+
+print(f&quot;All orders    : {all_orders}&quot;)
+print(f&quot;Orders &gt;= 100 : {big_orders}&quot;)
+print()
+print(&quot;Type hints make the intent clear:&quot;)
+print(&quot;  orders: list  — the caller knows what to pass&quot;)
+print(&quot;  -&gt; dict        — the caller knows what to expect back&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 4 — LANGCHAIN AGENTEXECUTOR WITH GROQ
+# ══════════════════════════════════════════════════════════════
+#
+#  The AgentExecutor runs the ReAct loop:
+#    LLM decides which tool to call
+#    → your code runs it
+#    → result goes back to the LLM
+#    → repeat until the LLM has an answer
+#
+#  Pattern (used verbatim in backend.py):
+#
+#    from langchain_groq import ChatGroq
+#    from langchain.tools import tool
+#    from langchain.agents import create_tool_calling_agent, AgentExecutor
+#    from langchain_core.prompts import ChatPromptTemplate
+#
+#    llm = ChatGroq(api_key=GROQ_API_KEY, model=&quot;llama-3.1-70b-versatile&quot;, temperature=0)
+#
+#    @tool
+#    def get_schema() -&gt; str:
+#        &quot;&quot;&quot;Return the database schema as JSON.&quot;&quot;&quot;
+#        ...
+#
+#    @tool
+#    def run_sql(sql: str) -&gt; str:
+#        &quot;&quot;&quot;Run a SELECT query. Only SELECT is allowed.&quot;&quot;&quot;
+#        ...
+#
+#    prompt = ChatPromptTemplate.from_messages([
+#        (&quot;system&quot;, &quot;You are a SQL expert. Call get_schema first...&quot;),
+#        (&quot;human&quot;, &quot;{input}&quot;),
+#        (&quot;placeholder&quot;, &quot;{agent_scratchpad}&quot;),
+#    ])
+#
+#    executor = AgentExecutor(
+#        agent=create_tool_calling_agent(llm, tools, prompt),
+#        tools=[get_schema, run_sql],
+#        verbose=False,
+#        max_iterations=6,
+#    )
+#
+#    result = executor.invoke({&quot;input&quot;: &quot;Which country has the most orders?&quot;})
+#    print(result[&quot;output&quot;])   # plain English answer
+#
+#  GROQ vs OPENAI (one-line swap):
+#    OpenAI: ChatOpenAI(model=&quot;gpt-4o-mini&quot;, api_key=...)
+#    Groq:   ChatGroq(model=&quot;llama-3.1-70b-versatile&quot;, api_key=...)
+#
+#  EXAMPLE — simulated ReAct loop (no API key required) ─────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_NL_SQL_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ── Simulated AgentExecutor loop ──────────────────────────────
+# Shows the THINK → ACT → OBSERVE pattern without an API key.
+
+def fake_get_schema() -&gt; str:
+    schema = {
+        &quot;users&quot;:  [{&quot;column&quot;: &quot;id&quot;}, {&quot;column&quot;: &quot;name&quot;}, {&quot;column&quot;: &quot;city&quot;}, {&quot;column&quot;: &quot;country&quot;}],
+        &quot;orders&quot;: [{&quot;column&quot;: &quot;id&quot;}, {&quot;column&quot;: &quot;user_id&quot;}, {&quot;column&quot;: &quot;product&quot;}, {&quot;column&quot;: &quot;amount&quot;}],
+    }
+    return json.dumps(schema, indent=2)
+
+
+def fake_run_sql(sql: str) -&gt; str:
+    if not sql.strip().upper().startswith(&quot;SELECT&quot;):
+        return json.dumps({&quot;error&quot;: &quot;Only SELECT queries are permitted.&quot;})
+    return json.dumps([
+        {&quot;country&quot;: &quot;Canada&quot;, &quot;order_count&quot;: 8},
+        {&quot;country&quot;: &quot;USA&quot;,    &quot;order_count&quot;: 6},
+    ])
+
+
+def simulate_agent(question: str) -&gt; None:
+    print(f&quot;Question: {question}&quot;)
+    print(&quot;-&quot; * 50)
+
+    print(&quot;THINK: I need to know the database structure.&quot;)
+    print(&quot;ACT:   get_schema()&quot;)
+    schema_result = fake_get_schema()
+    print(f&quot;OBSERVE: {schema_result[:80]}...&quot;)
+
+    sql = &quot;SELECT u.country, COUNT(o.id) AS order_count FROM users u JOIN orders o ON u.id = o.user_id GROUP BY u.country ORDER BY order_count DESC&quot;
+    print(f&quot;\nTHINK: I know the schema. I will write a JOIN query.&quot;)
+    print(f&quot;ACT:   run_sql(sql=&#x27;{sql[:55]}...&#x27;)&quot;)
+    results = fake_run_sql(sql)
+    print(f&quot;OBSERVE: {results}&quot;)
+
+    rows = json.loads(results)
+    top = rows[0]
+    print(f&quot;\nFINAL ANSWER: {top[&#x27;country&#x27;]} has the most orders ({top[&#x27;order_count&#x27;]}).&quot;)
+
+
+simulate_agent(&quot;Which country has the most orders?&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  TASK 1 — BUILD THE DATABASE SEED FUNCTION
+# ══════════════════════════════════════════════════════════════
+#
+#  Write a function seed_demo_db(db_path: str) -&gt; None that:
+#
+#    1. Uses &#x27;with sqlite3.connect(db_path) as conn:&#x27;
+#    2. Creates two tables:
+#         employees (id INTEGER PRIMARY KEY, name TEXT, dept TEXT, salary REAL)
+#         projects  (id INTEGER PRIMARY KEY, name TEXT, budget REAL, lead_id INTEGER)
+#    3. Inserts the starting data below using parameterized queries
+#    4. Prints how many rows were inserted for each table
+#
+#  Call seed_demo_db(&#x27;:memory:&#x27;) and then verify the data by querying
+#  inside the same &#x27;with&#x27; block.
+#
+#  Expected output:
+#    Seeded: employees=4 rows, projects=4 rows
+#    Employees with salary &gt; 80000:
+#      Alice — Engineering — $95000.0
+#      Carol — Finance — $85000.0
+#
+# --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_NL_SQL_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>employee_rows = [
+    (1, &quot;Alice&quot;, &quot;Engineering&quot;, 95000),
+    (2, &quot;Bob&quot;,   &quot;Sales&quot;,       72000),
+    (3, &quot;Carol&quot;, &quot;Finance&quot;,     85000),
+    (4, &quot;Dave&quot;,  &quot;Engineering&quot;, 78000),
+]
+
+project_rows = [
+    (1, &quot;Data Platform&quot;,    120000, 1),
+    (2, &quot;CRM Migration&quot;,     80000, 2),
+    (3, &quot;Analytics Hub&quot;,     95000, 3),
+    (4, &quot;API Modernization&quot;, 70000, 4),
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  TASK 2 — DEFINE THE LANGCHAIN TOOLS
+# ══════════════════════════════════════════════════════════════
+#
+#  Define two @tool functions that match the backend.py pattern.
+#  Both functions must use &#x27;with sqlite3.connect(task2_db) as conn:&#x27;
+#
+#  get_schema() -&gt; str
+#    Read sqlite_master for table names, then PRAGMA table_info
+#    for each table. Return json.dumps(schema).
+#
+#  run_sql(sql: str) -&gt; str
+#    Reject any query that does not start with SELECT.
+#    Return results as json.dumps(list_of_dicts).
+#    Wrap in try/except — return json.dumps({&quot;error&quot;: str(e)}) on failure.
+#
+#  Test by calling the tools directly (no agent needed):
+#    print(get_schema.invoke({}))
+#    print(run_sql.invoke({&quot;sql&quot;: &quot;SELECT name, dept FROM employees&quot;}))
+#    print(run_sql.invoke({&quot;sql&quot;: &quot;DELETE FROM employees&quot;}))
+#
+#  Expected output:
+#    {&quot;employees&quot;: [{&quot;column&quot;: &quot;id&quot;, &quot;type&quot;: &quot;INTEGER&quot;}, ...], &quot;projects&quot;: [...]}
+#    [{&quot;name&quot;: &quot;Alice&quot;, &quot;dept&quot;: &quot;Engineering&quot;}, {&quot;name&quot;: &quot;Bob&quot;, ...}, ...]
+#    {&quot;error&quot;: &quot;Only SELECT queries are permitted.&quot;}
+#
+# --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_NL_SQL_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langchain.tools import tool
+
+# File-based DB so both tool functions can share the same connection target
+task2_db: str = os.path.join(tempfile.gettempdir(), &quot;task2_demo.db&quot;)
+
+# Seed task2_db with the employee + project data from TASK 1
+with sqlite3.connect(task2_db) as _conn:
+    _cur = _conn.cursor()
+    _cur.execute(&quot;DROP TABLE IF EXISTS employees&quot;)
+    _cur.execute(&quot;DROP TABLE IF EXISTS projects&quot;)
+    _cur.execute(&quot;CREATE TABLE employees (id INTEGER PRIMARY KEY, name TEXT, dept TEXT, salary REAL)&quot;)
+    _cur.execute(&quot;CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT, budget REAL, lead_id INTEGER)&quot;)
+    _cur.executemany(&quot;INSERT INTO employees VALUES (?,?,?,?)&quot;, employee_rows)
+    _cur.executemany(&quot;INSERT INTO projects VALUES (?,?,?,?)&quot;, project_rows)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  TASK 3 — WIRE GROQ INTO THE AGENTEXECUTOR
+# ══════════════════════════════════════════════════════════════
+#
+#  Using the tools from TASK 2 and the CONCEPT 4 pattern,
+#  build an AgentExecutor backed by Groq and ask it 2 questions.
+#
+#  Steps:
+#    1. Load the Groq API key from the environment
+#    2. Build ChatGroq(model=&quot;llama-3.1-70b-versatile&quot;, temperature=0)
+#    3. Build the prompt, agent, and executor (CONCEPT 4 pattern)
+#    4. Ask both questions and print result[&quot;output&quot;] for each
+#    5. If GROQ_API_KEY is not set, print a clear message instead
+#
+#  Expected output (wording will vary):
+#    Q: What is the average salary per department?
+#    A: Engineering: $86,500. Finance: $85,000. Sales: $72,000.
+#
+#    Q: Which project has the highest budget?
+#    A: Data Platform has the highest budget at $120,000.
+#
+# --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_NL_SQL_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dotenv import load_dotenv
+
+# Load from the nl_sql_app/.env file if it exists
+load_dotenv(os.path.join(os.getcwd(), &quot;nl_sql_app&quot;, &quot;.env&quot;))
+
+questions = [
+    &quot;What is the average salary per department?&quot;,
+    &quot;Which project has the highest budget?&quot;,
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  TASK 4 — PYDANTIC MODELS FOR THE API CONTRACT
+# ══════════════════════════════════════════════════════════════
+#
+#  FastAPI uses Pydantic models to validate request and response data.
+#  Write standalone versions of the models used in backend.py:
+#
+#  1. SchemaRequest with field: table_name: str
+#
+#  2. SchemaResponse with fields:
+#       table_name: str
+#       columns:    list
+#       row_count:  int
+#
+#  3. handle_schema_request(req: SchemaRequest) -&gt; SchemaResponse
+#     Query task2_db from TASK 2. Return column names and row count
+#     for the requested table.
+#
+#  Call it twice:
+#    handle_schema_request(SchemaRequest(table_name=&quot;employees&quot;))
+#    handle_schema_request(SchemaRequest(table_name=&quot;projects&quot;))
+#
+#  Expected output:
+#    table_name=&#x27;employees&#x27;  columns=[&#x27;id&#x27;, &#x27;name&#x27;, &#x27;dept&#x27;, &#x27;salary&#x27;]  row_count=4
+#    table_name=&#x27;projects&#x27;   columns=[&#x27;id&#x27;, &#x27;name&#x27;, &#x27;budget&#x27;, &#x27;lead_id&#x27;]  row_count=4
+#
+# --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_NL_SQL_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pydantic import BaseModel</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 5 -- STREAMLIT: FRONTEND IN PURE PYTHON
+# ══════════════════════════════════════════════════════════════
+#
+#  Streamlit converts Python scripts into interactive web apps.
+#  No HTML, no JavaScript, no templates -- just Python functions.
+#
+#  Execution model:
+#    Streamlit re-runs the entire script from top to bottom on
+#    every user interaction (button click, text input, selectbox).
+#    Use st.session_state to persist values across re-runs.
+#
+#  Core components used in this project:
+#
+#    st.title(&#x27;App title&#x27;)              -- large heading
+#    st.text_input(&#x27;Label&#x27;)             -- returns the typed string
+#    st.button(&#x27;Ask&#x27;)                   -- returns True when clicked
+#    st.dataframe(df)                   -- renders a sortable table
+#    st.code(sql, language=&#x27;sql&#x27;)       -- syntax-highlighted code block
+#    st.sidebar.text(&#x27;sidebar text&#x27;)    -- content in the left panel
+#    st.error(&#x27;message&#x27;)                -- red error box
+#    st.spinner(&#x27;Loading...&#x27;)           -- loading indicator
+#
+#  pip install streamlit
+#  Run: streamlit run app.py    (opens http://localhost:8501)
+#
+#  EXAMPLE ----------------------------------------------------------</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_NL_SQL_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ── Streamlit app structure -- simulated in-notebook ───────────
+# In real use, this code lives in nl_sql_app/app.py and is
+# launched with: streamlit run nl_sql_app/app.py
+#
+# The simulation below shows how data flows through the app
+# without needing an actual Streamlit process.
+
+import json
+
+def simulate_ask_question(question: str) -&gt; dict:
+    &quot;&quot;&quot;Simulates what app.py calls via requests.post(&#x27;/query&#x27;).&quot;&quot;&quot;
+    if not question.strip():
+        return {&#x27;error&#x27;: &#x27;Question cannot be empty.&#x27;}
+    return {
+        &#x27;sql&#x27;:     &quot;SELECT * FROM employees WHERE dept = &#x27;Engineering&#x27;&quot;,
+        &#x27;results&#x27;: [{&#x27;name&#x27;: &#x27;Alice&#x27;, &#x27;dept&#x27;: &#x27;Engineering&#x27;, &#x27;salary&#x27;: 95000},
+                    {&#x27;name&#x27;: &#x27;Dave&#x27;,  &#x27;dept&#x27;: &#x27;Engineering&#x27;, &#x27;salary&#x27;: 78000}],
+        &#x27;latency_ms&#x27;: 842,
+    }
+
+
+def simulate_streamlit_page(question: str) -&gt; None:
+    &quot;&quot;&quot;
+    Represents the Streamlit app flow.
+    In app.py, each print() call is replaced by the matching st. call.
+    &quot;&quot;&quot;
+    print(&#x27;[st.title]      NL-SQL: Talk to Any Database&#x27;)
+    print(&#x27;[st.sidebar]    Backend: http://localhost:8000&#x27;)
+    print()
+    print(f&quot;[st.text_input] Question entered: &#x27;{question}&#x27;&quot;)
+
+    if not question.strip():
+        print(&#x27;[st.warning]    Please enter a question.&#x27;)
+        return
+
+    print(&#x27;[st.spinner]    Asking the AI agent...&#x27;)
+    response = simulate_ask_question(question)
+
+    if &#x27;error&#x27; in response:
+        print(f&#x27;[st.error]      {response[&quot;error&quot;]}&#x27;)
+        return
+
+    print(f&#x27;[st.success]    Answer ready in {response[&quot;latency_ms&quot;]} ms&#x27;)
+    print(f&#x27;[st.code/sql]   {response[&quot;sql&quot;]}&#x27;)
+    print(f&#x27;[st.dataframe]  {json.dumps(response[&quot;results&quot;], indent=2)}&#x27;)
+    print(f&#x27;[st.caption]    Latency: {response[&quot;latency_ms&quot;]} ms&#x27;)
+
+
+# ── Run the simulation ────────────────────────────────────────
+simulate_streamlit_page(&#x27;Who are the highest paid engineers?&#x27;)
+print()
+simulate_streamlit_page(&#x27;&#x27;)   # empty input -- shows the warning path</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  TASK 5 -- BUILD THE STREAMLIT FRONTEND
+# ══════════════════════════════════════════════════════════════
+#
+#  Create nl_sql_app/app.py -- a Streamlit app that queries your
+#  FastAPI backend and displays the results.
+#
+#  The app must:
+#
+#  1. Title and sidebar
+#       st.title(&#x27;NL-SQL: Talk to Any Database&#x27;)
+#       st.sidebar.header(&#x27;Settings&#x27;)
+#       st.sidebar.text(f&#x27;Backend: {BACKEND_URL}&#x27;)
+#
+#  2. Question input and button
+#       question = st.text_input(&#x27;Ask a question about the data:&#x27;)
+#       clicked  = st.button(&#x27;Ask&#x27;)
+#
+#  3. On button click:
+#       - POST to {BACKEND_URL}/query with {&#x27;question&#x27;: question}
+#       - If HTTP error: st.error(response.text) and stop
+#
+#  4. Display results
+#       data = response.json()
+#       st.code(data[&#x27;sql&#x27;], language=&#x27;sql&#x27;)
+#       st.dataframe(pd.DataFrame(data[&#x27;results&#x27;]))
+#       st.caption(f&quot;Latency: {data[&#x27;latency_ms&#x27;]} ms&quot;)
+#
+#  5. Error handling
+#       Wrap the request in try/except requests.exceptions.ConnectionError
+#       If backend is not running: st.error(&#x27;Backend not reachable...&#x27;)
+#
+#  BACKEND_URL is read from the environment:
+#    BACKEND_URL = os.environ.get(&#x27;BACKEND_URL&#x27;, &#x27;http://localhost:8000&#x27;)
+#
+#  Test:
+#    uvicorn nl_sql_app.backend:app --reload --port 8000   (Terminal 1)
+#    streamlit run nl_sql_app/app.py                        (Terminal 2)
+#    Open http://localhost:8501 and ask: &#x27;Who has the highest salary?&#x27;
+#
+# --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_Bonus_NL_SQL_Project.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ask_question() is the function your Streamlit app calls.
+# Write it inside nl_sql_app/app.py -- not in this notebook.
+import os
+import requests
+
+BACKEND_URL = os.environ.get(&#x27;BACKEND_URL&#x27;, &#x27;http://localhost:8000&#x27;)
+
+def ask_question(question: str) -&gt; dict:
+    &quot;&quot;&quot;POST a question to the FastAPI backend and return the response dict.&quot;&quot;&quot;
+    resp = requests.post(f&#x27;{BACKEND_URL}/query&#x27;, json={&#x27;question&#x27;: question}, timeout=30)
+    resp.raise_for_status()
+    return resp.json()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  HOW TO RUN THE FULL APPLICATION
+# ══════════════════════════════════════════════════════════════
+#
+#  Terminal 1 — Seed the database (run once):
+#    cd Curriculum/Week_12_Capstone
+#    python nl_sql_app/seed_data.py
+#
+#  Terminal 2 — Start the backend:
+#    cd Curriculum/Week_12_Capstone
+#    uvicorn nl_sql_app.backend:app --reload --port 8000
+#
+#    Visit http://localhost:8000/docs for auto-generated API docs.
+#    Test /health and /schema directly in the browser.
+#
+#  Terminal 3 — Start the frontend:
+#    cd Curriculum/Week_12_Capstone/nl_sql_app
+#    streamlit run app.py
+#
+#    Streamlit opens at http://localhost:8501
+#
+#  Sample questions to try:
+#    - How many users are there per country?
+#    - What is the total revenue per product?
+#    - Which user has spent the most money?
+#    - List all orders above $500 with the customer name.
+#    - What is the average order amount per city?
+#    - How many orders were placed in January 2024?
+#
+#  W12 Royal Road Standard — Observability:
+#    Every /query call logs:
+#      question received, SQL generated, row count, latency in ms.
+#    Latency is also returned in the API response and shown in
+#    the Streamlit UI footer.
+#
+# ══════════════════════════════════════════════════════════════</pre><h2 id="day-3">Day 3 — Docker And Kafka Setup</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-3"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 12  |  DAY 1  |  DOCKER AND KAFKA SETUP
+══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ────────────────────────────────────
+ - Understand what Docker is and why data engineers use it
+ - Understand what Kafka is: topics, producers, consumers, offsets
+ - Simulate a Kafka topic using a plain Python list
+ - Write producer and consumer functions
+ - Build a small end-to-end pipeline in simulation mode
+
+ PROJECT GOAL FOR TODAY
+ ────────────────────────────────────
+ By the end of this file you will have a working simulation
+ of a Kafka message queue.  Day 2 will plug real data into it.
+
+ TIME:  ~45 minutes
+
+══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+
+
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: Apache Kafka vs RabbitMQ vs cloud pub/sub (Pub/Sub, EventHub, Kinesis).
+ Rule of thumb: use Kafka when you need durable, replayable event streams with high throughput. Use RabbitMQ for simpler task queues. Use cloud pub/sub when you want managed infrastructure with zero operational overhead.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — WHAT IS DOCKER AND WHY DATA ENGINEERS USE IT
+══════════════════════════════════════════════════════════════
+
+ Docker lets you run software in a &quot;container&quot; — a lightweight,
+ isolated environment that includes everything the software needs.
+
+ Without Docker, setting up Kafka requires:
+   - Installing Java
+   - Downloading and configuring Kafka
+   - Managing ports and config files by hand
+   - Different steps on Windows, Mac, and Linux
+
+ With Docker, one command starts everything:
+   docker-compose up -d
+
+ Containers are:
+   Portable     — same image runs on any machine
+   Isolated     — each service gets its own network and filesystem
+   Disposable   — delete the container, start fresh any time
+   Reproducible — your teammate gets the same environment
+
+ Data engineers use Docker to run:
+   - Kafka and Zookeeper (message streaming)
+   - MinIO (object storage, like a local S3)
+   - PostgreSQL (relational database)
+   - Airflow (workflow orchestration)
+   - Spark (distributed data processing)
+
+ Key vocabulary:
+   Image      — the blueprint (downloaded from Docker Hub)
+   Container  — a running instance of an image
+   Volume     — persistent storage that survives container restarts
+   Port       — the number that maps container port to host port
+                e.g.  &quot;9092:9092&quot; means container 9092 = host 9092
+
+EXAMPLE ──────────────────────────────────────────────────────
+This is a simulation — no Docker needed.
+We print what the equivalent Docker commands would be.</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+docker_commands = [
+    &quot;docker-compose up -d                    # start all services&quot;,
+    &quot;docker ps                               # list running containers&quot;,
+    &quot;docker-compose logs kafka               # view Kafka logs&quot;,
+    &quot;docker-compose down                     # stop all services&quot;,
+]
+
+print(&quot;Common Docker commands a data engineer uses:&quot;)
+for cmd in docker_commands:
+    print(f&quot;  {cmd}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — WHAT IS KAFKA
+══════════════════════════════════════════════════════════════
+
+ Kafka is a distributed message streaming platform.
+ It decouples the service that produces data from the service
+ that consumes and processes data.
+
+ Core concepts:
+
+   Topic      — a named channel for a specific type of message.
+                Example: &quot;traffic-accidents&quot;, &quot;hotel-bookings&quot;
+
+   Producer   — any program that writes (publishes) messages
+                to a topic.  In our pipeline: the API fetcher.
+
+   Consumer   — any program that reads (subscribes to) messages
+                from a topic.  In our pipeline: the MinIO writer.
+
+   Message    — a single unit of data (usually a JSON string).
+
+   Offset     — the position of a message in the topic.
+                Message 0 = first message ever written.
+                The consumer tracks its current offset so it
+                knows where to continue after a restart.
+
+   Partition  — Kafka splits topics into partitions for scale.
+                We use 1 partition in this capstone.
+
+ Why use Kafka instead of writing directly to the database?
+   - The producer and consumer can run at different speeds
+   - If the database is down, messages wait in Kafka safely
+   - Multiple consumers can read the same topic independently
+   - Messages are retained for days — you can replay them
+
+EXAMPLE ──────────────────────────────────────────────────────
+SIMULATION: a Python list acts as a single Kafka topic.
+Each element in the list is one message (a string or dict).</pre><p>The &quot;topic&quot; is just a list held in memory.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>topic_queue = []</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>A simple producer function: appends one message to the topic.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def produce(topic, message):
+    topic.append(message)
+    print(f&quot;  [PRODUCER] sent: {message}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>A simple consumer function: reads from a given offset.
+Returns the messages it read and the new offset position.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def consume(topic, offset):
+    new_messages = topic[offset:]
+    new_offset = len(topic)
+    return new_messages, new_offset</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Demonstrate producing three messages.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>produce(topic_queue, &quot;record_001&quot;)
+produce(topic_queue, &quot;record_002&quot;)
+produce(topic_queue, &quot;record_003&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Consume starting from offset 0.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>messages, current_offset = consume(topic_queue, 0)
+print(f&quot;\n[CONSUMER] read {len(messages)} message(s), new offset = {current_offset}&quot;)
+for m in messages:
+    print(f&quot;  -&gt; {m}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">REAL MODE (requires Docker + confluent-kafka) ─────────────────
+from confluent_kafka import Producer, Consumer
+
+producer_config = {&quot;bootstrap.servers&quot;: &quot;localhost:9092&quot;}
+p = Producer(producer_config)
+p.produce(&quot;gov-data-raw&quot;, value=&quot;record_001&quot;.encode(&quot;utf-8&quot;))
+p.flush()
+
+consumer_config = {
+    &quot;bootstrap.servers&quot;: &quot;localhost:9092&quot;,
+    &quot;group.id&quot;: &quot;pipeline-group&quot;,
+    &quot;auto.offset.reset&quot;: &quot;earliest&quot;,
+}
+c = Consumer(consumer_config)
+c.subscribe([&quot;gov-data-raw&quot;])
+msg = c.poll(timeout=5.0)
+if msg:
+    print(msg.value().decode(&quot;utf-8&quot;))
+c.close()
+──────────────────────────────────────────────────────────────</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — OFFSET TRACKING
+══════════════════════════════════════════════════════════════
+
+ In real Kafka, each consumer group maintains its own offset.
+ This means:
+   - Two different consumers can read the same topic
+     independently without interfering.
+   - If a consumer crashes at offset 7, it restarts at 7
+     and does not re-read messages 0-6.
+   - A consumer can &quot;seek&quot; back to offset 0 to replay all data.
+
+ In our simulation, offset is just an integer we pass around.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+topic_b = []</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Produce 5 messages.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>for i in range(5):
+    produce(topic_b, f&quot;event_{i}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Consumer A reads all 5 messages from offset 0.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>msgs_a, offset_a = consume(topic_b, 0)
+print(f&quot;\n[CONSUMER A] read {len(msgs_a)} messages, offset now = {offset_a}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Produce 3 more messages while consumer A was busy.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>produce(topic_b, &quot;event_5&quot;)
+produce(topic_b, &quot;event_6&quot;)
+produce(topic_b, &quot;event_7&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Consumer A resumes from where it left off (offset 5).</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>new_msgs_a, offset_a = consume(topic_b, offset_a)
+print(f&quot;[CONSUMER A] caught up: {len(new_msgs_a)} new messages, offset = {offset_a}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Consumer B starts fresh from offset 0 (reads everything).</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>msgs_b, offset_b = consume(topic_b, 0)
+print(f&quot;[CONSUMER B] independent read: {len(msgs_b)} messages total&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1
+══════════════════════════════════════════════════════════════
+
+ A logistics company tracks package scans at warehouses.
+ Each scan is a message produced to the &quot;scans&quot; topic.
+
+ Task:
+   Write a producer function called add_scan(topic, scan_dict)
+   that appends a dictionary to the topic list and prints a
+   confirmation message.
+
+   Then write a consumer function called read_scans(topic, offset)
+   that returns a tuple of (list_of_messages, new_offset).
+
+   Use the starting data below to produce all 4 scans,
+   then consume them from offset 0.
+
+ Expected output:
+   [SCAN PRODUCER] added: {&#x27;package_id&#x27;: &#x27;PKG-001&#x27;, &#x27;location&#x27;: &#x27;Tel Aviv&#x27;, &#x27;status&#x27;: &#x27;arrived&#x27;}
+   [SCAN PRODUCER] added: {&#x27;package_id&#x27;: &#x27;PKG-002&#x27;, &#x27;location&#x27;: &#x27;Haifa&#x27;, &#x27;status&#x27;: &#x27;arrived&#x27;}
+   [SCAN PRODUCER] added: {&#x27;package_id&#x27;: &#x27;PKG-001&#x27;, &#x27;location&#x27;: &#x27;Haifa&#x27;, &#x27;status&#x27;: &#x27;departed&#x27;}
+   [SCAN PRODUCER] added: {&#x27;package_id&#x27;: &#x27;PKG-003&#x27;, &#x27;location&#x27;: &#x27;Jerusalem&#x27;, &#x27;status&#x27;: &#x27;arrived&#x27;}
+   [SCAN CONSUMER] read 4 scans, offset = 4
+   {&#x27;package_id&#x27;: &#x27;PKG-001&#x27;, &#x27;location&#x27;: &#x27;Tel Aviv&#x27;, &#x27;status&#x27;: &#x27;arrived&#x27;}
+   {&#x27;package_id&#x27;: &#x27;PKG-002&#x27;, &#x27;location&#x27;: &#x27;Haifa&#x27;, &#x27;status&#x27;: &#x27;arrived&#x27;}
+   {&#x27;package_id&#x27;: &#x27;PKG-001&#x27;, &#x27;location&#x27;: &#x27;Haifa&#x27;, &#x27;status&#x27;: &#x27;departed&#x27;}
+   {&#x27;package_id&#x27;: &#x27;PKG-003&#x27;, &#x27;location&#x27;: &#x27;Jerusalem&#x27;, &#x27;status&#x27;: &#x27;arrived&#x27;}</pre><p>--- starting data ---</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>scans_topic = []
+
+scan_records = [
+    {&quot;package_id&quot;: &quot;PKG-001&quot;, &quot;location&quot;: &quot;Tel Aviv&quot;,   &quot;status&quot;: &quot;arrived&quot;},
+    {&quot;package_id&quot;: &quot;PKG-002&quot;, &quot;location&quot;: &quot;Haifa&quot;,      &quot;status&quot;: &quot;arrived&quot;},
+    {&quot;package_id&quot;: &quot;PKG-001&quot;, &quot;location&quot;: &quot;Haifa&quot;,      &quot;status&quot;: &quot;departed&quot;},
+    {&quot;package_id&quot;: &quot;PKG-003&quot;, &quot;location&quot;: &quot;Jerusalem&quot;,  &quot;status&quot;: &quot;arrived&quot;},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2
+══════════════════════════════════════════════════════════════
+
+ The same logistics system has two independent consumers:
+   - &quot;warehouse_system&quot; tracks arrivals
+   - &quot;billing_system&quot;  tracks departures
+
+ Each system maintains its own offset in a dict called
+ consumer_offsets.
+
+ Task:
+   After producing all 4 scans from Exercise 1 (use scan_records
+   and the same scans_topic), write code that:
+     1. Reads all messages with warehouse_system (offset starts at 0)
+     2. Produces 2 more scans (PKG-004 arrived in Beer Sheva,
+        PKG-005 arrived in Eilat)
+     3. warehouse_system reads again from its saved offset —
+        should get only the 2 new messages
+     4. billing_system reads from offset 0 — should get all 6
+
+ Expected output (final two reads):
+   [warehouse_system] caught up: 2 new scans, offset = 6
+   [billing_system] total scans read: 6, offset = 6</pre><p>--- starting data ---</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>consumer_offsets = {
+    &quot;warehouse_system&quot;: 0,
+    &quot;billing_system&quot;:   0,
+}
+
+extra_scans = [
+    {&quot;package_id&quot;: &quot;PKG-004&quot;, &quot;location&quot;: &quot;Beer Sheva&quot;, &quot;status&quot;: &quot;arrived&quot;},
+    {&quot;package_id&quot;: &quot;PKG-005&quot;, &quot;location&quot;: &quot;Eilat&quot;,      &quot;status&quot;: &quot;arrived&quot;},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3
+══════════════════════════════════════════════════════════════
+
+ Now build a small end-to-end pipeline.
+ You have a list of 5 employee records as dicts.
+ The pipeline has three steps:
+   1. Producer: loop over the records, produce each one
+      to a topic called &quot;employees_topic&quot;
+   2. Consumer: consume all messages from offset 0
+   3. Processor: for each consumed message, print the
+      employee name and salary formatted as:
+        &quot;Loaded: &lt;name&gt; | salary: &lt;salary&gt;&quot;
+
+ Expected output:
+   [PIPELINE] Producing 5 records...
+   [PRODUCER] sent record 1: David Cohen
+   [PRODUCER] sent record 2: Sarah Levi
+   [PRODUCER] sent record 3: Avi Mizrahi
+   [PRODUCER] sent record 4: Noa Shapiro
+   [PRODUCER] sent record 5: Yael Ben-David
+   [PIPELINE] Consuming from offset 0...
+   Loaded: David Cohen | salary: 12000
+   Loaded: Sarah Levi | salary: 15500
+   Loaded: Avi Mizrahi | salary: 9800
+   Loaded: Noa Shapiro | salary: 13200
+   Loaded: Yael Ben-David | salary: 11000
+   [PIPELINE] Done. 5 records processed.</pre><p>--- starting data ---</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D1_Docker_Kafka_Setup.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>employees_topic = []
+
+employee_records = [
+    {&quot;name&quot;: &quot;David Cohen&quot;,    &quot;department&quot;: &quot;Engineering&quot;, &quot;salary&quot;: 12000},
+    {&quot;name&quot;: &quot;Sarah Levi&quot;,     &quot;department&quot;: &quot;Marketing&quot;,   &quot;salary&quot;: 15500},
+    {&quot;name&quot;: &quot;Avi Mizrahi&quot;,    &quot;department&quot;: &quot;Engineering&quot;, &quot;salary&quot;: 9800},
+    {&quot;name&quot;: &quot;Noa Shapiro&quot;,    &quot;department&quot;: &quot;HR&quot;,          &quot;salary&quot;: 13200},
+    {&quot;name&quot;: &quot;Yael Ben-David&quot;, &quot;department&quot;: &quot;Marketing&quot;,   &quot;salary&quot;: 11000},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-4">Day 4 — Extract — Api And Kafka Producer</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-4"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 12  |  DAY 2  |  EXTRACT — API AND KAFKA PRODUCER
+══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Call a real REST API and parse its JSON response
+ 2. Produce records to a Kafka topic (simulated with a list)
+ 3. Handle network errors gracefully with try/except
+
+ PIPELINE CONTEXT
+ ─────────────────
+ This is Stage 2 of the capstone pipeline:
+   Day 1: Docker + Kafka setup (simulation)
+   Day 2: Extract data from API, produce to Kafka  &lt;-- today
+   Day 3: Store raw records in Bronze layer (MinIO)
+   Day 4: Transform and load to PostgreSQL (Silver)
+   Day 5: Orchestrate the full pipeline with logging
+
+ TIME:  ~45 minutes
+
+══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D2_Extract_API_Producer.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+
+import requests
+import json
+
+
+
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: batch extraction (scheduled) vs micro-batch (every few minutes) vs streaming (event-driven).
+ Rule of thumb: use batch for reporting with daily SLAs. Use micro-batch to reduce data latency without full streaming complexity. Move to streaming only when real-time decisions depend on incoming events.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — CALLING A REST API WITH requests.get()
+══════════════════════════════════════════════════════════════
+
+ The Israeli Government Open Data portal exposes public
+ datasets through a standard REST API called CKAN.
+
+ The base URL for all data searches is:
+   https://data.gov.il/api/3/action/datastore_search
+
+ Key query parameters:
+   resource_id  — the unique ID of the specific dataset table
+   limit        — maximum number of records to return
+   offset       — how many records to skip (used for pagination)
+
+ The response is always JSON with this structure:
+   {
+     &quot;success&quot;: true,
+     &quot;result&quot;: {
+       &quot;total&quot;: 12345,
+       &quot;records&quot;: [
+         {&quot;field1&quot;: &quot;value1&quot;, &quot;field2&quot;: &quot;value2&quot;},
+         ...
+       ]
+     }
+   }
+
+ We access records with: response.json()[&quot;result&quot;][&quot;records&quot;]
+
+ A timeout parameter is important for production code — if the
+ server is slow, we do not want the program to hang forever.
+
+EXAMPLE ──────────────────────────────────────────────────────
+SIMULATION: instead of calling the real API, we build a fake
+response dict that matches the real structure exactly.
+This lets the code run without a network connection.</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D2_Extract_API_Producer.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+def make_fake_api_response(resource_id, limit):
+    &quot;&quot;&quot;Return a dict that mimics the structure of a real CKAN API response.&quot;&quot;&quot;
+    records = []
+    for i in range(1, limit + 1):
+        records.append({
+            &quot;_id&quot;: i,
+            &quot;resource_id&quot;: resource_id,
+            &quot;district&quot;: f&quot;District_{i % 6 + 1}&quot;,
+            &quot;count&quot;: i * 17,
+            &quot;year&quot;: 2020 + (i % 4),
+        })
+    return {
+        &quot;success&quot;: True,
+        &quot;result&quot;: {
+            &quot;total&quot;: limit * 3,   # pretend there are more records beyond the limit
+            &quot;records&quot;: records,
+        },
+    }</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Simulate the API call and parse the records.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D2_Extract_API_Producer.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>fake_response_data = make_fake_api_response(&quot;5e87a7a1-2f6f-41c1-8aec-7216d52a6cf6&quot;, limit=5)
+
+records = fake_response_data[&quot;result&quot;][&quot;records&quot;]
+print(f&quot;API call returned {len(records)} records.&quot;)
+print(f&quot;First record: {records[0]}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">REAL MODE (requires network access) ──────────────────────────
+url = &quot;https://data.gov.il/api/3/action/datastore_search&quot;
+params = {
+    &quot;resource_id&quot;: &quot;5e87a7a1-2f6f-41c1-8aec-7216d52a6cf6&quot;,
+    &quot;limit&quot;: 50,
+}
+response = requests.get(url, params=params, timeout=10)
+response.raise_for_status()
+records = response.json()[&quot;result&quot;][&quot;records&quot;]
+──────────────────────────────────────────────────────────────</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — PRODUCING RECORDS TO KAFKA
+══════════════════════════════════════════════════════════════
+
+ In a real Kafka setup, a producer serializes each record to
+ JSON and sends it to a broker running at localhost:9092.
+ The broker writes it to the named topic on disk.
+
+ In simulation mode, the &quot;topic&quot; is just a Python list.
+ Each element in the list is one record (a dict).
+ Appending to the list is equivalent to producing a message.
+
+ The producer function:
+   1. Accepts a list of record dicts and a topic list
+   2. Iterates over records
+   3. Appends each record dict to the topic list
+   4. Returns the count of records produced
+
+ Keeping a count lets the orchestrator log how many records
+ moved through each stage of the pipeline.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><p>SIMULATION: topic is a plain Python list.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D2_Extract_API_Producer.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>demo_topic = []
+
+def produce_to_topic(records_list, topic):
+    &quot;&quot;&quot;Append each record dict to the topic list. Return count produced.&quot;&quot;&quot;
+    count = 0
+    for record in records_list:
+        topic.append(record)
+        count += 1
+    return count
+
+sample_records = [
+    {&quot;id&quot;: 1, &quot;city&quot;: &quot;Tel Aviv&quot;,    &quot;value&quot;: 100},
+    {&quot;id&quot;: 2, &quot;city&quot;: &quot;Jerusalem&quot;,   &quot;value&quot;: 200},
+    {&quot;id&quot;: 3, &quot;city&quot;: &quot;Haifa&quot;,       &quot;value&quot;: 150},
+]
+
+produced = produce_to_topic(sample_records, demo_topic)
+print(f&quot;\nProduced {produced} records to demo topic.&quot;)
+print(f&quot;Topic now contains {len(demo_topic)} messages.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">REAL MODE (requires Docker + confluent-kafka) ─────────────────
+from confluent_kafka import Producer
+import json
+
+producer_config = {&quot;bootstrap.servers&quot;: &quot;localhost:9092&quot;}
+p = Producer(producer_config)
+
+for record in sample_records:
+    p.produce(&quot;gov-data-raw&quot;, value=json.dumps(record).encode(&quot;utf-8&quot;))
+
+p.flush()   # wait until all messages are delivered
+print(f&quot;Produced {len(sample_records)} messages to topic gov-data-raw&quot;)
+──────────────────────────────────────────────────────────────</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — ERROR HANDLING FOR NETWORK CALLS
+══════════════════════════════════════════════════════════════
+
+ Network calls can fail for many reasons:
+   - The server is down or unreachable
+   - The URL is wrong (404 Not Found)
+   - The request takes too long (timeout)
+   - The response is not valid JSON (malformed response)
+
+ requests.exceptions.RequestException is the base class for
+ all requests errors. Catching it covers connection errors,
+ timeouts, and HTTP errors in one except block.
+
+ Best practice pattern for a fetch function:
+   1. Wrap the requests.get() call in try/except
+   2. On error: print or log the error message
+   3. Return an empty list so the pipeline can continue
+      (downstream code receives [] and produces 0 messages)
+
+ Returning an empty list instead of raising is called
+ &quot;graceful degradation&quot; — the pipeline does not crash,
+ it just continues with no data for this batch.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D2_Extract_API_Producer.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+def safe_fetch(url, params):
+    &quot;&quot;&quot;Fetch JSON from url with params. Return records list or [] on error.&quot;&quot;&quot;
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        return response.json()[&quot;result&quot;][&quot;records&quot;]
+    except requests.exceptions.RequestException as e:
+        print(f&quot;  [ERROR] Network request failed: {e}&quot;)
+        return []</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Test with a deliberately broken URL to trigger the error path.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D2_Extract_API_Producer.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>result = safe_fetch(&quot;https://this-server-does-not-exist.example.com/api&quot;, {})
+print(f&quot;\nsafe_fetch with bad URL returned: {result}&quot;)
+print(f&quot;  Pipeline can continue — received empty list: {result == []}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1
+══════════════════════════════════════════════════════════════
+
+ Write a function fetch_gov_data(resource_id, limit=50)
+ that calls the Israeli Government Open Data API and returns
+ a list of record dicts.
+
+ API URL: https://data.gov.il/api/3/action/datastore_search
+ Pass resource_id and limit as query parameters.
+ Wrap the call in try/except requests.exceptions.RequestException.
+ On error, print the error and return an empty list.
+
+ Call the function with:
+   resource_id = &quot;5e87a7a1-2f6f-41c1-8aec-7216d52a6cf6&quot;
+   limit       = 50
+
+ Print the count of records fetched and the first record.
+ If the network is unavailable, the function must return []
+ without crashing.
+
+ Expected output (network available):
+   Fetched 50 records from resource 5e87a7a1-2f6f-41c1-8aec-7216d52a6cf6
+   First record: {&#x27;_id&#x27;: 1, ...}
+
+ Expected output (network unavailable):
+   [ERROR] Network request failed: ...
+   Fetched 0 records from resource 5e87a7a1-2f6f-41c1-8aec-7216d52a6cf6</pre><p>--- starting data ---</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D2_Extract_API_Producer.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>GOV_API_URL = &quot;https://data.gov.il/api/3/action/datastore_search&quot;
+TARGET_RESOURCE_ID = &quot;5e87a7a1-2f6f-41c1-8aec-7216d52a6cf6&quot;</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>(write your code here)</p>
+<pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2
+══════════════════════════════════════════════════════════════
+
+ Write a function produce_records(records, topic_queue)
+ that appends each record dict to topic_queue and returns
+ the count of records produced.
+
+ The function must:
+   - Iterate over the records list
+   - Append each record dict directly (not as JSON string)
+   - Return the integer count of records appended
+
+ Use the sample_data below as the records to produce.
+ Create an empty list called pipeline_topic as the queue.
+ Call produce_records and print the count returned.
+ Then print the length of pipeline_topic to confirm.
+
+ Expected output:
+   produce_records returned: 4
+   pipeline_topic length   : 4</pre><p>--- starting data ---</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D2_Extract_API_Producer.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>pipeline_topic = []
+
+sample_data = [
+    {&quot;_id&quot;: 1, &quot;district&quot;: &quot;North&quot;,  &quot;accidents&quot;: 42, &quot;year&quot;: 2022},
+    {&quot;_id&quot;: 2, &quot;district&quot;: &quot;South&quot;,  &quot;accidents&quot;: 31, &quot;year&quot;: 2022},
+    {&quot;_id&quot;: 3, &quot;district&quot;: &quot;Center&quot;, &quot;accidents&quot;: 78, &quot;year&quot;: 2022},
+    {&quot;_id&quot;: 4, &quot;district&quot;: &quot;North&quot;,  &quot;accidents&quot;: 39, &quot;year&quot;: 2023},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>(write your code here)</p>
+<pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3
+══════════════════════════════════════════════════════════════
+
+ Combine both functions from Exercise 1 and Exercise 2.
+
+ Write code that:
+   1. Calls fetch_gov_data(TARGET_RESOURCE_ID, limit=50)
+      and stores the result in fetched_records
+   2. Creates an empty list called main_topic
+   3. Calls produce_records(fetched_records, main_topic)
+      and stores the return value in produced_count
+   4. Prints the summary line shown below
+
+ If the network is unavailable, fetched_records will be []
+ and produced_count will be 0 — this is the expected behavior.
+
+ Expected output (network available):
+   Fetched 50 records, produced 50 to topic
+
+ Expected output (network unavailable):
+   [ERROR] Network request failed: ...
+   Fetched 0 records, produced 0 to topic</pre><p>--- starting data ---</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D2_Extract_API_Producer.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>main_topic = []</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>(write your code here)</p>
+<h2 id="day-5">Day 5 — Store — Bronze Layer (Minio / S3)</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-5"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 12  |  DAY 3  |  STORE — BRONZE LAYER (MinIO / S3)
+══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Understand what MinIO and object storage are
+ 2. Understand the Bronze / Silver / Gold data lake layers
+ 3. Save and load JSON files (simulate S3 bucket operations)
+
+ PIPELINE CONTEXT
+ ─────────────────
+ This is Stage 3 of the capstone pipeline:
+   Day 1: Docker + Kafka setup (simulation)
+   Day 2: Extract data from API, produce to Kafka
+   Day 3: Store raw records in Bronze layer (MinIO)  &lt;-- today
+   Day 4: Transform and load to PostgreSQL (Silver)
+   Day 5: Orchestrate the full pipeline with logging
+
+ TIME:  ~45 minutes
+
+══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D3_Store_MinIO.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+
+import os
+import json
+
+
+
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: MinIO (self-hosted S3-compatible) vs AWS S3 vs Google Cloud Storage.
+ Rule of thumb: use MinIO in local development and air-gapped environments. Move to S3 or GCS in production when managed storage, global replication, and tight cloud integration are needed.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — WHAT IS MinIO / S3 OBJECT STORAGE
+══════════════════════════════════════════════════════════════
+
+ Object storage treats data as named &quot;objects&quot; (files) inside
+ named &quot;buckets&quot; (top-level containers).  Unlike a filesystem,
+ there are no real sub-folders — the slash in a key like
+ &quot;bronze/2024-01-15/raw_data.json&quot; is just part of the name.
+
+ AWS S3 (Simple Storage Service) is the most widely used
+ object storage service in cloud data engineering.
+
+ MinIO is an open-source, self-hosted object storage server
+ that is 100% compatible with the S3 API.  Data engineers run
+ MinIO locally (via Docker) to develop and test pipelines
+ before deploying them to AWS.
+
+ Why object storage for a data pipeline?
+   - Raw files can be any size — no schema required
+   - Easy to version: keep every daily snapshot forever
+   - Cheap storage cost compared to a database
+   - S3-compatible tools (boto3, Spark, Pandas) work with MinIO
+
+ SIMULATION: in this lesson, a local folder acts as the bucket.
+   Real MinIO bucket  : s3://my-pipeline/bronze/
+   Simulation folder  : ./bronze/
+
+ The Python code is identical except for the boto3 client call.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><p>Simulation: create a local folder to represent the bucket.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D3_Store_MinIO.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>bronze_folder = os.path.join(os.path.dirname(__file__), &quot;bronze_demo&quot;)
+os.makedirs(bronze_folder, exist_ok=True)
+
+print(f&quot;Bronze bucket (simulation) ready at: {bronze_folder}&quot;)
+print(&quot;  In production this would be an S3 or MinIO bucket.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">REAL MODE (requires Docker + boto3 + running MinIO) ──────────
+import boto3
+
+s3 = boto3.client(
+    &quot;s3&quot;,
+    endpoint_url=&quot;http://localhost:9000&quot;,
+    aws_access_key_id=&quot;minioadmin&quot;,
+    aws_secret_access_key=&quot;minioadmin&quot;,
+)
+s3.create_bucket(Bucket=&quot;my-pipeline&quot;)
+print(&quot;MinIO bucket created.&quot;)
+──────────────────────────────────────────────────────────────</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — BRONZE / SILVER / GOLD NAMING CONVENTION
+══════════════════════════════════════════════════════════════
+
+ The Medallion Architecture organizes data into three layers.
+ Each layer is a separate folder (or S3 prefix):
+
+   BRONZE  — raw, unprocessed data exactly as received
+             Filename pattern: raw_YYYY-MM-DD.json
+             Never delete or modify Bronze files.
+             If something goes wrong you can always replay
+             the pipeline from Bronze.
+
+   SILVER  — cleaned and validated data
+             Nulls filled, types corrected, columns renamed
+             Filename pattern: cleaned_YYYY-MM-DD.json
+             or loaded into a relational table (Day 4).
+
+   GOLD    — aggregated, business-ready data
+             Grouped by city/year, KPIs computed, joined with
+             other tables.  Used directly by dashboards and
+             analysts.
+
+ Typical folder structure:
+
+   data/
+     bronze/
+       raw_2024-01-14.json
+       raw_2024-01-15.json
+     silver/
+       cleaned_2024-01-14.json
+       cleaned_2024-01-15.json
+     gold/
+       kpis_january_2024.json
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D3_Store_MinIO.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+layer_names = [&quot;bronze&quot;, &quot;silver&quot;, &quot;gold&quot;]
+descriptions = {
+    &quot;bronze&quot;: &quot;Raw data as received — never modified&quot;,
+    &quot;silver&quot;: &quot;Cleaned and typed — ready for analysis&quot;,
+    &quot;gold&quot;:   &quot;Aggregated — ready for dashboards&quot;,
+}
+
+print(&quot;\nMedallion Architecture layers:&quot;)
+for layer in layer_names:
+    print(f&quot;  {layer.upper():8s} | {descriptions[layer]}&quot;)
+
+print(&quot;\nExample filename convention:&quot;)
+for layer, prefix in [(&quot;bronze&quot;, &quot;raw&quot;), (&quot;silver&quot;, &quot;cleaned&quot;), (&quot;gold&quot;, &quot;kpis&quot;)]:
+    print(f&quot;  {layer}/  -&gt;  {prefix}_2024-01-15.json&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — SAVING AND LOADING JSON FILES
+══════════════════════════════════════════════════════════════
+
+ Python&#x27;s built-in json module provides two key functions:
+
+   json.dumps(obj)   — serialize Python object to a JSON string
+   json.loads(s)     — parse a JSON string back to Python object
+
+ For files you typically use:
+   json.dump(obj, f)    — write to an open file object
+   json.load(f)         — read from an open file object
+
+ indent=2 makes the JSON human-readable (one key per line).
+ ensure_ascii=False preserves non-ASCII characters (Hebrew text).
+
+ After writing, you can verify the file with os.path.getsize()
+ to confirm it is not empty before moving to the next stage.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D3_Store_MinIO.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+sample_records = [
+    {&quot;_id&quot;: 1, &quot;district&quot;: &quot;North&quot;,  &quot;accidents&quot;: 42, &quot;year&quot;: 2022},
+    {&quot;_id&quot;: 2, &quot;district&quot;: &quot;South&quot;,  &quot;accidents&quot;: 31, &quot;year&quot;: 2022},
+    {&quot;_id&quot;: 3, &quot;district&quot;: &quot;Center&quot;, &quot;accidents&quot;: 78, &quot;year&quot;: 2022},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Write to a JSON file.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D3_Store_MinIO.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>demo_filepath = os.path.join(bronze_folder, &quot;raw_demo.json&quot;)
+with open(demo_filepath, &quot;w&quot;, encoding=&quot;utf-8&quot;) as f:
+    json.dump(sample_records, f, indent=2, ensure_ascii=False)
+
+file_size = os.path.getsize(demo_filepath)
+print(f&quot;\nWrote {len(sample_records)} records to {demo_filepath}&quot;)
+print(f&quot;  File size: {file_size} bytes&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Read it back.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D3_Store_MinIO.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>with open(demo_filepath, &quot;r&quot;, encoding=&quot;utf-8&quot;) as f:
+    loaded = json.load(f)
+
+print(f&quot;Read back {len(loaded)} records.&quot;)
+print(f&quot;  First record: {loaded[0]}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">REAL MODE (requires boto3 + running MinIO) ───────────────────
+json_string = json.dumps(sample_records, indent=2, ensure_ascii=False)
+s3.put_object(
+    Bucket=&quot;my-pipeline&quot;,
+    Key=&quot;bronze/raw_2024-01-15.json&quot;,
+    Body=json_string.encode(&quot;utf-8&quot;),
+)
+response = s3.get_object(Bucket=&quot;my-pipeline&quot;, Key=&quot;bronze/raw_2024-01-15.json&quot;)
+loaded = json.loads(response[&quot;Body&quot;].read().decode(&quot;utf-8&quot;))
+──────────────────────────────────────────────────────────────</pre><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1
+══════════════════════════════════════════════════════════════
+
+ Write a function save_to_bronze(records, output_folder, run_date)
+ that saves the records list as a JSON file.
+
+ Rules:
+   - The filename must be f&quot;raw_{run_date}.json&quot;
+   - The file must be written inside output_folder
+   - Use indent=2 and ensure_ascii=False
+   - The function must return the full filepath (string)
+
+ After calling the function, print:
+   Saved 6 records to bronze/raw_2024-01-15.json (312 bytes)
+ (The actual byte count will vary.)
+
+ Expected output:
+   Saved 6 records to &lt;path&gt;/raw_2024-01-15.json (NNN bytes)</pre><p>--- starting data ---</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D3_Store_MinIO.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>output_folder = os.path.join(os.path.dirname(__file__), &quot;bronze&quot;)
+os.makedirs(output_folder, exist_ok=True)
+
+run_date = &quot;2024-01-15&quot;
+
+records_to_save = [
+    {&quot;_id&quot;: 1, &quot;district&quot;: &quot;North&quot;,    &quot;accidents&quot;: 42, &quot;year&quot;: 2022},
+    {&quot;_id&quot;: 2, &quot;district&quot;: &quot;South&quot;,    &quot;accidents&quot;: 31, &quot;year&quot;: 2022},
+    {&quot;_id&quot;: 3, &quot;district&quot;: &quot;Center&quot;,   &quot;accidents&quot;: 78, &quot;year&quot;: 2022},
+    {&quot;_id&quot;: 4, &quot;district&quot;: &quot;Haifa&quot;,    &quot;accidents&quot;: 55, &quot;year&quot;: 2023},
+    {&quot;_id&quot;: 5, &quot;district&quot;: &quot;Tel Aviv&quot;, &quot;accidents&quot;: 91, &quot;year&quot;: 2023},
+    {&quot;_id&quot;: 6, &quot;district&quot;: &quot;Jerusalem&quot;,&quot;accidents&quot;: 47, &quot;year&quot;: 2023},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>(write your code here)</p>
+<pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2
+══════════════════════════════════════════════════════════════
+
+ Write a function list_bronze_files(folder)
+ that returns a list of (filename, size_bytes) tuples for
+ every .json file found in folder.
+
+ Rules:
+   - Use os.listdir() to iterate over files in folder
+   - Include only files whose name ends with &quot;.json&quot;
+   - For each file, get its size in bytes with os.path.getsize()
+   - Return a list of (filename, size_bytes) tuples
+   - Sort the list by filename alphabetically
+
+ After calling the function, print each tuple on its own line.
+
+ Expected output (after Exercise 1 has run):
+   Bronze files in &lt;folder&gt;:
+     raw_2024-01-15.json  |  312 bytes</pre><p>--- starting data ---
+output_folder is defined above (from Exercise 1)</p>
+<p>(write your code here)</p>
+<pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3
+══════════════════════════════════════════════════════════════
+
+ Write a function load_from_bronze(filepath)
+ that reads a JSON file at filepath and returns a list of
+ record dicts.
+
+ Rules:
+   - Open the file with encoding=&quot;utf-8&quot;
+   - Use json.load() to parse it
+   - Return the parsed list
+
+ Call the function with the filepath returned by save_to_bronze
+ in Exercise 1. Print the count of records loaded and the
+ last record in the list.
+
+ Expected output:
+   Loaded 6 records from bronze/raw_2024-01-15.json
+   Last record: {&#x27;_id&#x27;: 6, &#x27;district&#x27;: &#x27;Jerusalem&#x27;, &#x27;accidents&#x27;: 47, &#x27;year&#x27;: 2023}</pre><p>--- starting data ---
+Use the filepath variable returned from Exercise 1 above</p>
+<p>(write your code here)</p>
+<h2 id="day-6">Day 6 — Transform And Load — Silver Layer</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-6"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 12  |  DAY 4  |  TRANSFORM AND LOAD — SILVER LAYER</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Apply Silver layer transformations to raw records
+ 2. Load cleaned records into SQLite (same SQL as PostgreSQL)
+ 3. Query results using SELECT, COUNT, GROUP BY, ORDER BY
+
+ PIPELINE CONTEXT
+ ─────────────────
+ This is Stage 4 of the capstone pipeline:
+   Day 1: Docker + Kafka setup (simulation)
+   Day 2: Extract data from API, produce to Kafka
+   Day 3: Store raw records in Bronze layer (MinIO)
+   Day 4: Transform and load to PostgreSQL (Silver) &lt;-- today
+   Day 5: Orchestrate the full pipeline with logging
+
+ TIME:  ~45 minutes
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: Python + pandas transforms vs dbt (SQL-first transforms) vs Spark.
+ Rule of thumb: use Python transforms when logic requires libraries or complex control flow. Use dbt when SQL analysts own the transformation layer and want version-controlled, testable SQL. Move to Spark when row counts exceed hundreds of millions.</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D4_Transform_Load_PostgreSQL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import sqlite3
+import os
+from datetime import datetime</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — SILVER LAYER TRANSFORMATION</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ The Silver layer converts raw Bronze data into clean,
+ consistent records that are safe to load into a database.
+
+ Standard Silver transformations:
+
+   1. Strip whitespace from string fields
+      raw:     &quot;  Tel Aviv  &quot;  -&gt;  &quot;Tel Aviv&quot;
+
+   2. Replace empty strings with None
+      raw:     &quot;&quot;  -&gt;  None (becomes NULL in SQL)
+
+   3. Rename columns to snake_case
+      raw:     &quot;DistrictName&quot;  -&gt;  &quot;district_name&quot;
+
+   4. Add a loaded_at timestamp
+      Every row gets a loaded_at field set to the current time.
+      This lets you audit when each record was processed and
+      makes it easy to find &quot;records loaded in the last hour&quot;.
+
+   5. Cast numeric strings to int or float
+      raw:     &quot;42&quot;  -&gt;  42
+
+ The transformation function takes a list of raw dicts and
+ returns a new list of cleaned dicts.  It never modifies the
+ original list — this preserves the Bronze record unchanged.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D4_Transform_Load_PostgreSQL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def transform_demo(record):
+    &quot;&quot;&quot;Apply basic Silver transformations to one record dict.&quot;&quot;&quot;
+    cleaned = {}
+    for key, value in record.items():
+        # Strip whitespace from strings, replace empty with None.
+        if isinstance(value, str):
+            value = value.strip()
+            if value == &quot;&quot;:
+                value = None
+        cleaned[key] = value
+    # Add loaded_at timestamp.
+    cleaned[&quot;loaded_at&quot;] = datetime.now().isoformat()
+    return cleaned
+
+raw_demo = {&quot;district&quot;: &quot;  North  &quot;, &quot;year&quot;: 2022, &quot;note&quot;: &quot;&quot;}
+cleaned_demo = transform_demo(raw_demo)
+
+print(&quot;Raw record    :&quot;, raw_demo)
+print(&quot;Cleaned record:&quot;, cleaned_demo)
+print(f&quot;  &#x27;note&#x27; is now: {repr(cleaned_demo[&#x27;note&#x27;])} (None = SQL NULL)&quot;)
+print(f&quot;  &#x27;district&#x27; stripped: &#x27;{cleaned_demo[&#x27;district&#x27;]}&#x27;&quot;)
+print(f&quot;  loaded_at added: {cleaned_demo[&#x27;loaded_at&#x27;][:19]}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — LOADING TO SQLite (SAME SQL AS PostgreSQL)</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ SQLite is a file-based relational database built into Python.
+ It uses standard SQL, so the INSERT, SELECT, GROUP BY, and
+ ORDER BY statements you write here work identically in
+ PostgreSQL (just the connection setup differs).
+
+ Key steps to load records:
+
+   1. Connect: sqlite3.connect(&quot;mydb.db&quot;) returns a Connection.
+      Pass &quot;:memory:&quot; to create a temporary in-memory database.
+
+   2. Get a cursor: conn.cursor() returns a Cursor object.
+      All SQL is executed through the cursor.
+
+   3. CREATE TABLE: define column names and types.
+      Use IF NOT EXISTS so re-running the script does not error.
+
+   4. INSERT with executemany: pass a list of tuples.
+      executemany is much faster than calling execute() in a loop.
+
+   5. Commit: conn.commit() writes the changes to disk.
+
+   6. Close: conn.close() releases the file lock.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D4_Transform_Load_PostgreSQL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>conn = sqlite3.connect(&quot;:memory:&quot;)   # in-memory database
+cursor = conn.cursor()
+
+# Create a simple table.
+cursor.execute(&quot;&quot;&quot;
+    CREATE TABLE IF NOT EXISTS demo_records (
+        id          INTEGER,
+        district    TEXT,
+        accidents   INTEGER,
+        year        INTEGER,
+        loaded_at   TEXT
+    )
+&quot;&quot;&quot;)
+
+# Insert 3 rows using executemany.
+demo_rows = [
+    (1, &quot;North&quot;,  42, 2022, datetime.now().isoformat()),
+    (2, &quot;South&quot;,  31, 2022, datetime.now().isoformat()),
+    (3, &quot;Center&quot;, 78, 2023, datetime.now().isoformat()),
+]
+cursor.executemany(
+    &quot;INSERT INTO demo_records VALUES (?, ?, ?, ?, ?)&quot;,
+    demo_rows,
+)
+conn.commit()
+
+# Verify the count.
+cursor.execute(&quot;SELECT COUNT(*) FROM demo_records&quot;)
+count = cursor.fetchone()[0]
+print(f&quot;\nInserted rows: {count}&quot;)
+conn.close()
+
+# REAL MODE (requires PostgreSQL + psycopg2) ───────────────────
+# import psycopg2
+#
+# conn = psycopg2.connect(
+#     host=&quot;localhost&quot;, port=5432,
+#     dbname=&quot;pipeline_db&quot;, user=&quot;postgres&quot;, password=&quot;postgres&quot;
+# )
+# cursor = conn.cursor()
+# cursor.execute(&quot;CREATE TABLE IF NOT EXISTS pipeline_data (...)&quot;)
+# cursor.executemany(&quot;INSERT INTO pipeline_data VALUES (%s, %s, %s, %s, %s)&quot;, rows)
+# conn.commit()
+# cursor.close()
+# conn.close()
+# ──────────────────────────────────────────────────────────────</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — QUERYING RESULTS</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ After loading, we run SQL queries to verify and summarize
+ the data.  Three standard verification queries:
+
+   1. Total count:  SELECT COUNT(*) FROM table_name
+      Confirms the expected number of rows were loaded.
+
+   2. Top N rows:   SELECT * FROM table_name ORDER BY col DESC LIMIT 5
+      Shows the rows with the highest value in a numeric column.
+
+   3. Group by:     SELECT col, COUNT(*) FROM table_name GROUP BY col
+      Counts rows per unique value of a categorical column.
+      Shows how the data is distributed across categories.
+
+ cursor.fetchall() returns a list of tuples.
+ cursor.fetchone() returns one tuple (or None).
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D4_Transform_Load_PostgreSQL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>conn2 = sqlite3.connect(&quot;:memory:&quot;)
+c2 = conn2.cursor()
+
+c2.execute(&quot;&quot;&quot;
+    CREATE TABLE IF NOT EXISTS traffic (
+        id INTEGER, district TEXT, accidents INTEGER, year INTEGER
+    )
+&quot;&quot;&quot;)
+c2.executemany(
+    &quot;INSERT INTO traffic VALUES (?, ?, ?, ?)&quot;,
+    [
+        (1, &quot;North&quot;,    42, 2022),
+        (2, &quot;South&quot;,    31, 2022),
+        (3, &quot;Center&quot;,   78, 2022),
+        (4, &quot;North&quot;,    39, 2023),
+        (5, &quot;Center&quot;,   65, 2023),
+        (6, &quot;South&quot;,    50, 2023),
+    ],
+)
+conn2.commit()
+
+# Query 1: total count.
+c2.execute(&quot;SELECT COUNT(*) FROM traffic&quot;)
+print(f&quot;\nTotal rows in traffic table: {c2.fetchone()[0]}&quot;)
+
+# Query 2: top 3 rows by accidents (highest first).
+c2.execute(&quot;SELECT district, year, accidents FROM traffic ORDER BY accidents DESC LIMIT 3&quot;)
+print(&quot;Top 3 by accidents:&quot;)
+for row in c2.fetchall():
+    print(f&quot;  {row[0]:8s} {row[1]}  {row[2]} accidents&quot;)
+
+# Query 3: count per district.
+c2.execute(&quot;SELECT district, COUNT(*) AS row_count FROM traffic GROUP BY district ORDER BY row_count DESC&quot;)
+print(&quot;Rows per district:&quot;)
+for row in c2.fetchall():
+    print(f&quot;  {row[0]:8s} : {row[1]} rows&quot;)
+
+conn2.close()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ Write a function transform_records(raw_records)
+ that cleans a list of raw record dicts and returns a new
+ list of cleaned dicts.
+
+ For each record the function must:
+   1. Strip leading/trailing whitespace from all string values
+   2. Replace any empty string value with None
+   3. Add a key &quot;loaded_at&quot; with value datetime.now().isoformat()
+
+ The function must return a NEW list — do not modify the
+ original raw_records list.
+
+ After calling the function, print the count of cleaned records
+ and show the first record to confirm loaded_at was added.
+
+ Expected output:
+   Transformed 5 records
+   First cleaned record:
+     {&#x27;_id&#x27;: 1, &#x27;district&#x27;: &#x27;North&#x27;, &#x27;accidents&#x27;: 42, &#x27;year&#x27;: 2022, &#x27;notes&#x27;: None, &#x27;loaded_at&#x27;: &#x27;...&#x27;}
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D4_Transform_Load_PostgreSQL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>raw_records = [
+    {&quot;_id&quot;: 1, &quot;district&quot;: &quot;North  &quot;,  &quot;accidents&quot;: 42, &quot;year&quot;: 2022, &quot;notes&quot;: &quot;&quot;},
+    {&quot;_id&quot;: 2, &quot;district&quot;: &quot;  South&quot;,  &quot;accidents&quot;: 31, &quot;year&quot;: 2022, &quot;notes&quot;: &quot;partial&quot;},
+    {&quot;_id&quot;: 3, &quot;district&quot;: &quot;Center&quot;,   &quot;accidents&quot;: 78, &quot;year&quot;: 2022, &quot;notes&quot;: &quot;&quot;},
+    {&quot;_id&quot;: 4, &quot;district&quot;: &quot; Haifa &quot;,  &quot;accidents&quot;: 55, &quot;year&quot;: 2023, &quot;notes&quot;: &quot;&quot;},
+    {&quot;_id&quot;: 5, &quot;district&quot;: &quot;Tel Aviv&quot;, &quot;accidents&quot;: 91, &quot;year&quot;: 2023, &quot;notes&quot;: &quot;verified&quot;},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D4_Transform_Load_PostgreSQL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># (write your code here)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ Write a function load_to_db(records, db_path)
+ that loads cleaned records into SQLite and returns the row
+ count in the table after loading.
+
+ Rules:
+   - Connect to db_path (use &quot;:memory:&quot; to keep it in RAM)
+   - CREATE TABLE IF NOT EXISTS pipeline_data with columns:
+       record_id INTEGER, district TEXT, accidents INTEGER,
+       year INTEGER, notes TEXT, loaded_at TEXT
+   - Use executemany to insert all records
+   - Commit and then run SELECT COUNT(*) to get the row count
+   - Close the connection and return the row count
+
+ Use the cleaned records returned by transform_records
+ in Exercise 1 as input.
+
+ Expected output:
+   Loaded 5 rows into pipeline_data
+
+--- starting data ---
+Use cleaned_records from Exercise 1 above</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D4_Transform_Load_PostgreSQL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>db_path = &quot;:memory:&quot;</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D4_Transform_Load_PostgreSQL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># (write your code here)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ Connect to a new in-memory SQLite database and insert the
+ records below. Then write and execute three SQL query strings:
+
+   query_total   : SELECT COUNT(*) FROM pipeline_data
+   query_top5    : top 5 rows ordered by accidents DESC
+   query_by_year : count of rows per year, ordered by year ASC
+
+ Print the results of each query.
+
+ Expected output:
+   Total rows: 8
+   Top 5 by accidents:
+     Center 2023 91 accidents
+     North  2023 88 accidents
+     Center 2022 78 accidents
+     South  2023 71 accidents
+     Haifa  2022 65 accidents
+   Rows per year:
+     2022 : 4 rows
+     2023 : 4 rows
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D4_Transform_Load_PostgreSQL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>analysis_records = [
+    (1, &quot;North&quot;,  42, 2022, &quot;2024-01-15T10:00:00&quot;),
+    (2, &quot;South&quot;,  31, 2022, &quot;2024-01-15T10:00:00&quot;),
+    (3, &quot;Center&quot;, 78, 2022, &quot;2024-01-15T10:00:00&quot;),
+    (4, &quot;Haifa&quot;,  65, 2022, &quot;2024-01-15T10:00:00&quot;),
+    (5, &quot;North&quot;,  88, 2023, &quot;2024-01-15T10:00:00&quot;),
+    (6, &quot;South&quot;,  71, 2023, &quot;2024-01-15T10:00:00&quot;),
+    (7, &quot;Center&quot;, 91, 2023, &quot;2024-01-15T10:00:00&quot;),
+    (8, &quot;Haifa&quot;,  60, 2023, &quot;2024-01-15T10:00:00&quot;),
+]
+
+query_total    = &quot;SELECT COUNT(*) FROM pipeline_data&quot;
+query_top5     = &quot;SELECT district, year, accidents FROM pipeline_data ORDER BY accidents DESC LIMIT 5&quot;
+query_by_year  = &quot;SELECT year, COUNT(*) FROM pipeline_data GROUP BY year ORDER BY year ASC&quot;</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D4_Transform_Load_PostgreSQL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># (write your code here)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-7">Day 7 — Orchestrate — Final Pipeline Run</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-7"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 12  |  DAY 5  |  ORCHESTRATE — FINAL PIPELINE RUN
+══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Configure Python logging with timestamp and level
+ 2. Orchestrate a multi-stage pipeline by chaining outputs
+ 3. Build a structured run report with timing and error counts
+
+ PIPELINE CONTEXT
+ ─────────────────
+ This is Stage 5 (final) of the capstone pipeline:
+   Day 1: Docker + Kafka setup (simulation)
+   Day 2: Extract data from API, produce to Kafka
+   Day 3: Store raw records in Bronze layer (MinIO)
+   Day 4: Transform and load to PostgreSQL (Silver)
+   Day 5: Orchestrate the full pipeline with logging  &lt;-- today
+
+ Today we wire all four stages together into a single
+ run_pipeline() function.  Each stage&#x27;s output becomes the
+ next stage&#x27;s input.  Failures are caught per-stage so one
+ broken stage does not crash the entire pipeline.
+
+ TIME:  ~45 minutes
+
+══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D5_Pipeline_Final_Run.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+
+import logging
+import time
+import os
+import json
+import sqlite3
+from datetime import datetime
+
+
+
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: custom logging + Grafana vs OpenTelemetry vs managed APM (Datadog/New Relic).
+ Rule of thumb: use custom metrics + Grafana for full control and no vendor lock-in. Use OpenTelemetry for portable, standards-based traces across microservices. Move to managed APM when the team needs pre-built dashboards and on-call alerting out of the box.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — PYTHON LOGGING MODULE
+══════════════════════════════════════════════════════════════
+
+ The logging module is the standard way to emit structured
+ messages in Python programs.  Unlike print(), log messages
+ include a level (DEBUG, INFO, WARNING, ERROR, CRITICAL) and
+ can be routed to files, external systems, or filtered by
+ level at runtime.
+
+ basicConfig() sets up the root logger with one call:
+   level   — minimum severity to display (INFO = show INFO+)
+   format  — format string for each log line
+   handlers — where to send log output (default: stderr)
+
+ Useful format tokens:
+   %(asctime)s    — timestamp (e.g. 2024-01-15 10:22:05,123)
+   %(levelname)s  — INFO, WARNING, ERROR, etc.
+   %(message)s    — the message string
+
+ The four main log levels in order of severity:
+   logging.debug(msg)    — verbose detail (disabled in INFO mode)
+   logging.info(msg)     — normal progress messages
+   logging.warning(msg)  — something unexpected but not fatal
+   logging.error(msg)    — a stage failed; pipeline may continue
+
+ Call basicConfig only once per program (at the top-level
+ script).  Calling it inside a function has no effect if the
+ root logger was already configured.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><p>Configure the root logger (call this once at the top of the script).</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D5_Pipeline_Final_Run.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>logging.basicConfig(
+    level=logging.INFO,
+    format=&quot;%(asctime)s  %(levelname)-8s  %(message)s&quot;,
+    datefmt=&quot;%Y-%m-%d %H:%M:%S&quot;,
+)
+
+logging.info(&quot;Logging is configured.&quot;)
+logging.info(&quot;Pipeline script starting.&quot;)
+logging.warning(&quot;This is a WARNING — something unexpected but the script continues.&quot;)
+logging.error(&quot;This is an ERROR — a stage would have failed here.&quot;)
+logging.info(&quot;After the ERROR, the pipeline continues.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — ORCHESTRATION PATTERN
+══════════════════════════════════════════════════════════════
+
+ Orchestration means running each stage in order and passing
+ the output of one stage as the input to the next.
+
+ The pattern for a robust pipeline:
+
+   try:
+       stage_output = run_stage(previous_output)
+       logging.info(f&quot;Stage done: {len(stage_output)} records&quot;)
+   except Exception as e:
+       logging.error(f&quot;Stage failed: {e}&quot;)
+       stage_output = []   # continue with empty data
+
+ If a stage fails, we set its output to [] and let the next
+ stage run.  The downstream stage will produce 0 records,
+ which is safe.  The run report will capture the error.
+
+ Why catch Exception (broad) instead of a specific type?
+ In orchestration code, we want to catch any unexpected error
+ (database down, disk full, network timeout) so the orchestrator
+ itself never crashes.  The error is recorded in the report.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D5_Pipeline_Final_Run.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+def stage_extract_sim(resource_id, limit):
+    &quot;&quot;&quot;Simulate the extract stage — return fake records.&quot;&quot;&quot;
+    records = [
+        {&quot;_id&quot;: i, &quot;district&quot;: f&quot;District_{i % 4 + 1}&quot;, &quot;count&quot;: i * 10, &quot;year&quot;: 2023}
+        for i in range(1, limit + 1)
+    ]
+    return records
+
+def stage_transform_sim(raw_records):
+    &quot;&quot;&quot;Simulate the transform stage — add loaded_at to each record.&quot;&quot;&quot;
+    cleaned = []
+    for r in raw_records:
+        r_copy = dict(r)
+        r_copy[&quot;loaded_at&quot;] = datetime.now().isoformat()
+        cleaned.append(r_copy)
+    return cleaned
+
+def stage_load_sim(records):
+    &quot;&quot;&quot;Simulate the load stage — insert into in-memory SQLite.&quot;&quot;&quot;
+    conn = sqlite3.connect(&quot;:memory:&quot;)
+    c = conn.cursor()
+    c.execute(&quot;CREATE TABLE pipeline_data (id INTEGER, district TEXT, count INTEGER, year INTEGER, loaded_at TEXT)&quot;)
+    rows = [(r[&quot;_id&quot;], r[&quot;district&quot;], r[&quot;count&quot;], r[&quot;year&quot;], r[&quot;loaded_at&quot;]) for r in records]
+    c.executemany(&quot;INSERT INTO pipeline_data VALUES (?, ?, ?, ?, ?)&quot;, rows)
+    conn.commit()
+    c.execute(&quot;SELECT COUNT(*) FROM pipeline_data&quot;)
+    row_count = c.fetchone()[0]
+    conn.close()
+    return row_count</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Run the three stages in sequence, passing outputs forward.</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D5_Pipeline_Final_Run.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>logging.info(&quot;Orchestration demo starting.&quot;)
+
+try:
+    raw = stage_extract_sim(&quot;demo-resource&quot;, limit=10)
+    logging.info(f&quot;Stage EXTRACT done: {len(raw)} records fetched&quot;)
+except Exception as e:
+    logging.error(f&quot;Stage EXTRACT failed: {e}&quot;)
+    raw = []
+
+try:
+    cleaned = stage_transform_sim(raw)
+    logging.info(f&quot;Stage TRANSFORM done: {len(cleaned)} records cleaned&quot;)
+except Exception as e:
+    logging.error(f&quot;Stage TRANSFORM failed: {e}&quot;)
+    cleaned = []
+
+try:
+    loaded_count = stage_load_sim(cleaned)
+    logging.info(f&quot;Stage LOAD done: {loaded_count} rows in database&quot;)
+except Exception as e:
+    logging.error(f&quot;Stage LOAD failed: {e}&quot;)
+    loaded_count = 0
+
+logging.info(&quot;Orchestration demo complete.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — RUN REPORT
+══════════════════════════════════════════════════════════════
+
+ A run report is a dict that captures the outcome of one
+ pipeline execution.  It is printed at the end of every run
+ so the operator can see at a glance what happened.
+
+ Standard run report keys:
+
+   started_at        — ISO timestamp when run_pipeline() started
+   finished_at       — ISO timestamp when run_pipeline() ended
+   duration_seconds  — float, finished - started in seconds
+   records_fetched   — int, how many records the extract stage got
+   records_loaded    — int, how many rows were written to the DB
+   errors            — list of error message strings (empty = success)
+
+ Use time.time() to measure elapsed time:
+   t_start = time.time()
+   ... do work ...
+   duration = round(time.time() - t_start, 2)
+
+ After building the report dict, print it one key per line
+ for readability.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D5_Pipeline_Final_Run.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+t0 = time.time()
+time.sleep(0.05)   # simulate work taking 50 ms
+t1 = time.time()
+
+demo_report = {
+    &quot;started_at&quot;:       datetime.now().isoformat()[:19],
+    &quot;finished_at&quot;:      datetime.now().isoformat()[:19],
+    &quot;duration_seconds&quot;: round(t1 - t0, 2),
+    &quot;records_fetched&quot;:  10,
+    &quot;records_loaded&quot;:   10,
+    &quot;errors&quot;:           [],
+}
+
+print(&quot;\nRun report example:&quot;)
+for key, value in demo_report.items():
+    print(f&quot;  {key:&lt;22} : {value}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1
+══════════════════════════════════════════════════════════════
+
+ Set up logging and write a function run_pipeline(resource_id,
+ output_folder, db_path) that orchestrates all four stages.
+
+ The stages (all simulated inline — no imports needed):
+   Stage 1 EXTRACT  : call stage_extract_sim(resource_id, limit=20)
+   Stage 2 PRODUCE  : append each record to a list called topic_queue
+   Stage 3 BRONZE   : call json.dumps() on topic_queue, write to file
+                      named f&quot;{output_folder}/raw_{today}.json&quot;
+                      where today = datetime.now().strftime(&quot;%Y-%m-%d&quot;)
+   Stage 4 LOAD     : call stage_load_sim(topic_queue)
+
+ After each stage, log an INFO message:
+   &quot;Stage EXTRACT complete: 20 records&quot;
+   &quot;Stage PRODUCE complete: 20 records in queue&quot;
+   &quot;Stage BRONZE complete: saved to raw_2024-01-15.json&quot;
+   &quot;Stage LOAD complete: 20 rows in database&quot;
+
+ Call run_pipeline(&quot;gov-resource-001&quot;, output_folder, &quot;:memory:&quot;)
+
+ Expected output (logging lines):
+   2024-01-15 10:22:05  INFO      Stage EXTRACT complete: 20 records
+   2024-01-15 10:22:05  INFO      Stage PRODUCE complete: 20 records in queue
+   2024-01-15 10:22:05  INFO      Stage BRONZE complete: saved to raw_2024-01-15.json
+   2024-01-15 10:22:05  INFO      Stage LOAD complete: 20 rows in database</pre><p>--- starting data ---</p>
+<div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D5_Pipeline_Final_Run.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>output_folder = os.path.join(os.path.dirname(__file__), &quot;pipeline_output&quot;)
+os.makedirs(output_folder, exist_ok=True)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>(write your code here)</p>
+<pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2
+══════════════════════════════════════════════════════════════
+
+ Modify run_pipeline from Exercise 1 to add per-stage
+ error handling.
+
+ Wrap each stage call in try/except Exception as e:
+   - On success: log INFO as before
+   - On failure: log ERROR with the message, set stage output to []
+     and append the error message string to an errors list
+   - The pipeline must always reach Stage 4 even if earlier stages fail
+
+ To test the error path, add this line at the top of run_pipeline
+ (before Stage 1):
+   raise_on_stage = 2   # set to 1,2,3,4 to simulate a failure
+
+ Then in Stage 2&#x27;s try block, before the main code, add:
+   if raise_on_stage == 2:
+       raise RuntimeError(&quot;Simulated Stage 2 failure&quot;)
+
+ Call run_pipeline with raise_on_stage = 2.
+
+ Expected output:
+   INFO      Stage EXTRACT complete: 20 records
+   ERROR     Stage PRODUCE failed: Simulated Stage 2 failure
+   INFO      Stage BRONZE complete: saved to raw_2024-01-15.json
+   INFO      Stage LOAD complete: 0 rows in database
+   WARNING   Pipeline completed with 1 error(s)</pre><p>--- starting data ---
+No additional variables needed</p>
+<p>(write your code here)</p>
+<pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3
+══════════════════════════════════════════════════════════════
+
+ Add a run report to run_pipeline from Exercise 2.
+
+ At the START of run_pipeline, record:
+   t_start    = time.time()
+   started_at = datetime.now().isoformat()[:19]
+
+ At the END (after all four stages and error checks), build
+ a run_report dict with these exact keys:
+   started_at        — string from above
+   finished_at       — datetime.now().isoformat()[:19]
+   duration_seconds  — round(time.time() - t_start, 2)
+   records_fetched   — count from Stage 1 (0 if failed)
+   records_loaded    — count from Stage 4 (0 if failed)
+   errors            — list of error strings (empty = clean run)
+
+ Print the run report one key per line, then return it.
+
+ Call run_pipeline with raise_on_stage = 0 (no failures) and
+ print the returned report to verify all keys are present.
+
+ Expected output:
+   INFO      Stage EXTRACT complete: 20 records
+   INFO      Stage PRODUCE complete: 20 records in queue
+   INFO      Stage BRONZE complete: saved to raw_2024-01-15.json
+   INFO      Stage LOAD complete: 20 rows in database
+   Run report:
+     started_at             : 2024-01-15T10:22:05
+     finished_at            : 2024-01-15T10:22:05
+     duration_seconds       : 0.02
+     records_fetched        : 20
+     records_loaded         : 20
+     errors                 : []</pre><p>--- starting data ---
+No additional variables needed</p>
+<p>(write your code here)</p>
+<pre class="box">## ══════════════════════════════════════════════════════════════
+##  CONCEPT 4 — FULL OBSERVABILITY STACK
+## ══════════════════════════════════════════════════════════════
+Royal Road Standard W12: combine structured logs, run metrics, and cost tracking
+into one `PipelineObserver` object — and call `dashboard()` at the end of every run.
+
+An observable pipeline records **three things** for every run:
+
+| Layer | What it captures |
+|-------|-----------------|
+| Structured logs | every stage name, status (OK / FAILED), duration |
+| Run metrics | records in, records out, error count |
+| Cost snapshot | API calls made, tokens used, estimated dollar cost |
+
+This pattern is what a Principal AI Solutions Engineer owns in production.
+Every alert, SLA, and cost report flows from this object.
+
+**EXAMPLE**</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D5_Pipeline_Final_Run.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import logging, datetime
+
+class PipelineObserver:
+    def __init__(self, pipeline_name):
+        self.name        = pipeline_name
+        self.started_at  = datetime.datetime.now()
+        self.stages      = []        # list of stage records
+        self.api_calls   = 0
+        self.tokens_used = 0
+        self.cost_per_k  = 0.002     # $ per 1 000 tokens
+
+    def record_stage(self, stage_name, records_in, records_out, error=None):
+        entry = {
+            &quot;stage&quot;:       stage_name,
+            &quot;records_in&quot;:  records_in,
+            &quot;records_out&quot;: records_out,
+            &quot;ok&quot;:          error is None,
+            &quot;error&quot;:       str(error) if error else None,
+        }
+        self.stages.append(entry)
+        status = &quot;OK&quot; if error is None else f&quot;FAILED ({error})&quot;
+        logging.info(&quot;[%s] %s: %d-&gt;%d | %s&quot;,
+                     self.name, stage_name, records_in, records_out, status)
+
+    def add_api_call(self, tokens=0):
+        self.api_calls   += 1
+        self.tokens_used += tokens
+
+    def dashboard(self):
+        elapsed = (datetime.datetime.now() - self.started_at).total_seconds()
+        failed  = [s for s in self.stages if not s[&quot;ok&quot;]]
+        cost    = (self.tokens_used / 1000) * self.cost_per_k
+        sep     = &quot;=&quot; * 52
+        print(sep)
+        print(f&quot;  PIPELINE DASHBOARD  {self.name}&quot;)
+        print(sep)
+        print(f&quot;  Duration       : {elapsed:.2f}s&quot;)
+        print(f&quot;  Stages run     : {len(self.stages)}&quot;)
+        print(f&quot;  Stages failed  : {len(failed)}&quot;)
+        print(f&quot;  API calls      : {self.api_calls}&quot;)
+        print(f&quot;  Tokens used    : {self.tokens_used}&quot;)
+        print(f&quot;  Est. cost      : ${cost:.4f}&quot;)
+        if failed:
+            print(f&quot;  Failed stages  : {[f[&#x27;stage&#x27;] for f in failed]}&quot;)
+        print(sep)
+
+# Demo: wire the observer into a 3-stage run
+obs = PipelineObserver(&quot;gov_data_pipeline&quot;)
+
+obs.record_stage(&quot;extract&quot;,   records_in=0,   records_out=500)
+obs.add_api_call(tokens=1200)
+
+obs.record_stage(&quot;transform&quot;, records_in=500, records_out=487)
+
+obs.record_stage(&quot;load&quot;,      records_in=487, records_out=487)
+
+obs.dashboard()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">## ══════════════════════════════════════════════════════════════
+##  EXERCISE 4
+## ══════════════════════════════════════════════════════════════
+Royal Road Standard W12: wire `PipelineObserver` into a 4-stage run.
+
+Your pipeline has these stages (simulate with `record_stage` / `add_api_call`):
+
+| Stage | records_in | records_out | API call? |
+|-------|-----------|-------------|-----------|
+| fetch_api | 0 | 300 | yes — 800 tokens |
+| validate | 300 | 285 | no |
+| transform | 285 | 285 | no |
+| load_to_db | 285 | 285 | no |
+
+1. Create a `PipelineObserver` named `&quot;final_pipeline&quot;`.
+2. Record each stage in order.
+3. Call `add_api_call(tokens=800)` after the fetch stage.
+4. Call `dashboard()` at the end.
+
+Expected output:
+```
+====================================================
+  PIPELINE DASHBOARD  final_pipeline
+====================================================
+  Duration       : 0.00s
+  Stages run     : 4
+  Stages failed  : 0
+  API calls      : 1
+  Tokens used    : 800
+  Est. cost      : $0.0016
+====================================================
+```
+--- starting data --- (no additional variables needed)</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D5_Pipeline_Final_Run.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Create your PipelineObserver and call record_stage() / add_api_call() below.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">## ══════════════════════════════════════════════════════════════
+##  CONCEPT 5 — SMART SCHEMA AGENT: STAGE 7 — FASTAPI PRODUCTION WRAPPER
+## ══════════════════════════════════════════════════════════════
+Stage 7 adds a production HTTP layer to the `SmartSchemaAgent` built across W6–W11.
+Five endpoints expose the governed NL→SQL interface to external callers:
+
+| Method | Path | Agent capability used |
+|--------|------|-----------------------|
+| GET | /health | liveness — is the service up? |
+| GET | /schema | Stage 1: table metadata from sqlite_master |
+| POST | /query | Stage 5: natural-language → SQL → rows |
+| GET | /audit | Stage 2: last N rows from the audit log |
+| POST | /validate | Stage 3: safety check before execution |
+
+This is the full agent running as a governed, observable REST API.
+In production: replace `DB_PATH = &quot;:memory:&quot;` with your real database path.
+
+**EXAMPLE**</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D5_Pipeline_Final_Run.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># SIMULATION MODE
+# To run as a real server: uvicorn &lt;this_file&gt;:app --reload
+# Replace DB_PATH with your real SQLite file in production.
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import sqlite3
+
+app = FastAPI(title=&quot;Smart Schema Agent API&quot;, version=&quot;7.0&quot;)
+DB_PATH = &quot;:memory:&quot;
+
+DANGEROUS = {&quot;DROP&quot;, &quot;TRUNCATE&quot;, &quot;DELETE&quot;}
+
+
+def _run_sql(sql, limit=50):
+    con = sqlite3.connect(DB_PATH)
+    try:
+        cur = con.execute(sql)
+        cols = [d[0] for d in cur.description] if cur.description else []
+        rows = cur.fetchmany(limit)
+        return [dict(zip(cols, row)) for row in rows]
+    finally:
+        con.close()
+
+
+class QueryRequest(BaseModel):
+    question: str
+    max_rows: int = 10
+
+class ValidateRequest(BaseModel):
+    sql: str
+
+
+@app.get(&quot;/health&quot;)
+def health():
+    return {&quot;status&quot;: &quot;ok&quot;, &quot;agent&quot;: &quot;SmartSchemaAgent&quot;, &quot;version&quot;: &quot;7.0&quot;}
+
+
+@app.get(&quot;/schema&quot;)
+def schema():
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute(
+        &quot;SELECT name, sql FROM sqlite_master WHERE type=&#x27;table&#x27;&quot;
+    ).fetchall()
+    con.close()
+    return {r[0]: r[1] for r in rows}
+
+
+@app.post(&quot;/query&quot;)
+def query(req: QueryRequest):
+    # Stage 5: in production, pass req.question to the LangChain NL-&gt;SQL agent
+    # Here we simulate with a fixed query so no API key is required
+    simulated_sql = f&quot;SELECT * FROM audit_log LIMIT {req.max_rows}&quot;
+    try:
+        rows = _run_sql(simulated_sql, req.max_rows)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {&quot;sql&quot;: simulated_sql, &quot;rows&quot;: rows, &quot;row_count&quot;: len(rows)}
+
+
+@app.get(&quot;/audit&quot;)
+def audit(limit: int = 20):
+    try:
+        return _run_sql(
+            f&quot;SELECT * FROM audit_log ORDER BY rowid DESC LIMIT {limit}&quot;
+        )
+    except Exception:
+        return []
+
+
+@app.post(&quot;/validate&quot;)
+def validate(req: ValidateRequest):
+    upper = req.sql.upper()
+    for kw in DANGEROUS:
+        if kw in upper:
+            return {&quot;safe&quot;: False, &quot;reason&quot;: &quot;destructive operation&quot;}
+    return {&quot;safe&quot;: True, &quot;reason&quot;: &quot;ok&quot;}
+
+
+# Print endpoint map (no server needed to see this output)
+endpoints = [
+    (&quot;GET &quot;, &quot;/health&quot;,   &quot;service liveness&quot;),
+    (&quot;GET &quot;, &quot;/schema&quot;,   &quot;table metadata (Stage 1)&quot;),
+    (&quot;POST&quot;, &quot;/query&quot;,    &quot;NL question -&gt; SQL + rows (Stage 5)&quot;),
+    (&quot;GET &quot;, &quot;/audit&quot;,    &quot;last N audit entries (Stage 2)&quot;),
+    (&quot;POST&quot;, &quot;/validate&quot;, &quot;SQL safety check (Stage 3)&quot;),
+]
+print(&quot;SmartSchemaAgent API — Stage 7&quot;)
+for method, path, desc in endpoints:
+    print(f&quot;  {method}  {path:12}  {desc}&quot;)
+print()
+print(&quot;To run:  uvicorn &lt;filename&gt;:app --reload&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">## ══════════════════════════════════════════════════════════════
+##  EXERCISE 5 — SMART SCHEMA AGENT: STAGE 7
+## ══════════════════════════════════════════════════════════════
+Add a `GET /stats` endpoint to the app defined above.
+
+The endpoint must return a JSON object with exactly three keys:
+
+| Key | Value |
+|-----|-------|
+| `&quot;tables&quot;` | number of tables in the schema (from `sqlite_master`) |
+| `&quot;audit_entries&quot;` | total rows in `audit_log` (return 0 if the table does not exist) |
+| `&quot;agent_version&quot;` | the string `&quot;7.0&quot;` |
+
+Expected response when the DB has 2 tables and 5 audit rows:
+```json
+{
+  &quot;tables&quot;: 2,
+  &quot;audit_entries&quot;: 5,
+  &quot;agent_version&quot;: &quot;7.0&quot;
+}
+```
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D5_Pipeline_Final_Run.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Add your @app.get(&quot;/stats&quot;) endpoint below.
+# Use _run_sql() for database queries; wrap audit_log access in try/except.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 6 — SECURITY GATE: END-TO-END PIPELINE AUDIT (CIA: C+I+A)
+# ══════════════════════════════════════════════════════════════
+#
+#  Analogy: the water treatment plant&#x27;s end-of-day compliance report —
+#  every valve, filter, and test result is logged, signed, and submitted
+#  before the plant can shut down for the night. One missing entry or a
+#  broken seal invalidates the entire run.
+#
+#  THREE CHECKS IN ONE FUNCTION
+#  ────────────────────────────
+#  1. STAGE COMPLETENESS (Availability)
+#     Every pipeline run must have evidence that all 5 required stages
+#     ran: EXTRACT, VALIDATE, STORE, TRANSFORM, LOAD.
+#     A missing entry means the stage was skipped — or the log was truncated.
+#     Raise MissingStageError(stage) for the first gap found.
+#
+#  2. BRONZE LAYER PII CHECK (Confidentiality)
+#     The Bronze layer stores raw records before any masking or encryption.
+#     PII keys (email, phone, national_id) must never appear here.
+#     If a source schema added a PII column, this check catches it before
+#     the data is persisted. Raise PIIInBronzeError(key).
+#
+#  3. AUDIT LOG HMAC (Integrity)
+#     The last audit_log entry is signed with HMAC-SHA256 at write time.
+#     At audit time, the signature is recomputed and compared.
+#     A mismatch means the log was modified after the run completed —
+#     potential tampering or a bug in the log writer. Raise HMACError.
+#
+#  EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D5_Pipeline_Final_Run.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hmac
+import hashlib
+import json
+from dataclasses import dataclass, field
+
+_REQUIRED_STAGES = {&quot;EXTRACT&quot;, &quot;VALIDATE&quot;, &quot;STORE&quot;, &quot;TRANSFORM&quot;, &quot;LOAD&quot;}
+_PII_KEYS        = {&quot;email&quot;, &quot;phone&quot;, &quot;national_id&quot;}
+
+class MissingStageError(Exception):
+    pass
+
+class PIIInBronzeError(Exception):
+    pass
+
+class HMACError(Exception):
+    pass
+
+@dataclass
+class AuditResult:
+    passed:     bool
+    violations: list = field(default_factory=list)
+
+def _sign(entry: dict, key: bytes) -&gt; str:
+    msg = json.dumps(entry, sort_keys=True, default=str).encode()
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+def pipeline_security_audit(
+    audit_log:      list,
+    bronze_records: list,
+    hmac_key:       bytes,
+) -&gt; AuditResult:
+    stages_seen = {e.get(&quot;stage&quot;, &quot;&quot;).upper() for e in audit_log}
+    for required in _REQUIRED_STAGES:
+        if required not in stages_seen:
+            raise MissingStageError(
+                f&quot;required stage &#x27;{required}&#x27; not found in audit_log&quot;
+            )
+
+    for record in bronze_records:
+        for pii_key in _PII_KEYS:
+            if pii_key in record:
+                raise PIIInBronzeError(
+                    f&quot;PII key &#x27;{pii_key}&#x27; found in Bronze layer record&quot;
+                )
+
+    if audit_log:
+        last_entry = audit_log[-1]
+        expected_sig = last_entry.get(&quot;signature&quot;, &quot;&quot;)
+        entry_body   = {k: v for k, v in last_entry.items() if k != &quot;signature&quot;}
+        actual_sig   = _sign(entry_body, hmac_key)
+        if not hmac.compare_digest(expected_sig, actual_sig):
+            raise HMACError(&quot;Audit log HMAC signature mismatch — possible tampering&quot;)
+
+    return AuditResult(passed=True, violations=[])
+
+# Demo
+print(&quot;=&quot; * 55)
+print(&quot;CONCEPT 6: Pipeline Security Audit&quot;)
+print(&quot;=&quot; * 55)
+
+_key = b&quot;demo-secret-key&quot;
+_body = {&quot;stage&quot;: &quot;LOAD&quot;, &quot;records&quot;: 42, &quot;ts&quot;: &quot;2025-01-01T00:00:00&quot;}
+_sig  = _sign(_body, _key)
+
+demo_log = [
+    {&quot;stage&quot;: &quot;EXTRACT&quot;,   &quot;records&quot;: 50},
+    {&quot;stage&quot;: &quot;VALIDATE&quot;,  &quot;records&quot;: 50},
+    {&quot;stage&quot;: &quot;STORE&quot;,     &quot;records&quot;: 50},
+    {&quot;stage&quot;: &quot;TRANSFORM&quot;, &quot;records&quot;: 42},
+    {**_body, &quot;signature&quot;: _sig},
+]
+demo_bronze = [
+    {&quot;district&quot;: &quot;North&quot;, &quot;count&quot;: 120, &quot;year&quot;: 2024},
+    {&quot;district&quot;: &quot;South&quot;, &quot;count&quot;: 95,  &quot;year&quot;: 2024},
+]
+
+try:
+    result = pipeline_security_audit(demo_log, demo_bronze, _key)
+    print(f&quot;Audit result: passed={result.passed}, violations={result.violations}&quot;)
+except (MissingStageError, PIIInBronzeError, HMACError) as e:
+    print(f&quot;{type(e).__name__}: {e}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  EXERCISE 6
+# ══════════════════════════════════════════════════════════════
+# Step 1 — Call pipeline_security_audit() with the starting data below.
+#           Catch MissingStageError, PIIInBronzeError, HMACError and
+#           print the violation type and message.
+# Step 2 — Fix the audit_log so all 5 required stages are present.
+#           Confirm the audit passes that check.
+# Step 3 — Fix the bronze_records so no PII key is present.
+#           Confirm the audit passes both checks and returns a passing AuditResult.
+#
+# Expected output (with the broken starting data):
+#     MissingStageError: required stage &#x27;LOAD&#x27; not found in audit_log
+#
+# After all fixes:
+#     AuditResult(passed=True, violations=[])</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_12_Capstone/W12_D5_Pipeline_Final_Run.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hmac, hashlib, json
+from dataclasses import dataclass, field
+
+hmac_key = b&quot;pipeline-secret-2025&quot;
+
+# Deliberately broken: missing LOAD stage
+audit_log = [
+    {&quot;stage&quot;: &quot;EXTRACT&quot;,   &quot;records&quot;: 50, &quot;ts&quot;: &quot;2025-01-01T08:00:00&quot;},
+    {&quot;stage&quot;: &quot;VALIDATE&quot;,  &quot;records&quot;: 50, &quot;ts&quot;: &quot;2025-01-01T08:01:00&quot;},
+    {&quot;stage&quot;: &quot;STORE&quot;,     &quot;records&quot;: 50, &quot;ts&quot;: &quot;2025-01-01T08:02:00&quot;},
+    {&quot;stage&quot;: &quot;TRANSFORM&quot;, &quot;records&quot;: 42, &quot;ts&quot;: &quot;2025-01-01T08:03:00&quot;},
+    # LOAD entry missing
+]
+
+# Deliberately broken: contains PII key
+bronze_records = [
+    {&quot;district&quot;: &quot;North&quot;, &quot;count&quot;: 120, &quot;year&quot;: 2024, &quot;email&quot;: &quot;test@example.com&quot;},
+    {&quot;district&quot;: &quot;South&quot;, &quot;count&quot;: 95,  &quot;year&quot;: 2024},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-8">Day 8 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-8"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 12  |  CAPSTONE PROJECT  |  OVERVIEW</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ PROJECT GOAL
+ ────────────────────────────────────
+ Build a real data engineering pipeline from scratch using
+ Israeli Government open data.  The pipeline ingests live data
+ from the government API, streams it through Kafka, stores raw
+ files in MinIO object storage (the &quot;Bronze&quot; layer), transforms
+ and loads clean records into PostgreSQL (the &quot;Silver&quot; layer),
+ and exposes the results as a Grafana dashboard.
+
+ Every day you build one stage.  By Day 5 you have a working
+ end-to-end pipeline that a junior data engineer could put on
+ a resume.
+
+ SIMULATION MODE vs REAL MODE
+ ────────────────────────────────────
+ Each day file contains two modes:
+
+   SIMULATION MODE  — runs on any machine right now with no
+                      extra software.  Uses Python lists,
+                      local files, and SQLite to mimic each
+                      service.  You learn the logic without
+                      fighting with Docker.
+
+   REAL MODE        — the production code shown in comments.
+                      Activate it once Docker is running by
+                      uncommenting the relevant block.  The
+                      APIs are identical; only the connection
+                      target changes.
+
+ TIME:  This file is read-only — no exercises here.
+        Estimated total capstone time: ~4-5 hours across 5 days.</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ ARCHITECTURE DIAGRAM</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+  Israeli Gov API
+  (data.gov.il)
+        |
+        |  HTTP GET (requests)
+        v
+  ┌─────────────┐
+  │  PRODUCER   │  Day 2 — fetch records, push to Kafka topic
+  │  (Python)   │
+  └──────┬──────┘
+         |
+         |  Kafka topic: &quot;gov-data-raw&quot;
+         v
+  ┌─────────────┐
+  │    KAFKA    │  Day 1 — message broker, decouples stages
+  │  (broker)   │
+  └──────┬──────┘
+         |
+         |  Consumer reads messages
+         v
+  ┌─────────────┐
+  │    MinIO    │  Day 3 — object storage, saves raw JSON files
+  │  (Bronze)   │          (like AWS S3 but runs locally)
+  └──────┬──────┘
+         |
+         |  Load raw files, transform records
+         v
+  ┌─────────────┐
+  │ PostgreSQL  │  Day 4 — relational DB, stores clean records
+  │  (Silver)   │
+  └──────┬──────┘
+         |
+         |  SQL queries / metrics
+         v
+  ┌─────────────┐
+  │   Grafana   │  Day 5 — dashboard shows charts from the DB
+  │ (dashboard) │
+  └─────────────┘
+
+  SIMULATION equivalents:
+    Kafka     -&gt;  Python list  (in-memory queue)
+    MinIO     -&gt;  local folder (bronze_layer/)
+    PostgreSQL-&gt;  SQLite file  (pipeline.db)
+    Grafana   -&gt;  printed summary + matplotlib (optional)</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ 5-DAY PLAN</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ Day 1  —  Docker &amp; Kafka Setup
+           Understand containers and message brokers.
+           Simulate a Kafka topic with a Python list.
+           Learn: producer, consumer, topic, offset.
+
+ Day 2  —  Extract: API → Producer
+           Call the Israeli Gov API with requests.
+           Parse JSON records.
+           Push records to the Kafka queue (simulated or real).
+
+ Day 3  —  Store: Consumer → MinIO (Bronze Layer)
+           Read messages from the queue.
+           Save raw JSON files to a local folder (or real MinIO).
+           Learn: Bronze/Silver/Gold naming convention.
+
+ Day 4  —  Transform &amp; Load: Bronze → PostgreSQL (Silver Layer)
+           Read raw files, clean nulls, rename columns.
+           Load clean records into SQLite (or real PostgreSQL).
+           Write SQL queries to explore the loaded data.
+
+ Day 5  —  Orchestrate: Full Pipeline Run
+           Wire all 4 stages together in one function.
+           Add logging with timestamps.
+           Generate a run report (records fetched, loaded, errors).</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ DATA SOURCE — ISRAELI GOVERNMENT OPEN DATA API</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ Base URL:
+   https://data.gov.il/api/3/action/datastore_search
+
+ Query parameters:
+   resource_id  — identifies the specific dataset table
+   limit        — max number of records to return (default 100)
+   offset       — skip N records (for pagination)
+
+ Full example URL:
+   https://data.gov.il/api/3/action/datastore_search
+     ?resource_id=5e87a7a1-2f6f-41c1-8aec-7216d52a6cf6
+     &amp;limit=100
+
+ The response is JSON with this shape:
+   {
+     &quot;success&quot;: true,
+     &quot;result&quot;: {
+       &quot;total&quot;: 12345,
+       &quot;records&quot;: [
+         {&quot;_id&quot;: 1, &quot;field1&quot;: &quot;value&quot;, &quot;field2&quot;: 42, ...},
+         ...
+       ]
+     }
+   }
+
+ Resource IDs used in this capstone:
+   Traffic accidents: 5e87a7a1-2f6f-41c1-8aec-7216d52a6cf6
+
+ Find more datasets at:  https://data.gov.il/dataset</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ SETUP REQUIREMENTS</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ SIMULATION MODE — no extra installation needed.
+ Just make sure these standard/common packages are available:
+   pip install requests
+
+ REAL MODE — install Docker Desktop first, then:
+   pip install confluent-kafka boto3 psycopg2-binary
+
+ Docker Desktop download:
+   https://www.docker.com/products/docker-desktop/
+
+ To start all services at once, run from your project folder:
+   docker-compose up -d
+
+ (See the docker-compose.yml snippet below.)</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ DOCKER COMPOSE CONFIGURATION</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ Save the following as  docker-compose.yml  in your project
+ folder, then run:  docker-compose up -d
+
+─────────────────────────────────────────────────────────────
+
+version: &quot;3.8&quot;
+services:
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - &quot;2181:2181&quot;
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper
+    ports:
+      - &quot;9092:9092&quot;
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  minio:
+    image: minio/minio:latest
+    ports:
+      - &quot;9000:9000&quot;
+      - &quot;9001:9001&quot;
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address &quot;:9001&quot;
+    volumes:
+      - minio_data:/data
+
+  postgres:
+    image: postgres:15
+    ports:
+      - &quot;5432:5432&quot;
+    environment:
+      POSTGRES_USER: pipeline
+      POSTGRES_PASSWORD: pipeline123
+      POSTGRES_DB: govdata
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - &quot;3000:3000&quot;
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    depends_on:
+      - postgres
+
+volumes:
+  minio_data:
+  pg_data:
+
+─────────────────────────────────────────────────────────────
+
+ Service URLs once docker-compose is running:
+   Kafka broker:      localhost:9092
+   MinIO console:     http://localhost:9001  (minioadmin / minioadmin)
+   PostgreSQL:        localhost:5432  (pipeline / pipeline123 / govdata)
+   Grafana:           http://localhost:3000  (admin / admin)</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ HOW TO WORK THROUGH THE CAPSTONE</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ Step 1.  Open W12_D1_Docker_Kafka_Setup.py
+          Read each concept section, run the examples,
+          then solve the 3 exercises.
+
+ Step 2.  Each day file stands alone — you can run Day 3
+          without having finished Day 2.  The simulation
+          code is self-contained.
+
+ Step 3.  Once you have completed all 5 day files in
+          SIMULATION mode, set up Docker and switch each
+          file to REAL mode one service at a time.
+
+ Step 4.  On Day 5, run the full pipeline and generate
+          the run report.  That report is your capstone
+          deliverable.
+
+ Recommended order:
+   W12_D1 -&gt; W12_D2 -&gt; W12_D3 -&gt; W12_D4 -&gt; W12_D5</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="pager"><a class="btn ghost" href="week-11.html">&larr; Week 11</a><a class="btn ghost" href="week-13.html">Week 13 &rarr;</a></div>
+</main></body></html>

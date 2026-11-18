@@ -1,0 +1,1658 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 16 — Incident Response</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 16 — Incident Response</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="16" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 16 — Incident Response</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 5 — IR &amp; Forensics</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Incident Response process / SC-200: Microsoft Sentinel incidents / GCIA: IR evidence collection</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>Automated IR triage script → timeline JSON from log dataset</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W12 (detection methodology), W13 (endpoint EDR), W14 (network), W15 (cloud)</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — IR Frameworks and Incident Lifecycle</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=4MGVTpXAAmo" target="_blank" rel="noopener"><b>Incident Response Lifecycle Explained</b><small>Cyber connect</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=NIST%20incident%20response%20lifecycle%20blue%20team%202024" target="_blank" rel="noopener">NIST incident response lifecycle blue team 2024</a></p></div>
+<hr />
+<h3>Concept 1 — IR Lifecycle: PICERL</h3>
+<p>The PICERL framework (Preparation, Identification, Containment, Eradication, Recovery, Lessons Learned) gives every IR engagement a shared vocabulary and sequencing contract. Without it, IR teams skip steps under pressure — typically skipping Eradication and jumping to Recovery, which leaves the attacker's persistence mechanism intact.</p>
+<p><strong>Analogy to data engineering:</strong> PICERL maps to the incident lifecycle in an on-call data platform. Preparation = runbooks + dashboards. Identification = alerting. Containment = circuit breaker / rate limiter. Eradication = root cause fix. Recovery = canary redeploy. Lessons Learned = post-mortem + backlog item.</p>
+<p><strong>PICERL phase responsibilities:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Phase</th>
+<th>Goal</th>
+<th>Key outputs</th>
+<th>SLA target</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Preparation</td>
+<td>Pre-build detection, playbooks, access</td>
+<td>Runbook library, contact list</td>
+<td>Ongoing</td>
+</tr>
+<tr>
+<td>Identification</td>
+<td>Confirm a security incident occurred</td>
+<td>Incident ticket, initial severity</td>
+<td>&lt; 15 min from alert</td>
+</tr>
+<tr>
+<td>Containment</td>
+<td>Stop spread, preserve evidence</td>
+<td>Isolation decision, forensic image</td>
+<td>&lt; 1 hr (P1)</td>
+</tr>
+<tr>
+<td>Eradication</td>
+<td>Remove attacker tools and access</td>
+<td>Clean bill of health per system</td>
+<td>&lt; 4 hr (P1)</td>
+</tr>
+<tr>
+<td>Recovery</td>
+<td>Restore normal operations safely</td>
+<td>Production restored, monitoring elevated</td>
+<td>&lt; 8 hr (P1)</td>
+</tr>
+<tr>
+<td>Lessons Learned</td>
+<td>Prevent recurrence</td>
+<td>Post-mortem doc, detection gap tickets</td>
+<td>&lt; 5 business days</td>
+</tr>
+</tbody>
+</table>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+
+class IRPhase(Enum):
+    PREPARATION = &quot;preparation&quot;
+    IDENTIFICATION = &quot;identification&quot;
+    CONTAINMENT = &quot;containment&quot;
+    ERADICATION = &quot;eradication&quot;
+    RECOVERY = &quot;recovery&quot;
+    LESSONS_LEARNED = &quot;lessons_learned&quot;
+
+class Severity(Enum):
+    P1 = &quot;P1&quot;   # Critical — active breach, data exfiltration
+    P2 = &quot;P2&quot;   # High — confirmed compromise, no active exfil
+    P3 = &quot;P3&quot;   # Medium — suspected compromise, investigation
+    P4 = &quot;P4&quot;   # Low — precautionary / informational
+
+@dataclass
+class IRPhaseRecord:
+    phase: IRPhase
+    start_time: Optional[datetime]
+    end_time: Optional[datetime]
+    owner: str
+    actions_taken: list[str] = field(default_factory=list)
+    artifacts: list[str] = field(default_factory=list)
+
+    def duration_minutes(self) -&gt; Optional[float]:
+        if self.start_time and self.end_time:
+            return (self.end_time - self.start_time).total_seconds() / 60.0
+        return None
+
+@dataclass
+class IncidentRecord:
+    incident_id: str
+    title: str
+    severity: Severity
+    created_at: datetime
+    phase_records: dict[IRPhase, IRPhaseRecord] = field(default_factory=dict)
+    affected_systems: list[str] = field(default_factory=list)
+    iocs: list[str] = field(default_factory=list)
+    closed_at: Optional[datetime] = None
+
+    def current_phase(self) -&gt; Optional[IRPhase]:
+        completed = {p for p, r in self.phase_records.items() if r.end_time is not None}
+        phase_order = list(IRPhase)
+        for phase in reversed(phase_order):
+            if phase in completed:
+                idx = phase_order.index(phase)
+                next_idx = idx + 1
+                if next_idx &lt; len(phase_order):
+                    return phase_order[next_idx]
+        return IRPhase.PREPARATION
+
+    def total_duration_minutes(self) -&gt; Optional[float]:
+        if self.closed_at:
+            return (self.closed_at - self.created_at).total_seconds() / 60.0
+        return None
+
+    def mttr_minutes(self) -&gt; Optional[float]:
+        recovery = self.phase_records.get(IRPhase.RECOVERY)
+        if recovery and recovery.end_time:
+            return (recovery.end_time - self.created_at).total_seconds() / 60.0
+        return None
+
+# Build a sample incident record
+incident = IncidentRecord(
+    incident_id=&quot;INC-2024-001&quot;,
+    title=&quot;Suspected account takeover — alice@corp.com&quot;,
+    severity=Severity.P1,
+    created_at=datetime(2024, 6, 1, 10, 30),
+    affected_systems=[&quot;Azure AD&quot;, &quot;Exchange Online&quot;],
+    iocs=[&quot;185.220.101.5&quot;, &quot;attacker@evil.com&quot;],
+)
+incident.phase_records[IRPhase.IDENTIFICATION] = IRPhaseRecord(
+    phase=IRPhase.IDENTIFICATION,
+    start_time=datetime(2024, 6, 1, 10, 30),
+    end_time=datetime(2024, 6, 1, 10, 42),
+    owner=&quot;analyst1@corp.com&quot;,
+    actions_taken=[&quot;Reviewed Sentinel impossible travel alert&quot;, &quot;Confirmed two successful sign-ins from IL and RU&quot;],
+    artifacts=[&quot;INC-2024-001-sentinel-alert.json&quot;],
+)
+incident.phase_records[IRPhase.CONTAINMENT] = IRPhaseRecord(
+    phase=IRPhase.CONTAINMENT,
+    start_time=datetime(2024, 6, 1, 10, 42),
+    end_time=datetime(2024, 6, 1, 11, 10),
+    owner=&quot;analyst1@corp.com&quot;,
+    actions_taken=[&quot;Disabled alice@corp.com in Azure AD&quot;, &quot;Revoked all active sessions via MFA reset&quot;, &quot;Blocked 185.220.101.5 in Conditional Access&quot;],
+    artifacts=[&quot;INC-2024-001-account-disabled.png&quot;],
+)
+
+ident = incident.phase_records[IRPhase.IDENTIFICATION]
+contain = incident.phase_records[IRPhase.CONTAINMENT]
+print(f&quot;Identification duration: {ident.duration_minutes():.0f} min&quot;)
+print(f&quot;Containment duration: {contain.duration_minutes():.0f} min&quot;)
+print(f&quot;Current phase: {incident.current_phase().value}&quot;)
+# Output:
+# Identification duration: 12 min
+# Containment duration: 28 min
+# Current phase: eradication
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add an <code>sla_breach(self) -&gt; list[tuple[IRPhase, float, float]]</code> method to <code>IncidentRecord</code> that returns a list of <code>(phase, actual_minutes, sla_minutes)</code> tuples for any phase that exceeded its SLA. Use these SLAs:</p>
+<ul>
+<li>Identification: 15 min</li>
+<li>Containment: 60 min (P1), 240 min (P2+)</li>
+<li>Eradication: 240 min (P1), 480 min (P2+)</li>
+<li>Recovery: 480 min (P1)</li>
+</ul>
+<p>Create an incident where Identification took 20 minutes (breaches 15 min SLA) and Containment took 30 minutes (within 60 min SLA). Assert only Identification appears in the breach list.</p>
+<p>Expected output:</p>
+<pre><code>SLA breaches: [(IRPhase.IDENTIFICATION, 20.0, 15.0)]
+</code></pre><hr />
+<h3>Concept 2 — Evidence Collection and Chain of Custody</h3>
+<p>Evidence collection in IR follows the same ordering constraint as forensic analysis: volatile evidence first (RAM, running processes, network connections), then semi-volatile (event logs, prefetch), then non-volatile (disk image). Skipping order destroys evidence — a RAM dump taken after a reboot is empty.</p>
+<p><strong>Volatility order for Windows endpoints:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Priority</th>
+<th>Evidence type</th>
+<th>Volatility</th>
+<th>Collection method</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>System time</td>
+<td>Highest</td>
+<td><code>w32tm /query /status</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Network connections</td>
+<td>High</td>
+<td><code>netstat -naob</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Running processes</td>
+<td>High</td>
+<td><code>tasklist /v</code> / <code>Get-Process</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td>Logged-in users</td>
+<td>High</td>
+<td><code>query user</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td>RAM dump</td>
+<td>High</td>
+<td>WinPmem / DumpIt</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Event logs</td>
+<td>Medium</td>
+<td><code>wevtutil epl</code></td>
+</tr>
+<tr>
+<td>7</td>
+<td>Registry hives</td>
+<td>Medium</td>
+<td><code>reg save</code></td>
+</tr>
+<tr>
+<td>8</td>
+<td>Prefetch</td>
+<td>Medium</td>
+<td><code>%SystemRoot%\Prefetch\</code></td>
+</tr>
+<tr>
+<td>9</td>
+<td>Disk image</td>
+<td>Low</td>
+<td>dd / FTK Imager</td>
+</tr>
+</tbody>
+</table>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from enum import IntEnum
+from typing import Optional
+import hashlib
+import json
+
+class VolatilityLevel(IntEnum):
+    CRITICAL = 1    # disappears on reboot
+    HIGH = 2        # changes frequently
+    MEDIUM = 3      # relatively stable
+    LOW = 4         # persists across reboots
+
+@dataclass
+class EvidenceItem:
+    name: str
+    description: str
+    volatility: VolatilityLevel
+    collection_command: str
+    output_path: str
+    collected_at: Optional[datetime] = None
+    sha256: Optional[str] = None
+    size_bytes: Optional[int] = None
+
+    def record_collection(self, content: bytes) -&gt; None:
+        self.collected_at = datetime.utcnow()
+        self.sha256 = hashlib.sha256(content).hexdigest()
+        self.size_bytes = len(content)
+
+    def chain_of_custody_entry(self) -&gt; dict:
+        return {
+            &quot;evidence_name&quot;: self.name,
+            &quot;output_path&quot;: self.output_path,
+            &quot;collected_at&quot;: self.collected_at.isoformat() if self.collected_at else None,
+            &quot;sha256&quot;: self.sha256,
+            &quot;size_bytes&quot;: self.size_bytes,
+            &quot;volatility&quot;: self.volatility.name,
+        }
+
+WINDOWS_EVIDENCE_PLAN: list[EvidenceItem] = [
+    EvidenceItem(&quot;system_time&quot;, &quot;Current system clock&quot;, VolatilityLevel.CRITICAL,
+                 &quot;w32tm /query /status&quot;, &quot;evidence/system_time.txt&quot;),
+    EvidenceItem(&quot;network_connections&quot;, &quot;Active TCP/UDP connections with PIDs&quot;, VolatilityLevel.CRITICAL,
+                 &quot;netstat -naob&quot;, &quot;evidence/netstat.txt&quot;),
+    EvidenceItem(&quot;running_processes&quot;, &quot;Process list with parent PIDs&quot;, VolatilityLevel.HIGH,
+                 &quot;tasklist /v /fo CSV&quot;, &quot;evidence/processes.csv&quot;),
+    EvidenceItem(&quot;event_log_security&quot;, &quot;Windows Security event log (last 7 days)&quot;, VolatilityLevel.MEDIUM,
+                 &#x27;wevtutil epl Security evidence\\security.evtx /q:&quot;*[System[TimeCreated[timediff(@SystemTime) &lt;= 604800000]]]&quot;&#x27;,
+                 &quot;evidence/security.evtx&quot;),
+    EvidenceItem(&quot;event_log_sysmon&quot;, &quot;Sysmon operational log&quot;, VolatilityLevel.MEDIUM,
+                 &#x27;wevtutil epl &quot;Microsoft-Windows-Sysmon/Operational&quot; evidence\\sysmon.evtx&#x27;,
+                 &quot;evidence/sysmon.evtx&quot;),
+    EvidenceItem(&quot;prefetch_files&quot;, &quot;Windows Prefetch directory&quot;, VolatilityLevel.MEDIUM,
+                 &quot;xcopy C:\\Windows\\Prefetch evidence\\prefetch\\ /E /H&quot;,
+                 &quot;evidence/prefetch/&quot;),
+]
+
+def simulate_collection_run(plan: list[EvidenceItem]) -&gt; list[dict]:
+    results = []
+    sorted_plan = sorted(plan, key=lambda e: e.volatility)
+    for item in sorted_plan:
+        fake_content = f&quot;SIMULATED OUTPUT FOR {item.name} AT {datetime.utcnow()}&quot;.encode()
+        item.record_collection(fake_content)
+        results.append(item.chain_of_custody_entry())
+    return results
+
+chain = simulate_collection_run(WINDOWS_EVIDENCE_PLAN)
+for entry in chain[:3]:
+    print(f&quot;{entry[&#x27;evidence_name&#x27;]}: SHA256={entry[&#x27;sha256&#x27;][:16]}... collected={entry[&#x27;collected_at&#x27;]}&quot;)
+# Output:
+# system_time: SHA256=... collected=2024-06-01T10:...
+# network_connections: SHA256=... collected=2024-06-01T10:...
+# event_log_security: SHA256=... collected=2024-06-01T10:...
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>validate_collection_completeness(collected: list[dict], plan: list[EvidenceItem]) -&gt; list[str]</code> that returns a list of missing evidence item names — items in the plan whose <code>collected_at</code> is still <code>None</code>. Then simulate a partial collection where only the first two items in <code>WINDOWS_EVIDENCE_PLAN</code> were collected (by setting <code>collected_at</code> to None on the rest) and verify the missing list has 4 items.</p>
+<p>Expected output:</p>
+<pre><code>Missing evidence items: [&#x27;event_log_security&#x27;, &#x27;event_log_sysmon&#x27;, &#x27;prefetch_files&#x27;, &#x27;running_processes&#x27;]
+</code></pre><hr />
+<h3>Concept 3 — Incident Severity Classification</h3>
+<p>Severity classification determines the pace and resources of an IR. Misclassifying a P1 as P3 delays containment by hours. Classification must be done by a checklist, not gut feel, because cognitive load is high during active incidents.</p>
+<p><strong>Classification matrix:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>P1</th>
+<th>P2</th>
+<th>P3</th>
+<th>P4</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Data exfiltration</td>
+<td>Active or confirmed</td>
+<td>Suspected</td>
+<td>Unlikely</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Affected systems</td>
+<td>&gt; 10 or Crown Jewels</td>
+<td>2–10 systems</td>
+<td>1–2 systems</td>
+<td>No prod systems</td>
+</tr>
+<tr>
+<td>Attacker persistence</td>
+<td>Confirmed</td>
+<td>Likely</td>
+<td>Unknown</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Business impact</td>
+<td>Revenue/legal/regulatory</td>
+<td>Operational degradation</td>
+<td>Minor</td>
+<td>None</td>
+</tr>
+<tr>
+<td>C2 active</td>
+<td>Yes</td>
+<td>Unknown</td>
+<td>No</td>
+<td>No</td>
+</tr>
+</tbody>
+</table>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from enum import Enum
+
+class DataExfiltrationStatus(Enum):
+    CONFIRMED = &quot;confirmed&quot;
+    SUSPECTED = &quot;suspected&quot;
+    UNLIKELY = &quot;unlikely&quot;
+    NO = &quot;no&quot;
+
+class PersistenceStatus(Enum):
+    CONFIRMED = &quot;confirmed&quot;
+    LIKELY = &quot;likely&quot;
+    UNKNOWN = &quot;unknown&quot;
+    NO = &quot;no&quot;
+
+@dataclass
+class SeverityInput:
+    exfiltration: DataExfiltrationStatus
+    affected_system_count: int
+    crown_jewel_affected: bool
+    persistence: PersistenceStatus
+    c2_active: bool
+    business_impact_score: int   # 0-3: 0=none, 1=minor, 2=operational, 3=revenue/legal
+
+def classify_severity(inputs: SeverityInput) -&gt; Severity:
+    if (inputs.exfiltration == DataExfiltrationStatus.CONFIRMED or
+        inputs.c2_active or
+        (inputs.crown_jewel_affected and inputs.persistence == PersistenceStatus.CONFIRMED) or
+        inputs.business_impact_score == 3):
+        return Severity.P1
+
+    if (inputs.exfiltration == DataExfiltrationStatus.SUSPECTED or
+        inputs.affected_system_count &gt;= 5 or
+        inputs.persistence == PersistenceStatus.CONFIRMED or
+        inputs.business_impact_score == 2):
+        return Severity.P2
+
+    if (inputs.persistence == PersistenceStatus.LIKELY or
+        inputs.affected_system_count &gt;= 2 or
+        inputs.business_impact_score == 1):
+        return Severity.P3
+
+    return Severity.P4
+
+# Test cases
+cases = [
+    SeverityInput(DataExfiltrationStatus.CONFIRMED, 3, False, PersistenceStatus.CONFIRMED, True, 3),
+    SeverityInput(DataExfiltrationStatus.SUSPECTED, 8, False, PersistenceStatus.LIKELY, False, 2),
+    SeverityInput(DataExfiltrationStatus.UNLIKELY, 1, False, PersistenceStatus.UNKNOWN, False, 1),
+    SeverityInput(DataExfiltrationStatus.NO, 0, False, PersistenceStatus.NO, False, 0),
+]
+for c in cases:
+    print(f&quot;{classify_severity(c).value} — exfil={c.exfiltration.value}, systems={c.affected_system_count}&quot;)
+# Output:
+# P1 — exfil=confirmed, systems=3
+# P2 — exfil=suspected, systems=8
+# P3 — exfil=unlikely, systems=1
+# P4 — exfil=no, systems=0
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>reclassify_over_time(incident: IncidentRecord, snapshots: list[tuple[datetime, SeverityInput]]) -&gt; list[tuple[datetime, Severity]]</code> that returns a list of <code>(timestamp, new_severity)</code> tuples whenever the severity changed compared to the previous snapshot. Start with the incident's initial severity from <code>incident.severity</code>. Create a scenario where an incident starts at P3 and escalates to P1 after new evidence arrives.</p>
+<p>Expected output:</p>
+<pre><code>[(datetime(2024, 6, 1, 10, 30), P3), (datetime(2024, 6, 1, 11, 00), P1)]
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Incident playbook generation and triage assistance
+<strong>Threat:</strong> Attackers use LLMs to rehearse IR workflows from leaked post-mortems, anticipating containment actions and pre-staging persistence before the analyst can act
+<strong>Opportunity:</strong> SOC lead asks LLM to generate a first-draft playbook for a new attack type: &quot;Given this impossible travel alert for a Finance user accessing Azure AD from a known TOR exit node with no MFA, generate a 10-step IR playbook with owner, action, and expected output for each step.&quot;
+<strong>Prompt to try:</strong> <code>&quot;You are an incident responder. Alert: Azure AD account takeover suspected — user alice@corp.com, Finance dept, signed in from TOR exit node, no MFA, UEBA score 85. Generate a PICERL playbook with 3 actions per phase. For each action: owner (Tier 1/Tier 2/Manager), tool, expected output.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Timeline Construction and Log Correlation</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=KzD0MmEYAzQ" target="_blank" rel="noopener"><b>Timeline Analysis in DFIR, Full Process Explained</b><small>BlackPerl</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=incident%20response%20timeline%20construction%20log%20analysis%20forensics" target="_blank" rel="noopener">incident response timeline construction log analysis forensics</a></p></div>
+<hr />
+<h3>Concept 1 — Building an Incident Timeline</h3>
+<p>An incident timeline is the primary deliverable of IR analysis. It sequences all attacker and defender actions with timestamps and source evidence. Without it, the team cannot identify the initial compromise vector, measure dwell time, or scope the investigation.</p>
+<p><strong>Timeline entry schema:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+
+class TimelineEventType(Enum):
+    ATTACKER_ACTION = &quot;attacker_action&quot;
+    DEFENDER_ACTION = &quot;defender_action&quot;
+    SYSTEM_EVENT = &quot;system_event&quot;
+    DETECTION = &quot;detection&quot;
+    CONTAINMENT = &quot;containment&quot;
+
+@dataclass
+class TimelineEntry:
+    timestamp: datetime
+    event_type: TimelineEventType
+    source: str             # log source: &quot;Sysmon&quot;, &quot;SigninLogs&quot;, &quot;Zeek&quot;, &quot;Analyst&quot;
+    source_event_id: str    # e.g. &quot;EventID:4624&quot; or &quot;alert:INC-2024-001-01&quot;
+    host: str
+    actor: str              # user, process, or IP
+    action: str             # what happened
+    technique_id: Optional[str] = None
+    evidence_path: Optional[str] = None
+    confidence: str = &quot;high&quot;   # high / medium / low
+
+    def to_dict(self) -&gt; dict:
+        return {
+            &quot;timestamp&quot;: self.timestamp.isoformat(),
+            &quot;event_type&quot;: self.event_type.value,
+            &quot;source&quot;: self.source,
+            &quot;source_event_id&quot;: self.source_event_id,
+            &quot;host&quot;: self.host,
+            &quot;actor&quot;: self.actor,
+            &quot;action&quot;: self.action,
+            &quot;technique_id&quot;: self.technique_id,
+            &quot;evidence_path&quot;: self.evidence_path,
+            &quot;confidence&quot;: self.confidence,
+        }
+
+@dataclass
+class IncidentTimeline:
+    incident_id: str
+    entries: list[TimelineEntry] = field(default_factory=list)
+
+    def add(self, entry: TimelineEntry) -&gt; None:
+        self.entries.append(entry)
+        self.entries.sort(key=lambda e: e.timestamp)
+
+    def attacker_dwell_time_minutes(self) -&gt; Optional[float]:
+        attacker_entries = [e for e in self.entries if e.event_type == TimelineEventType.ATTACKER_ACTION]
+        containment_entries = [e for e in self.entries if e.event_type == TimelineEventType.CONTAINMENT]
+        if attacker_entries and containment_entries:
+            first_attacker = attacker_entries[0].timestamp
+            first_containment = containment_entries[0].timestamp
+            return (first_containment - first_attacker).total_seconds() / 60.0
+        return None
+
+    def unique_techniques(self) -&gt; list[str]:
+        return sorted({e.technique_id for e in self.entries if e.technique_id})
+
+    def export_json(self) -&gt; dict:
+        return {
+            &quot;incident_id&quot;: self.incident_id,
+            &quot;entry_count&quot;: len(self.entries),
+            &quot;dwell_time_minutes&quot;: self.attacker_dwell_time_minutes(),
+            &quot;techniques_observed&quot;: self.unique_techniques(),
+            &quot;entries&quot;: [e.to_dict() for e in self.entries],
+        }
+
+# Build an incident timeline from correlated log sources
+timeline = IncidentTimeline(incident_id=&quot;INC-2024-001&quot;)
+timeline.add(TimelineEntry(
+    timestamp=datetime(2024, 6, 1, 8, 0, 0),
+    event_type=TimelineEventType.ATTACKER_ACTION,
+    source=&quot;SigninLogs&quot;,
+    source_event_id=&quot;signin:abc123&quot;,
+    host=&quot;AzureAD&quot;,
+    actor=&quot;alice@corp.com from 185.220.101.5&quot;,
+    action=&quot;Successful sign-in from TOR exit node — IL login at 09:00, RU login at 10:30&quot;,
+    technique_id=&quot;T1078&quot;,
+))
+timeline.add(TimelineEntry(
+    timestamp=datetime(2024, 6, 1, 8, 15, 0),
+    event_type=TimelineEventType.ATTACKER_ACTION,
+    source=&quot;AuditLogs&quot;,
+    source_event_id=&quot;audit:def456&quot;,
+    host=&quot;AzureAD&quot;,
+    actor=&quot;alice@corp.com&quot;,
+    action=&quot;Added new OAuth application credential — persistence via app registration&quot;,
+    technique_id=&quot;T1098.001&quot;,
+))
+timeline.add(TimelineEntry(
+    timestamp=datetime(2024, 6, 1, 10, 30, 0),
+    event_type=TimelineEventType.DETECTION,
+    source=&quot;Sentinel&quot;,
+    source_event_id=&quot;alert:INC-2024-001-01&quot;,
+    host=&quot;AzureAD&quot;,
+    actor=&quot;Sentinel&quot;,
+    action=&quot;Impossible travel alert fired — 1888 km/h (IL→RU)&quot;,
+    technique_id=&quot;T1078&quot;,
+))
+timeline.add(TimelineEntry(
+    timestamp=datetime(2024, 6, 1, 10, 45, 0),
+    event_type=TimelineEventType.CONTAINMENT,
+    source=&quot;Analyst&quot;,
+    source_event_id=&quot;action:contain-001&quot;,
+    host=&quot;AzureAD&quot;,
+    actor=&quot;analyst1@corp.com&quot;,
+    action=&quot;Disabled alice@corp.com and revoked all active sessions&quot;,
+))
+
+export = timeline.export_json()
+print(f&quot;Dwell time: {export[&#x27;dwell_time_minutes&#x27;]} minutes&quot;)
+print(f&quot;Techniques: {export[&#x27;techniques_observed&#x27;]}&quot;)
+print(f&quot;Entry count: {export[&#x27;entry_count&#x27;]}&quot;)
+# Output:
+# Dwell time: 165.0 minutes
+# Techniques: [&#x27;T1078&#x27;, &#x27;T1098.001&#x27;]
+# Entry count: 4
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a method <code>gap_analysis(self) -&gt; list[tuple[datetime, datetime, float]]</code> to <code>IncidentTimeline</code> that returns intervals where no events were recorded for more than 60 minutes (potential blind spots in the timeline). For each gap, return <code>(gap_start, gap_end, gap_minutes)</code>. Create a timeline with a 90-minute gap between two events and verify it is detected.</p>
+<p>Expected output:</p>
+<pre><code>Gaps &gt; 60 min: [(datetime(2024, 6, 1, 9, 0), datetime(2024, 6, 1, 10, 30), 90.0)]
+</code></pre><hr />
+<h3>Concept 2 — Multi-Source Log Correlation</h3>
+<p>Real incidents span multiple log sources simultaneously. Correlating them requires a shared key — usually a timestamp window, a username, or a hostname — and a merge strategy that handles clock skew between sources (different systems may report the same event with offsets of up to 5 seconds).</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+from typing import Iterator
+
+CLOCK_SKEW_TOLERANCE_SECONDS = 5
+
+def normalize_log_timestamp(ts: str, source: str) -&gt; datetime:
+    ts = ts.replace(&quot;Z&quot;, &quot;+00:00&quot;)
+    try:
+        return datetime.fromisoformat(ts).replace(tzinfo=None)
+    except ValueError:
+        return datetime.strptime(ts, &quot;%Y-%m-%d %H:%M:%S&quot;)
+
+def build_timeline_from_logs(
+    signin_logs: list[dict],
+    audit_logs: list[dict],
+    sysmon_logs: list[dict],
+    incident_id: str,
+) -&gt; IncidentTimeline:
+    timeline = IncidentTimeline(incident_id=incident_id)
+
+    for log in signin_logs:
+        if log.get(&quot;ResultType&quot;) == &quot;0&quot;:
+            timeline.add(TimelineEntry(
+                timestamp=normalize_log_timestamp(log[&quot;TimeGenerated&quot;], &quot;SigninLogs&quot;),
+                event_type=TimelineEventType.ATTACKER_ACTION,
+                source=&quot;SigninLogs&quot;,
+                source_event_id=log.get(&quot;CorrelationId&quot;, &quot;&quot;),
+                host=&quot;AzureAD&quot;,
+                actor=f&quot;{log[&#x27;UserPrincipalName&#x27;]} from {log[&#x27;IPAddress&#x27;]}&quot;,
+                action=f&quot;Successful sign-in from {log.get(&#x27;Location&#x27;, &#x27;Unknown&#x27;)}&quot;,
+                technique_id=&quot;T1078&quot;,
+                confidence=&quot;high&quot;,
+            ))
+
+    for log in audit_logs:
+        operation = log.get(&quot;OperationName&quot;, &quot;&quot;)
+        if &quot;credential&quot; in operation.lower() or &quot;policy&quot; in operation.lower():
+            timeline.add(TimelineEntry(
+                timestamp=normalize_log_timestamp(log[&quot;TimeGenerated&quot;], &quot;AuditLogs&quot;),
+                event_type=TimelineEventType.ATTACKER_ACTION,
+                source=&quot;AuditLogs&quot;,
+                source_event_id=log.get(&quot;Id&quot;, &quot;&quot;),
+                host=&quot;AzureAD&quot;,
+                actor=log.get(&quot;InitiatedBy&quot;, {}).get(&quot;user&quot;, {}).get(&quot;userPrincipalName&quot;, &quot;&quot;),
+                action=f&quot;AD change: {operation}&quot;,
+                technique_id=&quot;T1098&quot;,
+                confidence=&quot;high&quot;,
+            ))
+
+    for log in sysmon_logs:
+        event_id = log.get(&quot;EventID&quot;)
+        if event_id in (1, 3, 10, 25):
+            eid_map = {1: &quot;ProcessCreate&quot;, 3: &quot;NetworkConnect&quot;, 10: &quot;ProcessAccess&quot;, 25: &quot;ProcessTampering&quot;}
+            technique_map = {1: &quot;T1059&quot;, 3: &quot;T1071&quot;, 10: &quot;T1055&quot;, 25: &quot;T1055.012&quot;}
+            timeline.add(TimelineEntry(
+                timestamp=normalize_log_timestamp(log[&quot;UtcTime&quot;], &quot;Sysmon&quot;),
+                event_type=TimelineEventType.SYSTEM_EVENT,
+                source=&quot;Sysmon&quot;,
+                source_event_id=f&quot;Sysmon:{event_id}:{log.get(&#x27;ProcessId&#x27;, &#x27;&#x27;)}&quot;,
+                host=log.get(&quot;Computer&quot;, &quot;&quot;),
+                actor=log.get(&quot;Image&quot;, &quot;&quot;),
+                action=f&quot;Sysmon {eid_map.get(event_id, event_id)}: {log.get(&#x27;CommandLine&#x27;, log.get(&#x27;DestinationIp&#x27;, &#x27;&#x27;))}&quot;,
+                technique_id=technique_map.get(event_id),
+                confidence=&quot;high&quot;,
+            ))
+
+    return timeline
+
+# Test with sample data
+signin_sample = [
+    {&quot;TimeGenerated&quot;: &quot;2024-06-01T09:00:00Z&quot;, &quot;CorrelationId&quot;: &quot;s1&quot;,
+     &quot;UserPrincipalName&quot;: &quot;alice@corp.com&quot;, &quot;IPAddress&quot;: &quot;82.80.1.10&quot;,
+     &quot;Location&quot;: &quot;IL&quot;, &quot;ResultType&quot;: &quot;0&quot;},
+    {&quot;TimeGenerated&quot;: &quot;2024-06-01T10:30:00Z&quot;, &quot;CorrelationId&quot;: &quot;s2&quot;,
+     &quot;UserPrincipalName&quot;: &quot;alice@corp.com&quot;, &quot;IPAddress&quot;: &quot;185.220.101.5&quot;,
+     &quot;Location&quot;: &quot;RU&quot;, &quot;ResultType&quot;: &quot;0&quot;},
+]
+audit_sample = [
+    {&quot;TimeGenerated&quot;: &quot;2024-06-01T10:35:00Z&quot;, &quot;Id&quot;: &quot;a1&quot;,
+     &quot;OperationName&quot;: &quot;Add application credential&quot;,
+     &quot;InitiatedBy&quot;: {&quot;user&quot;: {&quot;userPrincipalName&quot;: &quot;alice@corp.com&quot;}}},
+]
+sysmon_sample = [
+    {&quot;EventID&quot;: 3, &quot;UtcTime&quot;: &quot;2024-06-01 09:05:00&quot;, &quot;ProcessId&quot;: &quot;1234&quot;,
+     &quot;Computer&quot;: &quot;ALICE-WS01&quot;, &quot;Image&quot;: &quot;C:\\Windows\\System32\\cmd.exe&quot;,
+     &quot;DestinationIp&quot;: &quot;185.220.101.5&quot;},
+]
+
+timeline = build_timeline_from_logs(signin_sample, audit_sample, sysmon_sample, &quot;INC-2024-001&quot;)
+print(f&quot;Timeline entries: {len(timeline.entries)}&quot;)
+for e in timeline.entries:
+    print(f&quot;  {e.timestamp.strftime(&#x27;%H:%M&#x27;)} [{e.source}] {e.action[:60]}&quot;)
+# Output:
+# Timeline entries: 4
+#   09:00 [SigninLogs] Successful sign-in from IL
+#   09:05 [Sysmon] Sysmon NetworkConnect: 185.220.101.5
+#   10:30 [SigninLogs] Successful sign-in from RU
+#   10:35 [AuditLogs] AD change: Add application credential
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>deduplicate_timeline(timeline: IncidentTimeline, window_seconds: int = 5) -&gt; IncidentTimeline</code> that removes entries where the same <code>actor</code> + <code>technique_id</code> combination appears within <code>window_seconds</code> of each other (clock skew deduplication). Create a timeline where two Sysmon NetworkConnect events for the same process and IP are logged 3 seconds apart, and verify only one survives after deduplication.</p>
+<p>Expected output:</p>
+<pre><code>Before dedup: 2 entries
+After dedup: 1 entry
+</code></pre><hr />
+<h3>Concept 3 — Containment Strategy Selection</h3>
+<p>Containment is a risk vs. speed tradeoff. Aggressive containment (pull network cable, disable account immediately) stops the attacker but may destroy volatile evidence and tip off the attacker (if they have monitoring). Graduated containment (monitor, then isolate, then block) preserves more evidence but allows more damage.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from enum import Enum
+from dataclasses import dataclass
+
+class ContainmentApproach(Enum):
+    AGGRESSIVE = &quot;aggressive&quot;      # isolate immediately — accept evidence loss
+    GRADUATED = &quot;graduated&quot;        # monitor first, then contain in stages
+    DECEPTION = &quot;deception&quot;        # let attacker proceed in honeynet — maximum intelligence
+
+@dataclass
+class ContainmentDecision:
+    approach: ContainmentApproach
+    rationale: str
+    actions: list[str]
+    estimated_dwell_extension_minutes: int
+    evidence_preservation_score: int   # 0-100
+
+def recommend_containment(
+    severity: Severity,
+    exfil_active: bool,
+    forensic_evidence_collected: bool,
+    c2_active: bool,
+) -&gt; ContainmentDecision:
+    if exfil_active or severity == Severity.P1 and c2_active:
+        return ContainmentDecision(
+            approach=ContainmentApproach.AGGRESSIVE,
+            rationale=&quot;Active exfiltration or C2 — stop damage immediately, evidence loss acceptable&quot;,
+            actions=[
+                &quot;Disable compromised account in Azure AD&quot;,
+                &quot;Block source IPs at perimeter firewall&quot;,
+                &quot;Revoke all active OAuth tokens&quot;,
+                &quot;Isolate affected endpoints from network&quot;,
+                &quot;Notify legal and CISO&quot;,
+            ],
+            estimated_dwell_extension_minutes=0,
+            evidence_preservation_score=40,
+        )
+    elif severity in (Severity.P1, Severity.P2) and not forensic_evidence_collected:
+        return ContainmentDecision(
+            approach=ContainmentApproach.GRADUATED,
+            rationale=&quot;High severity but no active exfil — collect RAM/logs before isolating&quot;,
+            actions=[
+                &quot;Enable enhanced logging on affected systems&quot;,
+                &quot;Collect RAM dump and event logs (15 min window)&quot;,
+                &quot;Disable account but do not block IPs yet&quot;,
+                &quot;Monitor for lateral movement while collecting&quot;,
+                &quot;Full isolation after evidence collection&quot;,
+            ],
+            estimated_dwell_extension_minutes=15,
+            evidence_preservation_score=85,
+        )
+    else:
+        return ContainmentDecision(
+            approach=ContainmentApproach.GRADUATED,
+            rationale=&quot;Lower severity or evidence already collected — standard graduated containment&quot;,
+            actions=[
+                &quot;Reset compromised account password + MFA&quot;,
+                &quot;Review and revoke suspicious OAuth apps&quot;,
+                &quot;Add IOCs to SIEM watchlist&quot;,
+                &quot;Schedule forensic imaging within 2 hours&quot;,
+            ],
+            estimated_dwell_extension_minutes=30,
+            evidence_preservation_score=95,
+        )
+
+decision = recommend_containment(Severity.P1, exfil_active=True, forensic_evidence_collected=False, c2_active=True)
+print(f&quot;Approach: {decision.approach.value}&quot;)
+print(f&quot;Rationale: {decision.rationale}&quot;)
+for i, action in enumerate(decision.actions, 1):
+    print(f&quot;  {i}. {action}&quot;)
+# Output:
+# Approach: aggressive
+# Rationale: Active exfiltration or C2 — stop damage immediately, evidence loss acceptable
+#   1. Disable compromised account in Azure AD
+#   ...
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a <code>containment_report(decision: ContainmentDecision, incident: IncidentRecord) -&gt; str</code> function that returns a plain-text briefing string formatted as:</p>
+<pre><code>CONTAINMENT DECISION — INC-2024-001 (P1)
+Approach: AGGRESSIVE
+Rationale: ...
+Actions:
+  1. ...
+Evidence preservation: 40/100
+Estimated additional dwell: 0 min
+</code></pre><p>Expected output: the formatted string with correct incident ID, severity, and action list.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Log correlation and hypothesis generation
+<strong>Threat:</strong> LLM-assisted incident reconstruction can be fed misleading log fragments by attackers who anticipate that defenders will use LLM triage and inject false context (e.g., spoofed log entries that point to a different attacker IP)
+<strong>Opportunity:</strong> Paste a raw log dump to an LLM and ask for a kill chain reconstruction: &quot;Given these 12 log entries from Sysmon, SigninLogs, and AuditLogs, reconstruct the likely attack sequence in chronological order and identify the initial access vector.&quot;
+<strong>Prompt to try:</strong> <code>&quot;Here are raw log entries from an incident: [log dump]. Reconstruct the attack timeline with timestamps, identify the initial access method, and list any IOCs (IPs, hashes, email addresses) found across all log sources.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — Automated Triage Scripting</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=_riaZjLnoXo" target="_blank" rel="noopener"><b>Automate Everything with Shuffle! -- Let&#x27;s Make Security Operation Centers Fun Again</b><small>Taylor Walton</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=incident%20response%20automation%20Python%20SOAR%20triage%20script" target="_blank" rel="noopener">incident response automation Python SOAR triage script</a></p></div>
+<hr />
+<h3>Concept 1 — Triage Automation Architecture</h3>
+<p>Manual triage has two failure modes: too slow (analyst overwhelmed, P1 alert sits unacknowledged for 30 minutes) and too inconsistent (analyst A checks 5 things, analyst B checks 15). Automated triage scripts eliminate both by executing the same checklist every time, at machine speed.</p>
+<p><strong>Triage automation components:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Role</th>
+<th>Analogy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Alert ingestor</td>
+<td>Pulls alert from SIEM API</td>
+<td>Kafka consumer</td>
+</tr>
+<tr>
+<td>Context enricher</td>
+<td>Queries AD, TI, UEBA for enrichment</td>
+<td>Lookup JOIN in dbt</td>
+</tr>
+<tr>
+<td>Evidence collector</td>
+<td>Runs collection commands via API/agent</td>
+<td>ETL extractor</td>
+</tr>
+<tr>
+<td>Severity scorer</td>
+<td>Applies classification matrix</td>
+<td>Business rule engine</td>
+</tr>
+<tr>
+<td>Ticket creator</td>
+<td>Opens incident in ticketing system</td>
+<td>Webhook to Jira/ServiceNow</td>
+</tr>
+<tr>
+<td>Notification sender</td>
+<td>Pages on-call via PagerDuty/Teams</td>
+<td>Alertmanager receiver</td>
+</tr>
+</tbody>
+</table>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Callable, Optional
+
+@dataclass
+class TriageStepResult:
+    step_name: str
+    success: bool
+    output: dict
+    error: Optional[str] = None
+    duration_seconds: float = 0.0
+
+@dataclass
+class TriageResult:
+    incident_id: str
+    alert_id: str
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    steps: list[TriageStepResult] = field(default_factory=list)
+    severity: Optional[Severity] = None
+    timeline: Optional[IncidentTimeline] = None
+    suppressed: bool = False
+    suppression_reason: str = &quot;&quot;
+
+    def succeeded(self) -&gt; bool:
+        return all(s.success for s in self.steps if not s.error)
+
+    def failed_steps(self) -&gt; list[str]:
+        return [s.step_name for s in self.steps if not s.success]
+
+    def duration_seconds(self) -&gt; Optional[float]:
+        if self.completed_at:
+            return (self.completed_at - self.started_at).total_seconds()
+        return None
+
+TriageStep = Callable[[dict, TriageResult], TriageStepResult]
+
+def run_triage_pipeline(alert: dict, steps: list[TriageStep]) -&gt; TriageResult:
+    result = TriageResult(
+        incident_id=f&quot;INC-{datetime.utcnow().strftime(&#x27;%Y%m%d-%H%M%S&#x27;)}&quot;,
+        alert_id=alert.get(&quot;alert_id&quot;, &quot;unknown&quot;),
+        started_at=datetime.utcnow(),
+    )
+    for step_fn in steps:
+        import time
+        start = time.monotonic()
+        try:
+            step_result = step_fn(alert, result)
+        except Exception as e:
+            step_result = TriageStepResult(
+                step_name=step_fn.__name__,
+                success=False,
+                output={},
+                error=str(e),
+                duration_seconds=time.monotonic() - start,
+            )
+        step_result.duration_seconds = time.monotonic() - start
+        result.steps.append(step_result)
+        if not step_result.success and step_result.error:
+            break
+    result.completed_at = datetime.utcnow()
+    return result
+
+# Define triage steps as functions
+def step_enrich_user(alert: dict, result: TriageResult) -&gt; TriageStepResult:
+    user = alert.get(&quot;actor&quot;, &quot;&quot;)
+    USER_DIR = {&quot;alice@corp.com&quot;: {&quot;department&quot;: &quot;Finance&quot;, &quot;manager&quot;: &quot;david@corp.com&quot;, &quot;mfa_enabled&quot;: False}}
+    user_info = USER_DIR.get(user, {&quot;department&quot;: &quot;Unknown&quot;, &quot;mfa_enabled&quot;: True})
+    result.timeline = IncidentTimeline(incident_id=result.incident_id)
+    return TriageStepResult(&quot;enrich_user&quot;, True, user_info)
+
+def step_check_threat_intel(alert: dict, result: TriageResult) -&gt; TriageStepResult:
+    ip = alert.get(&quot;actor_ip&quot;, &quot;&quot;)
+    TOR_EXITS = {&quot;185.220.101.5&quot;, &quot;185.220.102.10&quot;}
+    is_tor = ip in TOR_EXITS
+    return TriageStepResult(&quot;check_threat_intel&quot;, True, {&quot;ip&quot;: ip, &quot;is_tor_exit&quot;: is_tor})
+
+def step_classify_severity(alert: dict, result: TriageResult) -&gt; TriageStepResult:
+    ti_step = next((s for s in result.steps if s.step_name == &quot;check_threat_intel&quot;), None)
+    user_step = next((s for s in result.steps if s.step_name == &quot;enrich_user&quot;), None)
+    is_tor = ti_step.output.get(&quot;is_tor_exit&quot;, False) if ti_step else False
+    no_mfa = not (user_step.output.get(&quot;mfa_enabled&quot;, True)) if user_step else False
+    inputs = SeverityInput(
+        exfiltration=DataExfiltrationStatus.SUSPECTED if is_tor else DataExfiltrationStatus.UNLIKELY,
+        affected_system_count=1,
+        crown_jewel_affected=False,
+        persistence=PersistenceStatus.UNKNOWN,
+        c2_active=is_tor,
+        business_impact_score=2 if is_tor else 1,
+    )
+    result.severity = classify_severity(inputs)
+    return TriageStepResult(&quot;classify_severity&quot;, True, {&quot;severity&quot;: result.severity.value})
+
+alert_input = {
+    &quot;alert_id&quot;: &quot;sentinel-alert-001&quot;,
+    &quot;rule&quot;: &quot;azure-impossible-travel&quot;,
+    &quot;actor&quot;: &quot;alice@corp.com&quot;,
+    &quot;actor_ip&quot;: &quot;185.220.101.5&quot;,
+    &quot;speed_kmh&quot;: 1888,
+}
+
+triage = run_triage_pipeline(alert_input, [step_enrich_user, step_check_threat_intel, step_classify_severity])
+print(f&quot;Incident: {triage.incident_id}&quot;)
+print(f&quot;Severity: {triage.severity.value}&quot;)
+print(f&quot;Duration: {triage.duration_seconds():.2f}s&quot;)
+for s in triage.steps:
+    print(f&quot;  [{s.step_name}] success={s.success} output={s.output}&quot;)
+# Output:
+# Incident: INC-2024...
+# Severity: P1
+# Duration: 0.00s
+# [enrich_user] success=True output={...}
+# [check_threat_intel] success=True output={&#x27;ip&#x27;: &#x27;185.220.101.5&#x27;, &#x27;is_tor_exit&#x27;: True}
+# [classify_severity] success=True output={&#x27;severity&#x27;: &#x27;P1&#x27;}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a fourth triage step <code>step_recommend_containment(alert: dict, result: TriageResult) -&gt; TriageStepResult</code> that calls <code>recommend_containment()</code> using the severity from <code>result.severity</code> and whether the alert IP is a TOR exit (from a prior step's output). The step output dict should include <code>approach</code> and <code>action_count</code>. Add it to the pipeline and verify it runs after <code>step_classify_severity</code>.</p>
+<p>Expected output:</p>
+<pre><code>[step_recommend_containment] success=True output={&#x27;approach&#x27;: &#x27;aggressive&#x27;, &#x27;action_count&#x27;: 5}
+</code></pre><hr />
+<h3>Concept 2 — Playbook as Code</h3>
+<p>A playbook-as-code approach stores IR procedures as Python dataclasses with preconditions, actions, and expected outputs. This enables dry-run testing, version control, and automatic execution when all preconditions are met.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Callable, Optional
+from enum import Enum
+
+class PlaybookStatus(Enum):
+    PENDING = &quot;pending&quot;
+    RUNNING = &quot;running&quot;
+    COMPLETED = &quot;completed&quot;
+    FAILED = &quot;failed&quot;
+    SKIPPED = &quot;skipped&quot;
+
+@dataclass
+class PlaybookAction:
+    name: str
+    description: str
+    requires_approval: bool
+    auto_executable: bool
+    execute: Optional[Callable[[dict], dict]] = None
+
+@dataclass
+class PlaybookStep:
+    step_id: str
+    phase: IRPhase
+    actions: list[PlaybookAction]
+    precondition: Optional[Callable[[TriageResult], bool]] = None
+    status: PlaybookStatus = PlaybookStatus.PENDING
+
+    def can_execute(self, triage: TriageResult) -&gt; bool:
+        if self.precondition is None:
+            return True
+        return self.precondition(triage)
+
+@dataclass
+class Playbook:
+    name: str
+    trigger_rule: str
+    severity_scope: list[Severity]
+    steps: list[PlaybookStep]
+
+    def applicable_to(self, triage: TriageResult) -&gt; bool:
+        return triage.severity in self.severity_scope
+
+    def dry_run_report(self, triage: TriageResult) -&gt; list[dict]:
+        report = []
+        for step in self.steps:
+            can_exec = step.can_execute(triage)
+            for action in step.actions:
+                report.append({
+                    &quot;step&quot;: step.step_id,
+                    &quot;phase&quot;: step.phase.value,
+                    &quot;action&quot;: action.name,
+                    &quot;auto_executable&quot;: action.auto_executable and can_exec,
+                    &quot;requires_approval&quot;: action.requires_approval,
+                    &quot;precondition_met&quot;: can_exec,
+                })
+        return report
+
+# Define the impossible travel playbook
+impossible_travel_playbook = Playbook(
+    name=&quot;Azure AD Impossible Travel Response&quot;,
+    trigger_rule=&quot;azure-impossible-travel&quot;,
+    severity_scope=[Severity.P1, Severity.P2],
+    steps=[
+        PlaybookStep(
+            step_id=&quot;ID-01&quot;,
+            phase=IRPhase.IDENTIFICATION,
+            actions=[
+                PlaybookAction(&quot;query_signin_history&quot;, &quot;Pull last 7 days of sign-ins for user&quot;, False, True),
+                PlaybookAction(&quot;check_mfa_status&quot;, &quot;Verify MFA enrollment in Azure AD&quot;, False, True),
+                PlaybookAction(&quot;check_ueba_score&quot;, &quot;Retrieve UEBA risk score from Sentinel&quot;, False, True),
+            ],
+        ),
+        PlaybookStep(
+            step_id=&quot;CN-01&quot;,
+            phase=IRPhase.CONTAINMENT,
+            precondition=lambda t: t.severity == Severity.P1,
+            actions=[
+                PlaybookAction(&quot;disable_account&quot;, &quot;Disable user in Azure AD&quot;, True, True),
+                PlaybookAction(&quot;revoke_sessions&quot;, &quot;Revoke all OAuth tokens via Graph API&quot;, True, True),
+                PlaybookAction(&quot;block_source_ip&quot;, &quot;Add source IP to CA named location blocklist&quot;, True, False),
+            ],
+        ),
+    ],
+)
+
+fake_triage = TriageResult(&quot;INC-2024-001&quot;, &quot;alert-001&quot;, datetime.utcnow())
+fake_triage.severity = Severity.P1
+
+report = impossible_travel_playbook.dry_run_report(fake_triage)
+print(&quot;Playbook dry run:&quot;)
+for item in report:
+    auto = &quot;AUTO&quot; if item[&quot;auto_executable&quot;] else &quot;MANUAL&quot;
+    approval = &quot;APPROVAL REQUIRED&quot; if item[&quot;requires_approval&quot;] else &quot;no approval&quot;
+    print(f&quot;  [{item[&#x27;phase&#x27;]}] {item[&#x27;action&#x27;]}: {auto}, {approval}&quot;)
+# Output:
+# [identification] query_signin_history: AUTO, no approval
+# [identification] check_mfa_status: AUTO, no approval
+# ...
+# [containment] disable_account: AUTO, APPROVAL REQUIRED
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a third step <code>ER-01</code> (Eradication phase) with precondition: only runs if the <code>CN-01</code> containment step completed (check that <code>step.status == PlaybookStatus.COMPLETED</code> for the containment step). The step should include actions: &quot;audit_oauth_apps&quot;, &quot;remove_malicious_credential&quot;, &quot;search_for_lateral_movement&quot;. Run the dry run and show that <code>ER-01</code> actions show <code>precondition_met: False</code> because <code>CN-01</code> has not been executed yet.</p>
+<p>Expected output:</p>
+<pre><code>[eradication] audit_oauth_apps: MANUAL, precondition_met: False
+</code></pre><hr />
+<h3>Concept 3 — IOC Extraction and Distribution</h3>
+<p>IOCs (Indicators of Compromise) extracted from an incident must be normalized and distributed to all enforcement points: firewall, email gateway, endpoint EDR, SIEM watchlist, and TI platform. Manual IOC distribution is slow and inconsistent — automation ensures zero-gap propagation.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from enum import Enum
+from datetime import datetime
+from typing import Optional
+import re
+import ipaddress
+
+class IOCType(Enum):
+    IPV4 = &quot;ipv4&quot;
+    DOMAIN = &quot;domain&quot;
+    URL = &quot;url&quot;
+    FILE_HASH_MD5 = &quot;file_hash_md5&quot;
+    FILE_HASH_SHA256 = &quot;file_hash_sha256&quot;
+    EMAIL = &quot;email&quot;
+    USER_ACCOUNT = &quot;user_account&quot;
+
+@dataclass
+class IOC:
+    value: str
+    ioc_type: IOCType
+    confidence: str      # high / medium / low
+    source: str          # &quot;analyst&quot;, &quot;sysmon&quot;, &quot;zeek&quot;, &quot;ti_feed&quot;
+    first_seen: datetime
+    last_seen: datetime
+    incident_id: str
+    context: str = &quot;&quot;
+    ttl_hours: int = 24  # how long to block/alert on this IOC
+
+    def is_expired(self, as_of: Optional[datetime] = None) -&gt; bool:
+        as_of = as_of or datetime.utcnow()
+        age_hours = (as_of - self.first_seen).total_seconds() / 3600
+        return age_hours &gt; self.ttl_hours
+
+def extract_iocs_from_timeline(timeline: IncidentTimeline) -&gt; list[IOC]:
+    iocs: list[IOC] = []
+    ip_pattern = re.compile(r&#x27;\b(?:\d{1,3}\.){3}\d{1,3}\b&#x27;)
+    email_pattern = re.compile(r&#x27;\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b&#x27;)
+    hash_sha256 = re.compile(r&#x27;\b[a-fA-F0-9]{64}\b&#x27;)
+    hash_md5 = re.compile(r&#x27;\b[a-fA-F0-9]{32}\b&#x27;)
+
+    def is_private_ip(ip: str) -&gt; bool:
+        try:
+            return ipaddress.ip_address(ip).is_private
+        except ValueError:
+            return False
+
+    seen: set[str] = set()
+    for entry in timeline.entries:
+        text = f&quot;{entry.actor} {entry.action}&quot;
+        for ip in ip_pattern.findall(text):
+            if ip not in seen and not is_private_ip(ip):
+                seen.add(ip)
+                iocs.append(IOC(
+                    value=ip, ioc_type=IOCType.IPV4, confidence=&quot;high&quot;,
+                    source=entry.source, first_seen=entry.timestamp,
+                    last_seen=entry.timestamp, incident_id=timeline.incident_id,
+                    context=entry.action[:100],
+                ))
+        for email in email_pattern.findall(text):
+            if email not in seen:
+                seen.add(email)
+                iocs.append(IOC(
+                    value=email, ioc_type=IOCType.EMAIL, confidence=&quot;medium&quot;,
+                    source=entry.source, first_seen=entry.timestamp,
+                    last_seen=entry.timestamp, incident_id=timeline.incident_id,
+                ))
+
+    return iocs
+
+iocs = extract_iocs_from_timeline(timeline)
+print(f&quot;IOCs extracted: {len(iocs)}&quot;)
+for ioc in iocs:
+    print(f&quot;  [{ioc.ioc_type.value}] {ioc.value} (confidence={ioc.confidence})&quot;)
+# Output:
+# IOCs extracted: 2
+#   [ipv4] 185.220.101.5 (confidence=high)
+#   [email] alice@corp.com (confidence=medium)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a <code>format_iocs_for_distribution(iocs: list[IOC], format: str) -&gt; str</code> function that outputs IOCs in two formats:</p>
+<ul>
+<li><code>&quot;stix_json&quot;</code>: a JSON string with <code>{&quot;type&quot;: &quot;bundle&quot;, &quot;objects&quot;: [{&quot;type&quot;: &quot;indicator&quot;, &quot;value&quot;: ..., &quot;ioc_type&quot;: ..., &quot;confidence&quot;: ...}]}</code></li>
+<li><code>&quot;csv&quot;</code>: a CSV string with columns <code>value,ioc_type,confidence,ttl_hours</code></li>
+</ul>
+<p>Call it with the extracted IOCs and verify both outputs are well-formed.</p>
+<p>Expected output:</p>
+<pre><code>STIX: {&quot;type&quot;: &quot;bundle&quot;, &quot;objects&quot;: [{&quot;type&quot;: &quot;indicator&quot;, &quot;value&quot;: &quot;185.220.101.5&quot;, ...}]}
+CSV:
+value,ioc_type,confidence,ttl_hours
+185.220.101.5,ipv4,high,24
+alice@corp.com,email,medium,24
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Automated playbook generation from incident patterns
+<strong>Threat:</strong> LLM-generated playbooks can encode biases from training data — e.g., always recommending &quot;block the IP&quot; for every incident type, which does nothing against attackers using residential proxies that rotate every 5 minutes
+<strong>Opportunity:</strong> Feed a completed incident timeline to an LLM and ask it to generate a playbook for the same attack pattern in the future — capturing the specific containment actions that worked, in the correct order, with the actual API calls used
+<strong>Prompt to try:</strong> <code>&quot;Based on this incident timeline [JSON], generate a reusable IR playbook in JSON format with fields: trigger_conditions, identification_steps, containment_steps, eradication_steps, each with: action_name, tool, api_call (if applicable), requires_approval (bool).&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Post-Incident Analysis</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=qgHWzQ2zcqQ" target="_blank" rel="noopener"><b>Postmortem Culture at Google | Ramon Medrano Llamas | Conf42 SRE 2022</b><small>Conf42</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=incident%20response%20post-mortem%20blameless%20security%20engineering" target="_blank" rel="noopener">incident response post-mortem blameless security engineering</a></p></div>
+<hr />
+<h3>Concept 1 — Post-Mortem Structure</h3>
+<p>A post-mortem (also called After Action Review or Lessons Learned) is the final phase of PICERL. Its purpose is not to assign blame but to find and close the systemic gaps that allowed the incident to happen and persist. In detection engineering, every incident is also a detection gap report.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+
+@dataclass
+class DetectionGap:
+    gap_id: str
+    description: str
+    technique_id: str
+    when_missed: str            # phase where attacker action went undetected
+    root_cause: str             # why the detection missed
+    recommended_fix: str        # rule change, new data source, process change
+    estimated_effort_days: float
+    priority: str               # P1-P4
+
+@dataclass
+class PostMortem:
+    incident_id: str
+    title: str
+    authored_by: str
+    authored_at: datetime
+    severity: Severity
+    executive_summary: str
+
+    timeline_summary: str       # 3-5 sentence narrative of the attack chain
+    root_cause: str             # the single most impactful contributing factor
+    contributing_factors: list[str] = field(default_factory=list)
+
+    what_went_well: list[str] = field(default_factory=list)
+    what_went_poorly: list[str] = field(default_factory=list)
+
+    detection_gaps: list[DetectionGap] = field(default_factory=list)
+    action_items: list[dict] = field(default_factory=list)  # {owner, description, due_date, status}
+
+    def detection_gap_backlog(self) -&gt; list[DetectionGap]:
+        priority_rank = {&quot;P1&quot;: 0, &quot;P2&quot;: 1, &quot;P3&quot;: 2, &quot;P4&quot;: 3}
+        return sorted(self.detection_gaps, key=lambda g: (priority_rank.get(g.priority, 4), g.estimated_effort_days))
+
+    def effort_estimate_total_days(self) -&gt; float:
+        return sum(g.estimated_effort_days for g in self.detection_gaps)
+
+pm = PostMortem(
+    incident_id=&quot;INC-2024-001&quot;,
+    title=&quot;Azure AD Account Takeover via Credential Stuffing — alice@corp.com&quot;,
+    authored_by=&quot;analyst1@corp.com&quot;,
+    authored_at=datetime(2024, 6, 5, 9, 0),
+    severity=Severity.P1,
+    executive_summary=&quot;Attacker used stolen credentials to sign in to alice@corp.com&#x27;s Azure AD account from a TOR exit node. No MFA was enforced on the Finance team. Attacker added an OAuth app credential for persistence. Containment took 45 minutes from alert to isolation.&quot;,
+    timeline_summary=&quot;At 08:00, attacker authenticated from IL (legitimate — likely credential test). At 10:30, successful auth from RU TOR exit node. Attacker added OAuth credential at 10:35. Sentinel alert fired at 10:30. Analyst contained at 10:45.&quot;,
+    root_cause=&quot;MFA was not enforced for the Finance OU in Conditional Access policy.&quot;,
+    contributing_factors=[
+        &quot;Finance team was excluded from the MFA CA policy during a migration 6 months ago and never re-added&quot;,
+        &quot;UEBA was enabled but no automated response playbook was wired to the impossible travel alert&quot;,
+        &quot;No alert for OAuth credential additions to existing accounts&quot;,
+    ],
+    what_went_well=[
+        &quot;Impossible travel detection fired within seconds of the sign-in&quot;,
+        &quot;Analyst contained the account within 15 minutes of acknowledging the alert&quot;,
+    ],
+    what_went_poorly=[
+        &quot;No alert for OAuth app credential persistence — attacker had a backdoor for 10 minutes before eradication&quot;,
+        &quot;MFA gap existed undetected for 6 months&quot;,
+    ],
+    detection_gaps=[
+        DetectionGap(&quot;GAP-001&quot;, &quot;No rule for new OAuth credential additions to existing accounts&quot;,
+                     &quot;T1098.001&quot;, &quot;Eradication&quot;, &quot;Missing AuditLogs rule for &#x27;Add application credential&#x27;&quot;,
+                     &quot;Add Sentinel rule: AuditLogs | where OperationName == &#x27;Add application credential&#x27;&quot;,
+                     0.5, &quot;P1&quot;),
+        DetectionGap(&quot;GAP-002&quot;, &quot;No CA policy coverage report — Finance exclusion went undetected&quot;,
+                     &quot;T1078&quot;, &quot;Preparation&quot;, &quot;No automated CA policy drift detection&quot;,
+                     &quot;Weekly CA policy export + diff against baseline, alert on new exclusions&quot;,
+                     2.0, &quot;P2&quot;),
+    ],
+    action_items=[
+        {&quot;owner&quot;: &quot;security-eng@corp.com&quot;, &quot;description&quot;: &quot;Add Sentinel rule for T1098.001&quot;, &quot;due_date&quot;: &quot;2024-06-08&quot;, &quot;status&quot;: &quot;open&quot;},
+        {&quot;owner&quot;: &quot;identity-team@corp.com&quot;, &quot;description&quot;: &quot;Enforce MFA on all Finance accounts via CA&quot;, &quot;due_date&quot;: &quot;2024-06-06&quot;, &quot;status&quot;: &quot;open&quot;},
+    ]
+)
+
+backlog = pm.detection_gap_backlog()
+print(f&quot;Detection gap backlog ({len(backlog)} items, est. {pm.effort_estimate_total_days()}d):&quot;)
+for g in backlog:
+    print(f&quot;  [{g.priority}] {g.gap_id}: {g.description[:60]} ({g.estimated_effort_days}d)&quot;)
+# Output:
+# Detection gap backlog (2 items, est. 2.5d):
+#   [P1] GAP-001: No rule for new OAuth credential additions... (0.5d)
+#   [P2] GAP-002: No CA policy coverage report... (2.0d)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a <code>generate_postmortem_md(pm: PostMortem) -&gt; str</code> function that formats the post-mortem as a markdown document with sections: Executive Summary, Timeline Summary, Root Cause, Contributing Factors, What Went Well, What Went Poorly, Detection Gap Backlog (as a table), and Action Items (as a table with owner/description/due date/status). Output should start with <code># Post-Mortem — {incident_id}</code>.</p>
+<p>Expected output: a multi-section markdown string, first line <code># Post-Mortem — INC-2024-001</code>.</p>
+<hr />
+<h3>Concept 2 — Metrics: MTTD, MTTR, Dwell Time</h3>
+<p>Measuring IR effectiveness requires consistent metric definitions. Without agreed definitions, MTTD (Mean Time to Detect) in one team's report means something different than another's.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+from statistics import mean, stdev
+
+@dataclass
+class IRMetricsRecord:
+    incident_id: str
+    severity: Severity
+    attack_start: datetime      # first attacker action observed in timeline
+    first_alert: datetime       # first SIEM alert
+    analyst_acknowledged: datetime  # analyst opened the ticket
+    contained_at: datetime      # attacker action stopped
+    recovered_at: datetime      # systems confirmed clean and operational
+
+    def mttd_minutes(self) -&gt; float:
+        return (self.first_alert - self.attack_start).total_seconds() / 60.0
+
+    def mtta_minutes(self) -&gt; float:
+        return (self.analyst_acknowledged - self.first_alert).total_seconds() / 60.0
+
+    def mttc_minutes(self) -&gt; float:
+        return (self.contained_at - self.analyst_acknowledged).total_seconds() / 60.0
+
+    def mttr_minutes(self) -&gt; float:
+        return (self.recovered_at - self.attack_start).total_seconds() / 60.0
+
+    def dwell_time_minutes(self) -&gt; float:
+        return (self.contained_at - self.attack_start).total_seconds() / 60.0
+
+def calculate_program_metrics(records: list[IRMetricsRecord]) -&gt; dict:
+    if not records:
+        return {}
+    return {
+        &quot;incident_count&quot;: len(records),
+        &quot;mean_mttd_minutes&quot;: round(mean(r.mttd_minutes() for r in records), 1),
+        &quot;mean_mtta_minutes&quot;: round(mean(r.mtta_minutes() for r in records), 1),
+        &quot;mean_mttr_minutes&quot;: round(mean(r.mttr_minutes() for r in records), 1),
+        &quot;mean_dwell_minutes&quot;: round(mean(r.dwell_time_minutes() for r in records), 1),
+        &quot;p90_dwell_minutes&quot;: round(sorted(r.dwell_time_minutes() for r in records)[int(len(records)*0.9)], 1),
+        &quot;by_severity&quot;: {
+            sev.value: round(mean(r.dwell_time_minutes() for r in records if r.severity == sev), 1)
+            for sev in Severity if any(r.severity == sev for r in records)
+        }
+    }
+
+metrics_data = [
+    IRMetricsRecord(&quot;INC-001&quot;, Severity.P1,
+        datetime(2024, 6, 1, 8, 0), datetime(2024, 6, 1, 10, 30),
+        datetime(2024, 6, 1, 10, 40), datetime(2024, 6, 1, 10, 45), datetime(2024, 6, 1, 14, 0)),
+    IRMetricsRecord(&quot;INC-002&quot;, Severity.P2,
+        datetime(2024, 6, 2, 9, 0), datetime(2024, 6, 2, 9, 15),
+        datetime(2024, 6, 2, 9, 25), datetime(2024, 6, 2, 10, 0), datetime(2024, 6, 2, 12, 0)),
+]
+metrics = calculate_program_metrics(metrics_data)
+print(f&quot;Mean MTTD: {metrics[&#x27;mean_mttd_minutes&#x27;]} min&quot;)
+print(f&quot;Mean Dwell: {metrics[&#x27;mean_dwell_minutes&#x27;]} min&quot;)
+print(f&quot;Dwell by severity: {metrics[&#x27;by_severity&#x27;]}&quot;)
+# Output:
+# Mean MTTD: 86.3 min
+# Mean Dwell: 142.5 min
+# Dwell by severity: {&#x27;P1&#x27;: 165.0, &#x27;P2&#x27;: 60.0}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a function <code>sla_compliance_report(records: list[IRMetricsRecord]) -&gt; dict</code> that returns a dict with one key per severity (only present if data exists), each containing <code>{&quot;incidents&quot;: N, &quot;within_sla&quot;: N, &quot;compliance_pct&quot;: float}</code>. SLA definitions: P1 MTTR ≤ 480 min; P2 MTTR ≤ 1440 min. Create a dataset of 3 P1 incidents (two within SLA, one at 600 min) and verify compliance at 66.7%.</p>
+<p>Expected output:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>{&quot;P1&quot;: {&quot;incidents&quot;: 3, &quot;within_sla&quot;: 2, &quot;compliance_pct&quot;: 66.7}}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — Lessons Learned to Detection Backlog</h3>
+<p>The most valuable output of a post-mortem is a concrete set of detection engineering backlog items. Every gap identified must become a ticket with a technique ID, a data source requirement, an estimated effort, and an owner.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime, date
+from typing import Optional
+
+@dataclass
+class DetectionBacklogItem:
+    item_id: str
+    source_incident: str
+    technique_id: str
+    technique_name: str
+    gap_description: str
+    proposed_rule_title: str
+    data_source_required: str
+    data_source_available: bool
+    estimated_effort_days: float
+    owner: Optional[str]
+    target_completion: Optional[date]
+    status: str = &quot;backlog&quot;  # backlog / in_progress / done / wontfix
+
+    def roi_score(self) -&gt; float:
+        # Higher score = higher priority
+        priority_map = {&quot;T1078&quot;: 90, &quot;T1098&quot;: 85, &quot;T1059&quot;: 80, &quot;T1055&quot;: 75}
+        technique_score = priority_map.get(self.technique_id[:5], 50)
+        effort_penalty = min(self.estimated_effort_days * 5, 40)
+        availability_bonus = 20 if self.data_source_available else 0
+        return technique_score - effort_penalty + availability_bonus
+
+def postmortem_to_backlog(pm: PostMortem) -&gt; list[DetectionBacklogItem]:
+    items = []
+    for i, gap in enumerate(pm.detection_gaps):
+        items.append(DetectionBacklogItem(
+            item_id=f&quot;DET-{pm.incident_id}-{i+1:03d}&quot;,
+            source_incident=pm.incident_id,
+            technique_id=gap.technique_id,
+            technique_name=gap.technique_id,
+            gap_description=gap.description,
+            proposed_rule_title=f&quot;Detect {gap.technique_id} — {gap.description[:40]}&quot;,
+            data_source_required=gap.root_cause,
+            data_source_available=True,
+            estimated_effort_days=gap.estimated_effort_days,
+            owner=None,
+            target_completion=None,
+            status=&quot;backlog&quot;,
+        ))
+    return sorted(items, key=lambda x: -x.roi_score())
+
+backlog_items = postmortem_to_backlog(pm)
+for item in backlog_items:
+    print(f&quot;ROI={item.roi_score():.0f} [{item.item_id}] {item.proposed_rule_title[:60]}&quot;)
+# Output:
+# ROI=107 [DET-INC-2024-001-001] Detect T1098.001 — No rule for new OAuth credential...
+# ROI=... [DET-INC-2024-001-002] Detect T1078 — No CA policy coverage report...
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a <code>merge_backlogs(existing: list[DetectionBacklogItem], new: list[DetectionBacklogItem]) -&gt; list[DetectionBacklogItem]</code> function that merges two backlogs, deduplicating by <code>technique_id</code> (keep the item with the higher <code>roi_score()</code>). Create two overlapping backlogs and verify the merged result has no duplicate technique IDs and always keeps the higher-ROI item.</p>
+<p>Expected output:</p>
+<pre><code>Merged count: 3 (no duplicates on technique_id)
+Kept item for T1098: roi=107 (higher than roi=60)
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Post-mortem quality review
+<strong>Threat:</strong> LLM-assisted post-mortems can normalize poor security practices if trained on biased corpora — e.g., consistently recommending &quot;enable MFA&quot; as the fix for every incident type, regardless of whether MFA was the actual gap
+<strong>Opportunity:</strong> Use an LLM to review a post-mortem draft for completeness: &quot;Does this post-mortem include a root cause (not just symptoms), at least one process gap (not just technical), and specific measurable action items with owners and due dates? Flag any vague or missing sections.&quot;
+<strong>Prompt to try:</strong> <code>&quot;Review this IR post-mortem for completeness and quality: [paste document]. Score each section 1-5 and explain what's missing. Specifically check: (1) root cause is systemic not symptomatic, (2) action items have measurable success criteria, (3) detection gaps map to specific ATT&amp;CK techniques.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — IR Triage Module (Full Pipeline)</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=Nb9_ahZMC5U" target="_blank" rel="noopener"><b>SOC Open Source, Build own SOAR with Shuffle, ELK-TheHive-Cortex-Teams Full Automation, Part 2</b><small>BlackPerl</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=SOAR%20incident%20response%20automation%20Python%20pipeline%202024" target="_blank" rel="noopener">SOAR incident response automation Python pipeline 2024</a></p></div>
+<hr />
+<h3>Concept 1 — IR Triage Data Structures</h3>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+import argparse
+from pathlib import Path
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from typing import Optional
+from enum import Enum
+
+# (All dataclasses from Days 1-4 are imported here in the full module)
+
+@dataclass
+class TriagePackage:
+    incident: IncidentRecord
+    timeline: IncidentTimeline
+    triage_result: TriageResult
+    containment_decision: ContainmentDecision
+    iocs: list[IOC]
+    evidence_chain: list[dict]
+    generated_at: datetime = field(default_factory=datetime.utcnow)
+
+    def to_json(self) -&gt; dict:
+        return {
+            &quot;generated_at&quot;: self.generated_at.isoformat(),
+            &quot;incident_id&quot;: self.incident.incident_id,
+            &quot;severity&quot;: self.incident.severity.value,
+            &quot;timeline_entries&quot;: len(self.timeline.entries),
+            &quot;dwell_time_minutes&quot;: self.timeline.attacker_dwell_time_minutes(),
+            &quot;techniques&quot;: self.timeline.unique_techniques(),
+            &quot;containment_approach&quot;: self.containment_decision.approach.value,
+            &quot;ioc_count&quot;: len(self.iocs),
+            &quot;iocs&quot;: [{&quot;value&quot;: i.value, &quot;type&quot;: i.ioc_type.value} for i in self.iocs],
+            &quot;evidence_items&quot;: len(self.evidence_chain),
+            &quot;triage_steps&quot;: [{&quot;step&quot;: s.step_name, &quot;success&quot;: s.success} for s in self.triage_result.steps],
+        }
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a method <code>risk_summary(self) -&gt; str</code> to <code>TriagePackage</code> that returns a one-paragraph plain-English summary. It should include: incident ID, severity, dwell time (or &quot;unknown&quot;), number of techniques observed, IOC count, and containment approach. Create a sample <code>TriagePackage</code> and verify the summary contains all five data points.</p>
+<p>Expected output:</p>
+<pre><code>Incident INC-2024-001 (P1): attacker dwell time 165 minutes, 2 techniques observed (T1078, T1098.001), 2 IOCs extracted. Containment: aggressive. Recommended next step: execute containment playbook.
+</code></pre><hr />
+<h3>Concept 2 — Full Triage Pipeline</h3>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def run_full_ir_triage(
+    alert: dict,
+    signin_logs: list[dict],
+    audit_logs: list[dict],
+    sysmon_logs: list[dict],
+    output_path: str = &quot;triage_output.json&quot;,
+) -&gt; TriagePackage:
+    # Step 1: Run automated triage pipeline
+    triage = run_triage_pipeline(
+        alert,
+        [step_enrich_user, step_check_threat_intel, step_classify_severity],
+    )
+
+    # Step 2: Build incident record
+    severity = triage.severity or Severity.P3
+    incident = IncidentRecord(
+        incident_id=triage.incident_id,
+        title=f&quot;Triage: {alert.get(&#x27;rule&#x27;, &#x27;Unknown rule&#x27;)} — {alert.get(&#x27;actor&#x27;, &#x27;&#x27;)}&quot;,
+        severity=severity,
+        created_at=datetime.utcnow(),
+        affected_systems=[&quot;AzureAD&quot;],
+        iocs=[alert.get(&quot;actor_ip&quot;, &quot;&quot;)],
+    )
+
+    # Step 3: Build timeline
+    timeline = build_timeline_from_logs(signin_logs, audit_logs, sysmon_logs, triage.incident_id)
+
+    # Step 4: Containment decision
+    ti_step = next((s for s in triage.steps if s.step_name == &quot;check_threat_intel&quot;), None)
+    is_tor = ti_step.output.get(&quot;is_tor_exit&quot;, False) if ti_step else False
+    containment = recommend_containment(severity, exfil_active=False, forensic_evidence_collected=False, c2_active=is_tor)
+
+    # Step 5: IOC extraction
+    iocs = extract_iocs_from_timeline(timeline)
+
+    # Step 6: Evidence collection plan (simulated)
+    evidence_chain = simulate_collection_run(WINDOWS_EVIDENCE_PLAN)
+
+    package = TriagePackage(
+        incident=incident,
+        timeline=timeline,
+        triage_result=triage,
+        containment_decision=containment,
+        iocs=iocs,
+        evidence_chain=evidence_chain,
+    )
+
+    Path(output_path).write_text(json.dumps(package.to_json(), indent=2), encoding=&quot;utf-8&quot;)
+    return package
+
+if __name__ == &quot;__main__&quot;:
+    parser = argparse.ArgumentParser(description=&quot;IR triage pipeline&quot;)
+    parser.add_argument(&quot;--alert&quot;, required=True, help=&quot;Path to alert JSON file&quot;)
+    parser.add_argument(&quot;--signin-logs&quot;, help=&quot;Path to Azure SigninLogs JSONL&quot;)
+    parser.add_argument(&quot;--audit-logs&quot;, help=&quot;Path to AuditLogs JSONL&quot;)
+    parser.add_argument(&quot;--sysmon-logs&quot;, help=&quot;Path to Sysmon JSONL&quot;)
+    parser.add_argument(&quot;--output&quot;, default=&quot;triage_output.json&quot;)
+    args = parser.parse_args()
+
+    alert_data = json.loads(Path(args.alert).read_text())
+    signin = [json.loads(l) for l in Path(args.signin_logs).read_text().splitlines() if l.strip()] if args.signin_logs else []
+    audit = [json.loads(l) for l in Path(args.audit_logs).read_text().splitlines() if l.strip()] if args.audit_logs else []
+    sysmon = [json.loads(l) for l in Path(args.sysmon_logs).read_text().splitlines() if l.strip()] if args.sysmon_logs else []
+
+    pkg = run_full_ir_triage(alert_data, signin, audit, sysmon, args.output)
+    print(f&quot;Triage complete: {pkg.incident.incident_id} ({pkg.incident.severity.value})&quot;)
+    print(f&quot;  Timeline entries: {len(pkg.timeline.entries)}&quot;)
+    print(f&quot;  IOCs: {len(pkg.iocs)}&quot;)
+    print(f&quot;  Output: {args.output}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Create a test harness <code>test_triage_pipeline()</code> that builds synthetic alert, signin, audit, and sysmon data (the same data used in prior exercises), calls <code>run_full_ir_triage()</code>, and asserts:</p>
+<ul>
+<li><code>package.incident.severity == Severity.P1</code></li>
+<li><code>len(package.timeline.entries) &gt;= 3</code></li>
+<li><code>len(package.iocs) &gt;= 1</code></li>
+<li><code>package.containment_decision.approach == ContainmentApproach.AGGRESSIVE</code></li>
+</ul>
+<p>Expected output:</p>
+<pre><code>test_triage_pipeline: PASS
+severity=P1, timeline_entries=4, ioc_count=2, containment=aggressive
+</code></pre><hr />
+<h3>Concept 3 — IR Metrics Dashboard</h3>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class IRDashboardData:
+    period_label: str
+    total_incidents: int
+    by_severity: dict[str, int]
+    mean_mttd: float
+    mean_mttr: float
+    mean_dwell: float
+    top_techniques: list[tuple[str, int]]
+    open_detection_gaps: int
+    detection_gap_effort_days: float
+
+def build_ir_dashboard(
+    packages: list[TriagePackage],
+    postmortems: list[PostMortem],
+    period_label: str = &quot;Last 30 days&quot;,
+) -&gt; IRDashboardData:
+    by_severity: dict[str, int] = {}
+    all_techniques: list[str] = []
+
+    for pkg in packages:
+        sev = pkg.incident.severity.value
+        by_severity[sev] = by_severity.get(sev, 0) + 1
+        all_techniques.extend(pkg.timeline.unique_techniques())
+
+    technique_counts: dict[str, int] = {}
+    for t in all_techniques:
+        technique_counts[t] = technique_counts.get(t, 0) + 1
+    top_techniques = sorted(technique_counts.items(), key=lambda x: -x[1])[:5]
+
+    open_gaps = sum(len(pm.detection_gaps) for pm in postmortems)
+    total_effort = sum(pm.effort_estimate_total_days() for pm in postmortems)
+
+    return IRDashboardData(
+        period_label=period_label,
+        total_incidents=len(packages),
+        by_severity=by_severity,
+        mean_mttd=0.0,
+        mean_mttr=0.0,
+        mean_dwell=0.0,
+        top_techniques=top_techniques,
+        open_detection_gaps=open_gaps,
+        detection_gap_effort_days=total_effort,
+    )
+
+def render_ir_dashboard_md(data: IRDashboardData) -&gt; str:
+    lines = [
+        f&quot;# IR Dashboard — {data.period_label}&quot;,
+        &quot;&quot;,
+        &quot;## Summary&quot;,
+        f&quot;- Total incidents: {data.total_incidents}&quot;,
+        f&quot;- By severity: {data.by_severity}&quot;,
+        f&quot;- Mean MTTD: {data.mean_mttd:.1f} min&quot;,
+        f&quot;- Mean MTTR: {data.mean_mttr:.1f} min&quot;,
+        f&quot;- Mean dwell: {data.mean_dwell:.1f} min&quot;,
+        &quot;&quot;,
+        &quot;## Top Techniques&quot;,
+        &quot;| Technique | Count |&quot;,
+        &quot;|-----------|-------|&quot;,
+    ]
+    for tech, count in data.top_techniques:
+        lines.append(f&quot;| {tech} | {count} |&quot;)
+    lines += [
+        &quot;&quot;,
+        &quot;## Detection Backlog&quot;,
+        f&quot;- Open gaps: {data.open_detection_gaps}&quot;,
+        f&quot;- Estimated effort: {data.detection_gap_effort_days:.1f} days&quot;,
+    ]
+    return &quot;\n&quot;.join(lines)
+
+print(render_ir_dashboard_md(IRDashboardData(
+    period_label=&quot;June 2024&quot;,
+    total_incidents=2,
+    by_severity={&quot;P1&quot;: 1, &quot;P2&quot;: 1},
+    mean_mttd=86.3, mean_mttr=300.0, mean_dwell=142.5,
+    top_techniques=[(&quot;T1078&quot;, 2), (&quot;T1098.001&quot;, 1)],
+    open_detection_gaps=2,
+    detection_gap_effort_days=2.5,
+)))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a <code>trend_analysis(current: IRDashboardData, previous: IRDashboardData) -&gt; dict</code> function that compares two periods and returns a dict with:</p>
+<ul>
+<li><code>&quot;incident_delta&quot;</code>: change in total_incidents (positive = more incidents)</li>
+<li><code>&quot;dwell_delta&quot;</code>: change in mean_dwell</li>
+<li><code>&quot;gap_delta&quot;</code>: change in open_detection_gaps</li>
+<li><code>&quot;regression&quot;</code>: True if dwell_delta &gt; 30 or incident_delta &gt; 5 (potential detection regression)</li>
+</ul>
+<p>Create two dashboard data objects representing consecutive months where dwell time increased by 45 minutes and verify <code>regression=True</code>.</p>
+<p>Expected output:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>{&quot;incident_delta&quot;: 0, &quot;dwell_delta&quot;: 45.0, &quot;gap_delta&quot;: 0, &quot;regression&quot;: True}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> IR metrics interpretation and trend explanation
+<strong>Threat:</strong> Adversaries target the incident response process itself — deliberately causing alert fatigue to degrade MTTA (analyst stops acknowledging alerts promptly), then operating during the degraded window
+<strong>Opportunity:</strong> Feed MTTD/MTTR trend data to an LLM monthly: &quot;Mean dwell increased from 95 min to 142 min this month. Top techniques were T1078 and T1098.001. Open detection gaps increased by 3. Identify likely causes and top 3 recommended actions.&quot;
+<strong>Prompt to try:</strong> <code>&quot;IR metrics for June vs May: MTTD: 86 → 102 min (+19%), MTTR: 250 → 380 min (+52%), open gaps: 4 → 7 (+3). Top techniques: T1078, T1098. Identify: (1) which metric regressed most, (2) likely root cause, (3) three specific actions to improve MTTR before next month's review.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 16</h2>
+<p><strong>Task:</strong> Build a complete automated IR triage script <code>ir/triage.py</code> that ingests a Sentinel alert JSON, enriches it with user context and TI data, builds a correlated timeline from multi-source log files, classifies severity, recommends containment, extracts IOCs, and outputs a <code>triage_output.json</code> file.</p>
+<p><strong>Builds on:</strong></p>
+<ul>
+<li>W12: <code>methodology/coverage_dashboard.py</code> — detection gaps from post-mortem feed back into coverage backlog</li>
+<li>W13: <code>rules/rules.json</code> — IOC extraction adds to SIEM watchlist that powers these rules</li>
+<li>W14: <code>network/beacon_detector.py</code> — Zeek logs become a timeline data source</li>
+<li>W15: <code>cloud/cloud_detector.py</code> — cloud alerts feed the triage pipeline as alert inputs</li>
+</ul>
+<p><strong>Deliverable:</strong></p>
+<pre><code>ir/
+├── triage.py          ← full module: IncidentRecord, IncidentTimeline, run_full_ir_triage(), CLI
+├── playbooks/
+│   └── azure_account_takeover.json   ← impossible travel playbook-as-code
+└── triage_output.json                ← sample run: 5 log entries → P1 alert → timeline JSON
+</code></pre><p><strong>Stretch goal:</strong> Add a Jira webhook call in <code>triage.py</code> that creates an incident ticket via the Jira REST API when severity is P1 or P2 (use <code>requests.post</code> with environment variable auth, stub the actual call in a <code>DRY_RUN</code> mode controlled by an env var).</p>
+<div class="pager"><a class="btn ghost" href="week-15.html">&larr; Week 15</a><a class="btn ghost" href="week-17.html">Week 17 &rarr;</a></div>
+</main></body></html>

@@ -1,0 +1,1265 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 07 — Threat Intelligence</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 07 — Threat Intelligence</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="07" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 07 — Threat Intelligence</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 2 — Attacker Mindset</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: CTI concepts, IOC analysis / SC-200: Threat Intelligence in Sentinel / GCIA: Threat actor analysis</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>CTI feed consumer → normalized SQLite IOC database</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W01 Networking, W02–W04 OS + Identity, W05 ATT&amp;CK, W06 Offensive Techniques</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Threat Intelligence Fundamentals</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=vDygXGJzWCY" target="_blank" rel="noopener"><b>Cyber Threat Intelligence Explained: A Quick Guide for Beginners</b><small>Adam Goss</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=cyber%20threat%20intelligence%20fundamentals%20IOCs%20TTPs%20strategic%20operational%20tactical" target="_blank" rel="noopener">cyber threat intelligence fundamentals IOCs TTPs strategic operational tactical</a></p></div>
+<hr />
+<h3>Concept 1 — The Intelligence Pyramid: Data, Information, Intelligence</h3>
+<p>Raw security data (a firewall log, a PCAP, a hash) becomes information when it has context (this hash was found on a known-compromised host), and becomes intelligence when it drives a decision (block this hash, hunt for related indicators, update this Sigma rule). The pyramid: Data → Information → Intelligence → Decision.</p>
+<p>The three levels of CTI mirror a data platform's architecture. Tactical intelligence (IOCs — IP addresses, domains, hashes, URLs) is like raw event tables: high volume, short shelf-life, queryable. Operational intelligence (TTPs, actor campaigns, attack patterns) is like a processed mart: lower volume, higher value, longer validity. Strategic intelligence (geopolitical context, threat actor motivations, long-term trends) is like an executive dashboard: low volume, very long validity, informs organizational risk posture.</p>
+<p>This distinction matters because IOC-only threat intelligence is a treadmill — attackers rotate IPs and domains in hours. TTP-based detection is durable because changing techniques is expensive.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+
+class IOCType(Enum):
+    IP = &quot;ip&quot;
+    DOMAIN = &quot;domain&quot;
+    SHA256 = &quot;sha256&quot;
+    MD5 = &quot;md5&quot;
+    URL = &quot;url&quot;
+    EMAIL = &quot;email&quot;
+
+class TLPLevel(Enum):
+    WHITE = &quot;white&quot;    # public distribution
+    GREEN = &quot;green&quot;    # community distribution
+    AMBER = &quot;amber&quot;    # organization-only
+    RED = &quot;red&quot;        # named recipients only
+
+@dataclass
+class IOC:
+    value: str
+    ioc_type: IOCType
+    tlp: TLPLevel
+    source: str
+    confidence: int          # 0-100
+    first_seen: str
+    last_seen: str
+    tags: list[str] = field(default_factory=list)
+    related_actor: str = &quot;&quot;
+    related_campaign: str = &quot;&quot;
+    expiry_days: int = 30    # IOC shelf life
+
+    def is_expired(self) -&gt; bool:
+        last = datetime.fromisoformat(self.last_seen)
+        age = (datetime.now() - last).days
+        return age &gt; self.expiry_days
+
+    def intel_level(self) -&gt; str:
+        if self.related_actor and self.related_campaign:
+            return &quot;operational&quot;
+        if self.related_actor:
+            return &quot;tactical-enriched&quot;
+        return &quot;tactical&quot;
+
+sample_iocs = [
+    IOC(value=&quot;185.220.101.45&quot;, ioc_type=IOCType.IP, tlp=TLPLevel.GREEN,
+        source=&quot;AlienVault OTX&quot;, confidence=75, first_seen=&quot;2024-03-01&quot;,
+        last_seen=&quot;2024-04-01&quot;, tags=[&quot;tor-exit-node&quot;, &quot;c2&quot;],
+        related_actor=&quot;APT34&quot;, related_campaign=&quot;SandStorm_2024&quot;, expiry_days=30),
+    IOC(value=&quot;evil-update.com&quot;, ioc_type=IOCType.DOMAIN, tlp=TLPLevel.AMBER,
+        source=&quot;internal_hunt&quot;, confidence=90, first_seen=&quot;2024-04-01&quot;,
+        last_seen=&quot;2024-04-10&quot;, tags=[&quot;phishing&quot;, &quot;c2-domain&quot;],
+        related_actor=&quot;APT34&quot;, related_campaign=&quot;&quot;, expiry_days=14),
+]
+
+for ioc in sample_iocs:
+    print(f&quot;{ioc.ioc_type.value}: {ioc.value}&quot;)
+    print(f&quot;  level: {ioc.intel_level()}, expired: {ioc.is_expired()}, confidence: {ioc.confidence}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>prioritize_iocs(iocs: list[IOC], min_confidence: int, exclude_expired: bool) -&gt; list[IOC]</code> that filters and sorts IOCs. Filter by <code>min_confidence</code> and optionally exclude expired entries. Sort descending by confidence, then by <code>intel_level</code> (operational &gt; tactical-enriched &gt; tactical).</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>mixed_iocs = [
+    IOC(&quot;1.2.3.4&quot;, IOCType.IP, TLPLevel.GREEN, &quot;feed_a&quot;, 40, &quot;2024-01-01&quot;, &quot;2024-01-15&quot;,
+        expiry_days=30),
+    IOC(&quot;bad.com&quot;, IOCType.DOMAIN, TLPLevel.AMBER, &quot;feed_b&quot;, 85, &quot;2024-04-01&quot;, &quot;2024-04-10&quot;,
+        related_actor=&quot;APT34&quot;, related_campaign=&quot;Op1&quot;, expiry_days=14),
+    IOC(&quot;abc123def456&quot;, IOCType.SHA256, TLPLevel.GREEN, &quot;feed_c&quot;, 95, &quot;2024-04-05&quot;, &quot;2024-04-10&quot;,
+        related_actor=&quot;Lazarus&quot;, expiry_days=60),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (top result):</p>
+<pre><code>abc123def456 — confidence 95, level tactical-enriched, not expired
+bad.com — confidence 85, level operational, not expired
+(1.2.3.4 filtered out: confidence 40 &lt; min_confidence 50)
+</code></pre><hr />
+<h3>Concept 2 — IOC Types and Their Shelf Life</h3>
+<p>Different IOC types have very different shelf lives — how long they remain valid indicators of compromise. An IP address used as C2 might be rotated within 24 hours. A domain might persist for days to weeks. A file hash (SHA-256) is permanent unless the attacker recompiles. A TTP (e.g., using certutil for download) may persist for years.</p>
+<p>The Pyramid of Pain (David Bianco) quantifies this: blocking hash values is trivial for the attacker to bypass (recompile), blocking TTPs is painful (requires redesigning the attack). This hierarchy should drive where you invest detection engineering effort.</p>
+<table>
+<thead>
+<tr>
+<th>IOC Type</th>
+<th>Typical Validity</th>
+<th>Pyramid Level</th>
+<th>Detection Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Hash (MD5/SHA256)</td>
+<td>Permanent</td>
+<td>Hash (trivial)</td>
+<td>Low — attacker recompiles</td>
+</tr>
+<tr>
+<td>IP address</td>
+<td>Hours–days</td>
+<td>IPs (easy)</td>
+<td>Low-medium</td>
+</tr>
+<tr>
+<td>Domain</td>
+<td>Days–weeks</td>
+<td>Domain Names (simple)</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>Network artifacts</td>
+<td>Weeks</td>
+<td>Network/Host Artifacts (annoying)</td>
+<td>Medium-high</td>
+</tr>
+<tr>
+<td>Tools</td>
+<td>Months</td>
+<td>Tools (challenging)</td>
+<td>High</td>
+</tr>
+<tr>
+<td>TTPs</td>
+<td>Years</td>
+<td>TTPs (tough)</td>
+<td>Very high</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+import re
+from datetime import datetime, timedelta
+
+# Validate IOC format before inserting into the database
+IP_RE = re.compile(
+    r&quot;^(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)$&quot;
+)
+DOMAIN_RE = re.compile(
+    r&quot;^(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$&quot;
+)
+SHA256_RE = re.compile(r&quot;^[a-fA-F0-9]{64}$&quot;)
+MD5_RE = re.compile(r&quot;^[a-fA-F0-9]{32}$&quot;)
+
+VALIDATORS = {
+    IOCType.IP: IP_RE,
+    IOCType.DOMAIN: DOMAIN_RE,
+    IOCType.SHA256: SHA256_RE,
+    IOCType.MD5: MD5_RE,
+}
+
+EXPIRY_DEFAULTS = {
+    IOCType.IP: 7,
+    IOCType.DOMAIN: 30,
+    IOCType.SHA256: 365,
+    IOCType.MD5: 365,
+    IOCType.URL: 14,
+    IOCType.EMAIL: 30,
+}
+
+def validate_ioc(value: str, ioc_type: IOCType) -&gt; tuple[bool, str]:
+    validator = VALIDATORS.get(ioc_type)
+    if validator is None:
+        return True, &quot;&quot;  # URL and EMAIL — accept without strict validation for now
+    if not validator.match(value.strip()):
+        return False, f&quot;value &#x27;{value}&#x27; does not match expected format for {ioc_type.value}&quot;
+    return True, &quot;&quot;
+
+def default_expiry(ioc_type: IOCType) -&gt; int:
+    return EXPIRY_DEFAULTS.get(ioc_type, 30)
+
+test_values = [
+    (&quot;185.220.101.45&quot;, IOCType.IP),
+    (&quot;256.1.2.3&quot;, IOCType.IP),
+    (&quot;evil-domain.com&quot;, IOCType.DOMAIN),
+    (&quot;abc123xyz&quot;, IOCType.SHA256),
+    (&quot;a&quot; * 64, IOCType.SHA256),
+]
+
+for value, ioc_type in test_values:
+    valid, error = validate_ioc(value, ioc_type)
+    expiry = default_expiry(ioc_type)
+    status = f&quot;valid (expiry: {expiry}d)&quot; if valid else f&quot;INVALID: {error}&quot;
+    print(f&quot;{ioc_type.value}: {value[:20]:&lt;20} → {status}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>normalize_ioc_value(value: str, ioc_type: IOCType) -&gt; str</code> that normalizes IOC values for consistent storage: lowercase domains and URLs, uppercase hashes, strip leading/trailing whitespace and protocol prefixes from URLs (strip <code>http://</code> and <code>https://</code>), strip port from IP:port strings. Then write a unit test function that asserts 5 normalization cases.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>normalization_cases = [
+    (&quot;  HTTP://Evil-Domain.COM/path  &quot;, IOCType.URL, &quot;evil-domain.com/path&quot;),
+    (&quot;  ABCDEF1234567890&quot; + &quot;a&quot; * 46 + &quot;  &quot;, IOCType.SHA256, &quot;ABCDEF1234567890&quot; + &quot;a&quot; * 46),
+    (&quot;192.168.1.1:443&quot;, IOCType.IP, &quot;192.168.1.1&quot;),
+    (&quot;  Evil-Domain.COM  &quot;, IOCType.DOMAIN, &quot;evil-domain.com&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>All 4 normalization tests passed.
+</code></pre><hr />
+<h3>Concept 3 — STIX 2.1 and Threat Intelligence Sharing Standards</h3>
+<p>STIX (Structured Threat Information eXpression) 2.1 is the JSON-based standard for sharing threat intelligence. TAXII (Trusted Automated eXchange of Intelligence Information) is the transport protocol. STIX defines object types: <code>indicator</code> (IOC with a pattern), <code>threat-actor</code>, <code>campaign</code>, <code>attack-pattern</code> (maps to ATT&amp;CK technique), <code>relationship</code> (links objects), <code>malware</code>, <code>tool</code>, <code>course-of-action</code>.</p>
+<p>A STIX indicator looks like: <code>[domain-name:value = 'evil.com']</code> — using a pattern language that can express complex conditions. Most CTI platforms (MISP, OpenCTI, Anomali) export STIX 2.1 bundles that you consume programmatically.</p>
+<p>From a data engineering perspective: STIX is a normalized schema for threat objects, just as your data warehouse has dimension tables for customers and products. Parsing STIX bundles is equivalent to loading a vendor-provided dimension table.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+
+# Simplified STIX 2.1 bundle (real ones come from platforms like MISP or AlienVault OTX)
+STIX_BUNDLE = {
+    &quot;type&quot;: &quot;bundle&quot;,
+    &quot;id&quot;: &quot;bundle--12345678-1234-1234-1234-123456789012&quot;,
+    &quot;objects&quot;: [
+        {
+            &quot;type&quot;: &quot;threat-actor&quot;,
+            &quot;id&quot;: &quot;threat-actor--apt34&quot;,
+            &quot;name&quot;: &quot;APT34&quot;,
+            &quot;aliases&quot;: [&quot;OilRig&quot;, &quot;Helix Kitten&quot;],
+            &quot;country&quot;: &quot;IR&quot;,
+            &quot;description&quot;: &quot;Iranian state-sponsored group targeting MENA finance and telecom&quot;,
+            &quot;labels&quot;: [&quot;nation-state&quot;],
+        },
+        {
+            &quot;type&quot;: &quot;indicator&quot;,
+            &quot;id&quot;: &quot;indicator--ioc1&quot;,
+            &quot;pattern&quot;: &quot;[domain-name:value = &#x27;evil-update.com&#x27;]&quot;,
+            &quot;pattern_type&quot;: &quot;stix&quot;,
+            &quot;valid_from&quot;: &quot;2024-04-01T00:00:00Z&quot;,
+            &quot;labels&quot;: [&quot;malicious-activity&quot;],
+            &quot;name&quot;: &quot;APT34 C2 Domain&quot;,
+        },
+        {
+            &quot;type&quot;: &quot;relationship&quot;,
+            &quot;id&quot;: &quot;relationship--rel1&quot;,
+            &quot;relationship_type&quot;: &quot;uses&quot;,
+            &quot;source_ref&quot;: &quot;threat-actor--apt34&quot;,
+            &quot;target_ref&quot;: &quot;indicator--ioc1&quot;,
+        },
+        {
+            &quot;type&quot;: &quot;attack-pattern&quot;,
+            &quot;id&quot;: &quot;attack-pattern--t1566&quot;,
+            &quot;name&quot;: &quot;Phishing&quot;,
+            &quot;external_references&quot;: [{&quot;source_name&quot;: &quot;mitre-attack&quot;, &quot;external_id&quot;: &quot;T1566&quot;}],
+        },
+    ],
+}
+
+def parse_stix_bundle(bundle: dict) -&gt; dict:
+    &quot;&quot;&quot;Extract actors, indicators, and relationships from a STIX bundle.&quot;&quot;&quot;
+    actors = {}
+    indicators = {}
+    relationships = []
+
+    for obj in bundle.get(&quot;objects&quot;, []):
+        obj_type = obj.get(&quot;type&quot;)
+        if obj_type == &quot;threat-actor&quot;:
+            actors[obj[&quot;id&quot;]] = obj
+        elif obj_type == &quot;indicator&quot;:
+            indicators[obj[&quot;id&quot;]] = obj
+        elif obj_type == &quot;relationship&quot;:
+            relationships.append(obj)
+
+    return {&quot;actors&quot;: actors, &quot;indicators&quot;: indicators, &quot;relationships&quot;: relationships}
+
+result = parse_stix_bundle(STIX_BUNDLE)
+print(f&quot;Actors: {len(result[&#x27;actors&#x27;])}&quot;)
+print(f&quot;Indicators: {len(result[&#x27;indicators&#x27;])}&quot;)
+print(f&quot;Relationships: {len(result[&#x27;relationships&#x27;])}&quot;)
+
+# Link actors to their indicators
+for rel in result[&quot;relationships&quot;]:
+    if rel[&quot;relationship_type&quot;] == &quot;uses&quot;:
+        actor = result[&quot;actors&quot;].get(rel[&quot;source_ref&quot;])
+        ioc = result[&quot;indicators&quot;].get(rel[&quot;target_ref&quot;])
+        if actor and ioc:
+            print(f&quot;  {actor[&#x27;name&#x27;]} uses {ioc[&#x27;name&#x27;]}: {ioc[&#x27;pattern&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>extract_ioc_values(bundle: dict) -&gt; list[dict]</code> that parses all <code>indicator</code> objects from a STIX bundle and extracts the actual IOC value from the STIX pattern string. Support patterns for <code>domain-name:value</code>, <code>ipv4-addr:value</code>, <code>file:hashes.SHA256</code>, and <code>url:value</code>. Return a list of dicts with keys <code>value</code>, <code>type</code>, <code>valid_from</code>, <code>name</code>.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>multi_indicator_bundle = {
+    &quot;type&quot;: &quot;bundle&quot;,
+    &quot;objects&quot;: [
+        {&quot;type&quot;: &quot;indicator&quot;, &quot;name&quot;: &quot;C2 Domain&quot;,
+         &quot;pattern&quot;: &quot;[domain-name:value = &#x27;badsite.ru&#x27;]&quot;,
+         &quot;valid_from&quot;: &quot;2024-04-01T00:00:00Z&quot;},
+        {&quot;type&quot;: &quot;indicator&quot;, &quot;name&quot;: &quot;Malware Hash&quot;,
+         &quot;pattern&quot;: &quot;[file:hashes.SHA256 = &#x27;abc123&quot; + &quot;0&quot; * 58 + &quot;&#x27;]&quot;,
+         &quot;valid_from&quot;: &quot;2024-04-02T00:00:00Z&quot;},
+        {&quot;type&quot;: &quot;indicator&quot;, &quot;name&quot;: &quot;C2 IP&quot;,
+         &quot;pattern&quot;: &quot;[ipv4-addr:value = &#x27;185.220.101.45&#x27;]&quot;,
+         &quot;valid_from&quot;: &quot;2024-04-03T00:00:00Z&quot;},
+    ]
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[{&quot;value&quot;: &quot;badsite.ru&quot;, &quot;type&quot;: &quot;domain&quot;, &quot;valid_from&quot;: &quot;2024-04-01T00:00:00Z&quot;, &quot;name&quot;: &quot;C2 Domain&quot;},
+ {&quot;value&quot;: &quot;abc123...&quot;, &quot;type&quot;: &quot;sha256&quot;, &quot;valid_from&quot;: &quot;2024-04-02T00:00:00Z&quot;, &quot;name&quot;: &quot;Malware Hash&quot;},
+ {&quot;value&quot;: &quot;185.220.101.45&quot;, &quot;type&quot;: &quot;ip&quot;, &quot;valid_from&quot;: &quot;2024-04-03T00:00:00Z&quot;, &quot;name&quot;: &quot;C2 IP&quot;}]
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> AI-assisted CTI synthesis and report summarization<br />
+<strong>Threat:</strong> State-sponsored groups and sophisticated threat actors use AI to generate more convincing spearphishing lures, translate malware into multiple languages/platforms, and automate IOC rotation faster than traditional defenses can track<br />
+<strong>Opportunity:</strong> Defenders feed raw threat reports (PDFs, blog posts, ISACs) to an LLM to extract IOCs, map techniques to ATT&amp;CK, and produce a structured intelligence brief in seconds — collapsing analyst processing time from hours to minutes<br />
+<strong>Prompt to try:</strong> <code>&quot;Extract all threat intelligence from the following security blog post. For each item, classify it as: IOC (with type), TTP (with ATT&amp;CK ID), or threat actor detail. Output as JSON with keys: iocs, ttps, actor_details. Blog post: [paste text]&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Threat Actor Profiling</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=uXdzsID5780" target="_blank" rel="noopener"><b>What Is an APT Group? Nation-State Hackers Explained</b><small>Lumifi</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=APT%20threat%20actor%20profiling%20attribution%20MITRE%20ATT%26CK%20group%20profiles%20nation%20state" target="_blank" rel="noopener">APT threat actor profiling attribution MITRE ATT&amp;CK group profiles nation state</a></p></div>
+<hr />
+<h3>Concept 1 — Threat Actor Taxonomy: Nation-State, Cybercrime, Hacktivist</h3>
+<p>Not all attackers are the same. Categorizing threat actors by motivation changes your defensive priorities, detection focus, and response posture.</p>
+<p>Nation-state actors (APT groups): long dwell time (months to years), sophisticated TTPs, persistent access, espionage or sabotage. Resources: government-funded. Examples with Israeli relevance: APT34/OilRig (Iranian, targets Israeli and MENA finance/government/telecom), APT33 (Iranian energy and aerospace), Lazarus Group (North Korean, financial theft + espionage).</p>
+<p>Cybercrime groups: financially motivated, ransomware-as-a-service, credential theft, business email compromise. Faster tempo, more noise. Examples: Scattered Spider, BlackCat/ALPHV, LockBit.</p>
+<p>Hacktivists: politically motivated, often target public-facing services for DDoS or defacement. Relevant in Israeli context: groups like Anonymous Sudan, Killnet — target public infrastructure during geopolitical events.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+
+@dataclass
+class ThreatActor:
+    name: str
+    aliases: list[str]
+    nation: str
+    motivation: str         # espionage | financial | hacktivist | destruction
+    sophistication: str     # novice | intermediate | advanced | expert
+    targets: list[str]
+    primary_ttps: list[str]
+    active_since: str
+    israeli_relevance: str  # high | medium | low | none
+
+APT34 = ThreatActor(
+    name=&quot;APT34&quot;,
+    aliases=[&quot;OilRig&quot;, &quot;Helix Kitten&quot;, &quot;IRN2&quot;, &quot;COBALT GYPSY&quot;],
+    nation=&quot;Iran&quot;,
+    motivation=&quot;espionage&quot;,
+    sophistication=&quot;advanced&quot;,
+    targets=[&quot;finance&quot;, &quot;government&quot;, &quot;telecom&quot;, &quot;energy&quot;, &quot;MENA region&quot;],
+    primary_ttps=[
+        &quot;T1566.001&quot;,  # spearphishing attachment
+        &quot;T1059.001&quot;,  # PowerShell
+        &quot;T1071.001&quot;,  # web protocols C2
+        &quot;T1078&quot;,      # valid accounts
+        &quot;T1003.001&quot;,  # LSASS dump
+        &quot;T1041&quot;,      # exfiltration over C2
+        &quot;T1070.004&quot;,  # file deletion
+        &quot;T1082&quot;,      # system info discovery
+        &quot;T1016&quot;,      # network config discovery
+        &quot;T1033&quot;,      # user discovery
+    ],
+    active_since=&quot;2014&quot;,
+    israeli_relevance=&quot;high&quot;,
+)
+
+Lazarus = ThreatActor(
+    name=&quot;Lazarus Group&quot;,
+    aliases=[&quot;HIDDEN COBRA&quot;, &quot;Zinc&quot;, &quot;APT38&quot;],
+    nation=&quot;North Korea&quot;,
+    motivation=&quot;financial&quot;,
+    sophistication=&quot;expert&quot;,
+    targets=[&quot;financial institutions&quot;, &quot;cryptocurrency exchanges&quot;, &quot;defense contractors&quot;],
+    primary_ttps=[
+        &quot;T1566.002&quot;,  # spearphishing link
+        &quot;T1059.001&quot;,  # PowerShell
+        &quot;T1055&quot;,      # process injection
+        &quot;T1070.001&quot;,  # clear windows event logs
+        &quot;T1486&quot;,      # data encrypted for impact (ransomware)
+    ],
+    active_since=&quot;2009&quot;,
+    israeli_relevance=&quot;medium&quot;,
+)
+
+def actor_summary(actor: ThreatActor) -&gt; str:
+    return (
+        f&quot;Actor: {actor.name} ({&#x27;, &#x27;.join(actor.aliases[:2])})\n&quot;
+        f&quot;  Nation: {actor.nation} | Motivation: {actor.motivation}\n&quot;
+        f&quot;  Active since: {actor.active_since} | Sophistication: {actor.sophistication}\n&quot;
+        f&quot;  Primary TTPs: {&#x27;, &#x27;.join(actor.primary_ttps[:5])}\n&quot;
+        f&quot;  Israeli relevance: {actor.israeli_relevance}&quot;
+    )
+
+print(actor_summary(APT34))
+print()
+print(actor_summary(Lazarus))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>actor_ttp_overlap(actor_a: ThreatActor, actor_b: ThreatActor) -&gt; dict</code> that returns <code>{&quot;shared_ttps&quot;: list, &quot;unique_to_a&quot;: list, &quot;unique_to_b&quot;: list, &quot;overlap_pct&quot;: float}</code>. Then write <code>prioritize_actors_by_ttp_coverage(actors: list, covered_techniques: set) -&gt; list</code> that sorts actors by the percentage of their TTPs that your detection rules already cover, descending.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>covered = {&quot;T1566.001&quot;, &quot;T1059.001&quot;, &quot;T1003.001&quot;, &quot;T1055&quot;, &quot;T1070.001&quot;}
+actors = [APT34, Lazarus]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Overlap between APT34 and Lazarus: {&#x27;shared_ttps&#x27;: [&#x27;T1566...&#x27;, &#x27;T1059.001&#x27;], overlap_pct: 20.0, ...}
+Coverage: Lazarus 60.0% covered (3/5 TTPs detected), APT34 20.0% covered (2/10 TTPs detected)
+</code></pre><hr />
+<h3>Concept 2 — APT34 Deep Dive: Techniques, Tools, and Israeli Context</h3>
+<p>APT34 (OilRig / Helix Kitten) is an Iranian state-sponsored group that has been active since at least 2014. It targets government and critical infrastructure in the Middle East and North Africa — with Israel a primary target given geopolitical tensions. The group uses custom malware families (POWRUNER, BONDUPDATER, RDAT, DNSpionage) alongside built-in LOLBins.</p>
+<p>Key operational patterns: spearphishing lures related to regional business themes (logistics, finance), use of legitimate cloud services (OneDrive, Dropbox) for C2, DNS tunneling for data exfiltration, and custom PowerShell droppers. Long dwell time — once in, they persist quietly for months harvesting data.</p>
+<p>From a defender's standpoint in an Israeli tech company: you should specifically hunt for APT34-linked IOCs, monitor for DNS tunneling patterns (characteristic of RDAT malware), watch for Office macros spawning PowerShell, and track any authentication from IP ranges associated with Iranian infrastructure.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># APT34 campaign indicators based on public reporting (Palo Alto Unit42, ClearSky, FireEye)
+APT34_CAMPAIGN_INDICATORS = {
+    &quot;campaign&quot;: &quot;SandStorm_2024&quot;,
+    &quot;actor&quot;: &quot;APT34 / OilRig&quot;,
+    &quot;target_sectors&quot;: [&quot;finance&quot;, &quot;government&quot;, &quot;telecom&quot;],
+    &quot;target_regions&quot;: [&quot;Israel&quot;, &quot;UAE&quot;, &quot;Saudi Arabia&quot;, &quot;Kuwait&quot;],
+    &quot;iocs&quot;: {
+        &quot;domains&quot;: [
+            &quot;update-service.net&quot;,
+            &quot;microsoft-cdn.me&quot;,
+            &quot;office365cdn.org&quot;,
+        ],
+        &quot;ips&quot;: [
+            &quot;185.117.88.117&quot;,
+            &quot;94.177.123.138&quot;,
+        ],
+        &quot;hashes&quot;: {
+            &quot;POWRUNER_dropper&quot;: &quot;a&quot; * 64,  # placeholder
+            &quot;BONDUPDATER_dll&quot;: &quot;b&quot; * 64,   # placeholder
+        },
+    },
+    &quot;attack_phases&quot;: [
+        {&quot;phase&quot;: &quot;initial_access&quot;, &quot;technique&quot;: &quot;T1566.001&quot;,
+         &quot;description&quot;: &quot;Spearphishing with macro-enabled XLSM lure — themes: regional business&quot;},
+        {&quot;phase&quot;: &quot;execution&quot;, &quot;technique&quot;: &quot;T1059.001&quot;,
+         &quot;description&quot;: &quot;PowerShell dropper via macro, downloads stage2 from OneDrive&quot;},
+        {&quot;phase&quot;: &quot;persistence&quot;, &quot;technique&quot;: &quot;T1053.005&quot;,
+         &quot;description&quot;: &quot;Scheduled task: \\Microsoft\\Windows\\DOTNET\\dotnetCheck&quot;},
+        {&quot;phase&quot;: &quot;c2&quot;, &quot;technique&quot;: &quot;T1071.004&quot;,
+         &quot;description&quot;: &quot;DNS tunneling via TXT record queries to registered C2 domains&quot;},
+        {&quot;phase&quot;: &quot;exfil&quot;, &quot;technique&quot;: &quot;T1041&quot;,
+         &quot;description&quot;: &quot;Staged data in Temp folder, exfiltrated via DNS TXT queries&quot;},
+    ],
+}
+
+def generate_hunt_queries(campaign: dict) -&gt; list[str]:
+    &quot;&quot;&quot;Generate plain-English hunt queries from a campaign profile.&quot;&quot;&quot;
+    queries = []
+    for ioc in campaign[&quot;iocs&quot;][&quot;domains&quot;]:
+        queries.append(f&quot;DNS query for domain: {ioc}&quot;)
+    for ip in campaign[&quot;iocs&quot;][&quot;ips&quot;]:
+        queries.append(f&quot;Outbound connection to IP: {ip}&quot;)
+    for phase in campaign[&quot;attack_phases&quot;]:
+        queries.append(
+            f&quot;Hunt for {phase[&#x27;technique&#x27;]} ({phase[&#x27;phase&#x27;]}): {phase[&#x27;description&#x27;]}&quot;
+        )
+    return queries
+
+for q in generate_hunt_queries(APT34_CAMPAIGN_INDICATORS):
+    print(f&quot;  HUNT: {q}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>map_actor_to_sigma_rules(actor: ThreatActor, rules_dir: str) -&gt; dict</code> that scans a directory of Sigma YAML files and returns <code>{&quot;covered&quot;: list, &quot;uncovered&quot;: list}</code> based on whether the rule's <code>tags</code> list contains the ATT&amp;CK technique IDs in <code>actor.primary_ttps</code>. Use <code>os.listdir</code> and <code>yaml.safe_load</code>.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os
+import yaml
+
+# Assume pipeline/rules/ exists with the 5 files from W06 Royal Road
+# actor = APT34 (primary_ttps includes T1566.001, T1059.001, T1003.001, T1078, T1071.001, ...)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>APT34 coverage via Sigma rules:
+  Covered (2/10): T1059.001, T1003.001
+  Uncovered (8/10): T1566.001, T1078, T1071.001, T1105, T1070.004, T1041, T1082, T1016
+</code></pre><hr />
+<h3>Concept 3 — Threat Feeds: AlienVault OTX, MISP, VirusTotal, and Free Sources</h3>
+<p>Threat intelligence feeds provide machine-readable IOCs you can ingest, normalize, and act on. Free sources: AlienVault OTX (Open Threat Exchange — pulse-based, community-driven, REST API), abuse.ch (malware hash, URL, and SSL cert feeds), CIRCL MISP (open-source threat sharing platform), EmergingThreats (Snort/Suricata rule feeds), CISA AIS (US government IOCs).</p>
+<p>Feed quality matters. Evaluate: freshness (when was this IOC last seen?), confidence (how was it verified?), false positive rate (how often does blocking this indicator break legitimate traffic?), coverage (does this feed cover the threat actors relevant to your sector?).</p>
+<p>For Israeli organizations: the Israel National Cyber Directorate (INCD) publishes advisories and IOCs. IsaacCS (Israeli cybersecurity org) and ClearSky (Israeli CTI vendor) publish APT research specifically covering Iranian and Palestinian threat actors.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import urllib.request
+import json
+import csv
+import io
+from datetime import datetime
+
+def fetch_otx_pulse_iocs(pulse_id: str, api_key: str) -&gt; list[dict]:
+    &quot;&quot;&quot;
+    Fetch IOCs from an AlienVault OTX pulse.
+    In production: GET https://otx.alienvault.com/api/v1/pulses/{pulse_id}/indicators
+    Simulated here for offline use.
+    &quot;&quot;&quot;
+    # Simulated OTX API response structure
+    simulated_response = {
+        &quot;results&quot;: [
+            {&quot;type&quot;: &quot;domain&quot;, &quot;indicator&quot;: &quot;malicious-domain.ru&quot;,
+             &quot;description&quot;: &quot;APT34 C2&quot;, &quot;created&quot;: &quot;2024-04-01T00:00:00&quot;},
+            {&quot;type&quot;: &quot;IPv4&quot;, &quot;indicator&quot;: &quot;185.220.101.45&quot;,
+             &quot;description&quot;: &quot;APT34 C2 server&quot;, &quot;created&quot;: &quot;2024-04-02T00:00:00&quot;},
+            {&quot;type&quot;: &quot;FileHash-SHA256&quot;,
+             &quot;indicator&quot;: &quot;a&quot; * 64,
+             &quot;description&quot;: &quot;POWRUNER dropper&quot;, &quot;created&quot;: &quot;2024-04-03T00:00:00&quot;},
+        ]
+    }
+
+    TYPE_MAP = {
+        &quot;domain&quot;: IOCType.DOMAIN,
+        &quot;IPv4&quot;: IOCType.IP,
+        &quot;FileHash-SHA256&quot;: IOCType.SHA256,
+        &quot;FileHash-MD5&quot;: IOCType.MD5,
+        &quot;URL&quot;: IOCType.URL,
+    }
+
+    iocs = []
+    for result in simulated_response[&quot;results&quot;]:
+        ioc_type = TYPE_MAP.get(result[&quot;type&quot;])
+        if ioc_type:
+            iocs.append({
+                &quot;value&quot;: result[&quot;indicator&quot;],
+                &quot;type&quot;: ioc_type.value,
+                &quot;source&quot;: f&quot;OTX:{pulse_id}&quot;,
+                &quot;description&quot;: result.get(&quot;description&quot;, &quot;&quot;),
+                &quot;first_seen&quot;: result[&quot;created&quot;],
+                &quot;confidence&quot;: 70,
+            })
+    return iocs
+
+iocs = fetch_otx_pulse_iocs(&quot;pulse_apt34_q2_2024&quot;, api_key=&quot;YOUR_KEY&quot;)
+for ioc in iocs:
+    print(f&quot;  [{ioc[&#x27;type&#x27;]}] {ioc[&#x27;value&#x27;]}: {ioc[&#x27;description&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>merge_feeds(feeds: list[list[dict]], dedup_key: str = &quot;value&quot;) -&gt; list[dict]</code> that combines multiple feed outputs into a single deduplicated list. When the same IOC value appears in multiple feeds, merge the <code>source</code> fields into a comma-separated string and keep the highest <code>confidence</code> value.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>feed_a = [
+    {&quot;value&quot;: &quot;evil.com&quot;, &quot;type&quot;: &quot;domain&quot;, &quot;source&quot;: &quot;OTX&quot;, &quot;confidence&quot;: 70},
+    {&quot;value&quot;: &quot;1.2.3.4&quot;, &quot;type&quot;: &quot;ip&quot;, &quot;source&quot;: &quot;OTX&quot;, &quot;confidence&quot;: 60},
+]
+feed_b = [
+    {&quot;value&quot;: &quot;evil.com&quot;, &quot;type&quot;: &quot;domain&quot;, &quot;source&quot;: &quot;MISP&quot;, &quot;confidence&quot;: 85},
+    {&quot;value&quot;: &quot;5.6.7.8&quot;, &quot;type&quot;: &quot;ip&quot;, &quot;source&quot;: &quot;MISP&quot;, &quot;confidence&quot;: 75},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[{&quot;value&quot;: &quot;evil.com&quot;, &quot;type&quot;: &quot;domain&quot;, &quot;source&quot;: &quot;OTX,MISP&quot;, &quot;confidence&quot;: 85},
+ {&quot;value&quot;: &quot;1.2.3.4&quot;, &quot;type&quot;: &quot;ip&quot;, &quot;source&quot;: &quot;OTX&quot;, &quot;confidence&quot;: 60},
+ {&quot;value&quot;: &quot;5.6.7.8&quot;, &quot;type&quot;: &quot;ip&quot;, &quot;source&quot;: &quot;MISP&quot;, &quot;confidence&quot;: 75}]
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Automated threat actor profiling from public reporting<br />
+<strong>Threat:</strong> Sophisticated threat actors now use LLMs to generate more convincing spearphishing lures tailored to specific individuals (using LinkedIn data + company news), write malware with varied coding styles, and automate the generation of lookalike phishing domains at scale<br />
+<strong>Opportunity:</strong> SOC analysts feed raw CTI blog posts (Mandiant, Unit42, ClearSky) to an LLM and get structured actor profiles in seconds, including ATT&amp;CK mappings, target sector enrichment, and detection recommendations — eliminating hours of manual extraction<br />
+<strong>Prompt to try:</strong> <code>&quot;You are a CTI analyst. Read the following threat actor profile and extract: (1) all IOC values with type, (2) all MITRE ATT&amp;CK technique IDs with technique name, (3) target sectors, (4) geographic focus, (5) likely motivation. Output structured JSON. Profile: APT34 (OilRig) is an Iranian state-sponsored group active since 2014, targeting finance and government in the Middle East using spearphishing and DNS tunneling...&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — Building the IOC Database</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=sWOa4Ld4CQM" target="_blank" rel="noopener"><b>How to Create MISP Events and Add Threat Intelligence</b><small>Adam Goss</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=threat%20intelligence%20IOC%20database%20SQLite%20Python%20MISP%20threat%20feed%20ingestion" target="_blank" rel="noopener">threat intelligence IOC database SQLite Python MISP threat feed ingestion</a></p></div>
+<hr />
+<h3>Concept 1 — IOC Database Schema Design</h3>
+<p>An IOC database is a normalized store for threat indicators and their context. The schema mirrors a star schema from data warehousing: a central <code>iocs</code> fact table with dimension tables for <code>sources</code>, <code>actors</code>, and <code>campaigns</code>. This allows you to answer questions like &quot;which actors are associated with this IP?&quot; and &quot;how many IOCs from this feed are still active?&quot;</p>
+<p>Key design decisions: use <code>TEXT</code> for IOC values (not VARCHAR with fixed length — URLs can be long), store hashes as TEXT (not BINARY — readability matters), add a <code>normalized_value</code> column that stores the canonical form (lowercase domain, uppercase hash). Index on <code>normalized_value</code> for fast lookups during log enrichment joins.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import sqlite3
+from datetime import datetime
+
+def create_ioc_database(db_path: str) -&gt; sqlite3.Connection:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    cur.executescript(&quot;&quot;&quot;
+        CREATE TABLE IF NOT EXISTS sources (
+            source_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            url TEXT,
+            tlp TEXT DEFAULT &#x27;GREEN&#x27;,
+            reliability_score INTEGER DEFAULT 70,
+            last_fetched TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS actors (
+            actor_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            aliases TEXT,           -- JSON array stored as TEXT
+            nation TEXT,
+            motivation TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS iocs (
+            ioc_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            value TEXT NOT NULL,
+            normalized_value TEXT NOT NULL,
+            ioc_type TEXT NOT NULL,
+            source_id INTEGER REFERENCES sources(source_id),
+            actor_id INTEGER REFERENCES actors(actor_id),
+            confidence INTEGER DEFAULT 50,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            expiry_date TEXT,
+            tags TEXT,              -- JSON array stored as TEXT
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime(&#x27;now&#x27;))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_iocs_normalized ON iocs(normalized_value);
+        CREATE INDEX IF NOT EXISTS idx_iocs_type ON iocs(ioc_type);
+        CREATE INDEX IF NOT EXISTS idx_iocs_active ON iocs(is_active);
+    &quot;&quot;&quot;)
+    conn.commit()
+    return conn
+
+def insert_source(conn: sqlite3.Connection, name: str, url: str = &quot;&quot;,
+                  tlp: str = &quot;GREEN&quot;) -&gt; int:
+    cur = conn.cursor()
+    cur.execute(
+        &quot;INSERT OR IGNORE INTO sources (name, url, tlp) VALUES (?, ?, ?)&quot;,
+        (name, url, tlp)
+    )
+    conn.commit()
+    cur.execute(&quot;SELECT source_id FROM sources WHERE name = ?&quot;, (name,))
+    return cur.fetchone()[0]
+
+conn = create_ioc_database(&quot;:memory:&quot;)
+source_id = insert_source(conn, &quot;AlienVault OTX&quot;, &quot;https://otx.alienvault.com&quot;)
+print(f&quot;Source ID: {source_id}&quot;)
+print(&quot;IOC database schema created successfully&quot;)
+conn.close()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>insert_ioc(conn, value, ioc_type, source_id, actor_id, confidence, first_seen, last_seen, tags) -&gt; int</code> that inserts a single IOC and returns its <code>ioc_id</code>. Before inserting, normalize the value using the <code>normalize_ioc_value</code> function from Day 1. If an IOC with the same <code>normalized_value</code> and <code>ioc_type</code> already exists, update its <code>last_seen</code>, <code>confidence</code> (use the higher value), and <code>is_active</code> to 1 instead of inserting a duplicate.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>conn = create_ioc_database(&quot;:memory:&quot;)
+source_id = insert_source(conn, &quot;TestFeed&quot;)
+
+ioc_id_1 = insert_ioc(conn, &quot;EVIL.COM&quot;, &quot;domain&quot;, source_id, None, 70,
+                        &quot;2024-04-01&quot;, &quot;2024-04-05&quot;, [&quot;c2&quot;])
+ioc_id_2 = insert_ioc(conn, &quot;evil.com&quot;, &quot;domain&quot;, source_id, None, 85,
+                        &quot;2024-04-01&quot;, &quot;2024-04-10&quot;, [&quot;c2&quot;, &quot;phishing&quot;])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>First insert: ioc_id = 1
+Second insert: updated existing ioc_id = 1 (confidence: 70 → 85, last_seen updated)
+</code></pre><hr />
+<h3>Concept 2 — Batch Feed Ingestion Pipeline</h3>
+<p>A real CTI pipeline ingests multiple feeds on a schedule, normalizes them into the standard schema, deduplicates, and marks expired IOCs as inactive. The pipeline should be idempotent: running it twice with the same feed produces the same database state.</p>
+<p>This is identical to a data engineering incremental load pattern: fetch new data, upsert (update if exists, insert if new), expire records not seen in the latest feed snapshot. The <code>is_active</code> flag replaces hard-deletes — you want to keep historical IOC data for retrospective threat hunting.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+from datetime import datetime, timedelta
+
+def expire_old_iocs(conn: sqlite3.Connection, max_age_days: int = 90) -&gt; int:
+    &quot;&quot;&quot;Mark IOCs not seen recently as inactive.&quot;&quot;&quot;
+    cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+    cur = conn.cursor()
+    cur.execute(&quot;&quot;&quot;
+        UPDATE iocs
+        SET is_active = 0
+        WHERE last_seen &lt; ?
+        AND is_active = 1
+    &quot;&quot;&quot;, (cutoff,))
+    conn.commit()
+    return cur.rowcount
+
+def ingest_feed(conn: sqlite3.Connection, feed_data: list[dict],
+                source_name: str) -&gt; dict:
+    &quot;&quot;&quot;
+    Ingest a normalized feed into the IOC database.
+    Returns stats: inserted, updated, skipped.
+    &quot;&quot;&quot;
+    source_id = insert_source(conn, source_name)
+    stats = {&quot;inserted&quot;: 0, &quot;updated&quot;: 0, &quot;skipped&quot;: 0}
+
+    for record in feed_data:
+        try:
+            result = insert_ioc(
+                conn=conn,
+                value=record[&quot;value&quot;],
+                ioc_type=record[&quot;type&quot;],
+                source_id=source_id,
+                actor_id=None,
+                confidence=record.get(&quot;confidence&quot;, 50),
+                first_seen=record.get(&quot;first_seen&quot;, datetime.now().isoformat()),
+                last_seen=record.get(&quot;last_seen&quot;, datetime.now().isoformat()),
+                tags=record.get(&quot;tags&quot;, []),
+            )
+            if result[&quot;action&quot;] == &quot;inserted&quot;:
+                stats[&quot;inserted&quot;] += 1
+            else:
+                stats[&quot;updated&quot;] += 1
+        except Exception:
+            stats[&quot;skipped&quot;] += 1
+
+    return stats
+
+sample_feed = [
+    {&quot;value&quot;: &quot;malicious-domain.ru&quot;, &quot;type&quot;: &quot;domain&quot;,
+     &quot;confidence&quot;: 80, &quot;first_seen&quot;: &quot;2024-04-01&quot;, &quot;last_seen&quot;: &quot;2024-04-10&quot;,
+     &quot;tags&quot;: [&quot;apt34&quot;, &quot;c2&quot;]},
+    {&quot;value&quot;: &quot;185.220.101.45&quot;, &quot;type&quot;: &quot;ip&quot;,
+     &quot;confidence&quot;: 75, &quot;first_seen&quot;: &quot;2024-04-02&quot;, &quot;last_seen&quot;: &quot;2024-04-10&quot;,
+     &quot;tags&quot;: [&quot;apt34&quot;, &quot;c2-server&quot;]},
+]
+
+conn = create_ioc_database(&quot;:memory:&quot;)
+# Assumes insert_ioc returns {&quot;action&quot;: &quot;inserted&quot;|&quot;updated&quot;, &quot;ioc_id&quot;: int}
+stats = ingest_feed(conn, sample_feed, &quot;OTX_APT34_Feed&quot;)
+print(f&quot;Ingestion stats: {stats}&quot;)
+conn.close()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>get_active_iocs_by_type(conn, ioc_type: str) -&gt; list[dict]</code> that returns all active IOCs of a given type as a list of dicts, ordered by confidence descending. Then write <code>check_log_events_against_iocs(conn, log_events: list[dict], field_map: dict) -&gt; list[dict]</code> that takes log events and a mapping of <code>{log_field: ioc_type}</code> and returns log events that match any active IOC in the database.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>field_map = {
+    &quot;dst_domain&quot;: &quot;domain&quot;,
+    &quot;dst_ip&quot;: &quot;ip&quot;,
+    &quot;file_hash&quot;: &quot;sha256&quot;,
+}
+
+log_events = [
+    {&quot;time&quot;: &quot;2024-04-10T09:00:00&quot;, &quot;src_ip&quot;: &quot;10.0.0.5&quot;,
+     &quot;dst_domain&quot;: &quot;malicious-domain.ru&quot;, &quot;dst_ip&quot;: &quot;185.220.101.45&quot;},
+    {&quot;time&quot;: &quot;2024-04-10T09:01:00&quot;, &quot;src_ip&quot;: &quot;10.0.0.6&quot;,
+     &quot;dst_domain&quot;: &quot;google.com&quot;, &quot;dst_ip&quot;: &quot;8.8.8.8&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>1 hit: {&#x27;time&#x27;: &#x27;2024-04-10T09:00:00&#x27;, &#x27;matched_ioc&#x27;: &#x27;malicious-domain.ru&#x27;, &#x27;ioc_type&#x27;: &#x27;domain&#x27;, &#x27;confidence&#x27;: 80}
+</code></pre><hr />
+<h3>Concept 3 — Enrichment Queries: Joining IOCs to Log Events</h3>
+<p>The value of an IOC database is realized when you join it against live or historical log data. In SQL terms: <code>SELECT * FROM log_events JOIN iocs ON log_events.dst_ip = iocs.normalized_value WHERE iocs.is_active = 1</code>. This is identical to identity enrichment from W04 — same JOIN pattern, different dimension table.</p>
+<p>Enrichment also works retroactively: when you add a new IOC, run it against historical logs going back 30–90 days to find past compromise. This retroactive hunting is one of the highest-value CTI use cases — discovering that an attacker was present before you knew about the IOC.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def enrich_logs_with_iocs(conn: sqlite3.Connection,
+                           log_events: list[dict],
+                           lookback_fields: list[tuple[str, str]]) -&gt; list[dict]:
+    &quot;&quot;&quot;
+    Enrich log events with IOC matches.
+    lookback_fields: list of (log_field_name, ioc_type) to check
+    Returns: log events with &#x27;ioc_hits&#x27; key added (empty list if no match)
+    &quot;&quot;&quot;
+    cur = conn.cursor()
+    enriched = []
+
+    for event in log_events:
+        hits = []
+        for log_field, ioc_type in lookback_fields:
+            value = event.get(log_field, &quot;&quot;)
+            if not value:
+                continue
+            normalized = value.lower().strip()
+            cur.execute(&quot;&quot;&quot;
+                SELECT ioc_id, value, ioc_type, confidence, tags
+                FROM iocs
+                WHERE normalized_value = ?
+                AND ioc_type = ?
+                AND is_active = 1
+            &quot;&quot;&quot;, (normalized, ioc_type))
+            rows = cur.fetchall()
+            for row in rows:
+                hits.append({
+                    &quot;matched_field&quot;: log_field,
+                    &quot;matched_value&quot;: value,
+                    &quot;ioc_type&quot;: row[&quot;ioc_type&quot;],
+                    &quot;confidence&quot;: row[&quot;confidence&quot;],
+                    &quot;tags&quot;: json.loads(row[&quot;tags&quot;]) if row[&quot;tags&quot;] else [],
+                })
+        enriched.append({**event, &quot;ioc_hits&quot;: hits, &quot;is_threat&quot;: len(hits) &gt; 0})
+
+    return enriched
+
+# Demonstrate usage pattern
+print(&quot;Enrichment pattern: SELECT log_events JOIN iocs ON normalized_value&quot;)
+print(&quot;Retroactive: run new IOCs against 90-day historical log archive&quot;)
+print(&quot;Alert trigger: event.is_threat = True → SIEM alert or SOAR playbook&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>retroactive_hunt(conn, historical_logs: list[dict], new_ioc_value: str, new_ioc_type: str, lookback_fields: list[tuple[str, str]]) -&gt; list[dict]</code> that: (1) inserts the new IOC into the database with confidence=90 and today's date, (2) runs <code>enrich_logs_with_iocs</code> against the historical log list, (3) returns only the events that hit on the new IOC, sorted by time.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>historical = [
+    {&quot;time&quot;: &quot;2024-03-15T08:00:00&quot;, &quot;src_ip&quot;: &quot;10.0.0.5&quot;, &quot;dst_domain&quot;: &quot;evil-update.com&quot;},
+    {&quot;time&quot;: &quot;2024-03-20T14:00:00&quot;, &quot;src_ip&quot;: &quot;10.0.0.8&quot;, &quot;dst_domain&quot;: &quot;evil-update.com&quot;},
+    {&quot;time&quot;: &quot;2024-04-01T09:00:00&quot;, &quot;src_ip&quot;: &quot;10.0.0.5&quot;, &quot;dst_domain&quot;: &quot;google.com&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Retroactive hunt found 2 historical hits for evil-update.com:
+  2024-03-15T08:00:00 — 10.0.0.5 → evil-update.com (25 days before IOC was known)
+  2024-03-20T14:00:00 — 10.0.0.8 → evil-update.com (20 days before IOC was known)
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLM-assisted IOC context enrichment<br />
+<strong>Threat:</strong> Attackers register lookalike domains that differ by one character from legitimate services (typosquatting, combosquatting) — these often don't appear in threat feeds and must be detected by pattern analysis rather than exact IOC match<br />
+<strong>Opportunity:</strong> When an unknown domain appears in logs, ask an LLM to evaluate its suspiciousness: age (WHOIS), registrar reputation, visual similarity to known brands, TLD choice, whether it matches known DGA patterns — providing an AI risk score without requiring a feed match<br />
+<strong>Prompt to try:</strong> <code>&quot;Evaluate the following domain for suspiciousness as a potential phishing or C2 domain. Consider: visual similarity to legitimate brands, TLD choice, naming patterns typical of attacker-registered domains, and age. Provide a risk score 0-100 and explain your reasoning: evil-update-microsoft.xyz&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Campaign Tracking and Hunt Hypotheses</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=Yb4rg2NbgNw" target="_blank" rel="noopener"><b>An Introduction to the Diamond Model of Intrusion Analysis by it&#x27;s Co-Author Sergio Caltagirone</b><small>Threat Intelligence Academy</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=threat%20hunting%20hypothesis-driven%20hunt%20campaigns%20Diamond%20Model%20intrusion%20analysis" target="_blank" rel="noopener">threat hunting hypothesis-driven hunt campaigns Diamond Model intrusion analysis</a></p></div>
+<hr />
+<h3>Concept 1 — The Diamond Model of Intrusion Analysis</h3>
+<p>The Diamond Model (Caltagirone, Pendergast, Betz 2013) describes every adversarial event as four linked vertices: Adversary (who attacked), Capability (tools/techniques used), Infrastructure (IPs, domains, C2 servers), and Victim (what was targeted). The model defines relationships between vertices and allows analysts to pivot from any known vertex to discover others.</p>
+<p>If you know the infrastructure (C2 IP), you can find other campaigns using the same IP (pivot to capability and adversary). If you know the capability (specific malware family), you find all victims and infrastructure. This pivoting logic drives threat hunting: start with what you know, expand systematically.</p>
+<p>In data engineering terms: this is a graph traversal problem. The Diamond Model is a graph where nodes are adversary/capability/infrastructure/victim objects and edges are &quot;uses/targets&quot; relationships.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+
+@dataclass
+class DiamondEvent:
+    event_id: str
+    adversary: str          # actor name or &quot;unknown&quot;
+    capability: str         # malware family, tool, or TTP
+    infrastructure: str     # C2 IP or domain
+    victim: str             # organization or asset
+    timestamp: str
+    confidence: int         # 0-100
+    meta_features: dict = field(default_factory=dict)  # business, political, military, diplomatic
+
+EVENTS = [
+    DiamondEvent(&quot;evt1&quot;, &quot;APT34&quot;, &quot;POWRUNER&quot;, &quot;185.220.101.45&quot;,
+                 &quot;FinanceCorp_IL&quot;, &quot;2024-03-15&quot;, 85,
+                 {&quot;sector&quot;: &quot;finance&quot;, &quot;country&quot;: &quot;Israel&quot;}),
+    DiamondEvent(&quot;evt2&quot;, &quot;APT34&quot;, &quot;BONDUPDATER&quot;, &quot;185.220.101.45&quot;,
+                 &quot;TelecomCo_AE&quot;, &quot;2024-03-20&quot;, 80,
+                 {&quot;sector&quot;: &quot;telecom&quot;, &quot;country&quot;: &quot;UAE&quot;}),
+    DiamondEvent(&quot;evt3&quot;, &quot;unknown&quot;, &quot;POWRUNER&quot;, &quot;94.177.123.138&quot;,
+                 &quot;GovAgency_SA&quot;, &quot;2024-04-01&quot;, 60,
+                 {&quot;sector&quot;: &quot;government&quot;, &quot;country&quot;: &quot;Saudi Arabia&quot;}),
+]
+
+def pivot_by_infrastructure(events: list[DiamondEvent], ip: str) -&gt; list[DiamondEvent]:
+    &quot;&quot;&quot;Find all events sharing the same C2 infrastructure.&quot;&quot;&quot;
+    return [e for e in events if e.infrastructure == ip]
+
+def pivot_by_capability(events: list[DiamondEvent], capability: str) -&gt; list[DiamondEvent]:
+    &quot;&quot;&quot;Find all events using the same malware/tool.&quot;&quot;&quot;
+    return [e for e in events if capability.lower() in e.capability.lower()]
+
+def cluster_by_adversary(events: list[DiamondEvent]) -&gt; dict[str, list[DiamondEvent]]:
+    &quot;&quot;&quot;Group events by attributed adversary.&quot;&quot;&quot;
+    clusters = {}
+    for event in events:
+        clusters.setdefault(event.adversary, []).append(event)
+    return clusters
+
+# Pivot: same IP as evt1 → find related campaigns
+related = pivot_by_infrastructure(EVENTS, &quot;185.220.101.45&quot;)
+print(f&quot;Infrastructure pivot on 185.220.101.45: {len(related)} events&quot;)
+for e in related:
+    print(f&quot;  {e.event_id}: {e.adversary} used {e.capability} against {e.victim}&quot;)
+
+# Capability pivot: POWRUNER across all campaigns
+powruner_use = pivot_by_capability(EVENTS, &quot;POWRUNER&quot;)
+print(f&quot;\nCapability pivot on POWRUNER: {len(powruner_use)} events&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>attribute_unknown_events(events: list[DiamondEvent], known_events: list[DiamondEvent]) -&gt; list[DiamondEvent]</code> that takes events with <code>adversary = &quot;unknown&quot;</code> and attempts attribution by matching infrastructure or capability to <code>known_events</code>. If a match is found, update <code>adversary</code> to the known actor's name and add <code>&quot;attributed_by&quot;: &quot;infrastructure&quot;|&quot;capability&quot;</code> to <code>meta_features</code>. Return only the events that were successfully attributed.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># evt3 shares POWRUNER capability with APT34 events
+attributed = attribute_unknown_events(
+    [e for e in EVENTS if e.adversary == &quot;unknown&quot;],
+    [e for e in EVENTS if e.adversary != &quot;unknown&quot;]
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Attributed evt3 to APT34 via capability (POWRUNER)
+  Updated: adversary = &quot;APT34&quot;, confidence remains 60, meta_features[&quot;attributed_by&quot;] = &quot;capability&quot;
+</code></pre><hr />
+<h3>Concept 2 — Hunt Hypothesis Framework</h3>
+<p>Threat hunting is proactive search for adversary activity that has not triggered any alerts. A hypothesis is a testable statement: &quot;APT34 may have used DNS tunneling to exfiltrate data from our environment in the last 30 days.&quot; A hypothesis should be: specific (not &quot;look for malware&quot;), testable (maps to a query or data source), falsifiable (you know what a positive and negative result look like).</p>
+<p>The hypothesis-to-query pipeline: hypothesis → identify data source → write detection query → baseline normal activity → define anomaly threshold → review results → document findings → if positive: escalate incident; if negative: document as hunted and move on.</p>
+<p>Good hypothesis sources: current threat intelligence (APT34 uses DNS tunneling — do we have DNS logs?), known TTPs of threat actors relevant to your sector, recent security reports, ATT&amp;CK data sources (what logs are needed to detect technique X?), and your own alert coverage gaps from the W05 coverage matrix.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class HuntHypothesis:
+    hypothesis_id: str
+    statement: str
+    threat_actor: str
+    technique: str
+    data_sources: list[str]
+    query_sketch: str
+    priority: str           # critical | high | medium | low
+    status: str             # not_started | in_progress | hunted_clean | positive_finding
+
+HYPOTHESES = [
+    HuntHypothesis(
+        hypothesis_id=&quot;HH-001&quot;,
+        statement=&quot;APT34 is using DNS TXT queries to tunnel data out of our environment&quot;,
+        threat_actor=&quot;APT34&quot;,
+        technique=&quot;T1071.004&quot;,
+        data_sources=[&quot;DNS logs&quot;, &quot;network NetFlow&quot;],
+        query_sketch=(
+            &quot;DNS queries from internal IPs where query_type=TXT &quot;
+            &quot;AND subdomain_length &gt; 30 &quot;
+            &quot;AND query_count_per_hour &gt; 10 to same base domain&quot;
+        ),
+        priority=&quot;critical&quot;,
+        status=&quot;not_started&quot;,
+    ),
+    HuntHypothesis(
+        hypothesis_id=&quot;HH-002&quot;,
+        statement=&quot;A service account is being used interactively in off-hours (potential credential theft)&quot;,
+        threat_actor=&quot;unknown&quot;,
+        technique=&quot;T1078&quot;,
+        data_sources=[&quot;Windows Security EID 4624&quot;],
+        query_sketch=(
+            &quot;EID 4624 WHERE account_type=&#x27;service&#x27; &quot;
+            &quot;AND logon_type IN (2,10) &quot;
+            &quot;AND hour(event_time) NOT BETWEEN 7 AND 20&quot;
+        ),
+        priority=&quot;high&quot;,
+        status=&quot;not_started&quot;,
+    ),
+]
+
+def prioritize_hypotheses(hypotheses: list[HuntHypothesis]) -&gt; list[HuntHypothesis]:
+    priority_order = {&quot;critical&quot;: 0, &quot;high&quot;: 1, &quot;medium&quot;: 2, &quot;low&quot;: 3}
+    return sorted(hypotheses, key=lambda h: priority_order.get(h.priority, 99))
+
+for h in prioritize_hypotheses(HYPOTHESES):
+    print(f&quot;[{h.priority.upper()}] {h.hypothesis_id}: {h.statement}&quot;)
+    print(f&quot;  Technique: {h.technique} | Sources: {&#x27;, &#x27;.join(h.data_sources)}&quot;)
+    print(f&quot;  Query sketch: {h.query_sketch[:80]}...&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>generate_hypotheses_from_actor(actor: ThreatActor, data_sources_available: set[str]) -&gt; list[HuntHypothesis]</code> that generates one hypothesis per TTP in <code>actor.primary_ttps</code>, where a hypothesis is generated only if the technique's required data source is in <code>data_sources_available</code>. Use a hardcoded mapping of <code>technique → required_data_source</code>.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>TECHNIQUE_DATASOURCE = {
+    &quot;T1566.001&quot;: &quot;email_gateway_logs&quot;,
+    &quot;T1059.001&quot;: &quot;windows_powershell_logs&quot;,
+    &quot;T1071.004&quot;: &quot;dns_logs&quot;,
+    &quot;T1003.001&quot;: &quot;sysmon_eid10&quot;,
+    &quot;T1053.005&quot;: &quot;windows_security_eid4698&quot;,
+}
+
+available = {&quot;dns_logs&quot;, &quot;sysmon_eid10&quot;, &quot;windows_security_eid4698&quot;}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Generated 3 hypotheses for APT34 (3 of 10 TTPs have available data sources):
+  HH-APT34-T1071.004: APT34 may be using DNS tunneling — data source: dns_logs
+  HH-APT34-T1003.001: APT34 may be dumping LSASS credentials — data source: sysmon_eid10
+  HH-APT34-T1053.005: APT34 may have created persistent scheduled tasks — data source: windows_security_eid4698
+</code></pre><hr />
+<h3>Concept 3 — Israeli Threat Landscape Context</h3>
+<p>The Israeli cybersecurity threat landscape is distinct: the country faces a persistent nation-state threat from Iranian groups (APT34, APT33, MuddyWater), Palestinian hacktivist and APT groups (Gaza Cybergang, Molerats), and occasional opportunistic Russian-aligned hacktivists. The threat is both sophisticated (APT34 targeting critical infrastructure and defense-adjacent tech companies) and noisy (Killnet-style DDoS during escalations).</p>
+<p>Israeli tech companies — especially those in fintech, SaaS, defense tech, and cloud infrastructure — are high-value targets because of: dual-use export concerns, connections to government and military, and the concentration of high-value data. An Israeli SOC analyst must have APT34 and Gaza Cybergang in their threat model in the same way a US financial SOC has FIN7 and APT10.</p>
+<p>Key Israeli CTI resources: ClearSky Cyber Security (publishes detailed APT reports covering Iranian/Palestinian groups), CheckPoint Research (global + Israel-specific), INCD (Israel National Cyber Directorate) advisories.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ISRAELI_THREAT_MODEL = {
+    &quot;priority_actors&quot;: [
+        {
+            &quot;actor&quot;: &quot;APT34 / OilRig&quot;,
+            &quot;nation&quot;: &quot;Iran&quot;,
+            &quot;sectors_at_risk&quot;: [&quot;finance&quot;, &quot;government&quot;, &quot;telecom&quot;, &quot;defense-tech&quot;],
+            &quot;peak_activity&quot;: &quot;during geopolitical escalation&quot;,
+            &quot;detection_priority&quot;: &quot;critical&quot;,
+            &quot;key_ttps&quot;: [&quot;T1566.001&quot;, &quot;T1059.001&quot;, &quot;T1071.004&quot;, &quot;T1003.001&quot;],
+        },
+        {
+            &quot;actor&quot;: &quot;MuddyWater&quot;,
+            &quot;nation&quot;: &quot;Iran&quot;,
+            &quot;sectors_at_risk&quot;: [&quot;government&quot;, &quot;telecom&quot;, &quot;oil-gas&quot;],
+            &quot;peak_activity&quot;: &quot;persistent year-round&quot;,
+            &quot;detection_priority&quot;: &quot;high&quot;,
+            &quot;key_ttps&quot;: [&quot;T1566.001&quot;, &quot;T1059.001&quot;, &quot;T1055&quot;, &quot;T1082&quot;],
+        },
+        {
+            &quot;actor&quot;: &quot;Gaza Cybergang / Molerats&quot;,
+            &quot;nation&quot;: &quot;Palestinian Authority&quot;,
+            &quot;sectors_at_risk&quot;: [&quot;government&quot;, &quot;media&quot;, &quot;NGO&quot;],
+            &quot;peak_activity&quot;: &quot;during military operations&quot;,
+            &quot;detection_priority&quot;: &quot;high&quot;,
+            &quot;key_ttps&quot;: [&quot;T1566.001&quot;, &quot;T1059.001&quot;, &quot;T1547.001&quot;],
+        },
+    ],
+    &quot;recommended_feeds&quot;: [
+        &quot;ClearSky published IOCs (blog.clearskysec.com)&quot;,
+        &quot;INCD advisories (cyber.gov.il)&quot;,
+        &quot;CheckPoint Research (research.checkpoint.com)&quot;,
+        &quot;AlienVault OTX — APT34 and MuddyWater pulses&quot;,
+    ],
+    &quot;detection_coverage_gaps&quot;: [
+        &quot;DNS tunneling (T1071.004) — requires dedicated DNS logging&quot;,
+        &quot;Azure AD impossible travel — requires Azure AD sign-in logs&quot;,
+        &quot;Supply chain compromise (T1195) — hard to detect without SBOM&quot;,
+    ],
+}
+
+def print_threat_briefing(model: dict) -&gt; None:
+    print(&quot;=== Israeli Threat Landscape Briefing ===\n&quot;)
+    for actor in model[&quot;priority_actors&quot;]:
+        print(f&quot;[{actor[&#x27;detection_priority&#x27;].upper()}] {actor[&#x27;actor&#x27;]} ({actor[&#x27;nation&#x27;]})&quot;)
+        print(f&quot;  Sectors: {&#x27;, &#x27;.join(actor[&#x27;sectors_at_risk&#x27;])}&quot;)
+        print(f&quot;  Key TTPs: {&#x27;, &#x27;.join(actor[&#x27;key_ttps&#x27;])}&quot;)
+    print(f&quot;\nDetection gaps: {len(model[&#x27;detection_coverage_gaps&#x27;])} identified&quot;)
+
+print_threat_briefing(ISRAELI_THREAT_MODEL)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>gap_coverage_report(threat_model: dict, covered_techniques: set[str]) -&gt; dict</code> that calculates, per actor in <code>priority_actors</code>, what percentage of their <code>key_ttps</code> are in <code>covered_techniques</code>. Return <code>{&quot;actor_name&quot;: {&quot;covered&quot;: list, &quot;uncovered&quot;: list, &quot;coverage_pct&quot;: float}}</code>.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>covered_now = {&quot;T1566.001&quot;, &quot;T1059.001&quot;, &quot;T1003.001&quot;, &quot;T1055&quot;}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>APT34: 50.0% covered (2/4) — uncovered: T1071.004, T1003.001 — wait, let me recalc
+APT34: T1566.001 ✓, T1059.001 ✓, T1071.004 ✗, T1003.001 ✓ = 75.0% (3/4)
+MuddyWater: T1566.001 ✓, T1059.001 ✓, T1055 ✓, T1082 ✗ = 75.0% (3/4)
+Gaza Cybergang: T1566.001 ✓, T1059.001 ✓, T1547.001 ✗ = 66.7% (2/3)
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> AI-driven hunt hypothesis generation from threat reports<br />
+<strong>Threat:</strong> Adversaries monitor detection blogs and security conference talks to understand what defenders are hunting, then change their TTPs to avoid the exact detection patterns being published — the public threat hunting community inadvertently telegraphs detection gaps<br />
+<strong>Opportunity:</strong> Given a new threat report, an LLM generates a prioritized list of hunt hypotheses, maps each to a data source, and drafts a query skeleton — reducing the time from &quot;report published&quot; to &quot;hunt initiated&quot; from days to hours<br />
+<strong>Prompt to try:</strong> <code>&quot;Based on this ClearSky APT34 report excerpt, generate 5 threat hunting hypotheses for a SOC with these available data sources: Windows Security logs (EID 4624, 4625, 4688, 4698), Sysmon (EID 1, 3, 7, 10, 13), DNS query logs, and Azure AD sign-in logs. For each hypothesis, write a plain-English query description and identify which data source it requires.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Completing the Royal Road: CTI Feed Consumer</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=p7by_uWzdEg" target="_blank" rel="noopener"><b>Creating a Threat Intelligence Program from Scratch Part 1</b><small>Prabh Nair</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Python%20threat%20intelligence%20pipeline%20SQLite%20IOC%20enrichment%20automation%20CTI" target="_blank" rel="noopener">Python threat intelligence pipeline SQLite IOC enrichment automation CTI</a></p></div>
+<hr />
+<h3>Concept 1 — Feed Consumer Architecture</h3>
+<p>A production CTI feed consumer runs on a schedule (daily or hourly), fetches from multiple sources, normalizes to a common schema, deduplicates, stores in the IOC database, and produces a delta report (new IOCs since last run, expired IOCs, IOCs with updated confidence). It is a mini-ETL pipeline where the source systems are threat feeds and the destination is the IOC database.</p>
+<p>The architecture mirrors a data engineering incremental load: extract (fetch from APIs), transform (normalize, validate, deduplicate), load (upsert into SQLite with conflict resolution). The key operational metric: freshness lag — how old are your current IOCs relative to the threat?</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import sqlite3
+import json
+from datetime import datetime
+
+class CTIFeedConsumer:
+    def __init__(self, db_path: str):
+        self.conn = create_ioc_database(db_path)
+        self.run_stats = {
+            &quot;run_time&quot;: datetime.now().isoformat(),
+            &quot;feeds_processed&quot;: 0,
+            &quot;iocs_inserted&quot;: 0,
+            &quot;iocs_updated&quot;: 0,
+            &quot;iocs_expired&quot;: 0,
+        }
+
+    def add_feed(self, name: str, url: str, tlp: str = &quot;GREEN&quot;) -&gt; int:
+        return insert_source(self.conn, name, url, tlp)
+
+    def ingest(self, feed_data: list[dict], source_name: str) -&gt; dict:
+        result = ingest_feed(self.conn, feed_data, source_name)
+        self.run_stats[&quot;iocs_inserted&quot;] += result.get(&quot;inserted&quot;, 0)
+        self.run_stats[&quot;iocs_updated&quot;] += result.get(&quot;updated&quot;, 0)
+        self.run_stats[&quot;feeds_processed&quot;] += 1
+        return result
+
+    def expire(self, max_age_days: int = 30) -&gt; int:
+        count = expire_old_iocs(self.conn, max_age_days)
+        self.run_stats[&quot;iocs_expired&quot;] = count
+        return count
+
+    def summary(self) -&gt; dict:
+        cur = self.conn.cursor()
+        cur.execute(&quot;SELECT COUNT(*) FROM iocs WHERE is_active = 1&quot;)
+        active = cur.fetchone()[0]
+        cur.execute(&quot;SELECT COUNT(*) FROM iocs WHERE is_active = 0&quot;)
+        expired = cur.fetchone()[0]
+        return {
+            **self.run_stats,
+            &quot;total_active_iocs&quot;: active,
+            &quot;total_expired_iocs&quot;: expired,
+        }
+
+    def close(self):
+        self.conn.close()
+
+consumer = CTIFeedConsumer(&quot;:memory:&quot;)
+consumer.add_feed(&quot;AlienVault OTX&quot;, &quot;https://otx.alienvault.com&quot;, &quot;GREEN&quot;)
+
+# Simulate two feed runs
+run1_data = [
+    {&quot;value&quot;: &quot;malicious.ru&quot;, &quot;type&quot;: &quot;domain&quot;, &quot;confidence&quot;: 80,
+     &quot;first_seen&quot;: &quot;2024-04-01&quot;, &quot;last_seen&quot;: &quot;2024-04-05&quot;},
+]
+run2_data = [
+    {&quot;value&quot;: &quot;evil-cdn.com&quot;, &quot;type&quot;: &quot;domain&quot;, &quot;confidence&quot;: 75,
+     &quot;first_seen&quot;: &quot;2024-04-09&quot;, &quot;last_seen&quot;: &quot;2024-04-10&quot;},
+]
+
+consumer.ingest(run1_data, &quot;AlienVault OTX&quot;)
+consumer.ingest(run2_data, &quot;AlienVault OTX&quot;)
+consumer.expire(max_age_days=3)
+
+print(json.dumps(consumer.summary(), indent=2))
+consumer.close()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>CTIFeedConsumer</code> with a <code>delta_report(since: str) -&gt; dict</code> method that returns IOCs inserted or updated after the <code>since</code> timestamp. The report should have keys <code>{&quot;new_iocs&quot;: list, &quot;updated_iocs&quot;: list, &quot;count_by_type&quot;: dict}</code>. Test by running two ingestion batches with different timestamps and verifying the delta captures only the second batch.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>consumer = CTIFeedConsumer(&quot;:memory:&quot;)
+t0 = &quot;2024-04-05T00:00:00&quot;
+# ... ingest batch1 (timestamped before t0)
+# ... ingest batch2 (timestamped after t0)
+delta = consumer.delta_report(since=t0)
+# Expected: delta[&quot;new_iocs&quot;] contains only batch2 items
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Delta since 2024-04-05T00:00:00:
+  new_iocs: 1 (evil-cdn.com)
+  updated_iocs: 0
+  count_by_type: {&quot;domain&quot;: 1}
+</code></pre><hr />
+<h3>Concept 2 — IOC Lookup Integration with the Log Pipeline</h3>
+<p>The IOC database becomes useful when it is joined to the log enrichment pipeline from W04. The complete chain: raw logs → normalize (W01–W03) → identity enrichment (W04) → IOC enrichment (W07) → output as annotated events. Each event now carries both identity context and threat intelligence context.</p>
+<p>This forms the foundation of a basic detection pipeline: if <code>ioc_hits</code> is non-empty, the event is a candidate alert. The confidence of the IOC and the sensitivity of the log source (LSASS access vs. HTTP request) determine the alert severity.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def build_enriched_pipeline(
+    log_events: list[dict],
+    identity_data: dict,        # from W04: {user_id → identity dict}
+    ioc_conn: sqlite3.Connection,
+    ioc_fields: list[tuple[str, str]],  # [(log_field, ioc_type), ...]
+) -&gt; list[dict]:
+    &quot;&quot;&quot;
+    Full W01–W07 enrichment pipeline:
+    1. Identity enrichment (W04 pattern)
+    2. IOC enrichment (W07)
+    3. Severity scoring
+    &quot;&quot;&quot;
+    enriched = []
+    for event in log_events:
+        result = dict(event)
+
+        # Step 1: Identity enrichment
+        user_id = event.get(&quot;user_id&quot;, &quot;&quot;)
+        if user_id in identity_data:
+            identity = identity_data[user_id]
+            result[&quot;department&quot;] = identity.get(&quot;department&quot;, &quot;unknown&quot;)
+            result[&quot;is_admin&quot;] = identity.get(&quot;is_admin&quot;, False)
+            result[&quot;account_type&quot;] = identity.get(&quot;account_type&quot;, &quot;human&quot;)
+
+        # Step 2: IOC enrichment
+        ioc_hits = []
+        cur = ioc_conn.cursor()
+        for log_field, ioc_type in ioc_fields:
+            value = event.get(log_field, &quot;&quot;)
+            if not value:
+                continue
+            cur.execute(
+                &quot;SELECT confidence, tags FROM iocs WHERE normalized_value = ? AND ioc_type = ? AND is_active = 1&quot;,
+                (str(value).lower().strip(), ioc_type)
+            )
+            row = cur.fetchone()
+            if row:
+                ioc_hits.append({
+                    &quot;field&quot;: log_field, &quot;value&quot;: value,
+                    &quot;confidence&quot;: row[0], &quot;tags&quot;: row[1]
+                })
+
+        result[&quot;ioc_hits&quot;] = ioc_hits
+        result[&quot;threat_score&quot;] = max((h[&quot;confidence&quot;] for h in ioc_hits), default=0)
+        result[&quot;is_threat&quot;] = len(ioc_hits) &gt; 0
+        enriched.append(result)
+
+    return sorted(enriched, key=lambda x: x[&quot;threat_score&quot;], reverse=True)
+
+print(&quot;Full enrichment pipeline: identity (W04) + IOC (W07) = annotated events with threat score&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>generate_alert(event: dict, threshold: int = 70) -&gt; dict | None</code> that takes an enriched event and produces a structured alert if <code>threat_score &gt;= threshold</code>. The alert should include: <code>alert_id</code> (UUID), <code>severity</code> (critical ≥90, high ≥75, medium ≥60, low otherwise), <code>title</code>, <code>technique_hints</code> (from IOC tags), <code>recommended_action</code> (isolate host / investigate / monitor).</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import uuid
+
+enriched_events = [
+    {&quot;time&quot;: &quot;2024-04-10T09:00:00&quot;, &quot;src_ip&quot;: &quot;10.0.0.5&quot;,
+     &quot;dst_domain&quot;: &quot;malicious.ru&quot;, &quot;user_id&quot;: &quot;alice&quot;,
+     &quot;department&quot;: &quot;finance&quot;, &quot;is_admin&quot;: False,
+     &quot;ioc_hits&quot;: [{&quot;field&quot;: &quot;dst_domain&quot;, &quot;value&quot;: &quot;malicious.ru&quot;,
+                   &quot;confidence&quot;: 85, &quot;tags&quot;: &#x27;[&quot;apt34&quot;,&quot;c2&quot;]&#x27;}],
+     &quot;threat_score&quot;: 85, &quot;is_threat&quot;: True},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Alert ID: &lt;uuid&gt;
+Severity: high
+Title: IOC Match — malicious.ru (confidence: 85)
+Technique hints: apt34, c2
+Recommended action: investigate
+</code></pre><hr />
+<h3>Concept 3 — Royal Road Deliverable: <code>pipeline/w07_cti_consumer.py</code></h3>
+<p>The complete W07 Royal Road artifact integrates everything from this week: the <code>IOC</code> dataclass with validation, the SQLite schema, the feed ingest pipeline with upsert logic, the enrichment query, and a CLI that accepts a feed JSON file and a log events JSON file, enriches the logs, and writes alerts to a JSON output file.</p>
+<p>The script is a standalone command-line tool: <code>python w07_cti_consumer.py --feed feed.json --logs events.json --db ioc.db --output alerts.json</code>. It follows the same CLI pattern as <code>w04_enrich.py</code>, extending the pipeline chain.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>#!/usr/bin/env python3
+&quot;&quot;&quot;
+w07_cti_consumer.py — CTI feed consumer and log enrichment pipeline.
+
+Usage:
+    python w07_cti_consumer.py --feed feed.json --logs events.json --db ioc.db --output alerts.json
+&quot;&quot;&quot;
+import argparse
+import json
+import sqlite3
+import sys
+import uuid
+from pathlib import Path
+from datetime import datetime
+
+def parse_args() -&gt; argparse.Namespace:
+    p = argparse.ArgumentParser(description=&quot;CTI feed consumer and log enrichment&quot;)
+    p.add_argument(&quot;--feed&quot;, type=Path, required=True, help=&quot;JSON feed file&quot;)
+    p.add_argument(&quot;--logs&quot;, type=Path, required=True, help=&quot;JSON log events file&quot;)
+    p.add_argument(&quot;--db&quot;, type=Path, default=Path(&quot;pipeline/ioc.db&quot;), help=&quot;SQLite DB path&quot;)
+    p.add_argument(&quot;--output&quot;, type=Path, required=True, help=&quot;JSON output alerts file&quot;)
+    p.add_argument(&quot;--threshold&quot;, type=int, default=70, help=&quot;Alert threshold (0-100)&quot;)
+    return p.parse_args()
+
+def main():
+    args = parse_args()
+
+    # 1. Initialize/open IOC database
+    conn = create_ioc_database(str(args.db))
+
+    # 2. Ingest feed
+    with args.feed.open() as f:
+        feed_data = json.load(f)
+    source_id = insert_source(conn, &quot;cli_feed&quot;)
+    stats = ingest_feed(conn, feed_data, &quot;cli_feed&quot;)
+    print(f&quot;Feed ingested: {stats}&quot;, file=sys.stderr)
+
+    # 3. Load log events
+    with args.logs.open() as f:
+        log_events = json.load(f)
+
+    # 4. Enrich and generate alerts
+    ioc_fields = [(&quot;dst_domain&quot;, &quot;domain&quot;), (&quot;dst_ip&quot;, &quot;ip&quot;), (&quot;file_hash&quot;, &quot;sha256&quot;)]
+    enriched = build_enriched_pipeline(log_events, {}, conn, ioc_fields)
+
+    alerts = []
+    for event in enriched:
+        alert = generate_alert(event, threshold=args.threshold)
+        if alert:
+            alerts.append(alert)
+
+    # 5. Write output
+    with args.output.open(&quot;w&quot;) as f:
+        json.dump(alerts, f, indent=2)
+    print(f&quot;Wrote {len(alerts)} alerts to {args.output}&quot;, file=sys.stderr)
+    conn.close()
+
+if __name__ == &quot;__main__&quot;:
+    main()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Create two test input files — <code>pipeline/test_feed.json</code> and <code>pipeline/test_logs.json</code> — and run the script end-to-end. <code>test_feed.json</code> should contain 3 IOCs (1 domain, 1 IP, 1 SHA256). <code>test_logs.json</code> should contain 4 log events: 2 that hit IOCs and 2 that are clean. Verify that the output <code>alerts.json</code> contains exactly 2 alerts, both with <code>threat_score &gt;= 70</code>.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>test_feed = [
+    {&quot;value&quot;: &quot;c2.badactor.net&quot;, &quot;type&quot;: &quot;domain&quot;, &quot;confidence&quot;: 85,
+     &quot;first_seen&quot;: &quot;2024-04-01&quot;, &quot;last_seen&quot;: &quot;2024-04-10&quot;},
+    {&quot;value&quot;: &quot;198.51.100.42&quot;, &quot;type&quot;: &quot;ip&quot;, &quot;confidence&quot;: 90,
+     &quot;first_seen&quot;: &quot;2024-04-05&quot;, &quot;last_seen&quot;: &quot;2024-04-10&quot;},
+    {&quot;value&quot;: &quot;a&quot; * 64, &quot;type&quot;: &quot;sha256&quot;, &quot;confidence&quot;: 95,
+     &quot;first_seen&quot;: &quot;2024-04-08&quot;, &quot;last_seen&quot;: &quot;2024-04-10&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Feed ingested: {&#x27;inserted&#x27;: 3, &#x27;updated&#x27;: 0, &#x27;skipped&#x27;: 0}
+Wrote 2 alerts to pipeline/alerts.json
+alerts.json contains: [{&quot;severity&quot;: &quot;high&quot;, ...}, {&quot;severity&quot;: &quot;critical&quot;, ...}]
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLM-powered IOC triage and false positive reduction<br />
+<strong>Threat:</strong> Large IOC feeds produce high false positive rates — blocking a legitimate CDN IP because one threat actor used it briefly can cause significant business impact; attackers exploit this by routing traffic through shared infrastructure that defenders hesitate to block<br />
+<strong>Opportunity:</strong> Before adding an IOC to a blocklist, query an LLM with the IOC value, source, and context: &quot;Is 203.0.113.5 likely a shared hosting IP or a dedicated C2? Given these 5 DNS resolvers also returned this IP in our logs, what is the risk of blocking?&quot; — reducing analyst triage time and block decision errors<br />
+<strong>Prompt to try:</strong> <code>&quot;You are a threat intelligence analyst. Evaluate this IOC for blocking risk: domain evil-update-service.net, source: AlienVault OTX, confidence: 72, tags: apt34 c2. Consider: Could this domain be shared hosting? What is the blast radius of blocking? Rate the block confidence as high/medium/low and explain your reasoning in 3 sentences.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 07</h2>
+<p><strong>Task:</strong> Build <code>pipeline/w07_cti_consumer.py</code> — a CLI tool that ingests a JSON threat feed, stores IOCs in a normalized SQLite database (<code>pipeline/ioc.db</code>), enriches a log events JSON file with IOC matches, and writes structured alerts to a JSON output file<br />
+<strong>Builds on:</strong> W04 identity enrichment pattern (<code>pipeline/w04_enrich.py</code>) — the IOC enrichment JOIN is a second dimension table added to the same event enrichment pipeline; W05 coverage matrix (<code>pipeline/coverage.csv</code>) — update T1071.004 to <code>covered=1</code> after building the DNS tunneling detector<br />
+<strong>Deliverable:</strong> <code>pipeline/w07_cti_consumer.py</code> with CLI args <code>--feed</code>, <code>--logs</code>, <code>--db</code>, <code>--output</code>, <code>--threshold</code>; <code>pipeline/ioc.db</code> schema with <code>sources</code>, <code>actors</code>, and <code>iocs</code> tables; <code>pipeline/test_feed.json</code> and <code>pipeline/test_logs.json</code> for smoke testing<br />
+<strong>Stretch goal:</strong> Add a <code>--expire</code> flag that marks IOCs last seen more than N days ago as inactive before running enrichment, and add an <code>--actor</code> flag to filter alerts by a specific threat actor name stored in the <code>actors</code> table</p>
+<div class="pager"><a class="btn ghost" href="week-06.html">&larr; Week 06</a><a class="btn ghost" href="week-08.html">Week 08 &rarr;</a></div>
+</main></body></html>

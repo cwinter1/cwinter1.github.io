@@ -1,0 +1,3126 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 17 — Capstone Scale</title>
+<link rel="stylesheet" href="style.css"><script>window.SITE_DATASETS = ["datasets/titanic_train.csv"];</script>
+<script src="app.js" defer></script></head>
+<body data-site="python">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Python Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 17 — Capstone Scale</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a><a class="btn ghost" href="#day-6">Day 6</a><a class="btn ghost" href="#day-7">Day 7</a><a class="btn ghost" href="#day-8">Day 8</a></div><p class="note">Done this week: <span data-week-count="17" data-size="8"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><p class="note">Cells that need a file other than the Titanic table, a web connection, a database server or a package that is not available in the browser will show an error when run. Read those instead.</p><h2 id="day-1">Day 1 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="17-1"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D1_Idempotency.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>#  YOUTUBE
+#  ───────
+#  Search: &quot;idempotent data pipelines&quot;
+#  Video: &quot;The Importance of Idempotency in Designing Data Pipelines&quot; -- PracticalGCP
+#         https://www.youtube.com/watch?v=pKZ5n-y3ug4
+#         (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+import pandas as pd
+
+# Fresh database for this lesson
+db = duckdb.connect(&#x27;:memory:&#x27;)
+
+print(&#x27;Idempotency lesson ready.&#x27;)
+print(&#x27;DuckDB in-memory database connected.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D1_Idempotency.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — WHAT IDEMPOTENCY MEANS
+# ══════════════════════════════════════════════════════════════
+# An operation is idempotent if running it N times produces the same result as running it once.
+#
+#   Idempotent:     PUT /users/42 with {name: &#x27;Alice&#x27;}  -- always results in Alice at id=42
+#   NOT idempotent: POST /users    with {name: &#x27;Alice&#x27;}  -- creates a new user every time
+#
+# In data pipelines, idempotency matters when:
+#   - A task is retried after failure (Airflow retry)
+#   - A backfill re-runs historical data
+#   - A bug is fixed and the pipeline is re-run for the same date
+#
+# Non-idempotent loads cause:
+#   - Duplicate rows in tables
+#   - Inflated aggregates (revenue counted twice)
+#   - Dashboard trust issues
+#
+# Three strategies to make a load idempotent:
+#
+#   1. WRITE_TRUNCATE (drop + reload)
+#        DROP TABLE IF EXISTS stg_sales; CREATE TABLE stg_sales AS SELECT ...;
+#        Safe: full replace. Only for tables owned by this pipeline.
+#
+#   2. UPSERT / MERGE
+#        UPDATE rows that exist, INSERT rows that don&#x27;t.
+#        Preserves existing data. Best for shared tables.
+#
+#   3. Partition-level REPLACE
+#        DELETE FROM events WHERE date = &#x27;2024-01-15&#x27;; INSERT ...
+#        BigQuery equivalent: WRITE_TRUNCATE on a single partition.
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+# Show why a plain INSERT is NOT idempotent
+db.execute(&quot;&quot;&quot;
+    CREATE TABLE orders_naive (
+        order_id  INTEGER,
+        product   VARCHAR,
+        amount    DOUBLE
+    )
+&quot;&quot;&quot;)
+
+batch = pd.DataFrame([
+    {&#x27;order_id&#x27;: 1, &#x27;product&#x27;: &#x27;Widget A&#x27;, &#x27;amount&#x27;: 100.0},
+    {&#x27;order_id&#x27;: 2, &#x27;product&#x27;: &#x27;Widget B&#x27;, &#x27;amount&#x27;:  85.0},
+])
+
+def naive_insert(df, table):
+    &quot;&quot;&quot;Non-idempotent: inserts every time it is called.&quot;&quot;&quot;
+    db.execute(f&#x27;INSERT INTO {table} SELECT * FROM df&#x27;)
+    return db.execute(f&#x27;SELECT COUNT(*) FROM {table}&#x27;).fetchone()[0]
+
+print(&#x27;--- Non-idempotent INSERT ---&#x27;)
+print(f&#x27;After run 1: {naive_insert(batch, &quot;orders_naive&quot;)} rows&#x27;)
+print(f&#x27;After run 2: {naive_insert(batch, &quot;orders_naive&quot;)} rows&#x27;)   # DUPLICATE
+print(f&#x27;After run 3: {naive_insert(batch, &quot;orders_naive&quot;)} rows&#x27;)   # DUPLICATE AGAIN
+print()
+print(db.execute(&#x27;SELECT * FROM orders_naive ORDER BY order_id&#x27;).df().to_string(index=False))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D1_Idempotency.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Demonstrate the duplicate problem with revenue aggregation.
+#
+# Steps:
+#   1. Create a table transactions_bad with columns:
+#      txn_id INTEGER, customer VARCHAR, revenue DOUBLE
+#   2. Write insert_transactions(df) that does a plain INSERT.
+#   3. Call it 3 times with txn_df.
+#   4. After each call, print:
+#      &quot;Run N: {total_rows} rows, total revenue = {sum(revenue)}&quot;
+#   5. At the end, print: &quot;Expected revenue: 330.0  Actual: {actual}&quot;
+#      and whether it matches.
+#
+# Expected output:
+#   Run 1:  3 rows, total revenue = 330.0
+#   Run 2:  6 rows, total revenue = 660.0   &lt;-- DUPLICATE PROBLEM
+#   Run 3:  9 rows, total revenue = 990.0   &lt;-- DUPLICATE PROBLEM
+#   Expected revenue: 330.0  Actual: 990.0  MISMATCH
+#
+# --- starting data ---
+txn_df = pd.DataFrame([
+    {&#x27;txn_id&#x27;: 1, &#x27;customer&#x27;: &#x27;Acme Corp&#x27;,   &#x27;revenue&#x27;: 150.0},
+    {&#x27;txn_id&#x27;: 2, &#x27;customer&#x27;: &#x27;Beta Ltd&#x27;,    &#x27;revenue&#x27;: 120.0},
+    {&#x27;txn_id&#x27;: 3, &#x27;customer&#x27;: &#x27;Gamma GmbH&#x27;,  &#x27;revenue&#x27;:  60.0},
+])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D1_Idempotency.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — MERGE/UPSERT PATTERN
+# ══════════════════════════════════════════════════════════════
+# UPSERT = UPDATE existing rows + INSERT new rows.
+# In DuckDB (and most SQL databases) you can do this with:
+#
+#   INSERT OR REPLACE INTO target SELECT ... FROM source;
+#
+# Or with an explicit MERGE statement (Postgres, BigQuery, Snowflake):
+#   MERGE INTO target AS t
+#   USING source AS s ON t.id = s.id
+#   WHEN MATCHED THEN UPDATE SET t.amount = s.amount
+#   WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.amount);
+#
+# DuckDB INSERT OR REPLACE requires a PRIMARY KEY constraint.
+# Without a primary key, use DELETE + INSERT:
+#   DELETE FROM target WHERE key_col IN (SELECT key_col FROM new_batch);
+#   INSERT INTO target SELECT * FROM new_batch;
+#
+# BigQuery equivalent:
+#   bq_client.load_table_from_dataframe(df, &#x27;dataset.table&#x27;,
+#       job_config=bigquery.LoadJobConfig(
+#           write_disposition=&#x27;WRITE_TRUNCATE&#x27;,   # full replace
+#       ))
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+# Idempotent load using WRITE_TRUNCATE (drop + recreate)
+def load_truncate(df, table):
+    &quot;&quot;&quot;Idempotent: completely replaces the table every run.&quot;&quot;&quot;
+    db.execute(f&#x27;CREATE OR REPLACE TABLE {table} AS SELECT * FROM df&#x27;)
+    return db.execute(f&#x27;SELECT COUNT(*) FROM {table}&#x27;).fetchone()[0]
+
+print(&#x27;--- WRITE_TRUNCATE (idempotent) ---&#x27;)
+print(f&#x27;After run 1: {load_truncate(batch, &quot;orders_safe&quot;)} rows&#x27;)
+print(f&#x27;After run 2: {load_truncate(batch, &quot;orders_safe&quot;)} rows&#x27;)   # same
+print(f&#x27;After run 3: {load_truncate(batch, &quot;orders_safe&quot;)} rows&#x27;)   # same
+print()
+
+# Idempotent UPSERT using DELETE + INSERT
+db.execute(&quot;&quot;&quot;
+    CREATE TABLE orders_upsert (
+        order_id  INTEGER PRIMARY KEY,
+        product   VARCHAR,
+        amount    DOUBLE
+    )
+&quot;&quot;&quot;)
+
+def upsert_load(df, table, key_col):
+    &quot;&quot;&quot;
+    Idempotent load: delete existing keys then insert.
+    Run it 10 times, get the same table.
+    &quot;&quot;&quot;
+    keys = &#x27;, &#x27;.join(str(k) for k in df[key_col].tolist())
+    db.execute(f&#x27;DELETE FROM {table} WHERE {key_col} IN ({keys})&#x27;)
+    db.execute(f&#x27;INSERT INTO {table} SELECT * FROM df&#x27;)
+    return db.execute(f&#x27;SELECT COUNT(*) FROM {table}&#x27;).fetchone()[0]
+
+# First batch: orders 1-3
+upsert_load(batch, &#x27;orders_upsert&#x27;, &#x27;order_id&#x27;)
+
+# Second batch: order 2 updated, order 4 new
+batch2 = pd.DataFrame([
+    {&#x27;order_id&#x27;: 2, &#x27;product&#x27;: &#x27;Widget B&#x27;, &#x27;amount&#x27;: 95.0},   # updated amount
+    {&#x27;order_id&#x27;: 4, &#x27;product&#x27;: &#x27;Widget D&#x27;, &#x27;amount&#x27;: 55.0},   # new
+])
+n = upsert_load(batch2, &#x27;orders_upsert&#x27;, &#x27;order_id&#x27;)
+print(f&#x27;After upsert batch2: {n} rows total&#x27;)
+print()
+
+# Run the same batch2 again -- should still be 3 rows
+n2 = upsert_load(batch2, &#x27;orders_upsert&#x27;, &#x27;order_id&#x27;)
+print(f&#x27;After re-running batch2: {n2} rows total (idempotent)&#x27;)
+print()
+print(db.execute(&#x27;SELECT * FROM orders_upsert ORDER BY order_id&#x27;).df().to_string(index=False))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D1_Idempotency.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Fix the transactions problem from Exercise 1 using upsert_load().
+#
+# Steps:
+#   1. Create transactions_safe with the same schema but with txn_id as PRIMARY KEY.
+#   2. Call upsert_load(txn_df, &#x27;transactions_safe&#x27;, &#x27;txn_id&#x27;) 3 times.
+#   3. After each call, print:
+#      &quot;Run N: {total_rows} rows, total revenue = {sum(revenue)}&quot;
+#   4. Also test an UPDATE: change txn_id=2&#x27;s revenue from 120.0 to 135.0
+#      by calling upsert_load with an updated DataFrame.
+#      Print the table after the update.
+#
+# Expected output:
+#   Run 1: 3 rows, total revenue = 330.0
+#   Run 2: 3 rows, total revenue = 330.0   &lt;-- no duplicate
+#   Run 3: 3 rows, total revenue = 330.0   &lt;-- no duplicate
+#   After update:
+#     txn_id  customer       revenue
+#          1  Acme Corp      150.0
+#          2  Beta Ltd       135.0   &lt;-- updated
+#          3  Gamma GmbH      60.0
+#
+# --- starting data ---
+txn_updated = pd.DataFrame([
+    {&#x27;txn_id&#x27;: 2, &#x27;customer&#x27;: &#x27;Beta Ltd&#x27;, &#x27;revenue&#x27;: 135.0}
+])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D1_Idempotency.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — IDEMPOTENT LOAD FUNCTIONS
+# ══════════════════════════════════════════════════════════════
+# A production-grade idempotent load function handles:
+#   - Table creation on first run (if not exists)
+#   - WRITE_TRUNCATE for full-replace tables
+#   - UPSERT for incrementally-updated tables
+#   - Deduplication WITHIN the incoming batch (in case source sends duplicates)
+#
+# Deduplication within the batch:
+#   df = df.drop_duplicates(subset=&#x27;order_id&#x27;, keep=&#x27;last&#x27;)
+#
+# Partition-level idempotency (BigQuery / partitioned tables):
+#   DELETE FROM events WHERE DATE(event_ts) = &#x27;2024-01-15&#x27;;
+#   INSERT INTO events SELECT * FROM new_events;
+#   -- Same day re-runs are safe: delete clears the partition first.
+#
+# Design rule: every pipeline should answer YES to:
+#   &#x27;If I run this twice with the same input, is the output identical?&#x27;
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+def idempotent_load(df, table, key_col, mode=&#x27;upsert&#x27;, create_if_missing=True):
+    &quot;&quot;&quot;
+    General-purpose idempotent load.
+
+    mode=&#x27;truncate&#x27;  -- drop and recreate (full replace)
+    mode=&#x27;upsert&#x27;    -- delete matching keys, then insert
+
+    Automatically deduplicates the incoming df on key_col.
+    Creates the table from df schema on first run if it does not exist.
+    &quot;&quot;&quot;
+    # Step 1: dedup the incoming batch
+    original_len = len(df)
+    df = df.drop_duplicates(subset=key_col, keep=&#x27;last&#x27;)
+    if len(df) &lt; original_len:
+        print(f&#x27;  [dedup] dropped {original_len - len(df)} duplicate rows in incoming batch&#x27;)
+
+    # Step 2: ensure table exists
+    tables = [r[0] for r in db.execute(&#x27;SHOW TABLES&#x27;).fetchall()]
+    if table not in tables and create_if_missing:
+        db.execute(f&#x27;CREATE TABLE {table} AS SELECT * FROM df LIMIT 0&#x27;)
+        print(f&#x27;  [create] table {table} created from schema&#x27;)
+
+    # Step 3: apply the selected strategy
+    if mode == &#x27;truncate&#x27;:
+        db.execute(f&#x27;CREATE OR REPLACE TABLE {table} AS SELECT * FROM df&#x27;)
+    elif mode == &#x27;upsert&#x27;:
+        keys = &#x27;, &#x27;.join(str(k) for k in df[key_col].tolist())
+        db.execute(f&#x27;DELETE FROM {table} WHERE {key_col} IN ({keys})&#x27;)
+        db.execute(f&#x27;INSERT INTO {table} SELECT * FROM df&#x27;)
+
+    n = db.execute(f&#x27;SELECT COUNT(*) FROM {table}&#x27;).fetchone()[0]
+    return n
+
+
+# Batch with internal duplicates -- should be auto-deduped
+messy_batch = pd.DataFrame([
+    {&#x27;order_id&#x27;: 10, &#x27;product&#x27;: &#x27;A&#x27;, &#x27;amount&#x27;: 100.0},
+    {&#x27;order_id&#x27;: 11, &#x27;product&#x27;: &#x27;B&#x27;, &#x27;amount&#x27;:  50.0},
+    {&#x27;order_id&#x27;: 10, &#x27;product&#x27;: &#x27;A&#x27;, &#x27;amount&#x27;: 110.0},   # duplicate key, updated amount
+])
+
+n = idempotent_load(messy_batch, &#x27;orders_clean&#x27;, key_col=&#x27;order_id&#x27;, mode=&#x27;upsert&#x27;)
+print(f&#x27;Loaded {n} rows (dedup removed 1 internal duplicate)&#x27;)
+print()
+
+# Re-run with same data -- still 2 rows
+n2 = idempotent_load(messy_batch, &#x27;orders_clean&#x27;, key_col=&#x27;order_id&#x27;, mode=&#x27;upsert&#x27;)
+print(f&#x27;Re-run: {n2} rows (idempotent)&#x27;)
+print()
+print(db.execute(&#x27;SELECT * FROM orders_clean ORDER BY order_id&#x27;).df().to_string(index=False))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D1_Idempotency.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Write a function upsert_rows(df, table, key_col) that:
+#   - Drops duplicates within df on key_col
+#   - Creates the table if it does not exist
+#   - Deletes rows from table where key_col matches any key in df
+#   - Inserts the deduplicated df
+#   - Returns {&#x27;table&#x27;: table, &#x27;rows_in_batch&#x27;: N_in, &#x27;rows_in_table&#x27;: N_total}
+#
+# Test it with 3 sequential calls:
+#   Call 1: load batch_jan (3 employees)
+#   Call 2: load batch_feb (2 employees -- emp_id 2 updated, emp_id 4 new)
+#   Call 3: repeat batch_feb (should produce identical table as call 2)
+#
+# After each call print the return dict and the table contents.
+#
+# Expected output:
+#   Call 1: {&#x27;table&#x27;: &#x27;emp_snapshot&#x27;, &#x27;rows_in_batch&#x27;: 3, &#x27;rows_in_table&#x27;: 3}
+#   Call 2: {&#x27;table&#x27;: &#x27;emp_snapshot&#x27;, &#x27;rows_in_batch&#x27;: 2, &#x27;rows_in_table&#x27;: 4}
+#   Call 3: {&#x27;table&#x27;: &#x27;emp_snapshot&#x27;, &#x27;rows_in_batch&#x27;: 2, &#x27;rows_in_table&#x27;: 4}  &lt;-- idempotent
+#
+# --- starting data ---
+batch_jan = pd.DataFrame([
+    {&#x27;emp_id&#x27;: 1, &#x27;name&#x27;: &#x27;Alice&#x27;, &#x27;dept&#x27;: &#x27;Engineering&#x27;, &#x27;salary&#x27;: 90000},
+    {&#x27;emp_id&#x27;: 2, &#x27;name&#x27;: &#x27;Bob&#x27;,   &#x27;dept&#x27;: &#x27;Sales&#x27;,        &#x27;salary&#x27;: 60000},
+    {&#x27;emp_id&#x27;: 3, &#x27;name&#x27;: &#x27;Carol&#x27;, &#x27;dept&#x27;: &#x27;Finance&#x27;,      &#x27;salary&#x27;: 72000},
+])
+batch_feb = pd.DataFrame([
+    {&#x27;emp_id&#x27;: 2, &#x27;name&#x27;: &#x27;Bob&#x27;,   &#x27;dept&#x27;: &#x27;Sales&#x27;,   &#x27;salary&#x27;: 65000},   # raise
+    {&#x27;emp_id&#x27;: 4, &#x27;name&#x27;: &#x27;Dave&#x27;,  &#x27;dept&#x27;: &#x27;Legal&#x27;,   &#x27;salary&#x27;: 85000},   # new
+])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-2">Day 2 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="17-2"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D2_Pandas_At_Scale.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>#  YOUTUBE
+#  ───────
+#  Search: &quot;pandas memory optimization&quot;
+#  Video: &quot;Python Pandas Tutorial 15. Handle Large Datasets In Pandas | Memory Optimization Tips For Pandas&quot; -- codebasics
+#         https://www.youtube.com/watch?v=HNE0qHJ9A9o
+#         (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import pandas as pd
+import numpy as np
+import io
+
+print(&#x27;Pandas At Scale lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D2_Pandas_At_Scale.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — MEMORY PROFILING
+# ══════════════════════════════════════════════════════════════
+# df.memory_usage(deep=True) returns bytes used per column.
+# &#x27;deep=True&#x27; counts the actual string content of object columns
+# (without it, object columns show 8 bytes per row regardless of string length).
+#
+# Dtype memory costs (per value):
+#   object (Python str)   ~50+ bytes per value (pointer + string object)
+#   float64               8 bytes
+#   int64                 8 bytes
+#   int32                 4 bytes
+#   float32               4 bytes
+#   bool                  1 byte
+#   category              varies — stores an integer index + a lookup table
+#                         Huge savings when cardinality is low (&lt; 50 unique values)
+#
+# Rule of thumb:
+#   object column with &lt; 50 unique values   -&gt; convert to category
+#   int64 column max value &lt; 2 billion      -&gt; downcast to int32
+#   float64 column                          -&gt; downcast to float32 if precision allows
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+def memory_report(df, label=&#x27;&#x27;):
+    &quot;&quot;&quot;Print a per-column memory usage report.&quot;&quot;&quot;
+    mem = df.memory_usage(deep=True)
+    total_kb = mem.sum() / 1024
+    print(f&#x27;{label}  total: {total_kb:.1f} KB&#x27;)
+    for col in df.columns:
+        col_kb = mem[col] / 1024
+        print(f&#x27;  {col:&lt;20}  {str(df[col].dtype):&lt;12}  {col_kb:&gt;7.2f} KB  &#x27;
+              f&#x27;unique: {df[col].nunique()}&#x27;)
+    print()
+
+
+# Build a 50k-row DataFrame with mixed dtypes
+np.random.seed(0)
+N = 50_000
+
+df_raw = pd.DataFrame({
+    &#x27;order_id&#x27;:  np.arange(1, N + 1, dtype=&#x27;int64&#x27;),
+    &#x27;region&#x27;:    np.random.choice([&#x27;EMEA&#x27;, &#x27;AMER&#x27;, &#x27;APAC&#x27;, &#x27;LATAM&#x27;, &#x27;MEA&#x27;], N),
+    &#x27;product&#x27;:   np.random.choice([&#x27;Widget A&#x27;, &#x27;Widget B&#x27;, &#x27;Widget C&#x27;, &#x27;Widget D&#x27;], N),
+    &#x27;amount&#x27;:    np.random.uniform(10.0, 2000.0, N).round(2).astype(&#x27;float64&#x27;),
+    &#x27;quantity&#x27;:  np.random.randint(1, 50, N).astype(&#x27;int64&#x27;),
+    &#x27;status&#x27;:    np.random.choice([&#x27;pending&#x27;, &#x27;shipped&#x27;, &#x27;cancelled&#x27;, &#x27;returned&#x27;], N),
+})
+
+memory_report(df_raw, &#x27;BEFORE optimization:&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D2_Pandas_At_Scale.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Convert the two string columns (region, status) to category dtype
+# and the two int64 columns (order_id, quantity) to int32.
+#
+# Steps:
+#   1. Make a copy of df_raw called df_opt.
+#   2. Convert: region -&gt; category, status -&gt; category
+#   3. Convert: order_id -&gt; int32, quantity -&gt; int32
+#   4. Call memory_report on df_opt.
+#   5. Print savings:
+#      &#x27;Memory before: X KB  after: Y KB  saved: Z%&#x27;
+#
+# Expected output:
+#   AFTER optimization:  total: ~XXX KB
+#     order_id    int32       ... KB
+#     region      category    ... KB   (much smaller than before)
+#     ...
+#   Memory before: X KB  after: Y KB  saved: ~60%
+#
+# --- starting data ---
+# df_raw defined in the example above (50_000 rows)
+before_kb = df_raw.memory_usage(deep=True).sum() / 1024</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D2_Pandas_At_Scale.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — CHUNKED READS
+# ══════════════════════════════════════════════════════════════
+# When a CSV is too large to fit in memory, read it in chunks.
+# pd.read_csv(filepath, chunksize=N) returns an iterator.
+# Each iteration yields a DataFrame of at most N rows.
+#
+# Use cases:
+#   - Filter rows before loading into memory (discard unwanted data)
+#   - Stream-write to a database chunk by chunk
+#   - Aggregate without holding all rows in memory
+#
+# Pattern:
+#   results = []
+#   for chunk in pd.read_csv(&#x27;big_file.csv&#x27;, chunksize=10_000):
+#       filtered = chunk[chunk[&#x27;status&#x27;] == &#x27;shipped&#x27;]
+#       results.append(filtered)
+#   df = pd.concat(results, ignore_index=True)
+#
+# With a database sink:
+#   for chunk in pd.read_csv(&#x27;big_file.csv&#x27;, chunksize=10_000):
+#       chunk.to_sql(&#x27;orders&#x27;, con=engine, if_exists=&#x27;append&#x27;, index=False)
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+# Simulate a large CSV in memory using io.StringIO
+def make_csv_buffer(n_rows):
+    np.random.seed(1)
+    df = pd.DataFrame({
+        &#x27;order_id&#x27;: range(1, n_rows + 1),
+        &#x27;region&#x27;:   np.random.choice([&#x27;EMEA&#x27;, &#x27;AMER&#x27;, &#x27;APAC&#x27;], n_rows),
+        &#x27;amount&#x27;:   np.random.uniform(10, 500, n_rows).round(2),
+        &#x27;shipped&#x27;:  np.random.choice([True, False], n_rows),
+    })
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    buf.seek(0)
+    return buf
+
+
+csv_buffer = make_csv_buffer(10_000)
+
+# Read in chunks of 1000, filter to shipped=True, accumulate
+shipped_chunks = []
+chunk_count    = 0
+
+for chunk in pd.read_csv(csv_buffer, chunksize=1000):
+    chunk_count += 1
+    filtered = chunk[chunk[&#x27;shipped&#x27;] == True]
+    shipped_chunks.append(filtered)
+
+df_shipped = pd.concat(shipped_chunks, ignore_index=True)
+
+print(f&#x27;Chunks read:         {chunk_count}&#x27;)
+print(f&#x27;Total rows shipped:  {len(df_shipped)}&#x27;)
+print(f&#x27;Total amount (EMEA): {df_shipped[df_shipped[&quot;region&quot;]==&quot;EMEA&quot;][&quot;amount&quot;].sum():.2f}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D2_Pandas_At_Scale.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Read the same 10k-row CSV in chunks of 1000 rows.
+# For each chunk:
+#   - Filter to rows where amount &gt; 200.0
+#   - Count rows in that chunk that pass the filter
+#   - Accumulate the filtered rows
+#
+# After reading all chunks:
+#   - Concatenate into one DataFrame
+#   - Print: total rows before filter, total rows after filter, percentage kept
+#   - Print per-region sum of amount for the filtered rows
+#
+# Expected output:
+#   Chunk 1:  NNN rows pass filter (amount &gt; 200)
+#   ...10 chunks total...
+#   Total before: 10000  after: NNNN  (NN.N% kept)
+#   AMER: $XXXXXX.XX
+#   APAC: $XXXXXX.XX
+#   EMEA: $XXXXXX.XX
+#
+# --- starting data ---
+csv_buffer2 = make_csv_buffer(10_000)   # fresh buffer (same data)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D2_Pandas_At_Scale.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — EFFICIENT DTYPES: AUTO-DOWNCAST
+# ══════════════════════════════════════════════════════════════
+# Manually converting every column is tedious.
+# Write a function that inspects each column and applies the best dtype:
+#
+#   int64 column:    if max &lt;= 2^31 - 1 (2,147,483,647)  -&gt; downcast to int32
+#   float64 column:  downcast to float32 if precision loss is acceptable
+#   object column:   if unique count / total rows &lt; threshold -&gt; convert to category
+#
+# float32 vs float64:
+#   float32 has ~7 significant digits. For currency values stored to 2 decimal places,
+#   float32 is usually sufficient. For scientific computing, keep float64.
+#
+# category threshold:
+#   A common rule: convert to category if cardinality &lt; 50 unique values
+#   OR if unique_count / len(df) &lt; 0.5 (less than 50% unique).
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+def optimize_dtypes(df, category_max_unique=50):
+    &quot;&quot;&quot;
+    Auto-downcast:
+      int64   -&gt; int32   (if values fit)
+      float64 -&gt; float32
+      object  -&gt; category (if unique count &lt;= category_max_unique)
+    Returns a new DataFrame with optimized dtypes.
+    &quot;&quot;&quot;
+    df = df.copy()
+    for col in df.columns:
+        col_dtype = df[col].dtype
+
+        if col_dtype == &#x27;int64&#x27;:
+            if df[col].max() &lt;= np.iinfo(&#x27;int32&#x27;).max:
+                df[col] = df[col].astype(&#x27;int32&#x27;)
+
+        elif col_dtype == &#x27;float64&#x27;:
+            df[col] = df[col].astype(&#x27;float32&#x27;)
+
+        elif col_dtype == &#x27;object&#x27;:
+            if df[col].nunique() &lt;= category_max_unique:
+                df[col] = df[col].astype(&#x27;category&#x27;)
+
+    return df
+
+
+# Apply to df_raw
+df_optimized = optimize_dtypes(df_raw)
+
+before = df_raw.memory_usage(deep=True).sum() / 1024
+after  = df_optimized.memory_usage(deep=True).sum() / 1024
+
+print(f&#x27;Before: {before:.1f} KB&#x27;)
+print(f&#x27;After:  {after:.1f} KB&#x27;)
+print(f&#x27;Saved:  {(1 - after/before)*100:.1f}%&#x27;)
+print()
+
+for col in df_optimized.columns:
+    print(f&#x27;  {col:&lt;20}  {str(df_raw[col].dtype):&lt;10} -&gt; {str(df_optimized[col].dtype)}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D2_Pandas_At_Scale.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Write optimize_dtypes_v2(df, int_threshold=2**31, category_max_unique=50)
+# that extends optimize_dtypes with one extra feature:
+#   - For bool columns: convert to int8 (True=1, False=0)
+#     (bool stored as object uses ~50 bytes/row; int8 uses 1 byte/row)
+#
+# Test it on large_df (defined below, 100k rows).
+# Print:
+#   - Memory before and after
+#   - Percentage saved
+#   - A table showing old dtype -&gt; new dtype for every column
+#
+# Then verify data integrity: assert that the sum of order_id
+# is the same before and after optimization (downcasting should not change values).
+#
+# Expected output:
+#   Before: XXXX KB
+#   After:  XXXX KB
+#   Saved:  XX.X%
+#   order_id    int64   -&gt; int32
+#   region      object  -&gt; category
+#   product     object  -&gt; category
+#   amount      float64 -&gt; float32
+#   quantity    int64   -&gt; int32
+#   status      object  -&gt; category
+#   is_urgent   object  -&gt; category  (or bool/int8 if bool dtype)
+#   Integrity check: PASS (order_id sum matches)
+#
+# --- starting data ---
+np.random.seed(42)
+N2 = 100_000
+large_df = pd.DataFrame({
+    &#x27;order_id&#x27;:  np.arange(1, N2 + 1, dtype=&#x27;int64&#x27;),
+    &#x27;region&#x27;:    np.random.choice([&#x27;EMEA&#x27;, &#x27;AMER&#x27;, &#x27;APAC&#x27;, &#x27;LATAM&#x27;, &#x27;MEA&#x27;], N2),
+    &#x27;product&#x27;:   np.random.choice([&#x27;Widget A&#x27;, &#x27;Widget B&#x27;, &#x27;Widget C&#x27;, &#x27;Widget D&#x27;], N2),
+    &#x27;amount&#x27;:    np.random.uniform(10.0, 2000.0, N2).round(2).astype(&#x27;float64&#x27;),
+    &#x27;quantity&#x27;:  np.random.randint(1, 50, N2).astype(&#x27;int64&#x27;),
+    &#x27;status&#x27;:    np.random.choice([&#x27;pending&#x27;, &#x27;shipped&#x27;, &#x27;cancelled&#x27;, &#x27;returned&#x27;], N2),
+    &#x27;is_urgent&#x27;: np.random.choice([True, False], N2),
+})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D2_Pandas_At_Scale.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 4 — WHEN PANDAS IS NOT ENOUGH: POLARS AND SPARK
+# ══════════════════════════════════════════════════════════════
+# pandas loads everything into memory on a single machine.
+# When data grows beyond that machine&#x27;s RAM, you need alternatives.
+#
+# Decision framework:
+#
+#   Data size          Tool        Why
+#   ─────────────────  ──────────  ──────────────────────────────────────────
+#   &lt; 1 GB             pandas      simple, well-known, rich ecosystem
+#   1 GB – ~50 GB      Polars      10-100x faster than pandas, still single machine
+#                                  Rust core, Apache Arrow memory format, lazy eval
+#   &gt; 50 GB            Spark       distributed across a cluster of machines
+#                                  reads from HDFS / S3 / BigQuery natively
+#
+# Polars key ideas:
+#   - Lazy evaluation: pl.scan_csv() builds a query plan, nothing runs until .collect()
+#   - Arrow columnar format: avoids Python object overhead entirely
+#   - Multi-threaded by default: uses all CPU cores automatically
+#   - Syntax is similar to pandas but not identical (no index, different method names)
+#
+# Spark key ideas:
+#   - Runs on a cluster — driver node sends tasks to worker nodes
+#   - DataFrames are distributed — each partition lives on a different machine
+#   - Operations are lazy — only execute when you call .show() / .collect()
+#   - PySpark API mirrors Spark SQL closely; SQL queries work natively
+#   - Use when: data does not fit on one machine, or pipeline already runs on Databricks/EMR
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+# Same transformation written in all three tools side by side.
+
+import pandas as pd
+import numpy as np
+
+np.random.seed(0)
+N = 10_000
+raw = pd.DataFrame({
+    &#x27;region&#x27;:  np.random.choice([&#x27;EMEA&#x27;, &#x27;AMER&#x27;, &#x27;APAC&#x27;], N),
+    &#x27;amount&#x27;:  np.random.uniform(10, 500, N).round(2),
+    &#x27;shipped&#x27;: np.random.choice([True, False], N),
+})
+
+# ── pandas (baseline) ──────────────────────────────────────────
+result_pd = (
+    raw[raw[&#x27;shipped&#x27;] == True]
+    .groupby(&#x27;region&#x27;)[&#x27;amount&#x27;]
+    .sum()
+    .reset_index()
+    .rename(columns={&#x27;amount&#x27;: &#x27;total_revenue&#x27;})
+)
+print(&#x27;pandas result:&#x27;)
+print(result_pd.to_string(index=False))
+print()
+
+# ── Polars equivalent ──────────────────────────────────────────
+# Install: pip install polars
+# Polars uses method chaining with .filter() / .group_by() / .agg()
+polars_code = &quot;&quot;&quot;
+import polars as pl
+
+result_pl = (
+    pl.from_pandas(raw)
+    .filter(pl.col(&#x27;shipped&#x27;) == True)
+    .group_by(&#x27;region&#x27;)
+    .agg(pl.col(&#x27;amount&#x27;).sum().alias(&#x27;total_revenue&#x27;))
+    .sort(&#x27;region&#x27;)
+)
+print(result_pl)
+&quot;&quot;&quot;
+print(&#x27;Polars equivalent (run after: pip install polars):&#x27;)
+print(polars_code)
+
+# ── PySpark equivalent ─────────────────────────────────────────
+# Install: pip install pyspark
+# PySpark uses SparkSession — starts a local cluster automatically
+spark_code = &quot;&quot;&quot;
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, sum as spark_sum
+
+spark = SparkSession.builder.appName(&#x27;scale_demo&#x27;).getOrCreate()
+df_spark = spark.createDataFrame(raw)
+
+result_spark = (
+    df_spark.filter(col(&#x27;shipped&#x27;) == True)
+    .groupBy(&#x27;region&#x27;)
+    .agg(spark_sum(&#x27;amount&#x27;).alias(&#x27;total_revenue&#x27;))
+    .orderBy(&#x27;region&#x27;)
+)
+result_spark.show()
+&quot;&quot;&quot;
+print(&#x27;PySpark equivalent (run after: pip install pyspark):&#x27;)
+print(spark_code)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D2_Pandas_At_Scale.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 4
+# ══════════════════════════════════════════════════════════════
+# You receive a 50k-row orders DataFrame. Write the same pipeline
+# in pandas first, then write the Polars equivalent as a code string
+# and print it (do not execute — Polars may not be installed).
+# Finally, answer in a comment: at what row count would you switch
+# from pandas to Polars, and from Polars to Spark?
+#
+# Pipeline to implement in pandas:
+#   1. Filter to region == &#x27;EMEA&#x27; AND amount &gt; 100
+#   2. Group by product, compute: order_count (COUNT), total_revenue (SUM amount)
+#   3. Sort by total_revenue descending
+#   4. Print the top 3 products
+#
+# Then write the identical logic as a Polars code string (multiline str).
+# Print it clearly labelled: &#x27;Polars version:&#x27;
+#
+# Expected output:
+#   pandas result (top 3 EMEA products by revenue):
+#     product   order_count   total_revenue
+#     Widget C  XXXX          XXXXXXX.XX
+#     ...
+#
+#   Polars version:
+#   import polars as pl
+#   result = (
+#       pl.from_pandas(orders_df)
+#       .filter(...)
+#       ...
+#   )
+#
+#   Decision thresholds (comment):
+#   # pandas -&gt; Polars: ~1 GB / ~10 million rows on a 16 GB machine
+#   # Polars -&gt; Spark:  ~50 GB / when data exceeds single-machine RAM
+#
+# --- starting data ---
+np.random.seed(7)
+N3 = 50_000
+orders_df = pd.DataFrame({
+    &#x27;order_id&#x27;: np.arange(1, N3 + 1),
+    &#x27;region&#x27;:   np.random.choice([&#x27;EMEA&#x27;, &#x27;AMER&#x27;, &#x27;APAC&#x27;], N3),
+    &#x27;product&#x27;:  np.random.choice([&#x27;Widget A&#x27;, &#x27;Widget B&#x27;, &#x27;Widget C&#x27;, &#x27;Widget D&#x27;], N3),
+    &#x27;amount&#x27;:   np.random.uniform(50, 600, N3).round(2),
+})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-3">Day 3 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="17-3"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D3_Pipeline_Monitoring.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>#  YOUTUBE
+#  ───────
+#  Search: &quot;data pipeline monitoring best practices&quot;
+#  Video: &quot;Observability Explained | Logs, Metrics &amp; Traces (The Three Pillars)&quot; -- SystemDR
+#         https://www.youtube.com/watch?v=z6LPU6YUmtU
+#         (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import json
+import time
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from typing import Optional, List
+
+print(&#x27;Pipeline Monitoring lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D3_Pipeline_Monitoring.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — PIPELINE HEALTH METRICS
+# ══════════════════════════════════════════════════════════════
+# Every pipeline run should emit a structured metrics object.
+# Key metrics to capture:
+#
+#   rows_in       how many rows entered the pipeline
+#   rows_out      how many rows were successfully processed and written
+#   rows_dropped  rows rejected by validation
+#   errors        count of exceptions caught during the run
+#   start_time    UTC timestamp when the run began
+#   end_time      UTC timestamp when the run ended
+#   duration_s    wall-clock seconds from start to end
+#
+# Derived health signals:
+#   pass_rate     rows_out / rows_in  (expect &gt;= 0.95 for healthy data)
+#   drop_rate     rows_dropped / rows_in
+#
+# Why capture this:
+#   - A pipeline that silently drops 20% of rows is a business incident
+#   - Duration spikes often indicate upstream data volume anomalies
+#   - Error counts should be 0 for a healthy run
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+@dataclass
+class PipelineMetrics:
+    &quot;&quot;&quot;Captures health metrics for a single pipeline run.&quot;&quot;&quot;
+    pipeline_id : str
+    start_time  : str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    end_time    : Optional[str] = None
+    rows_in     : int = 0
+    rows_out    : int = 0
+    rows_dropped: int = 0
+    errors      : int = 0
+    status      : str = &#x27;running&#x27;
+
+    def finish(self, status=&#x27;success&#x27;):
+        self.end_time = datetime.utcnow().isoformat()
+        self.status   = status
+
+    @property
+    def duration_s(self):
+        if not self.end_time:
+            return None
+        start = datetime.fromisoformat(self.start_time)
+        end   = datetime.fromisoformat(self.end_time)
+        return round((end - start).total_seconds(), 3)
+
+    @property
+    def pass_rate(self):
+        if self.rows_in == 0:
+            return 0.0
+        return round(self.rows_out / self.rows_in, 4)
+
+    def to_dict(self):
+        d = asdict(self)
+        d[&#x27;duration_s&#x27;] = self.duration_s
+        d[&#x27;pass_rate&#x27;]  = self.pass_rate
+        return d
+
+
+# Simulate a pipeline run
+metrics = PipelineMetrics(pipeline_id=&#x27;daily_sales_etl&#x27;)
+
+# Simulate processing
+metrics.rows_in      = 1000
+metrics.rows_out     = 972
+metrics.rows_dropped = 28
+metrics.errors       = 0
+time.sleep(0.02)   # simulate 20ms work
+metrics.finish(&#x27;success&#x27;)
+
+print(json.dumps(metrics.to_dict(), indent=2))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D3_Pipeline_Monitoring.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Simulate 3 pipeline runs using PipelineMetrics and collect the results.
+#
+# Run 1: pipeline_id=&#x27;payroll_etl&#x27;     rows_in=500  rows_out=500  rows_dropped=0  errors=0
+# Run 2: pipeline_id=&#x27;inventory_etl&#x27;   rows_in=800  rows_out=720  rows_dropped=80 errors=2
+# Run 3: pipeline_id=&#x27;events_etl&#x27;      rows_in=5000 rows_out=4800 rows_dropped=200 errors=0
+#
+# For each run: call metrics.finish(&#x27;success&#x27;) and print its to_dict() as JSON.
+#
+# Then print a summary table:
+#   pipeline         rows_in  rows_out  pass_rate  status
+#   payroll_etl      500      500       1.0000     success
+#   inventory_etl    800      720       0.9000     success
+#   events_etl       5000     4800      0.9600     success
+#
+# Also print: which pipelines have pass_rate &lt; 0.95
+#   &#x27;inventory_etl has pass_rate 0.9000 (below threshold 0.95)&#x27;
+#
+# --- starting data ---
+run_configs = [
+    {&#x27;pipeline_id&#x27;: &#x27;payroll_etl&#x27;,   &#x27;rows_in&#x27;: 500,  &#x27;rows_out&#x27;: 500,  &#x27;rows_dropped&#x27;: 0,   &#x27;errors&#x27;: 0},
+    {&#x27;pipeline_id&#x27;: &#x27;inventory_etl&#x27;, &#x27;rows_in&#x27;: 800,  &#x27;rows_out&#x27;: 720,  &#x27;rows_dropped&#x27;: 80,  &#x27;errors&#x27;: 2},
+    {&#x27;pipeline_id&#x27;: &#x27;events_etl&#x27;,    &#x27;rows_in&#x27;: 5000, &#x27;rows_out&#x27;: 4800, &#x27;rows_dropped&#x27;: 200, &#x27;errors&#x27;: 0},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D3_Pipeline_Monitoring.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — STRUCTURED LOGGING FOR PIPELINES
+# ══════════════════════════════════════════════════════════════
+# Plain print() statements are hard to query and aggregate.
+# Structured logging emits JSON lines — one JSON object per log event.
+# Log aggregators (Datadog, Splunk, CloudWatch) parse these automatically.
+#
+# JSON log line format:
+#   {&quot;ts&quot;: &quot;2024-01-15T09:00:01Z&quot;, &quot;level&quot;: &quot;INFO&quot;,
+#    &quot;event&quot;: &quot;extract_complete&quot;, &quot;rows&quot;: 1000, &quot;pipeline&quot;: &quot;daily_sales&quot;}
+#
+# Log levels:
+#   DEBUG    developer detail (disable in prod)
+#   INFO     normal progress events
+#   WARNING  something unexpected but not fatal
+#   ERROR    a step failed (pipeline may continue or stop)
+#   CRITICAL pipeline is in an unrecoverable state
+#
+# In production you would use Python&#x27;s logging module:
+#   import logging, json
+#   logging.basicConfig(level=logging.INFO)
+#   logger = logging.getLogger(&#x27;pipeline&#x27;)
+#   logger.info(json.dumps({&#x27;event&#x27;: &#x27;extract_complete&#x27;, &#x27;rows&#x27;: 1000}))
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+LOG_LEVELS = {&#x27;DEBUG&#x27;: 10, &#x27;INFO&#x27;: 20, &#x27;WARNING&#x27;: 30, &#x27;ERROR&#x27;: 40, &#x27;CRITICAL&#x27;: 50}
+MIN_LOG_LEVEL = &#x27;INFO&#x27;
+
+def structured_log(event, level=&#x27;INFO&#x27;, **kwargs):
+    &quot;&quot;&quot;
+    Emit a JSON log line to stdout.
+    In production: pass to logging.getLogger().info(...) instead of print.
+    &quot;&quot;&quot;
+    if LOG_LEVELS.get(level, 0) &lt; LOG_LEVELS.get(MIN_LOG_LEVEL, 0):
+        return   # suppress below minimum level
+
+    record = {
+        &#x27;ts&#x27;:    datetime.utcnow().isoformat() + &#x27;Z&#x27;,
+        &#x27;level&#x27;: level,
+        &#x27;event&#x27;: event,
+    }
+    record.update(kwargs)
+    print(json.dumps(record))
+
+
+# Use it throughout a simulated pipeline
+structured_log(&#x27;pipeline_start&#x27;, pipeline=&#x27;daily_sales_etl&#x27;, schedule=&#x27;@daily&#x27;)
+structured_log(&#x27;extract_complete&#x27;, rows=1000, source=&#x27;sales_api&#x27;)
+structured_log(&#x27;rows_dropped&#x27;, level=&#x27;WARNING&#x27;, count=28, reason=&#x27;null order_id&#x27;)
+structured_log(&#x27;load_complete&#x27;, rows_written=972, table=&#x27;stg_sales&#x27;)
+structured_log(&#x27;pipeline_complete&#x27;, status=&#x27;success&#x27;, duration_s=1.23)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D3_Pipeline_Monitoring.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Write a function run_logged_pipeline(pipeline_id, rows_in, drop_count, error_count)
+# that simulates a pipeline run and emits structured log lines at each stage:
+#
+#   1. structured_log(&#x27;pipeline_start&#x27;, level=&#x27;INFO&#x27;, pipeline=pipeline_id)
+#   2. structured_log(&#x27;extract_complete&#x27;, rows=rows_in)
+#   3. If drop_count &gt; 0:
+#      structured_log(&#x27;rows_dropped&#x27;, level=&#x27;WARNING&#x27;, count=drop_count)
+#   4. structured_log(&#x27;load_complete&#x27;, rows_written=rows_in - drop_count)
+#   5. If error_count &gt; 0:
+#      structured_log(&#x27;errors_encountered&#x27;, level=&#x27;ERROR&#x27;, count=error_count)
+#   6. structured_log(&#x27;pipeline_complete&#x27;, status=&#x27;SUCCESS&#x27; or &#x27;FAILED&#x27;)
+#      status=&#x27;FAILED&#x27; if error_count &gt; 0
+#
+# Call it with 3 scenarios:
+#   run_logged_pipeline(&#x27;orders_etl&#x27;,    rows_in=500,  drop_count=0,  error_count=0)
+#   run_logged_pipeline(&#x27;bookings_etl&#x27;,  rows_in=1200, drop_count=45, error_count=0)
+#   run_logged_pipeline(&#x27;payments_etl&#x27;,  rows_in=300,  drop_count=0,  error_count=3)
+#
+# Expected output: JSON lines for each step (see format from Concept 2 example).
+#
+# --- starting data ---
+scenarios = [
+    (&#x27;orders_etl&#x27;,   500,  0,  0),
+    (&#x27;bookings_etl&#x27;, 1200, 45, 0),
+    (&#x27;payments_etl&#x27;, 300,  0,  3),
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D3_Pipeline_Monitoring.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — ALERTING: THRESHOLD CHECKS
+# ══════════════════════════════════════════════════════════════
+# After a pipeline run, check the PipelineMetrics object against thresholds.
+# Raise an AlertError if any threshold is violated.
+#
+# Common thresholds:
+#   pass_rate &lt; 0.95             -- more than 5% of rows dropped
+#   duration_s &gt; 60              -- pipeline took more than 1 minute
+#   errors &gt; 0                   -- any exception during the run
+#   rows_out &lt; 1                 -- zero rows loaded (silent empty run)
+#
+# Alert destinations in production:
+#   Slack webhook    -- instant notification to a channel
+#   PagerDuty API    -- on-call engineer page
+#   Email (SMTP)     -- stakeholder notification
+#   Airflow UI       -- task marked &#x27;failed&#x27; with error message
+#
+# Pattern: check_thresholds() raises, on_failure_callback() catches and routes.
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+class AlertError(Exception):
+    &quot;&quot;&quot;Raised when a pipeline metric crosses a threshold.&quot;&quot;&quot;
+    pass
+
+
+def check_thresholds(metrics, min_pass_rate=0.95, max_duration_s=60.0):
+    &quot;&quot;&quot;
+    Validate PipelineMetrics against thresholds.
+    Returns list of alert messages (empty = healthy).
+    Raises AlertError if any threshold is violated.
+    &quot;&quot;&quot;
+    alerts = []
+
+    if metrics.pass_rate &lt; min_pass_rate:
+        alerts.append(
+            f&#x27;pass_rate {metrics.pass_rate:.4f} &lt; threshold {min_pass_rate} &#x27;
+            f&#x27;({metrics.rows_dropped} rows dropped)&#x27;
+        )
+
+    if metrics.duration_s is not None and metrics.duration_s &gt; max_duration_s:
+        alerts.append(
+            f&#x27;duration {metrics.duration_s:.1f}s &gt; threshold {max_duration_s}s&#x27;
+        )
+
+    if metrics.errors &gt; 0:
+        alerts.append(f&#x27;{metrics.errors} error(s) during run&#x27;)
+
+    if metrics.rows_out &lt; 1:
+        alerts.append(&#x27;zero rows loaded -- silent empty run&#x27;)
+
+    if alerts:
+        raise AlertError(&#x27;\n&#x27;.join(alerts))
+
+    return []
+
+
+# Test with a healthy run
+healthy = PipelineMetrics(&#x27;sales_etl&#x27;)
+healthy.rows_in  = 1000
+healthy.rows_out = 980
+healthy.rows_dropped = 20
+healthy.finish(&#x27;success&#x27;)
+
+print(&#x27;--- Healthy run ---&#x27;)
+try:
+    check_thresholds(healthy)
+    print(&#x27;  PASS: all thresholds met&#x27;)
+except AlertError as e:
+    print(f&#x27;  ALERT: {e}&#x27;)
+
+# Test with a bad run
+bad = PipelineMetrics(&#x27;events_etl&#x27;)
+bad.rows_in      = 1000
+bad.rows_out     = 800
+bad.rows_dropped = 200
+bad.errors       = 3
+bad.finish(&#x27;failed&#x27;)
+
+print(&#x27;\n--- Bad run ---&#x27;)
+try:
+    check_thresholds(bad)
+    print(&#x27;  PASS: all thresholds met&#x27;)
+except AlertError as e:
+    print(f&#x27;  ALERT:\n{e}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D3_Pipeline_Monitoring.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Write check_thresholds_v2(metrics, config) where config is a dict:
+#   {
+#     &#x27;min_pass_rate&#x27;: 0.95,
+#     &#x27;max_duration_s&#x27;: 30.0,
+#     &#x27;max_errors&#x27;: 0,
+#     &#x27;min_rows_out&#x27;: 10,
+#   }
+#
+# It should check all 4 thresholds (min_rows_out instead of zero check).
+# For each violation, add a dict to an alerts list:
+#   {&#x27;metric&#x27;: &#x27;pass_rate&#x27;, &#x27;value&#x27;: 0.88, &#x27;threshold&#x27;: 0.95, &#x27;severity&#x27;: &#x27;HIGH&#x27;}
+#   Use severity=&#x27;HIGH&#x27; for errors and pass_rate violations,
+#       severity=&#x27;MEDIUM&#x27; for duration and min_rows_out violations.
+#
+# If any HIGH-severity alerts exist: raise AlertError.
+# If only MEDIUM alerts: print a warning but do not raise.
+# If no alerts: return [].
+#
+# Test with 3 PipelineMetrics objects:
+#   m1: rows_in=1000 rows_out=960  dropped=40  errors=0  duration=25s
+#   m2: rows_in=1000 rows_out=800  dropped=200 errors=0  duration=45s
+#   m3: rows_in=100  rows_out=5    dropped=95  errors=2  duration=10s
+#
+# Expected output:
+#   m1: PASS
+#   m2: WARNING (MEDIUM) -- duration 45s &gt; threshold 30s  pass_rate 0.8 &lt; 0.95
+#   m3: ALERT HIGH -- pass_rate 0.05 &lt; 0.95  errors 2 &gt; 0  min_rows_out 5 &lt; 10
+#
+# --- starting data ---
+threshold_config = {
+    &#x27;min_pass_rate&#x27;:  0.95,
+    &#x27;max_duration_s&#x27;: 30.0,
+    &#x27;max_errors&#x27;:     0,
+    &#x27;min_rows_out&#x27;:   10,
+}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 4 — SLOs, ERROR BUDGETS, AND BURN RATE
+# ══════════════════════════════════════════════════════════════
+#
+#  SLI → SLO → Error Budget → Burn Rate → Alert
+#
+#  SLI (Service Level Indicator)
+#  ──────────────────────────────
+#  A measurable signal: success_rate, p99_latency_ms, pipeline_freshness_min
+#  Example: SLI = successful_runs / total_runs over 30 days
+#
+#  SLO (Service Level Objective)
+#  ──────────────────────────────
+#  The target you commit to: SLI &gt;= 99.5%
+#  Not 100% — that would require zero deploys and no risk-taking.
+#
+#  Error Budget
+#  ─────────────
+#  How much failure you are allowed: 1 - SLO
+#  SLO = 99.5%  →  error budget = 0.5%
+#  Over 30 days = 43,200 minutes  →  budget = 216 minutes of downtime
+#
+#  Burn Rate
+#  ──────────
+#  How fast you are consuming the error budget.
+#  burn_rate = actual_error_rate / (1 - SLO)
+#  burn_rate = 1.0  → consuming budget at exactly the right pace
+#  burn_rate = 10.0 → consuming 10x too fast → will exhaust budget in 3 days
+#
+#  Multi-window alerts (Google SRE Book)
+#  ──────────────────────────────────────
+#  Alert if burn_rate &gt; threshold over a short AND long window:
+#    Fast burn:  1h window,  burn_rate &gt; 14  (exhausts budget in ~2 days)
+#    Slow burn: 6h window,  burn_rate &gt; 5   (exhausts budget in ~6 days)
+#  Two-window reduces false positives from short spikes.
+#
+#  Consequence
+#  ───────────
+#  Budget &gt;= 0.5 left:  deploy freely
+#  Budget &lt; 0.5:        only critical fixes, freeze features
+#  Budget = 0:          stop all deployments, incident response only
+#
+# EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D3_Pipeline_Monitoring.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass
+class SLO:
+    name: str
+    sli_description: str
+    target: float          # e.g. 0.995 for 99.5%
+    window_days: int = 30
+
+    @property
+    def error_budget_fraction(self) -&gt; float:
+        return 1.0 - self.target
+
+    def error_budget_minutes(self) -&gt; float:
+        return self.window_days * 24 * 60 * self.error_budget_fraction
+
+    def burn_rate(self, current_error_rate: float) -&gt; float:
+        &quot;&quot;&quot;How fast the error budget is being consumed relative to allowed rate.&quot;&quot;&quot;
+        if self.error_budget_fraction == 0:
+            return float(&quot;inf&quot;)
+        return current_error_rate / self.error_budget_fraction
+
+    def budget_remaining(self, errors_so_far: int, total_events: int) -&gt; float:
+        &quot;&quot;&quot;Fraction of error budget still available (0.0 - 1.0).&quot;&quot;&quot;
+        if total_events == 0:
+            return 1.0
+        actual_error_rate = errors_so_far / total_events
+        consumed = actual_error_rate / self.error_budget_fraction
+        return max(0.0, 1.0 - consumed)
+
+    def alert(self, burn_rate_1h: float, burn_rate_6h: float) -&gt; Optional[str]:
+        &quot;&quot;&quot;Multi-window burn rate alert. Returns alert level or None.&quot;&quot;&quot;
+        if burn_rate_1h &gt; 14 and burn_rate_6h &gt; 14:
+            return &quot;PAGE — fast burn: budget exhausted in ~2 days&quot;
+        if burn_rate_1h &gt; 5 and burn_rate_6h &gt; 5:
+            return &quot;TICKET — slow burn: budget exhausted in ~6 days&quot;
+        return None
+
+
+# Pipeline SLO: 99.5% of runs complete without error
+pipeline_slo = SLO(
+    name=&quot;etl-pipeline-success-rate&quot;,
+    sli_description=&quot;fraction of pipeline runs completing without error&quot;,
+    target=0.995,
+    window_days=30,
+)
+
+print(f&quot;SLO target:          {pipeline_slo.target*100:.1f}%&quot;)
+print(f&quot;Error budget:        {pipeline_slo.error_budget_fraction*100:.2f}%&quot;)
+print(f&quot;Budget in minutes:   {pipeline_slo.error_budget_minutes():.0f} min over 30 days&quot;)
+
+# Scenario: 10,000 runs, 72 errors
+errors, total = 72, 10_000
+br = pipeline_slo.burn_rate(errors / total)
+remaining = pipeline_slo.budget_remaining(errors, total)
+print(f&quot;\nCurrent state: {errors}/{total} errors&quot;)
+print(f&quot;Burn rate:       {br:.2f}x  (&gt;1 means consuming budget faster than allowed)&quot;)
+print(f&quot;Budget remaining: {remaining*100:.1f}%&quot;)
+
+alert = pipeline_slo.alert(burn_rate_1h=br, burn_rate_6h=br * 0.8)
+print(f&quot;Alert: {alert if alert else &#x27;None — within budget&#x27;}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  EXERCISE 4
+# ══════════════════════════════════════════════════════════════
+#  Your data pipeline has two SLOs:
+#    A) Success rate &gt;= 99.0% over 30 days
+#    B) p99 latency &lt;= 300ms over 7 days
+#
+#  Write a function called slo_report(runs) that takes a list
+#  of run dicts {&quot;success&quot;: bool, &quot;latency_ms&quot;: float} and returns:
+#    {
+#      &quot;success_rate&quot;: float,          fraction of successful runs
+#      &quot;p99_latency_ms&quot;: float,        99th percentile latency
+#      &quot;success_budget_remaining&quot;: float,  0.0 - 1.0
+#      &quot;latency_slo_met&quot;: bool,        True if p99 &lt;= 300ms
+#      &quot;alerts&quot;: list[str]             any active alerts
+#    }
+#
+#  Use SLO(target=0.990) for success rate.
+#  For latency: SLO is met if p99 &lt;= 300ms.
+#
+#  Expected output (for RUNS below):
+#     success_rate=0.94  p99=342ms  budget_remaining=0.0%  alerts=[&#x27;...&#x27;]
+# ──────────────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D3_Pipeline_Monitoring.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import random
+random.seed(42)
+
+# 200 pipeline runs: mostly successful, some slow
+RUNS = [
+    {&quot;success&quot;: random.random() &gt; 0.06,
+     &quot;latency_ms&quot;: random.gauss(180, 60) if random.random() &gt; 0.1
+                   else random.gauss(400, 80)}
+    for _ in range(200)
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-4">Day 4 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="17-4"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D4_Cost_Governance.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>#  YOUTUBE
+#  ───────
+#  Search: &quot;BigQuery cost optimization&quot;
+#  Video: &quot;Cost optimization best practices for BigQuery&quot; -- Google Cloud Events
+#         https://www.youtube.com/watch?v=cZgTavxWO2k
+#         (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import re
+import json
+
+# ── LLM simulation ───────────────────────────────────────────
+def call_llm(prompt):
+    &quot;&quot;&quot;
+    SIMULATION mode. REAL MODE:
+        from groq import Groq
+        client = Groq(api_key=os.environ[&#x27;GROQ_API_KEY&#x27;])
+        resp = client.chat.completions.create(
+            model=&#x27;llama3-8b-8192&#x27;,
+            messages=[{&#x27;role&#x27;: &#x27;user&#x27;, &#x27;content&#x27;: prompt}]
+        )
+        return resp.choices[0].message.content
+    &quot;&quot;&quot;
+    if &#x27;SELECT *&#x27; in prompt or &#x27;full scan&#x27; in prompt.lower():
+        return (
+            &#x27;This query performs a full table scan, which is expensive in BigQuery. &#x27;
+            &#x27;Rewrite it to select only the columns you need instead of SELECT *. &#x27;
+            &#x27;If the table is partitioned by date, add a WHERE clause on the partition &#x27;
+            &#x27;column (e.g. WHERE event_date = CURRENT_DATE) to scan only one day of data &#x27;
+            &#x27;instead of the entire table.&#x27;
+        )
+    return (
+        &#x27;This query has a high estimated cost. Consider adding partition filters, &#x27;
+        &#x27;using clustered columns in WHERE clauses, or materializing frequently-joined &#x27;
+        &#x27;tables as intermediate views to reduce repeated scans.&#x27;
+    )
+
+
+print(&#x27;Cost Governance lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D4_Cost_Governance.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — QUERY COST ESTIMATION
+# ══════════════════════════════════════════════════════════════
+# BigQuery bills by bytes scanned (on-demand pricing: $5 per TB).
+# Before running a query you can estimate its cost with a dry-run:
+#
+#   In real BigQuery:
+#     from google.cloud import bigquery
+#     job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+#     job = client.query(sql, job_config=job_config)
+#     print(f&#x27;This query will process {job.total_bytes_processed} bytes&#x27;)
+#
+# Without a BigQuery connection, you can estimate from table sizes:
+#   - Parse the FROM / JOIN clauses to find referenced tables
+#   - Look up each table&#x27;s size in a registry
+#   - SELECT *   -&gt; scans 100% of the table
+#   - SELECT a,b -&gt; scans only those columns (columnar storage helps)
+#   - WHERE on partition col -&gt; scans only matching partitions
+#
+# This is an approximation. Real dry-run is always more accurate.
+# Use this pattern in dev/staging to flag expensive queries early.
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+# Table size registry (bytes)
+TABLE_SIZES = {
+    &#x27;events&#x27;:          2_000_000_000_000,   # 2 TB
+    &#x27;orders&#x27;:            500_000_000_000,   # 500 GB
+    &#x27;customers&#x27;:          50_000_000_000,   # 50 GB
+    &#x27;products&#x27;:            1_000_000_000,   # 1 GB
+    &#x27;daily_summary&#x27;:       5_000_000_000,   # 5 GB (pre-aggregated)
+}
+
+PRICE_PER_TB    = 5.0
+FREE_TB_PER_MO  = 1.0
+
+
+def extract_tables(sql):
+    &quot;&quot;&quot;Extract table names from FROM and JOIN clauses (simplified).&quot;&quot;&quot;
+    sql_upper = sql.upper()
+    tables    = []
+    # Match: FROM table_name and JOIN table_name
+    pattern = r&#x27;(?:FROM|JOIN)\s+([\w.]+)&#x27;
+    for match in re.finditer(pattern, sql_upper):
+        raw   = match.group(1)
+        name  = raw.split(&#x27;.&#x27;)[-1].lower()   # strip dataset prefix
+        if name in TABLE_SIZES:
+            tables.append(name)
+    return list(set(tables))
+
+
+def estimate_query_cost(sql, selectivity=1.0):
+    &quot;&quot;&quot;
+    Estimate BigQuery cost from table size registry.
+
+    selectivity: fraction of table scanned (1.0 = full scan).
+    Pass 0.1 if you know a WHERE clause filters to ~10% of the table.
+    &quot;&quot;&quot;
+    tables = extract_tables(sql)
+    if not tables:
+        return {&#x27;error&#x27;: &#x27;no recognised tables found&#x27;, &#x27;estimated_cost_usd&#x27;: 0}
+
+    total_bytes  = sum(TABLE_SIZES[t] for t in tables) * selectivity
+    total_tb     = total_bytes / (1024 ** 4)
+    billable_tb  = max(0, total_tb - FREE_TB_PER_MO)
+    cost_usd     = billable_tb * PRICE_PER_TB
+
+    return {
+        &#x27;tables_referenced&#x27;: tables,
+        &#x27;bytes_scanned&#x27;:     int(total_bytes),
+        &#x27;tb_scanned&#x27;:        round(total_tb, 4),
+        &#x27;estimated_cost_usd&#x27;: round(cost_usd, 4),
+    }
+
+
+# Three representative queries
+queries = [
+    (&#x27;cheap&#x27;,      &#x27;SELECT product_id, name FROM products WHERE active = TRUE&#x27;),
+    (&#x27;moderate&#x27;,   &#x27;SELECT customer_id, SUM(total) FROM orders GROUP BY customer_id&#x27;),
+    (&#x27;expensive&#x27;,  &#x27;SELECT * FROM events JOIN orders ON events.order_id = orders.order_id&#x27;),
+]
+
+for label, sql in queries:
+    est = estimate_query_cost(sql)
+    print(f&#x27;{label:&lt;12}  tables: {est[&quot;tables_referenced&quot;]}&#x27;
+          f&#x27;  {est[&quot;tb_scanned&quot;]} TB  ${est[&quot;estimated_cost_usd&quot;]:.4f}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D4_Cost_Governance.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Write estimate_query_cost_v2(sql, partition_filter=False, selected_columns=None)
+# that extends the base function with:
+#
+#   partition_filter=True  -&gt; apply 1/365 selectivity (query 1 day of 1 year)
+#   selected_columns=[&#x27;a&#x27;, &#x27;b&#x27;]  -&gt; use columnar efficiency:
+#     scan_fraction = len(selected_columns) / 20
+#     (assume tables have ~20 columns on average)
+#     cap at 1.0 (cannot scan more than the table)
+#
+# Test with the 5 queries below and print a cost table.
+# Show: query label, tables, tb_scanned, cost_usd.
+#
+# Expected output (approximate):
+#   label             tables          tb_scanned  cost_usd
+#   events_full       [&#x27;events&#x27;]      1.8190      $3.9097
+#   events_daily      [&#x27;events&#x27;]      0.0050      $0.0000  (&lt; free tier)
+#   events_2col_daily [&#x27;events&#x27;]      0.0005      $0.0000
+#   orders_join       [&#x27;orders&#x27;,...]  0.5000      $0.0000  (within free tier)
+#   big_join          [&#x27;events&#x27;,...]  2.3200      $6.5999
+#
+# --- starting data ---
+test_queries = [
+    (&#x27;events_full&#x27;,        &#x27;SELECT * FROM events&#x27;,                                        False, None),
+    (&#x27;events_daily&#x27;,       &#x27;SELECT * FROM events WHERE event_date = CURRENT_DATE&#x27;,        True,  None),
+    (&#x27;events_2col_daily&#x27;,  &#x27;SELECT user_id, event_type FROM events WHERE event_date = X&#x27;, True,  [&#x27;user_id&#x27;, &#x27;event_type&#x27;]),
+    (&#x27;orders_join&#x27;,        &#x27;SELECT o.order_id FROM orders o JOIN customers c ON o.cid=c.cid&#x27;, False, [&#x27;order_id&#x27;]),
+    (&#x27;big_join&#x27;,           &#x27;SELECT * FROM events JOIN orders ON events.order_id = orders.order_id&#x27;, False, None),
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D4_Cost_Governance.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — COST GUARDRAILS: REJECT EXPENSIVE QUERIES
+# ══════════════════════════════════════════════════════════════
+# A cost guardrail checks the estimated cost BEFORE executing the query.
+# If the estimate exceeds a threshold, raise an error instead of running.
+#
+# In BigQuery you can also use:
+#   job_config = bigquery.QueryJobConfig(
+#       maximum_bytes_billed=10_000_000_000   # 10 GB limit
+#   )
+#   -- query raises google.api_core.exceptions.Forbidden if over limit
+#
+# Tiered governance:
+#   &lt; $1.00   -- allow automatically
+#   $1-$10    -- allow with WARNING logged
+#   &gt; $10.00  -- require explicit approval flag or reject
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+class CostLimitError(Exception):
+    &quot;&quot;&quot;Raised when a query exceeds the cost guardrail threshold.&quot;&quot;&quot;
+    pass
+
+
+def cost_guard(sql, max_cost_usd=5.0, warn_cost_usd=1.0, selectivity=1.0):
+    &quot;&quot;&quot;
+    Estimate query cost and enforce tiers:
+      &lt; warn_cost_usd  -&gt; allow, no message
+      &gt;= warn_cost_usd -&gt; allow, print WARNING
+      &gt;= max_cost_usd  -&gt; raise CostLimitError
+
+    Returns the cost estimate dict if allowed.
+    &quot;&quot;&quot;
+    est = estimate_query_cost(sql, selectivity=selectivity)
+    cost = est[&#x27;estimated_cost_usd&#x27;]
+
+    if cost &gt;= max_cost_usd:
+        raise CostLimitError(
+            f&#x27;Query rejected: estimated ${cost:.4f} exceeds limit ${max_cost_usd:.2f}. &#x27;
+            f&#x27;Tables: {est[&quot;tables_referenced&quot;]}. &#x27;
+            f&#x27;Add partition filters or select fewer columns.&#x27;
+        )
+
+    if cost &gt;= warn_cost_usd:
+        print(f&#x27;  [COST WARNING] ${cost:.4f} for tables {est[&quot;tables_referenced&quot;]}&#x27;)
+
+    return est
+
+
+# Test three queries
+test_sqls = [
+    (&#x27;cheap&#x27;,     &#x27;SELECT name FROM products WHERE id = 1&#x27;,                          1.0),
+    (&#x27;moderate&#x27;,  &#x27;SELECT customer_id, SUM(total) FROM orders GROUP BY customer_id&#x27;, 1.0),
+    (&#x27;expensive&#x27;, &#x27;SELECT * FROM events JOIN orders ON events.order_id = orders.order_id&#x27;, 1.0),
+]
+
+for label, sql, sel in test_sqls:
+    print(f&#x27;--- {label} ---&#x27;)
+    try:
+        est = cost_guard(sql, max_cost_usd=5.0, warn_cost_usd=0.5, selectivity=sel)
+        print(f&#x27;  ALLOWED  ${est[&quot;estimated_cost_usd&quot;]:.4f}&#x27;)
+    except CostLimitError as e:
+        print(f&#x27;  BLOCKED  {e}&#x27;)
+    print()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D4_Cost_Governance.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Write run_with_cost_guard(sql_list, max_cost_usd=5.0)
+# that takes a list of SQL strings, runs cost_guard on each, and:
+#   - Prints ALLOWED or BLOCKED for each query
+#   - Collects results in a list of dicts:
+#     {&#x27;sql&#x27;: sql[:50], &#x27;status&#x27;: &#x27;allowed&#x27;/&#x27;blocked&#x27;, &#x27;cost_usd&#x27;: X}
+#   - Returns the results list
+#
+# Test it with the 5 queries below.
+#
+# Expected output:
+#   Query 1: ALLOWED   $0.0000
+#   Query 2: ALLOWED   $0.0000
+#   Query 3: [COST WARNING] ...
+#             ALLOWED   $X.XXXX
+#   Query 4: BLOCKED   Query rejected: ...
+#   Query 5: BLOCKED   Query rejected: ...
+#
+# --- starting data ---
+sql_batch = [
+    &#x27;SELECT name, price FROM products WHERE category = &quot;Electronics&quot;&#x27;,
+    &#x27;SELECT customer_id, email FROM customers WHERE country = &quot;GB&quot;&#x27;,
+    &#x27;SELECT order_id, total FROM orders WHERE order_date &gt;= &quot;2024-01-01&quot;&#x27;,
+    &#x27;SELECT * FROM events WHERE user_id = 12345&#x27;,
+    &#x27;SELECT * FROM events JOIN orders ON events.order_id = orders.order_id&#x27;,
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D4_Cost_Governance.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — LLM-ASSISTED COST REVIEW
+# ══════════════════════════════════════════════════════════════
+# When a query is blocked by cost_guard, the engineer needs to know:
+#   1. Why it is expensive
+#   2. How to rewrite it cheaply
+#
+# An LLM can explain both in plain English given:
+#   - The SQL text
+#   - The estimated cost and tables scanned
+#   - The cost limit that was violated
+#
+# This is NOT automated query rewriting -- the LLM output is advisory.
+# The engineer reads it and decides whether to refactor or request an exception.
+#
+# Integration pattern:
+#   try:
+#       cost_guard(sql, max_cost_usd=5.0)
+#       execute(sql)
+#   except CostLimitError as e:
+#       advice = call_llm(build_cost_prompt(sql, str(e)))
+#       print(advice)
+#       raise
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+def build_cost_prompt(sql, error_msg, cost_estimate):
+    return (
+        f&#x27;A BigQuery query was blocked by a cost guardrail.\n\n&#x27;
+        f&#x27;SQL:\n{sql}\n\n&#x27;
+        f&#x27;Cost estimate: ${cost_estimate[&quot;estimated_cost_usd&quot;]:.4f} &#x27;
+        f&#x27;(scans {cost_estimate[&quot;tb_scanned&quot;]} TB from tables {cost_estimate[&quot;tables_referenced&quot;]})\n\n&#x27;
+        f&#x27;Error: {error_msg}\n\n&#x27;
+        f&#x27;Suggest a cheaper rewrite in 3-4 sentences. Focus on partition filters and column selection.&#x27;
+    )
+
+
+expensive_sql = &#x27;SELECT * FROM events JOIN orders ON events.order_id = orders.order_id&#x27;
+
+cost_est = estimate_query_cost(expensive_sql)
+
+print(&#x27;--- Expensive query intercepted ---&#x27;)
+try:
+    cost_guard(expensive_sql, max_cost_usd=5.0)
+except CostLimitError as e:
+    prompt  = build_cost_prompt(expensive_sql, str(e), cost_est)
+    advice  = call_llm(prompt)
+    print(f&#x27;\n[LLM Cost Advisor]\n{advice}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D4_Cost_Governance.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Write a function guarded_execute(sql, max_cost_usd=5.0)
+# that:
+#   1. Calls cost_guard(sql, max_cost_usd)
+#   2. If ALLOWED: print &#x27;EXECUTING: &lt;sql[:60]&gt;&#x27; and return {&#x27;status&#x27;: &#x27;executed&#x27;, &#x27;cost&#x27;: X}
+#   3. If BLOCKED (CostLimitError):
+#      a. Call build_cost_prompt + call_llm to get advice
+#      b. Print &#x27;[LLM Cost Advisor]&#x27; followed by the advice
+#      c. Return {&#x27;status&#x27;: &#x27;blocked&#x27;, &#x27;cost&#x27;: X, &#x27;advice&#x27;: advice}
+#
+# Run it on 3 queries:
+#   Q1: &#x27;SELECT name FROM products WHERE id = 5&#x27;          max_cost=5.0
+#   Q2: &#x27;SELECT * FROM orders JOIN customers ON ...&#x27;      max_cost=2.0
+#   Q3: &#x27;SELECT * FROM events&#x27;                            max_cost=1.0
+#
+# Print the returned dict for each query.
+#
+# Expected output:
+#   Q1: EXECUTING: SELECT name FROM products WHERE id = 5
+#       {&#x27;status&#x27;: &#x27;executed&#x27;, &#x27;cost&#x27;: 0.0}
+#
+#   Q2: BLOCKED  ...
+#       [LLM Cost Advisor]
+#       This query has a high estimated cost ...
+#       {&#x27;status&#x27;: &#x27;blocked&#x27;, &#x27;cost&#x27;: X, &#x27;advice&#x27;: &#x27;...&#x27;}
+#
+#   Q3: BLOCKED ...
+#       [LLM Cost Advisor]
+#       This query performs a full table scan ...
+#       {&#x27;status&#x27;: &#x27;blocked&#x27;, &#x27;cost&#x27;: X, &#x27;advice&#x27;: &#x27;...&#x27;}
+#
+# --- starting data ---
+exercise_queries = [
+    (&#x27;Q1&#x27;, &#x27;SELECT name FROM products WHERE id = 5&#x27;,                              5.0),
+    (&#x27;Q2&#x27;, &#x27;SELECT * FROM orders JOIN customers ON orders.cid = customers.cid&#x27;,   2.0),
+    (&#x27;Q3&#x27;, &#x27;SELECT * FROM events&#x27;,                                                 1.0),
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — HIGH-THROUGHPUT ASYNC BATCH PROCESSING
+══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ By default, Python waits for each LLM call to finish before starting
+ the next. For batch jobs (summarise 50 documents, classify 1000 rows)
+ this is wasteful — the CPU sits idle while waiting for the API.
+
+ asyncio lets you launch multiple calls concurrently:
+   async def call_llm(prompt): ...   define an async function
+   await call_llm(prompt)            wait for one call
+   asyncio.gather(*tasks)            wait for ALL calls concurrently
+
+ In a notebook, use asyncio.run() or await directly (Jupyter supports it).
+
+ Typical speedup: 5-10x for I/O-bound batch jobs.
+ Limit concurrency to avoid rate limits: asyncio.Semaphore(max_concurrent)
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D4_Cost_Governance.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import asyncio
+import time
+import random
+
+# Simulate an LLM API call (replace with real openai.AsyncOpenAI in production)
+async def simulate_llm_call(prompt, call_id):
+    &quot;&quot;&quot;Simulates a 0.5-1.0s API call latency.&quot;&quot;&quot;
+    await asyncio.sleep(random.uniform(0.5, 1.0))
+    return {&#x27;id&#x27;: call_id, &#x27;prompt&#x27;: prompt[:30], &#x27;response&#x27;: f&#x27;Summary {call_id}&#x27;}
+
+
+prompts = [f&#x27;Summarise document {i}: Lorem ipsum content...&#x27; for i in range(8)]
+
+# ── Sequential (slow) ─────────────────────────────────────────
+async def run_sequential(prompts):
+    results = []
+    for i, p in enumerate(prompts):
+        results.append(await simulate_llm_call(p, i))
+    return results
+
+# ── Concurrent with semaphore (fast, rate-limited) ────────────
+async def run_concurrent(prompts, max_concurrent=4):
+    sem = asyncio.Semaphore(max_concurrent)
+    async def bounded_call(prompt, i):
+        async with sem:
+            return await simulate_llm_call(prompt, i)
+    return await asyncio.gather(*[bounded_call(p, i) for i, p in enumerate(prompts)])
+
+
+t0 = time.perf_counter()
+seq_results = asyncio.run(run_sequential(prompts))
+seq_time = time.perf_counter() - t0
+
+t0 = time.perf_counter()
+con_results = asyncio.run(run_concurrent(prompts, max_concurrent=4))
+con_time = time.perf_counter() - t0
+
+print(f&#x27;Sequential : {seq_time:.2f}s  ({len(seq_results)} results)&#x27;)
+print(f&#x27;Concurrent : {con_time:.2f}s  ({len(con_results)} results)&#x27;)
+print(f&#x27;Speedup    : {seq_time / con_time:.1f}x&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 4
+══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ Write an async function called batch_classify(texts, max_concurrent=3)
+ that classifies each text using simulate_classify() below.
+
+ Requirements:
+   - Use asyncio.Semaphore to limit to max_concurrent at once
+   - Return a list of dicts: [{&#x27;text&#x27;: ..., &#x27;label&#x27;: ..., &#x27;confidence&#x27;: ...}]
+   - The results list must be in the same order as the input texts
+     (asyncio.gather preserves order)
+
+ Run batch_classify on TEXTS below and print:
+   - Total time taken
+   - Each text (first 30 chars) and its label
+
+ Expected output (times will vary):
+     Classified 6 texts in ~X.Xs
+     complaint : &#x27;This product is terrible...&#x27;
+     praise    : &#x27;Absolutely love this serv...&#x27;
+     ...
+
+ --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D4_Cost_Governance.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import asyncio, time, random
+
+async def simulate_classify(text):
+    &quot;&quot;&quot;Simulates a 0.3-0.8s classification API call.&quot;&quot;&quot;
+    await asyncio.sleep(random.uniform(0.3, 0.8))
+    labels = [&#x27;complaint&#x27;, &#x27;praise&#x27;, &#x27;question&#x27;, &#x27;neutral&#x27;]
+    return {
+        &#x27;text&#x27;:       text,
+        &#x27;label&#x27;:      random.choice(labels),
+        &#x27;confidence&#x27;: round(random.uniform(0.7, 0.99), 2),
+    }
+
+TEXTS = [
+    &#x27;This product is terrible, I want a refund immediately.&#x27;,
+    &#x27;Absolutely love this service, will recommend to everyone.&#x27;,
+    &#x27;How do I reset my password?&#x27;,
+    &#x27;The delivery was late but the product itself is fine.&#x27;,
+    &#x27;Outstanding customer support, resolved in 5 minutes.&#x27;,
+    &#x27;I cannot log in to my account since the last update.&#x27;,
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 5 — TOKEN BUDGET &amp; CANARY PROMPT DEPLOYMENT
+══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ TOKEN BUDGET
+ Every LLM call costs tokens. Unchecked, a single bad request
+ (a 50-page document sent as context) can cost 10x a normal call.
+ Enforce a budget before sending:
+   estimated_tokens = len(text.split()) * 1.3  (rough heuristic)
+   tiktoken.encode(text)                       (exact, OpenAI models)
+
+ TOKEN BUDGET PATTERN:
+   if tokens &gt; MAX_TOKENS: truncate or chunk before sending
+   always log token count alongside cost estimate
+
+ CANARY DEPLOYMENT
+ Before rolling out a new prompt to all traffic, test it on a small
+ fraction (5-10%). Compare quality metrics. Roll back if worse.
+
+   router(user_id) -&gt; &#x27;new_prompt&#x27; if hash(user_id) % 100 &lt; canary_pct
+                   -&gt; &#x27;old_prompt&#x27; otherwise
+
+ Using a hash (not random) ensures the SAME user always gets the
+ same prompt version — consistent experience, reproducible results.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D4_Cost_Governance.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+
+# ── Token budget ──────────────────────────────────────────────
+def estimate_tokens(text):
+    &quot;&quot;&quot;Rough estimate: ~1.3 tokens per word (OpenAI rule of thumb).&quot;&quot;&quot;
+    return int(len(text.split()) * 1.3)
+
+def enforce_token_budget(text, max_tokens=2000, strategy=&#x27;truncate&#x27;):
+    &quot;&quot;&quot;
+    Returns (text, was_truncated, token_count).
+    strategy=&#x27;truncate&#x27;: cut to max_tokens worth of words
+    strategy=&#x27;reject&#x27;:   raise ValueError if over budget
+    &quot;&quot;&quot;
+    tokens = estimate_tokens(text)
+    if tokens &lt;= max_tokens:
+        return text, False, tokens
+    if strategy == &#x27;reject&#x27;:
+        raise ValueError(f&#x27;Input too long: {tokens} tokens (max {max_tokens})&#x27;)
+    max_words = int(max_tokens / 1.3)
+    truncated = &#x27; &#x27;.join(text.split()[:max_words])
+    return truncated, True, max_tokens
+
+short = &#x27;Summarise our Q1 sales performance.&#x27;
+long  = &#x27; &#x27;.join([&#x27;word&#x27;] * 3000)
+
+for text in [short, long]:
+    result, truncated, tok = enforce_token_budget(text, max_tokens=500)
+    print(f&#x27;tokens={tok:5d}  truncated={truncated}  preview: {result[:40]}&#x27;)
+
+
+# ── Canary router ─────────────────────────────────────────────
+PROMPTS = {
+    &#x27;stable&#x27;: &#x27;Summarise the following in 2 sentences: {text}&#x27;,
+    &#x27;canary&#x27;: &#x27;Provide a concise 2-sentence summary focusing on key metrics: {text}&#x27;,
+}
+
+def canary_router(user_id, canary_pct=10):
+    &quot;&quot;&quot;
+    Deterministic routing: same user always gets same prompt version.
+    Uses MD5 hash of user_id modulo 100.
+    &quot;&quot;&quot;
+    bucket = int(hashlib.md5(str(user_id).encode()).hexdigest(), 16) % 100
+    version = &#x27;canary&#x27; if bucket &lt; canary_pct else &#x27;stable&#x27;
+    return version, PROMPTS[version]
+
+# Simulate routing 20 users
+versions = [canary_router(f&#x27;user_{i}&#x27;)[0] for i in range(20)]
+canary_count = versions.count(&#x27;canary&#x27;)
+print(f&#x27;\nCanary traffic: {canary_count}/20 = {canary_count*5}%  (target: 10%)&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 5
+══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ Build a mini LLM request pipeline that combines token budget
+ enforcement and canary routing.
+
+ Write a function called prepare_request(user_id, text, max_tokens=1000,
+ canary_pct=20) that:
+   1. Runs enforce_token_budget(text, max_tokens)
+   2. Runs canary_router(user_id, canary_pct)
+   3. Returns a dict:
+        user_id, token_count, was_truncated,
+        prompt_version, prompt_template,
+        estimated_cost_usd (token_count * 0.000002)
+
+ Call it for each request in REQUESTS below and print a summary table.
+
+ Expected output (columns: user_id, tokens, truncated, version, cost):
+     user_001   312  False  stable  $0.000624
+     user_042   ...
+
+ --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D4_Cost_Governance.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+
+def estimate_tokens(text):
+    return int(len(text.split()) * 1.3)
+
+def enforce_token_budget(text, max_tokens=2000, strategy=&#x27;truncate&#x27;):
+    tokens = estimate_tokens(text)
+    if tokens &lt;= max_tokens:
+        return text, False, tokens
+    max_words = int(max_tokens / 1.3)
+    return &#x27; &#x27;.join(text.split()[:max_words]), True, max_tokens
+
+def canary_router(user_id, canary_pct=10):
+    bucket = int(hashlib.md5(str(user_id).encode()).hexdigest(), 16) % 100
+    version = &#x27;canary&#x27; if bucket &lt; canary_pct else &#x27;stable&#x27;
+    return version, f&#x27;Prompt template ({version})&#x27;
+
+REQUESTS = [
+    (&#x27;user_001&#x27;, &#x27;Analyse our Q1 performance. &#x27; + &#x27;Revenue grew. &#x27; * 50),
+    (&#x27;user_042&#x27;, &#x27;Short question about pricing.&#x27;),
+    (&#x27;user_099&#x27;, &#x27;Detailed report: &#x27; + &#x27;data point. &#x27; * 200),
+    (&#x27;user_017&#x27;, &#x27;Compare models A and B for our use case.&#x27;),
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-5">Day 5 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="17-5"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D5_Capstone_Final.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>#  YOUTUBE
+#  ───────
+#  Search: &quot;modern data stack tutorial&quot;
+#  Video: &quot;Modern Data Stack 101: Tools, Trends &amp; Architecture Explained | Data Engineering Series&quot; -- LetsTalkAboutData
+#         https://www.youtube.com/watch?v=DweFhfyCaJM
+#         (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+import pandas as pd
+import numpy as np
+import json
+import re
+import time
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from typing import Optional
+
+# ── Database ──────────────────────────────────────────────────
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+# ── dbt simulation ───────────────────────────────────────────
+def ref(m): return m
+def source(s, t): return f&#x27;{s}__{t}&#x27;
+
+def bq_load(df, table, write_disposition=&#x27;WRITE_TRUNCATE&#x27;):
+    tables = [r[0] for r in con.execute(&#x27;SHOW TABLES&#x27;).fetchall()]
+    if write_disposition == &#x27;WRITE_TRUNCATE&#x27; or table not in tables:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {table} AS SELECT * FROM df&#x27;)
+    else:
+        con.execute(f&#x27;INSERT INTO {table} SELECT * FROM df&#x27;)
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {table}&#x27;).fetchone()[0]
+
+def dbt_run(name, sql, materialized=&#x27;view&#x27;):
+    if materialized == &#x27;table&#x27;:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {name} AS {sql}&#x27;)
+    else:
+        con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {name}&#x27;).fetchone()[0]
+
+def dbt_test_not_null(model, col):
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {col} IS NULL&#x27;).fetchone()[0] == 0
+
+def dbt_test_unique(model, col):
+    return con.execute(f&quot;&quot;&quot;
+        SELECT COUNT(*) FROM (
+            SELECT {col} FROM {model} GROUP BY {col} HAVING COUNT(*) &gt; 1
+        )&quot;&quot;&quot;).fetchone()[0] == 0
+
+def dbt_test_positive(model, col):
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {col} &lt;= 0&#x27;).fetchone()[0] == 0
+
+# ── Idempotent load ───────────────────────────────────────────
+def idempotent_load(df, table, key_col):
+    df = df.drop_duplicates(subset=key_col, keep=&#x27;last&#x27;)
+    tables = [r[0] for r in con.execute(&#x27;SHOW TABLES&#x27;).fetchall()]
+    if table not in tables:
+        con.execute(f&#x27;CREATE TABLE {table} AS SELECT * FROM df LIMIT 0&#x27;)
+    keys = &#x27;, &#x27;.join(str(k) for k in df[key_col].tolist())
+    con.execute(f&#x27;DELETE FROM {table} WHERE {key_col} IN ({keys})&#x27;)
+    con.execute(f&#x27;INSERT INTO {table} SELECT * FROM df&#x27;)
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {table}&#x27;).fetchone()[0]
+
+# ── Metrics ───────────────────────────────────────────────────
+@dataclass
+class PipelineMetrics:
+    pipeline_id : str
+    start_time  : str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    end_time    : Optional[str] = None
+    rows_in     : int = 0
+    rows_out    : int = 0
+    rows_dropped: int = 0
+    errors      : int = 0
+    status      : str = &#x27;running&#x27;
+
+    def finish(self, status=&#x27;success&#x27;):
+        self.end_time = datetime.utcnow().isoformat()
+        self.status   = status
+
+    @property
+    def duration_s(self):
+        if not self.end_time: return None
+        return round((datetime.fromisoformat(self.end_time)
+                      - datetime.fromisoformat(self.start_time)).total_seconds(), 3)
+
+    @property
+    def pass_rate(self):
+        return round(self.rows_out / self.rows_in, 4) if self.rows_in else 0.0
+
+    def to_dict(self):
+        d = asdict(self)
+        d[&#x27;duration_s&#x27;] = self.duration_s
+        d[&#x27;pass_rate&#x27;]  = self.pass_rate
+        return d
+
+# ── Structured logging ────────────────────────────────────────
+def structured_log(event, level=&#x27;INFO&#x27;, **kwargs):
+    record = {&#x27;ts&#x27;: datetime.utcnow().isoformat() + &#x27;Z&#x27;, &#x27;level&#x27;: level, &#x27;event&#x27;: event}
+    record.update(kwargs)
+    print(json.dumps(record))
+
+# ── Alerting ──────────────────────────────────────────────────
+class AlertError(Exception): pass
+
+def check_thresholds(metrics, min_pass_rate=0.95, max_duration_s=60.0):
+    alerts = []
+    if metrics.pass_rate &lt; min_pass_rate:
+        alerts.append(f&#x27;pass_rate {metrics.pass_rate} &lt; {min_pass_rate}&#x27;)
+    if metrics.duration_s and metrics.duration_s &gt; max_duration_s:
+        alerts.append(f&#x27;duration {metrics.duration_s}s &gt; {max_duration_s}s&#x27;)
+    if metrics.errors &gt; 0:
+        alerts.append(f&#x27;{metrics.errors} errors during run&#x27;)
+    if alerts:
+        raise AlertError(&#x27;; &#x27;.join(alerts))
+
+# ── Cost guard ────────────────────────────────────────────────
+TABLE_SIZES = {
+    &#x27;raw__sales&#x27;: 5_000_000_000,
+    &#x27;stg_sales&#x27;:  5_000_000_000,
+    &#x27;fct_monthly_sales&#x27;: 500_000_000,
+}
+class CostLimitError(Exception): pass
+
+def cost_guard(sql, max_cost_usd=5.0):
+    pattern = r&#x27;(?:FROM|JOIN)\s+([\w.]+)&#x27;
+    tables  = [m.group(1).split(&#x27;.&#x27;)[-1].lower()
+               for m in re.finditer(pattern, sql.upper())
+               if m.group(1).split(&#x27;.&#x27;)[-1].lower() in TABLE_SIZES]
+    total_bytes = sum(TABLE_SIZES.get(t, 0) for t in set(tables))
+    cost = (total_bytes / 1024**4) * 5.0
+    if cost &gt; max_cost_usd:
+        raise CostLimitError(f&#x27;Estimated ${cost:.4f} exceeds ${max_cost_usd:.2f}&#x27;)
+    return {&#x27;tables&#x27;: list(set(tables)), &#x27;estimated_cost_usd&#x27;: round(cost, 6)}
+
+# ── LLM simulation ───────────────────────────────────────────
+def call_llm(prompt):
+    &quot;&quot;&quot;
+    SIMULATION mode. REAL MODE:
+        from groq import Groq
+        client = Groq(api_key=os.environ[&#x27;GROQ_API_KEY&#x27;])
+        resp = client.chat.completions.create(
+            model=&#x27;llama3-8b-8192&#x27;,
+            messages=[{&#x27;role&#x27;: &#x27;user&#x27;, &#x27;content&#x27;: prompt}]
+        )
+        return resp.choices[0].message.content
+    &quot;&quot;&quot;
+    if &#x27;fail&#x27; in prompt.lower() or &#x27;error&#x27; in prompt.lower():
+        return (
+            &#x27;The pipeline encountered errors during this run. &#x27;
+            &#x27;Review the structured logs for the exact failure point. &#x27;
+            &#x27;Data quality validation found issues in the incoming batch; &#x27;
+            &#x27;a manual review of the source system is recommended before the next run.&#x27;
+        )
+    return (
+        &#x27;The daily sales pipeline completed successfully. &#x27;
+        f&#x27;All dbt models materialized without errors and all schema tests passed. &#x27;
+        &#x27;Data is available in the fct_monthly_sales table for downstream reporting. &#x27;
+        &#x27;No action required from the data engineering team.&#x27;
+    )
+
+
+print(&#x27;W17 Capstone Final lesson ready.&#x27;)
+print(&#x27;All simulation layers loaded: dbt, idempotent_load, metrics, logging, cost_guard, LLM.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D5_Capstone_Final.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — FULL STACK REVIEW: HOW W13-W17 CONNECT
+# ══════════════════════════════════════════════════════════════
+# The analytics engineering stack we have built across 5 weeks:
+#
+#   W13 dbt Foundations
+#       Sources, staging models, refs, schema tests
+#       -&gt; Result: clean staging layer in DuckDB/BigQuery
+#
+#   W14 dbt Advanced
+#       Incremental models, snapshots, macros, dbt-expectations
+#       -&gt; Result: efficient updates, historical tracking, reusable logic
+#
+#   W15 BigQuery
+#       Concepts, read, write, cost control, dbt+BQ integration
+#       -&gt; Result: production-grade data warehouse layer
+#
+#   W16 Airflow
+#       DAG structure, XCom, sensors, dynamic tasks, dbt orchestration
+#       -&gt; Result: automated daily/hourly pipeline execution
+#
+#   W17 Capstone
+#       Idempotency, scale, monitoring, cost governance, full integration
+#       -&gt; Result: production-ready, observable, guarded pipeline
+#
+# The flow in one diagram:
+#   Source API
+#      |-- extract (Python)
+#      |-- validate (Pydantic / assertions)
+#      |-- idempotent_load (raw table, UPSERT)
+#      |-- dbt run stg_model (SQL transform)
+#      |-- dbt run mart_model (business aggregation)
+#      |-- dbt test (schema contracts)
+#      |-- check_thresholds (PipelineMetrics)
+#      |-- cost_guard (before any ad-hoc query)
+#      |-- structured_log (every step)
+#      |-- call_llm (run report narrative)
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+# Show the connection by importing all helpers and printing the stack
+stack = [
+    (&#x27;W13&#x27;, &#x27;dbt Foundations&#x27;,   &#x27;staging models, sources, schema tests&#x27;),
+    (&#x27;W14&#x27;, &#x27;dbt Advanced&#x27;,      &#x27;incremental, snapshots, macros, expectations&#x27;),
+    (&#x27;W15&#x27;, &#x27;BigQuery&#x27;,          &#x27;partitioning, cost estimation, bq_load&#x27;),
+    (&#x27;W16&#x27;, &#x27;Airflow&#x27;,           &#x27;DAG orchestration, XCom, DbtRunOperator&#x27;),
+    (&#x27;W17&#x27;, &#x27;Capstone + Scale&#x27;,  &#x27;idempotency, memory, monitoring, cost_guard, LLM report&#x27;),
+]
+
+print(&#x27;Analytics Engineering Stack (W13-W17):&#x27;)
+print(&#x27;-&#x27; * 70)
+for week, topic, tools in stack:
+    print(f&#x27;  {week}  {topic:&lt;22}  {tools}&#x27;)
+print(&#x27;-&#x27; * 70)
+print(&#x27;All layers active in this notebook.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D5_Capstone_Final.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Build the full pipeline in a single function run_pipeline(raw_df):
+#
+#   Step 1: validate raw_df
+#     - assert all order_id not null
+#     - assert all amount &gt; 0
+#     - structured_log(&#x27;validation_complete&#x27;, level=&#x27;INFO&#x27;, rows=N)
+#
+#   Step 2: idempotent_load(raw_df, &#x27;raw__sales&#x27;, &#x27;order_id&#x27;)
+#     - structured_log(&#x27;load_complete&#x27;, rows=N)
+#
+#   Step 3: dbt_run stg_sales
+#     SQL: SELECT order_id, UPPER(region) AS region,
+#                 product, ROUND(amount, 2) AS revenue
+#          FROM raw__sales
+#     - structured_log(&#x27;dbt_run&#x27;, model=&#x27;stg_sales&#x27;, rows=N)
+#
+#   Step 4: dbt_run fct_monthly_sales (table)
+#     SQL: SELECT region, product,
+#                 COUNT(*) AS order_count, SUM(revenue) AS total_revenue
+#          FROM stg_sales GROUP BY region, product
+#     - structured_log(&#x27;dbt_run&#x27;, model=&#x27;fct_monthly_sales&#x27;, rows=N)
+#
+#   Step 5: dbt tests on stg_sales:
+#     not_null(order_id), unique(order_id), positive(revenue)
+#     - For each test: structured_log(&#x27;dbt_test&#x27;, test=name, status=&#x27;PASS&#x27;/&#x27;FAIL&#x27;)
+#
+#   Return: {&#x27;rows_loaded&#x27;: N, &#x27;stg_rows&#x27;: N, &#x27;mart_rows&#x27;: N, &#x27;tests_passed&#x27;: N}
+#
+# Call run_pipeline(sales_df) and print the returned dict.
+#
+# Expected output: JSON log lines at each step, then a summary dict.
+#
+# --- starting data ---
+np.random.seed(5)
+sales_df = pd.DataFrame({
+    &#x27;order_id&#x27;: range(1, 21),
+    &#x27;region&#x27;:   np.random.choice([&#x27;EMEA&#x27;, &#x27;AMER&#x27;, &#x27;APAC&#x27;], 20),
+    &#x27;product&#x27;:  np.random.choice([&#x27;Widget A&#x27;, &#x27;Widget B&#x27;, &#x27;Widget C&#x27;], 20),
+    &#x27;amount&#x27;:   np.random.uniform(50, 2000, 20).round(2),
+})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D5_Capstone_Final.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — PRODUCTION CHECKLIST
+# ══════════════════════════════════════════════════════════════
+# Before calling a pipeline production-ready, verify each item:
+#
+#   Idempotency
+#     [ ] Load function uses UPSERT or WRITE_TRUNCATE
+#     [ ] Re-running with the same data produces the same table
+#
+#   Schema tests
+#     [ ] Every staging model has not_null + unique on primary key
+#     [ ] Every mart model has at least one not_null test
+#
+#   Structured logs
+#     [ ] Every step emits a JSON log line with event, level, and row counts
+#     [ ] Errors are logged at level ERROR before re-raising
+#
+#   Cost guardrail
+#     [ ] Every ad-hoc query goes through cost_guard before execution
+#     [ ] Queries with estimated cost &gt; threshold are blocked
+#
+#   LLM review
+#     [ ] On success: call_llm generates a plain-English run summary
+#     [ ] On failure: call_llm explains the error and suggests a fix
+#
+#   Threshold checks
+#     [ ] pass_rate &gt;= 0.95
+#     [ ] duration_s within SLA
+#     [ ] errors == 0
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+PRODUCTION_CHECKLIST = [
+    &#x27;idempotent_load used (upsert or truncate)&#x27;,
+    &#x27;dbt not_null test on primary key&#x27;,
+    &#x27;dbt unique test on primary key&#x27;,
+    &#x27;dbt positive test on revenue&#x27;,
+    &#x27;structured_log at every step&#x27;,
+    &#x27;cost_guard on all ad-hoc queries&#x27;,
+    &#x27;check_thresholds after run&#x27;,
+    &#x27;call_llm executive summary&#x27;,
+]
+
+def build_run_report(pipeline_id, metrics, checklist_items, tests_passed, tests_failed):
+    &quot;&quot;&quot;Build a structured run report dict for stakeholders.&quot;&quot;&quot;
+    return {
+        &#x27;pipeline_id&#x27;:       pipeline_id,
+        &#x27;run_date&#x27;:          datetime.utcnow().date().isoformat(),
+        &#x27;status&#x27;:            metrics.status,
+        &#x27;rows_in&#x27;:           metrics.rows_in,
+        &#x27;rows_out&#x27;:          metrics.rows_out,
+        &#x27;pass_rate&#x27;:         metrics.pass_rate,
+        &#x27;duration_s&#x27;:        metrics.duration_s,
+        &#x27;tests_passed&#x27;:      tests_passed,
+        &#x27;tests_failed&#x27;:      tests_failed,
+        &#x27;checklist_items&#x27;:   len(checklist_items),
+        &#x27;production_ready&#x27;:  tests_failed == 0 and metrics.errors == 0 and metrics.pass_rate &gt;= 0.95,
+    }
+
+
+# Build a sample report
+sample_metrics = PipelineMetrics(&#x27;sample_pipeline&#x27;)
+sample_metrics.rows_in  = 20
+sample_metrics.rows_out = 20
+sample_metrics.finish(&#x27;success&#x27;)
+
+report = build_run_report(
+    &#x27;daily_sales_pipeline&#x27;, sample_metrics,
+    PRODUCTION_CHECKLIST, tests_passed=3, tests_failed=0
+)
+print(json.dumps(report, indent=2))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D5_Capstone_Final.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Add all guardrails to the pipeline from Exercise 1.
+#
+# Wrap run_pipeline() in a new function guarded_pipeline(raw_df) that:
+#
+#   1. Creates a PipelineMetrics object
+#   2. Calls run_pipeline(raw_df) -- fills metrics.rows_in and rows_out
+#   3. Calls cost_guard on the mart SQL before running dbt_run fct_monthly_sales
+#      If CostLimitError: log it at ERROR level, set metrics.errors += 1
+#   4. Calls check_thresholds(metrics) after the run
+#      If AlertError: structured_log at ERROR level
+#   5. Calls metrics.finish(&#x27;success&#x27;) or finish(&#x27;failed&#x27;)
+#   6. Builds and returns a run_report dict using build_run_report()
+#
+# Run it twice:
+#   Run 1: clean_df (all valid data) -- should produce &#x27;production_ready&#x27;: True
+#   Run 2: dirty_df (has a negative amount) -- should trigger validation error
+#          catch the exception, log it, and return &#x27;production_ready&#x27;: False
+#
+# Print the run_report dict for both runs.
+#
+# --- starting data ---
+clean_df = sales_df.copy()   # from Exercise 1
+
+dirty_df = sales_df.copy()
+dirty_df.loc[3, &#x27;amount&#x27;] = -50.0   # inject bad data
+dirty_df.loc[7, &#x27;order_id&#x27;] = None  # inject null</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D5_Capstone_Final.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — HANDOFF ARTIFACT: LLM EXECUTIVE SUMMARY
+# ══════════════════════════════════════════════════════════════
+# The run report is a machine-readable dict.
+# Stakeholders need a human-readable summary.
+#
+# Pattern: send the report dict to an LLM and ask for a 3-4 sentence summary.
+# The LLM reads the structured data and writes in plain English:
+#   - What ran, how many rows, pass rate, duration
+#   - Whether action is required
+#   - If production_ready is False: what to fix
+#
+# This output can be:
+#   - Posted to a Slack channel (#data-reports)
+#   - Included in a daily email digest
+#   - Stored in a run_logs table for audit
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+def generate_executive_summary(run_report):
+    &quot;&quot;&quot;Call LLM to generate a plain-English executive summary of the run report.&quot;&quot;&quot;
+    prompt = (
+        f&#x27;You are a data engineering assistant. &#x27;
+        f&#x27;Summarise this pipeline run report in 3-4 sentences for a non-technical stakeholder.\n\n&#x27;
+        f&#x27;Report:\n{json.dumps(run_report, indent=2)}\n\n&#x27;
+        f&#x27;Focus on: what ran, how many rows were processed, &#x27;
+        f&#x27;whether any action is required, and production readiness.&#x27;
+    )
+    return call_llm(prompt)
+
+
+# Sample run report
+sample_report = {
+    &#x27;pipeline_id&#x27;:    &#x27;daily_sales_pipeline&#x27;,
+    &#x27;run_date&#x27;:       datetime.utcnow().date().isoformat(),
+    &#x27;status&#x27;:         &#x27;success&#x27;,
+    &#x27;rows_in&#x27;:        20,
+    &#x27;rows_out&#x27;:       20,
+    &#x27;pass_rate&#x27;:      1.0,
+    &#x27;duration_s&#x27;:     0.05,
+    &#x27;tests_passed&#x27;:   3,
+    &#x27;tests_failed&#x27;:   0,
+    &#x27;production_ready&#x27;: True,
+}
+
+summary = generate_executive_summary(sample_report)
+print(&#x27;Executive Summary:&#x27;)
+print(&#x27;-&#x27; * 50)
+print(summary)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D5_Capstone_Final.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Complete the capstone by calling generate_executive_summary on both run reports
+# from Exercise 2 (clean_df run and dirty_df run).
+#
+# Steps:
+#   1. Print the run_report for the clean_df run (should be production_ready: True)
+#   2. Call generate_executive_summary(run_report_clean) and print the result
+#   3. Print the run_report for the dirty_df run (should be production_ready: False)
+#   4. Call generate_executive_summary(run_report_dirty) and print the result
+#
+# Final output: two executive summaries.
+# The clean run summary should say &#x27;no action required&#x27;.
+# The dirty run summary should mention errors and recommend review.
+#
+# Expected output:
+#   --- Run 1 (clean) report ---
+#   {&quot;pipeline_id&quot;: &quot;daily_sales_pipeline&quot;, &quot;status&quot;: &quot;success&quot;, ..., &quot;production_ready&quot;: true}
+#
+#   Executive Summary (clean):
+#   The daily sales pipeline completed successfully ...
+#
+#   --- Run 2 (dirty) report ---
+#   {&quot;pipeline_id&quot;: &quot;daily_sales_pipeline&quot;, &quot;status&quot;: &quot;failed&quot;, ..., &quot;production_ready&quot;: false}
+#
+#   Executive Summary (dirty):
+#   The pipeline encountered errors during this run ...
+#
+# --- starting data ---
+# run_report_clean and run_report_dirty from Exercise 2</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-6">Day 6 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="17-6"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D6_Project_Scale_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 17  |  DAY 6  |  PROJECT: SCALE PIPELINE
+# ══════════════════════════════════════════════════════════════
+#
+#  PROJECT BRIEF
+#  ─────────────
+#  Build a production-grade scaled pipeline that handles 10,000 rows.
+#  Every technique from W13-W17 is applied:
+#    - Memory optimization (optimize_dtypes)
+#    - Chunked loading (simulate BQ chunk writes)
+#    - Full dbt pipeline (stg -&gt; mart + tests)
+#    - Cost guardrails (3 SQL queries checked)
+#    - LLM executive summary of the run
+#
+#  TIME:  ~120 minutes
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+import pandas as pd
+import numpy as np
+import json
+import re
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from typing import Optional
+
+# ── Database ──────────────────────────────────────────────────
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+# ── dbt helpers ───────────────────────────────────────────────
+def ref(m): return m
+def source(s, t): return f&#x27;{s}__{t}&#x27;
+
+def bq_load_chunk(df, table):
+    &quot;&quot;&quot;Append a chunk to a table (creates on first call).&quot;&quot;&quot;
+    tables = [r[0] for r in con.execute(&#x27;SHOW TABLES&#x27;).fetchall()]
+    if table not in tables:
+        con.execute(f&#x27;CREATE TABLE {table} AS SELECT * FROM df LIMIT 0&#x27;)
+    con.execute(f&#x27;INSERT INTO {table} SELECT * FROM df&#x27;)
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {table}&#x27;).fetchone()[0]
+
+def bq_load_truncate(df, table):
+    con.execute(f&#x27;CREATE OR REPLACE TABLE {table} AS SELECT * FROM df&#x27;)
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {table}&#x27;).fetchone()[0]
+
+def dbt_run(name, sql, materialized=&#x27;view&#x27;):
+    if materialized == &#x27;table&#x27;:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {name} AS {sql}&#x27;)
+    else:
+        con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {name}&#x27;).fetchone()[0]
+
+def dbt_test_not_null(model, col):
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {col} IS NULL&#x27;).fetchone()[0] == 0
+
+def dbt_test_unique(model, col):
+    return con.execute(f&quot;&quot;&quot;
+        SELECT COUNT(*) FROM (
+            SELECT {col} FROM {model} GROUP BY {col} HAVING COUNT(*) &gt; 1
+        )&quot;&quot;&quot;).fetchone()[0] == 0
+
+def dbt_test_positive(model, col):
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {col} &lt;= 0&#x27;).fetchone()[0] == 0
+
+def dbt_test_accepted_values(model, col, values):
+    ph = &#x27;, &#x27;.join([f&quot;&#x27;{v}&#x27;&quot; for v in values])
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {col} NOT IN ({ph})&#x27;).fetchone()[0] == 0
+
+# ── Structured logging ────────────────────────────────────────
+def structured_log(event, level=&#x27;INFO&#x27;, **kwargs):
+    record = {&#x27;ts&#x27;: datetime.utcnow().isoformat() + &#x27;Z&#x27;, &#x27;level&#x27;: level, &#x27;event&#x27;: event}
+    record.update(kwargs)
+    print(json.dumps(record))
+
+# ── Metrics ───────────────────────────────────────────────────
+@dataclass
+class PipelineMetrics:
+    pipeline_id : str
+    start_time  : str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    end_time    : Optional[str] = None
+    rows_in     : int = 0
+    rows_out    : int = 0
+    errors      : int = 0
+    status      : str = &#x27;running&#x27;
+
+    def finish(self, status=&#x27;success&#x27;):
+        self.end_time = datetime.utcnow().isoformat()
+        self.status   = status
+
+    @property
+    def duration_s(self):
+        if not self.end_time: return None
+        return round((datetime.fromisoformat(self.end_time)
+                      - datetime.fromisoformat(self.start_time)).total_seconds(), 3)
+
+    @property
+    def pass_rate(self):
+        return round(self.rows_out / self.rows_in, 4) if self.rows_in else 0.0
+
+    def to_dict(self):
+        d = asdict(self)
+        d[&#x27;duration_s&#x27;] = self.duration_s
+        d[&#x27;pass_rate&#x27;]  = self.pass_rate
+        return d
+
+# ── Cost guard ────────────────────────────────────────────────
+TABLE_REGISTRY = {
+    &#x27;raw__sales&#x27;:        10_000 * 500,    # 10k rows * ~500 bytes/row
+    &#x27;stg_sales&#x27;:         10_000 * 500,
+    &#x27;fct_monthly_sales&#x27;: 1_000 * 500,
+}
+
+class CostLimitError(Exception): pass
+
+def cost_guard(sql, max_cost_usd=0.001):
+    pattern = r&#x27;(?:FROM|JOIN)\s+([\w.]+)&#x27;
+    tables  = list({m.group(1).split(&#x27;.&#x27;)[-1].lower()
+                    for m in re.finditer(pattern, sql.upper())
+                    if m.group(1).split(&#x27;.&#x27;)[-1].lower() in TABLE_REGISTRY})
+    total_bytes = sum(TABLE_REGISTRY.get(t, 0) for t in tables)
+    cost = (total_bytes / 1024**4) * 5.0
+    if cost &gt; max_cost_usd:
+        raise CostLimitError(f&#x27;${cost:.8f} &gt; limit ${max_cost_usd}&#x27;)
+    return {&#x27;tables&#x27;: tables, &#x27;estimated_cost_usd&#x27;: round(cost, 8), &#x27;status&#x27;: &#x27;allowed&#x27;}
+
+# ── Memory optimization ───────────────────────────────────────
+def optimize_dtypes(df, category_max_unique=50):
+    df = df.copy()
+    for col in df.columns:
+        if df[col].dtype == &#x27;int64&#x27;:
+            if df[col].max() &lt;= np.iinfo(&#x27;int32&#x27;).max:
+                df[col] = df[col].astype(&#x27;int32&#x27;)
+        elif df[col].dtype == &#x27;float64&#x27;:
+            df[col] = df[col].astype(&#x27;float32&#x27;)
+        elif df[col].dtype == &#x27;object&#x27;:
+            if df[col].nunique() &lt;= category_max_unique:
+                df[col] = df[col].astype(&#x27;category&#x27;)
+    return df
+
+# ── LLM simulation ───────────────────────────────────────────
+def call_llm(prompt):
+    &quot;&quot;&quot;
+    SIMULATION mode. REAL MODE:
+        from groq import Groq
+        client = Groq(api_key=os.environ[&#x27;GROQ_API_KEY&#x27;])
+        resp = client.chat.completions.create(
+            model=&#x27;llama3-8b-8192&#x27;,
+            messages=[{&#x27;role&#x27;: &#x27;user&#x27;, &#x27;content&#x27;: prompt}]
+        )
+        return resp.choices[0].message.content
+    &quot;&quot;&quot;
+    return (
+        &#x27;The scaled sales pipeline completed successfully for all 10,000 rows. &#x27;
+        &#x27;Memory was optimized by 60% using dtype downcasting before loading. &#x27;
+        &#x27;All dbt schema tests passed on both the staging and mart models. &#x27;
+        &#x27;Cost guardrails approved all queries within the defined thresholds. &#x27;
+        &#x27;No action is required; data is available in fct_monthly_sales for reporting.&#x27;
+    )
+
+
+print(&#x27;Week 17 Project: Scale Pipeline&#x27;)
+print(&#x27;All simulation layers loaded. Complete each TASK below.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D6_Project_Scale_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 1 — GENERATE + OPTIMIZE A 10,000-ROW DATAFRAME
+# ══════════════════════════════════════════════════════════════
+# Generate a synthetic sales DataFrame with 10,000 rows.
+# Columns: order_id (int), region (str), product (str),
+#          amount (float), quantity (int), status (str)
+#
+# Run optimize_dtypes() on it.
+# Print memory usage BEFORE and AFTER optimization:
+#   Before: XXXX KB
+#   After:  XXXX KB
+#   Saved:  XX.X%
+#
+# Also print the dtype of each column before and after.
+#
+# Expected output:
+#   Before: ~2800 KB
+#   After:  ~600 KB
+#   Saved:  ~78%
+#   order_id  int64   -&gt; int32
+#   region    object  -&gt; category
+#   ...
+#
+# --- starting data ---
+np.random.seed(17)
+N = 10_000
+raw_sales_large = pd.DataFrame({
+    &#x27;order_id&#x27;:  np.arange(1, N + 1, dtype=&#x27;int64&#x27;),
+    &#x27;region&#x27;:    np.random.choice([&#x27;EMEA&#x27;, &#x27;AMER&#x27;, &#x27;APAC&#x27;, &#x27;LATAM&#x27;, &#x27;MEA&#x27;], N),
+    &#x27;product&#x27;:   np.random.choice([&#x27;Widget A&#x27;, &#x27;Widget B&#x27;, &#x27;Widget C&#x27;, &#x27;Widget D&#x27;], N),
+    &#x27;amount&#x27;:    np.random.uniform(10.0, 2000.0, N).round(2).astype(&#x27;float64&#x27;),
+    &#x27;quantity&#x27;:  np.random.randint(1, 50, N).astype(&#x27;int64&#x27;),
+    &#x27;status&#x27;:    np.random.choice([&#x27;pending&#x27;, &#x27;shipped&#x27;, &#x27;cancelled&#x27;, &#x27;returned&#x27;], N),
+})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D6_Project_Scale_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 2 — CHUNKED LOAD TO raw__sales
+# ══════════════════════════════════════════════════════════════
+# Load the optimized DataFrame in chunks of 1,000 rows.
+# Before loading each chunk: validate it.
+#
+# Validation rules per chunk:
+#   - All order_id not null
+#   - All amount &gt; 0
+#   - No duplicate order_id within the chunk
+#   If validation fails: skip the chunk, increment a rejected_chunks counter.
+#
+# Loading:
+#   Use bq_load_chunk(chunk, &#x27;raw__sales&#x27;) for each valid chunk.
+#   Emit a structured_log after each chunk:
+#     {&#x27;event&#x27;: &#x27;chunk_loaded&#x27;, &#x27;chunk_num&#x27;: N, &#x27;rows&#x27;: N, &#x27;total_so_far&#x27;: N}
+#
+# After all chunks print:
+#   Total chunks: 10
+#   Rejected chunks: 0
+#   Total rows loaded: 10000
+#
+# --- starting data ---
+# raw_sales_optimized from Task 1 (the optimize_dtypes result)
+CHUNK_SIZE = 1000</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D6_Project_Scale_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 3 — FULL dbt PIPELINE + TESTS
+# ══════════════════════════════════════════════════════════════
+# Run the full dbt pipeline on raw__sales (which now has 10,000 rows).
+#
+# Model 1: stg_sales (view)
+#   SELECT order_id, UPPER(region) AS region, product,
+#          ROUND(amount, 2) AS revenue, quantity,
+#          UPPER(status) AS order_status
+#   FROM raw__sales
+#
+# Model 2: fct_monthly_sales (table)
+#   SELECT region, product,
+#          COUNT(*) AS order_count,
+#          SUM(quantity) AS total_units,
+#          ROUND(SUM(revenue), 2) AS total_revenue
+#   FROM stg_sales
+#   GROUP BY region, product
+#
+# dbt tests on stg_sales:
+#   not_null(order_id), unique(order_id), positive(revenue)
+#
+# dbt tests on fct_monthly_sales:
+#   not_null(region), not_null(product),
+#   accepted_values(region, [&#x27;EMEA&#x27;,&#x27;AMER&#x27;,&#x27;APAC&#x27;,&#x27;LATAM&#x27;,&#x27;MEA&#x27;])
+#
+# Emit structured_log for each model run and each test result.
+# Print a test summary: {tests_run: 6, tests_passed: 6, tests_failed: 0}
+# Print fct_monthly_sales ordered by total_revenue DESC (use con.execute().df()).</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D6_Project_Scale_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 4 — COST GUARDRAILS ON 3 QUERIES
+# ══════════════════════════════════════════════════════════════
+# Run cost_guard on 3 queries against your pipeline tables.
+# Use max_cost_usd=0.0005 (a tight budget -- most queries pass, expensive ones don&#x27;t).
+#
+# For each query: print ALLOWED or BLOCKED with the estimated cost.
+# Collect results in a list: [{&#x27;query&#x27;: label, &#x27;status&#x27;: ..., &#x27;cost&#x27;: ...}]
+# Print the list as JSON at the end.
+#
+# Expected output:
+#   --- cheap ---
+#   ALLOWED  $0.00000000  (products table not in registry, cost=0)
+#
+#   --- moderate ---
+#   ALLOWED  $X.XXXXXXXX
+#
+#   --- expensive ---
+#   BLOCKED  $X.XXXXXXXX &gt; limit $0.0005
+#
+# Note: cost_guard uses TABLE_REGISTRY defined in the setup cell.
+# Adjust max_cost_usd so cheap and moderate pass, expensive is blocked.
+#
+# --- starting data ---
+cost_queries = [
+    (&#x27;cheap&#x27;,     &#x27;SELECT region, total_revenue FROM fct_monthly_sales ORDER BY total_revenue DESC LIMIT 5&#x27;, 0.000001),
+    (&#x27;moderate&#x27;,  &#x27;SELECT order_id, revenue FROM stg_sales WHERE region = &quot;EMEA&quot; LIMIT 1000&#x27;,               0.001),
+    (&#x27;expensive&#x27;, &#x27;SELECT * FROM raw__sales JOIN stg_sales ON raw__sales.order_id = stg_sales.order_id&#x27;,    0.000001),
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D6_Project_Scale_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 5 — LLM EXECUTIVE SUMMARY
+# ══════════════════════════════════════════════════════════════
+# Build a run_report dict that captures everything from Tasks 1-4:
+#   {
+#     &#x27;pipeline_id&#x27;:     &#x27;scale_pipeline&#x27;,
+#     &#x27;run_date&#x27;:        today&#x27;s date (ISO),
+#     &#x27;rows_generated&#x27;:  10000,
+#     &#x27;memory_saved_pct&#x27;: X,      # from Task 1
+#     &#x27;chunks_loaded&#x27;:   10,
+#     &#x27;total_rows_loaded&#x27;: 10000,
+#     &#x27;stg_rows&#x27;:        X,       # from Task 3
+#     &#x27;mart_rows&#x27;:       X,
+#     &#x27;tests_run&#x27;:       6,
+#     &#x27;tests_passed&#x27;:    6,
+#     &#x27;tests_failed&#x27;:    0,
+#     &#x27;cost_checks&#x27;:     [...],   # from Task 4
+#     &#x27;status&#x27;:          &#x27;SUCCESS&#x27;,
+#   }
+#
+# Call call_llm() with a prompt that includes:
+#   - The run_report as JSON
+#   - The instruction: &#x27;Summarise this pipeline run for a non-technical stakeholder&#x27;
+#
+# Print:
+#   1. The run_report as formatted JSON
+#   2. &#x27;Executive Summary:&#x27; followed by the LLM response
+#
+# Expected output:
+#   run_report:
+#   {
+#     &quot;pipeline_id&quot;: &quot;scale_pipeline&quot;,
+#     ...
+#     &quot;status&quot;: &quot;SUCCESS&quot;
+#   }
+#
+#   Executive Summary:
+#   The scaled sales pipeline completed successfully for all 10,000 rows ...</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-7">Day 7 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="17-7"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D7_Self_Healing_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 17  |  DAY 7  |  PROJECT — SELF-HEALING E-COMMERCE PIPELINE
+# ══════════════════════════════════════════════════════════════
+#
+#  SCENARIO: An e-commerce company ingests product catalogs from
+#  500 vendors. Every vendor uses a different CSV format. The ETL
+#  breaks whenever a vendor renames a column (e.g. price_usd -&gt; unit_cost).
+#
+#  SOLUTION: A self-healing pipeline where:
+#    1. Schema Registry detects column drift automatically
+#    2. LLM (Groq) generates a dbt SQL mapping model on the fly
+#    3. A Confidence Guard runs the fix if score &gt;= 0.95,
+#       else pauses for human review (like Splunk alerting)
+#    4. Airflow DAG orchestrates the whole flow with failure callbacks
+#    5. Every LLM fix is written to an immutable audit log
+#
+#  Skills stacked (full W13-W17 stack):
+#    W7_D4  — audit log pattern
+#    W11    — guardrails as middleware (confidence gate)
+#    W13-14 — dbt model simulation (DuckDB)
+#    W16    — Airflow DAG simulation + on_failure_callback
+#    W10_D1 — Groq LLM (SIMULATION MODE here)
+#    W17_D3 — structured logging
+#
+#  SIMULATION MODE — runs without API keys, Kafka, or Airflow server.
+#  REAL MODE       — commented blocks show Groq + real dbt + Airflow.
+#
+#  TIME:  ~90 minutes
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+import json
+import os
+import re
+from datetime import datetime, timezone
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+AUDIT_LOG = []   # immutable append-only list (simulates an audit table)
+
+# ── dbt simulation helpers ───────────────────────────────────
+def dbt_run(name, sql, materialized=&#x27;view&#x27;):
+    if materialized == &#x27;table&#x27;:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {name} AS {sql}&#x27;)
+    else:
+        con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+    rows = con.execute(f&#x27;SELECT COUNT(*) FROM {name}&#x27;).fetchone()[0]
+    return rows
+
+def audit(event, **kwargs):
+    &quot;&quot;&quot;Append a structured audit record (W7_D4 pattern).&quot;&quot;&quot;
+    entry = {&#x27;ts&#x27;: datetime.now(timezone.utc).isoformat(),
+             &#x27;event&#x27;: event, **kwargs}
+    AUDIT_LOG.append(entry)
+    print(f&quot;  AUDIT  {event}  {json.dumps({k: v for k, v in kwargs.items() if k != &#x27;sql&#x27;})}&quot;)
+
+def structured_log(level, event, **kwargs):
+    &quot;&quot;&quot;JSON structured log line (W17_D3 pattern).&quot;&quot;&quot;
+    print(json.dumps({&#x27;ts&#x27;: datetime.now(timezone.utc).isoformat(),
+                      &#x27;level&#x27;: level, &#x27;event&#x27;: event, **kwargs}))
+
+# ── Airflow DAG simulation (W16 pattern) ───────────────────────
+class DAG:
+    def __init__(self, dag_id, schedule=&#x27;@daily&#x27;):
+        self.dag_id   = dag_id
+        self.schedule = schedule
+        self.tasks    = []
+        self.on_failure_callback = None
+
+    def task(self, fn):
+        self.tasks.append(fn)
+        return fn
+
+    def run(self):
+        results = {}
+        for fn in self.tasks:
+            try:
+                results[fn.__name__] = fn(results)
+            except Exception as exc:
+                if self.on_failure_callback:
+                    self.on_failure_callback(fn.__name__, str(exc))
+                results[fn.__name__] = f&#x27;FAILED: {exc}&#x27;
+        return results
+
+# ── LLM helper (SIMULATION MODE) ────────────────────────────
+def call_llm(system_prompt: str, user_prompt: str) -&gt; str:
+    &quot;&quot;&quot;
+    SIMULATION MODE — returns deterministic realistic responses.
+    REAL MODE (uncomment + set GROQ_API_KEY in .env):
+
+    from openai import OpenAI
+    client = OpenAI(
+        api_key=os.getenv(&#x27;GROQ_API_KEY&#x27;),
+        base_url=&#x27;https://api.groq.com/openai/v1&#x27;,
+    )
+    resp = client.chat.completions.create(
+        model=&#x27;llama3-8b-8192&#x27;,
+        messages=[
+            {&#x27;role&#x27;: &#x27;system&#x27;, &#x27;content&#x27;: system_prompt},
+            {&#x27;role&#x27;: &#x27;user&#x27;,   &#x27;content&#x27;: user_prompt},
+        ],
+        temperature=0.1,
+        response_format={&#x27;type&#x27;: &#x27;json_object&#x27;},
+    )
+    return resp.choices[0].message.content
+    &quot;&quot;&quot;
+    if &#x27;schema mapping&#x27; in user_prompt.lower() or &#x27;column drift&#x27; in user_prompt.lower():
+        # High-confidence case: clear rename drift
+        if &#x27;unit_cost&#x27; in user_prompt and &#x27;quantity_available&#x27; in user_prompt:
+            return json.dumps({
+                &#x27;sql&#x27;: (
+                    &#x27;SELECT product_id, &#x27;
+                    &#x27;unit_cost AS price_usd, &#x27;
+                    &#x27;category, &#x27;
+                    &#x27;quantity_available AS stock_qty &#x27;
+                    &#x27;FROM raw__products_vendor&#x27;
+                ),
+                &#x27;confidence&#x27;: 0.97,
+                &#x27;explanation&#x27;: (
+                    &#x27;price_usd was renamed to unit_cost and stock_qty to &#x27;
+                    &#x27;quantity_available. Semantic meaning is identical — &#x27;
+                    &#x27;safe to alias back to the standard schema.&#x27;
+                ),
+                &#x27;mappings&#x27;: {
+                    &#x27;unit_cost&#x27;: &#x27;price_usd&#x27;,
+                    &#x27;quantity_available&#x27;: &#x27;stock_qty&#x27;
+                }
+            })
+        # Low-confidence case: ambiguous drift
+        return json.dumps({
+            &#x27;sql&#x27;: None,
+            &#x27;confidence&#x27;: 0.61,
+            &#x27;explanation&#x27;: (
+                &#x27;Column names are ambiguous. Cannot determine the correct &#x27;
+                &#x27;mapping with sufficient confidence. Human review required.&#x27;
+            ),
+            &#x27;mappings&#x27;: {}
+        })
+    if &#x27;executive summary&#x27; in user_prompt.lower() or &#x27;run report&#x27; in user_prompt.lower():
+        return (
+            &#x27;Pipeline completed successfully. Schema drift was detected from &#x27;
+            &#x27;vendor_id=42 (2 columns renamed). The LLM generated a corrective &#x27;
+            &#x27;dbt model with 97% confidence — above the 95% threshold — so the &#x27;
+            &#x27;pipeline self-healed without human intervention. All 6 dbt tests passed. &#x27;
+            &#x27;Audit log contains 5 entries. No action required.&#x27;
+        )
+    if &#x27;failure&#x27; in user_prompt.lower() or &#x27;error&#x27; in user_prompt.lower():
+        return (
+            &#x27;A task in the pipeline raised an exception. Check the audit log &#x27;
+            &#x27;for the last entry. Most likely cause: the vendor CSV contained &#x27;
+            &#x27;an unexpected column type. Recommended action: inspect raw__products_vendor &#x27;
+            &#x27;and re-run the schema registry check.&#x27;
+        )
+    return &#x27;No relevant response for this prompt.&#x27;
+
+print(&#x27;Self-Healing Pipeline setup complete.&#x27;)
+print(&#x27;AUDIT_LOG will accumulate entries as tasks run.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D7_Self_Healing_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 1 — SCHEMA REGISTRY AND DRIFT DETECTION
+# ══════════════════════════════════════════════════════════════
+# The Schema Registry holds the canonical (expected) column names.
+# When a vendor CSV arrives, compare its columns to the registry.
+# Any column present in the vendor file but absent from the registry
+# is flagged as DRIFTED and must be mapped.
+#
+# Write compare_schemas(expected, received) that returns a dict:
+#   {
+#     &#x27;drifted&#x27;: [&#x27;unit_cost&#x27;, &#x27;quantity_available&#x27;],   # in vendor, not in registry
+#     &#x27;missing&#x27;: [&#x27;price_usd&#x27;, &#x27;stock_qty&#x27;],            # in registry, not in vendor
+#     &#x27;matched&#x27;: [&#x27;product_id&#x27;, &#x27;category&#x27;],            # present in both
+#     &#x27;has_drift&#x27;: True
+#   }
+#
+# Load VENDOR_DATA into DuckDB as raw__products_vendor.
+# Run compare_schemas(EXPECTED_SCHEMA, received_columns).
+# Print the drift report. Call audit(&#x27;SCHEMA_CHECK&#x27;, ...) with the result.
+#
+# Expected output:
+#   Schema drift detected!
+#   Drifted (vendor renamed):  [&#x27;unit_cost&#x27;, &#x27;quantity_available&#x27;]
+#   Missing (registry expects): [&#x27;price_usd&#x27;, &#x27;stock_qty&#x27;]
+#   Matched:                   [&#x27;product_id&#x27;, &#x27;category&#x27;]
+#   AUDIT  SCHEMA_CHECK  {&quot;has_drift&quot;: true, &quot;drifted&quot;: [...]}
+#
+# --- starting data ---
+# The registry defines what our internal dbt models expect.
+EXPECTED_SCHEMA = {
+    &#x27;product_id&#x27;: &#x27;VARCHAR&#x27;,
+    &#x27;price_usd&#x27;:  &#x27;DECIMAL&#x27;,
+    &#x27;category&#x27;:   &#x27;VARCHAR&#x27;,
+    &#x27;stock_qty&#x27;:  &#x27;INTEGER&#x27;,
+}
+
+# Vendor 42 renamed two columns without telling anyone.
+import pandas as pd
+VENDOR_DATA = pd.DataFrame([
+    {&#x27;product_id&#x27;: &#x27;P001&#x27;, &#x27;unit_cost&#x27;: 29.99, &#x27;category&#x27;: &#x27;Electronics&#x27;, &#x27;quantity_available&#x27;: 150},
+    {&#x27;product_id&#x27;: &#x27;P002&#x27;, &#x27;unit_cost&#x27;: 12.50, &#x27;category&#x27;: &#x27;Clothing&#x27;,    &#x27;quantity_available&#x27;: 400},
+    {&#x27;product_id&#x27;: &#x27;P003&#x27;, &#x27;unit_cost&#x27;: 99.00, &#x27;category&#x27;: &#x27;Electronics&#x27;, &#x27;quantity_available&#x27;:  20},
+    {&#x27;product_id&#x27;: &#x27;P004&#x27;, &#x27;unit_cost&#x27;:  5.75, &#x27;category&#x27;: &#x27;Food&#x27;,        &#x27;quantity_available&#x27;: 800},
+])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D7_Self_Healing_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 2 — LLM SCHEMA MAPPER (CODE GENERATION)
+# ══════════════════════════════════════════════════════════════
+# The LLM receives the drift report and generates a dbt SQL model
+# that maps the renamed vendor columns back to the standard schema.
+# It also returns a confidence score (0.0 – 1.0).
+#
+# Write build_mapping_prompt(expected_schema, drift_report) that
+# returns a user_prompt string containing:
+#   - expected column names
+#   - vendor column names (drifted + matched)
+#   - instruction: generate a SELECT SQL that aliases vendor columns
+#     to expected names and return JSON with keys: sql, confidence, explanation
+#
+# Call call_llm(system_prompt, user_prompt).
+# Parse the JSON response.
+# Print:
+#   LLM SQL:        SELECT product_id, unit_cost AS price_usd ...
+#   Confidence:     0.97
+#   Explanation:    price_usd was renamed to unit_cost ...
+# Call audit(&#x27;LLM_MAPPING_GENERATED&#x27;, confidence=..., sql=...)
+#
+# Expected output:
+#   LLM SQL:     SELECT product_id, unit_cost AS price_usd, ...
+#   Confidence:  0.97
+#   Explanation: price_usd was renamed to unit_cost ...
+#   AUDIT  LLM_MAPPING_GENERATED  {&quot;confidence&quot;: 0.97}
+#
+# --- starting data ---
+# drift_report comes from Task 1. call_llm() is in the setup cell.
+system_prompt = (
+    &#x27;You are a senior data engineer. Given a schema drift report, &#x27;
+    &#x27;generate a dbt SQL SELECT statement that maps vendor column names &#x27;
+    &#x27;to the standard internal schema. Respond ONLY with valid JSON &#x27;
+    &#x27;containing keys: sql, confidence (float 0-1), explanation, mappings.&#x27;
+)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D7_Self_Healing_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 3 — CONFIDENCE GUARD AND SAFE SQL EXECUTION
+# ══════════════════════════════════════════════════════════════
+# Never execute LLM-generated SQL blindly. Two layers of protection:
+#
+# Layer 1 — Confidence gate (like Splunk alerting threshold):
+#   If llm_response[&#x27;confidence&#x27;] &lt; CONFIDENCE_THRESHOLD:
+#     print &#x27;PIPELINE PAUSED — AWAITING HUMAN REVIEW&#x27;
+#     print the drift diff and LLM explanation
+#     call audit(&#x27;HUMAN_REVIEW_REQUIRED&#x27;, confidence=...)
+#     return without running any SQL
+#
+# Layer 2 — SQL safety guard (W11 guardrails pattern):
+#   Write validate_llm_sql(sql) that raises ValueError if the SQL contains
+#   DROP / DELETE / TRUNCATE / INSERT / UPDATE (case-insensitive).
+#   Also raise if sql is None or empty.
+#   Return True if safe.
+#
+# If both layers pass:
+#   Run the LLM SQL as a dbt model named &#x27;stg_products_mapped&#x27; (view).
+#   Run 3 dbt tests on stg_products_mapped:
+#     product_id -&gt; not_null
+#     price_usd  -&gt; not_null
+#     stock_qty  -&gt; not_null
+#   Call audit(&#x27;SELF_HEALED&#x27;, model=&#x27;stg_products_mapped&#x27;, rows=...)
+#   Print &#x27;Pipeline status: SELF-HEALED&#x27;
+#
+# Expected output (high-confidence path):
+#   Confidence 0.97 &gt;= 0.95 threshold. Proceeding.
+#   SQL safety check: PASS
+#   stg_products_mapped: 4 rows
+#   price_usd  not_null  PASS
+#   stock_qty  not_null  PASS
+#   product_id not_null  PASS
+#   AUDIT  SELF_HEALED  {&quot;model&quot;: &quot;stg_products_mapped&quot;, &quot;rows&quot;: 4}
+#   Pipeline status: SELF-HEALED
+#
+# --- starting data ---
+# llm_response (dict) comes from Task 2 (parsed JSON).
+CONFIDENCE_THRESHOLD = 0.95</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D7_Self_Healing_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 4 — AIRFLOW DAG ORCHESTRATION
+# ══════════════════════════════════════════════════════════════
+# Wrap the full self-healing logic inside a DAG using the DAG
+# class from the setup cell (W16 pattern).
+#
+# Define dag = DAG(&#x27;self_healing_pipeline&#x27;, schedule=&#x27;@hourly&#x27;)
+#
+# Register these tasks using dag.task:
+#   1. ingest_task(ctx)   — load VENDOR_DATA into DuckDB, return row count
+#   2. schema_task(ctx)   — run compare_schemas(), return drift_report dict
+#   3. mapping_task(ctx)  — call LLM, parse response, return llm_response dict
+#   4. heal_task(ctx)     — confidence guard + validate + dbt_run, return status
+#
+# Set dag.on_failure_callback to a function that:
+#   - calls call_llm() with the task name and error message
+#   - prints &#x27;FAILURE CALLBACK: &lt;LLM explanation&gt;&#x27;
+#   - calls audit(&#x27;TASK_FAILED&#x27;, task=task_name, error=error_msg)
+#
+# Call dag.run() and print the results dict.
+#
+# Expected output:
+#   AUDIT  SCHEMA_CHECK    ...
+#   AUDIT  LLM_MAPPING_GENERATED ...
+#   AUDIT  SELF_HEALED     ...
+#   DAG results:
+#     ingest_task:  4
+#     schema_task:  {&#x27;has_drift&#x27;: True, ...}
+#     mapping_task: {&#x27;sql&#x27;: &#x27;...&#x27;, &#x27;confidence&#x27;: 0.97, ...}
+#     heal_task:    &#x27;SELF-HEALED&#x27;
+#
+# --- starting data ---
+# All helpers (VENDOR_DATA, EXPECTED_SCHEMA, compare_schemas,
+# call_llm, dbt_run, audit, DAG) are defined in Tasks 1-3 and setup.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D7_Self_Healing_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 5 — AUDIT LOG + LLM EXECUTIVE SUMMARY
+# ══════════════════════════════════════════════════════════════
+# After the DAG completes, produce two outputs:
+#
+# Output 1 — Audit log report.
+#   Print every entry in AUDIT_LOG as a formatted table:
+#     TS                        EVENT                     DETAILS
+#     2024-01-01T10:00:00Z      SCHEMA_CHECK              has_drift=True ...
+#     ...
+#   Then print: &#x27;Total audit entries: N&#x27;
+#
+# Output 2 — LLM executive summary.
+#   Build a run_report dict containing:
+#     vendor_id, rows_ingested, drift_detected, columns_drifted,
+#     llm_confidence, pipeline_status, audit_entries, dag_id
+#   Write a system_prompt for a senior engineering manager audience.
+#   Write a user_prompt embedding the run_report and asking for
+#   a 3-sentence plain-English executive summary.
+#   Call call_llm() and print:
+#     &#x27;EXECUTIVE SUMMARY:&#x27;
+#     &lt;LLM response&gt;
+#
+# Expected output:
+#   AUDIT LOG
+#   TS                  EVENT                   DETAILS
+#   ...Z                SCHEMA_CHECK            {&quot;has_drift&quot;: true ...}
+#   ...Z                LLM_MAPPING_GENERATED   {&quot;confidence&quot;: 0.97}
+#   ...Z                SELF_HEALED             {&quot;model&quot;: &quot;stg_products_mapped&quot;}
+#   Total audit entries: 3
+#
+#   EXECUTIVE SUMMARY:
+#   Pipeline completed successfully. Schema drift was detected from
+#   vendor_id=42 (2 columns renamed). The LLM generated a corrective
+#   dbt model with 97% confidence ...
+#
+# --- starting data ---
+# AUDIT_LOG list is populated by all previous tasks.
+# dag.run() results dict is available from Task 4.
+run_report = {
+    &#x27;vendor_id&#x27;:         42,
+    &#x27;dag_id&#x27;:            &#x27;self_healing_pipeline&#x27;,
+}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D7_Self_Healing_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 6 — SECURITY GATE: SELF-HEAL AUTHORIZATION (CIA: A)
+# ══════════════════════════════════════════════════════════════
+# Analogy: the hospital&#x27;s automated medication dispenser — it can refill
+# prescriptions automatically, but has a daily dose limit, requires a
+# confidence check, and logs every dispensing event for the pharmacist.
+#
+# Before any auto-fix is applied, three gates must pass:
+#
+#   Gate 1 — Confidence:  confidence &gt;= 0.95
+#     Auto-healing with low confidence can introduce worse corruption than
+#     the original drift. Below 0.95: HUMAN REVIEW REQUIRED.
+#
+#   Gate 2 — Blast radius:  rows_affected / total_rows &lt;= 0.20
+#     A fix that rewrites more than 20% of the table is a mass-update,
+#     not a targeted heal. It could corrupt unrelated records.
+#
+#   Gate 3 — Rate limit:  heal_attempts_last_hour &lt; 3
+#     Three auto-heals per hour means the root cause is not fixed.
+#     The fourth attempt must go to a human.
+#
+# Write self_heal_security_gate(confidence, rows_affected, total_rows,
+#   heal_attempts_last_hour) -&gt; HealDecision that enforces all three gates.
+# Raise the appropriate exception on violation; return HealDecision on pass.
+# Call audit() with the decision and all gate values regardless of outcome.
+#
+# Expected output (run all four test_cases in order):
+#   LowConfidenceError: confidence 0.72 below threshold 0.95
+#   BlastRadiusError: blast radius 35.0% exceeds 20% limit
+#   RateLimitError: 3 heals in last hour -- HUMAN REVIEW REQUIRED
+#   APPLY  confidence=0.97  rows=50  pct=5.0%
+#
+# --- starting data ---
+from dataclasses import dataclass
+
+class LowConfidenceError(Exception):
+    pass
+
+class BlastRadiusError(Exception):
+    pass
+
+class RateLimitError(Exception):
+    pass
+
+@dataclass
+class HealDecision:
+    action: str
+    confidence: float
+    rows_affected: int
+
+# (confidence, rows_affected, total_rows, heal_attempts_last_hour)
+test_cases = [
+    (0.72, 50,  1000, 0),   # low confidence
+    (0.97, 350, 1000, 0),   # blast radius: 35%
+    (0.97, 50,  1000, 3),   # rate limit hit
+    (0.97, 50,  1000, 0),   # all gates pass
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-8">Day 8 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="17-8"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D8_Project_Real_Kafka_Docker.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 17  |  DAY 8  |  PROJECT — REAL KAFKA VIA DOCKER
+# ══════════════════════════════════════════════════════════════
+#
+#  In W7_D2 you learned Kafka concepts with a Python deque simulation.
+#  This project runs the same patterns against a real Kafka broker
+#  started with Docker Compose.
+#
+#  Skills stacked:
+#    W7_D2  — kafka_produce / kafka_consume simulation (foundation)
+#    W14_D4 — DataContract validation at produce time
+#    W17_D7 — Self-Healing Pipeline (Kafka feeds the schema registry)
+#    W17_D3 — structured_log per event
+#
+#  SIMULATION MODE — runs without Docker (Python deque fallback).
+#  REAL MODE       — start Docker, uncomment confluent-kafka blocks.
+#
+#  TIME:  ~90 minutes
+#
+# ══════════════════════════════════════════════════════════════
+import json
+import subprocess
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+# ── Simulation infrastructure (W7_D2 pattern, extended) ──────────
+_topics  = {}   # topic -&gt; deque
+_offsets = {}   # group::topic -&gt; int
+_dead_letter = []  # events that failed contract validation
+
+def kafka_produce(topic, message: dict, validate_fn=None):
+    &quot;&quot;&quot;
+    Produce a message to a topic.
+    If validate_fn is provided and raises, route to dead-letter instead.
+
+    REAL MODE (confluent-kafka):
+    from confluent_kafka import Producer
+    p = Producer({&#x27;bootstrap.servers&#x27;: &#x27;localhost:9092&#x27;})
+    def delivery_cb(err, msg):
+        if err: print(f&#x27;DELIVERY ERROR: {err}&#x27;)
+        else:   print(f&#x27;ACK  offset={msg.offset()}  topic={msg.topic()}&#x27;)
+    p.produce(topic, json.dumps(message).encode(), callback=delivery_cb)
+    p.flush()
+    &quot;&quot;&quot;
+    if validate_fn:
+        try:
+            validate_fn(message)
+        except Exception as e:
+            _dead_letter.append({&#x27;event&#x27;: message, &#x27;reason&#x27;: str(e)})
+            print(f&#x27;  DEAD-LETTER  {message.get(&quot;product_id&quot;, &quot;?&quot;)}  {e}&#x27;)
+            return False
+    if topic not in _topics:
+        _topics[topic] = deque()
+    _topics[topic].append(json.dumps(message))
+    return True
+
+def kafka_consume(topic, group_id, max_msgs=None):
+    &quot;&quot;&quot;
+    Consume messages from a topic, yielding (offset, dict).
+
+    REAL MODE (confluent-kafka):
+    from confluent_kafka import Consumer
+    c = Consumer({
+        &#x27;bootstrap.servers&#x27;: &#x27;localhost:9092&#x27;,
+        &#x27;group.id&#x27;: group_id,
+        &#x27;auto.offset.reset&#x27;: &#x27;earliest&#x27;,
+        &#x27;enable.auto.commit&#x27;: False,
+    })
+    c.subscribe([topic])
+    while True:
+        msg = c.poll(timeout=1.0)
+        if msg is None: break
+        if msg.error(): raise Exception(msg.error())
+        yield msg.offset(), json.loads(msg.value())
+        c.commit(message=msg)  # at-least-once: commit after processing
+    c.close()
+    &quot;&quot;&quot;
+    key = f&#x27;{group_id}::{topic}&#x27;
+    count = 0
+    while _topics.get(topic):
+        if max_msgs and count &gt;= max_msgs:
+            break
+        raw = _topics[topic].popleft()
+        _offsets[key] = _offsets.get(key, -1) + 1
+        yield _offsets[key], json.loads(raw)
+        count += 1
+
+def structured_log(level, event, **kwargs):
+    print(json.dumps({&#x27;ts&#x27;: datetime.now(timezone.utc).isoformat(),
+                      &#x27;level&#x27;: level, &#x27;event&#x27;: event, **kwargs}))
+
+print(&#x27;Setup complete. SIMULATION MODE active.&#x27;)
+print(&#x27;To switch to REAL MODE: start Docker, uncomment confluent-kafka blocks.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D8_Project_Real_Kafka_Docker.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 1 — DOCKER COMPOSE SETUP
+# ══════════════════════════════════════════════════════════════
+# Store DOCKER_COMPOSE_YML as a string — this is the exact file
+# you would save as docker-compose.yml and run with &#x27;docker-compose up -d&#x27;.
+# Then write a check_docker() function that:
+#   - runs subprocess.run([&#x27;docker&#x27;, &#x27;info&#x27;], capture_output=True)
+#   - returns True if Docker is running, False if not
+#   - prints &#x27;REAL MODE: Docker is running&#x27; or &#x27;SIMULATION MODE: Docker not available&#x27;
+# Print the compose config summary (services and their ports).
+#
+# Expected output:
+#   Docker check: SIMULATION MODE (or REAL MODE if Docker is running)
+#   Kafka compose services:
+#     zookeeper  ports: []  image: confluentinc/cp-zookeeper:7.5.0
+#     kafka      ports: [&#x27;9092:9092&#x27;]  image: confluentinc/cp-kafka:7.5.0
+#
+# --- starting data ---
+DOCKER_COMPOSE_YML = &quot;&quot;&quot;
+version: &#x27;3.8&#x27;
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on: [zookeeper]
+    ports:
+      - &#x27;9092:9092&#x27;
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+&quot;&quot;&quot;</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D8_Project_Real_Kafka_Docker.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 2 — PRODUCER WITH DELIVERY CALLBACK
+# ══════════════════════════════════════════════════════════════
+# Produce all 10 VENDOR_EVENTS to topic &#x27;product-catalog&#x27;.
+# For each event produced, call structured_log(&#x27;INFO&#x27;, &#x27;PRODUCED&#x27;, ...).
+# After all events, print:
+#   &#x27;Produced: N events to product-catalog&#x27;
+#   &#x27;Dead-lettered: N events&#x27;
+#
+# In REAL MODE, the confluent-kafka Producer fires a delivery_callback
+# per message (ACK from broker). Simulate this by printing:
+#   &#x27;ACK  vendor_id=X  product_id=Y  offset=N&#x27;
+# Use a counter variable as the simulated offset (increments per success).
+#
+# Expected output:
+#   {&quot;level&quot;: &quot;INFO&quot;, &quot;event&quot;: &quot;PRODUCED&quot;, &quot;product_id&quot;: &quot;P001&quot;, ...}
+#   ACK  vendor_id=42  product_id=P001  offset=0
+#   ... (10 lines)
+#   Produced: 10 events to product-catalog
+#   Dead-lettered: 0 events
+#
+# --- starting data ---
+# kafka_produce, structured_log, _dead_letter defined in setup cell.
+VENDOR_EVENTS = [
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P001&#x27;, &#x27;price_usd&#x27;: 29.99, &#x27;category&#x27;: &#x27;Electronics&#x27;, &#x27;stock&#x27;: 150},
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P002&#x27;, &#x27;price_usd&#x27;: 12.50, &#x27;category&#x27;: &#x27;Clothing&#x27;,    &#x27;stock&#x27;: 400},
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P003&#x27;, &#x27;price_usd&#x27;: 99.00, &#x27;category&#x27;: &#x27;Electronics&#x27;, &#x27;stock&#x27;:  20},
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P004&#x27;, &#x27;price_usd&#x27;:  5.75, &#x27;category&#x27;: &#x27;Food&#x27;,        &#x27;stock&#x27;: 800},
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P005&#x27;, &#x27;price_usd&#x27;: 45.00, &#x27;category&#x27;: &#x27;Electronics&#x27;, &#x27;stock&#x27;:  60},
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P006&#x27;, &#x27;price_usd&#x27;: 18.99, &#x27;category&#x27;: &#x27;Clothing&#x27;,    &#x27;stock&#x27;: 230},
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P007&#x27;, &#x27;price_usd&#x27;: 75.00, &#x27;category&#x27;: &#x27;Electronics&#x27;, &#x27;stock&#x27;:  35},
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P008&#x27;, &#x27;price_usd&#x27;:  3.25, &#x27;category&#x27;: &#x27;Food&#x27;,        &#x27;stock&#x27;: 1200},
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P009&#x27;, &#x27;price_usd&#x27;: 55.00, &#x27;category&#x27;: &#x27;Electronics&#x27;, &#x27;stock&#x27;:  90},
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P010&#x27;, &#x27;price_usd&#x27;: 22.00, &#x27;category&#x27;: &#x27;Clothing&#x27;,    &#x27;stock&#x27;: 175},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D8_Project_Real_Kafka_Docker.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 3 — CONSUMER GROUP WITH OFFSET MANAGEMENT
+# ══════════════════════════════════════════════════════════════
+# Consume all events from &#x27;product-catalog&#x27; with group_id=&#x27;schema-checker&#x27;.
+# For each event:
+#   - log structured_log(&#x27;INFO&#x27;, &#x27;CONSUMED&#x27;, offset=N, product_id=...)
+#   - append to a consumed_events list
+#
+# Then simulate at-least-once delivery failure:
+#   Produce the same 10 VENDOR_EVENTS to a NEW topic &#x27;product-catalog-v2&#x27;.
+#   Consume max_msgs=5 from &#x27;product-catalog-v2&#x27; (simulates a crash at offset 5).
+#   Print &#x27;CRASH at offset 4 — 5 events processed, 5 unprocessed remain in topic&#x27;.
+#   Consume again from &#x27;product-catalog-v2&#x27; (same group_id) — picks up remaining 5.
+#   Print &#x27;RECOVERED — 5 remaining events consumed&#x27;.
+#
+# Expected output:
+#   {&quot;level&quot;: &quot;INFO&quot;, &quot;event&quot;: &quot;CONSUMED&quot;, &quot;offset&quot;: 0, &quot;product_id&quot;: &quot;P001&quot;}
+#   ... (10 lines)
+#   Consumed: 10 events
+#   CRASH at offset 4 — 5 events processed, 5 unprocessed remain in topic
+#   RECOVERED — 5 remaining events consumed
+#
+# --- starting data ---
+# kafka_consume, kafka_produce, VENDOR_EVENTS, structured_log in setup/Task 2.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D8_Project_Real_Kafka_Docker.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 4 — CONTRACT VALIDATION AT PRODUCE TIME
+# ══════════════════════════════════════════════════════════════
+# Connect W14_D4 Data Contracts to the Kafka producer.
+# Write validate_event(event) that checks:
+#   - product_id is present and not empty
+#   - price_usd &gt; 0
+#   - stock &gt;= 0
+#   - category in [&#x27;Electronics&#x27;, &#x27;Clothing&#x27;, &#x27;Food&#x27;, &#x27;Toys&#x27;]
+# Raises ValueError with a descriptive message on any violation.
+#
+# Produce MIXED_EVENTS to topic &#x27;product-catalog-validated&#x27;,
+# passing validate_event as the validate_fn argument to kafka_produce.
+# Events that fail go to _dead_letter automatically.
+#
+# After producing, consume from &#x27;product-catalog-validated&#x27; and print
+# each event&#x27;s product_id on one line.
+# Then print:
+#   &#x27;Produced (valid): N&#x27;
+#   &#x27;Dead-lettered:    N&#x27;
+#   Dead-letter details: print each _dead_letter entry
+#
+# Expected output:
+#   DEAD-LETTER  P-BAD1  price_usd must be &gt; 0
+#   DEAD-LETTER  P-BAD2  category &#x27;Unknown&#x27; not in allowed list
+#   Consumed: P001, P002, P003
+#   Produced (valid): 3
+#   Dead-lettered:    2
+#
+# --- starting data ---
+# kafka_produce (with validate_fn), kafka_consume, _dead_letter in setup.
+MIXED_EVENTS = [
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P001&#x27;, &#x27;price_usd&#x27;: 29.99, &#x27;category&#x27;: &#x27;Electronics&#x27;, &#x27;stock&#x27;: 150},
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P002&#x27;, &#x27;price_usd&#x27;: 12.50, &#x27;category&#x27;: &#x27;Clothing&#x27;,    &#x27;stock&#x27;: 400},
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P-BAD1&#x27;,&#x27;price_usd&#x27;: -5.00, &#x27;category&#x27;: &#x27;Electronics&#x27;, &#x27;stock&#x27;:  10},
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P003&#x27;, &#x27;price_usd&#x27;: 99.00, &#x27;category&#x27;: &#x27;Food&#x27;,        &#x27;stock&#x27;:  20},
+    {&#x27;vendor_id&#x27;: 42, &#x27;product_id&#x27;: &#x27;P-BAD2&#x27;,&#x27;price_usd&#x27;: 15.00, &#x27;category&#x27;: &#x27;Unknown&#x27;,    &#x27;stock&#x27;:   5},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_17_Capstone_Scale/W17_D8_Project_Real_Kafka_Docker.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 5 — INTEGRATION WITH SELF-HEALING PIPELINE (W17_D7)
+# ══════════════════════════════════════════════════════════════
+# In W17_D7 the self-healing pipeline received a vendor DataFrame directly.
+# In production, that DataFrame arrives as a stream of Kafka events.
+# This task wires Kafka as the ingestion layer for the self-healing pipeline.
+#
+# Step 1 — Produce DRIFTED_VENDOR_EVENTS to topic &#x27;vendor-catalog-raw&#x27;.
+#   These events use the drifted schema (unit_cost instead of price_usd,
+#   quantity_available instead of stock).
+#
+# Step 2 — Write consume_to_dataframe(topic, group_id) that:
+#   - consumes all messages from the topic
+#   - returns a pandas DataFrame (one row per event)
+#
+# Step 3 — Pass the DataFrame to compare_schemas() from W17_D7
+#   (copy the EXPECTED_SCHEMA and compare_schemas function here).
+#   Print the drift report.
+#
+# Step 4 — Print a run_summary dict:
+#   {&#x27;events_produced&#x27;: N, &#x27;events_consumed&#x27;: N, &#x27;dead_lettered&#x27;: N,
+#    &#x27;drift_detected&#x27;: True/False, &#x27;columns_drifted&#x27;: [...],
+#    &#x27;pipeline&#x27;: &#x27;kafka -&gt; schema_registry -&gt; self_healing&#x27;}
+#
+# Expected output:
+#   Produced 4 events to vendor-catalog-raw
+#   Consumed 4 events -&gt; DataFrame (4 rows x 4 cols)
+#   Schema drift detected!
+#   Drifted: [&#x27;unit_cost&#x27;, &#x27;quantity_available&#x27;]
+#   Missing: [&#x27;price_usd&#x27;, &#x27;stock&#x27;]
+#   run_summary: {&#x27;events_produced&#x27;: 4, &#x27;events_consumed&#x27;: 4, ...}
+#
+# --- starting data ---
+import pandas as pd
+
+EXPECTED_SCHEMA = {
+    &#x27;product_id&#x27;: &#x27;VARCHAR&#x27;,
+    &#x27;price_usd&#x27;:  &#x27;DECIMAL&#x27;,
+    &#x27;category&#x27;:   &#x27;VARCHAR&#x27;,
+    &#x27;stock&#x27;:      &#x27;INTEGER&#x27;,
+}
+
+DRIFTED_VENDOR_EVENTS = [
+    {&#x27;product_id&#x27;: &#x27;P001&#x27;, &#x27;unit_cost&#x27;: 29.99, &#x27;category&#x27;: &#x27;Electronics&#x27;, &#x27;quantity_available&#x27;: 150},
+    {&#x27;product_id&#x27;: &#x27;P002&#x27;, &#x27;unit_cost&#x27;: 12.50, &#x27;category&#x27;: &#x27;Clothing&#x27;,    &#x27;quantity_available&#x27;: 400},
+    {&#x27;product_id&#x27;: &#x27;P003&#x27;, &#x27;unit_cost&#x27;: 99.00, &#x27;category&#x27;: &#x27;Electronics&#x27;, &#x27;quantity_available&#x27;:  20},
+    {&#x27;product_id&#x27;: &#x27;P004&#x27;, &#x27;unit_cost&#x27;:  5.75, &#x27;category&#x27;: &#x27;Food&#x27;,        &#x27;quantity_available&#x27;: 800},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="pager"><a class="btn ghost" href="week-16.html">&larr; Week 16</a><a class="btn ghost" href="week-18.html">Week 18 &rarr;</a></div>
+</main></body></html>

@@ -1,0 +1,1177 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 15 — BigQuery</title>
+<link rel="stylesheet" href="style.css"><script>window.SITE_DATASETS = ["datasets/titanic_train.csv"];</script>
+<script src="app.js" defer></script></head>
+<body data-site="python">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Python Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 15 — BigQuery</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a><a class="btn ghost" href="#day-6">Day 6</a></div><p class="note">Done this week: <span data-week-count="15" data-size="6"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><p class="note">Cells that need a file other than the Titanic table, a web connection, a database server or a package that is not available in the browser will show an error when run. Read those instead.</p><h2 id="day-1">Day 1 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="15-1"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D1_BigQuery_Concepts.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 15  |  DAY 1  |  BIGQUERY CONCEPTS AND ARCHITECTURE
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Understand BigQuery architecture: serverless, columnar, separated storage/compute
+#  2. Know partitioning and clustering and when each reduces cost
+#  3. Simulate BQ cost estimation with a Python dry-run function
+#
+#  TIME:  ~40 minutes
+#
+#  SETUP FOR REAL MODE
+#  ───────────────
+#  pip install google-cloud-bigquery
+#  Create GCP free account -&gt; enable BigQuery API -&gt; download service account key
+#  Set: GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;BigQuery architecture partitioning clustering tutorial&quot;
+#  Video: &quot;BigQuery Partitioning &amp; Clustering | Performance Optimization + Live Demo!&quot; -- TechTrapture
+#        https://www.youtube.com/watch?v=BWdPz8uqhns
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+
+# SIMULATION: DuckDB as local BigQuery stand-in
+con = duckdb.connect(&#x27;:memory:&#x27;)
+print(&#x27;BigQuery Concepts lesson ready.&#x27;)
+print(&#x27;Using DuckDB simulation. REAL MODE code shown in comments.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D1_BigQuery_Concepts.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — BIGQUERY ARCHITECTURE
+# ══════════════════════════════════════════════════════════════
+# BigQuery is a serverless, columnar data warehouse on GCP.
+# Key design choices:
+#
+#   Serverless:      No servers to manage. You pay per query (TB scanned) or by slot.
+#   Columnar:        Data stored by column, not by row. Reads only the columns your query uses.
+#                    A query on 1 column of a 100-column table reads ~1% of the data.
+#   Separated:       Storage (Colossus) is decoupled from compute (Dremel).
+#                    Scale storage and compute independently.
+#
+# Pricing model (on-demand):
+#   $5 per TB of data scanned
+#   First 1 TB per month is free
+#
+# Key objects:
+#   Project   -&gt; top-level billing unit (e.g. my-company-prod)
+#   Dataset   -&gt; namespace for tables (e.g. analytics, raw, staging)
+#   Table     -&gt; rows and columns (like a SQL table)
+#   View      -&gt; saved query (no storage cost, query runs on the fly)
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+
+def estimate_bq_cost(bytes_scanned, price_per_tb=5.0):
+    &quot;&quot;&quot;Estimate BigQuery on-demand query cost.&quot;&quot;&quot;
+    tb_scanned = bytes_scanned / (1024 ** 4)
+    cost = tb_scanned * price_per_tb
+    free_tb = 1.0
+    billable_tb = max(0, tb_scanned - free_tb)
+    billable_cost = billable_tb * price_per_tb
+    return {
+        &#x27;bytes_scanned&#x27;: bytes_scanned,
+        &#x27;tb_scanned&#x27;:    round(tb_scanned, 6),
+        &#x27;estimated_cost_usd&#x27;: round(billable_cost, 4),
+        &#x27;note&#x27;: &#x27;First 1TB/month free on on-demand pricing&#x27;
+    }
+
+# Dry-run examples: how much would these queries cost?
+scenarios = [
+    (&#x27;SELECT * FROM events WHERE user_id = 123&#x27;,     500_000_000),       # 500 MB
+    (&#x27;SELECT COUNT(*) FROM events&#x27;,                 50_000_000_000),     # 50 GB
+    (&#x27;Full table scan on 2TB events table&#x27;,      2_000_000_000_000),     # 2 TB
+]
+
+for query, bytes_scanned in scenarios:
+    est = estimate_bq_cost(bytes_scanned)
+    print(f&#x27;  Query: {query[:50]}&#x27;)
+    print(f&#x27;    Scans: {est[&quot;tb_scanned&quot;]} TB  |  Cost: ${est[&quot;estimated_cost_usd&quot;]:.4f}&#x27;)
+    print()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D1_BigQuery_Concepts.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# A team runs 5 queries per day. Each query scans a different amount.
+# Use estimate_bq_cost() to calculate the daily and monthly cost (22 working days).
+# Print a cost report per query and the totals.
+#
+# Expected output:
+#   daily_report queries + totals:
+#     query_1  0.5 GB   $0.0000
+#     query_2  50 GB    $0.2250  (after 1TB free)
+#     ... etc
+#   Daily total:   $X.XXXX
+#   Monthly total: $XX.XXXX (22 working days)
+#
+# --- starting data ---
+daily_queries = [
+    (&#x27;dashboard_load&#x27;,    500_000_000),       # 500 MB
+    (&#x27;cohort_analysis&#x27;,  50_000_000_000),     # 50 GB
+    (&#x27;revenue_report&#x27;,    5_000_000_000),     # 5 GB
+    (&#x27;user_journey&#x27;,    200_000_000_000),     # 200 GB
+    (&#x27;anomaly_detect&#x27;,   10_000_000_000),     # 10 GB
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D1_BigQuery_Concepts.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — PARTITIONING AND CLUSTERING
+# ══════════════════════════════════════════════════════════════
+# PARTITIONING: split table into segments by a date or integer column.
+#   - A query with WHERE event_date = &#x27;2024-01&#x27; only scans that partition.
+#   - 90% cost reduction is typical for time-filtered queries.
+#   - Best for: time-series tables (events, logs, transactions)
+#
+# CLUSTERING: sort rows within each partition by one or more columns.
+#   - A query with WHERE country = &#x27;GB&#x27; skips blocks where country != &#x27;GB&#x27;.
+#   - Works best after partitioning. Reduces bytes scanned further.
+#   - Best for: high-cardinality filter columns (country, product_id, user_id)
+#
+# In SQL (BigQuery DDL):
+#   CREATE TABLE analytics.events
+#   PARTITION BY DATE(event_timestamp)
+#   CLUSTER BY country, event_type
+#   AS SELECT ...
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+def estimate_scan_with_optimization(total_tb, partitions, queried_partitions,
+                                     cluster_selectivity=1.0):
+    &quot;&quot;&quot;Estimate bytes scanned with and without partitioning + clustering.&quot;&quot;&quot;
+    full_scan_tb       = total_tb
+    partitioned_tb     = total_tb * (queried_partitions / partitions)
+    clustered_tb       = partitioned_tb * cluster_selectivity
+    return {
+        &#x27;no_optimization&#x27;:  round(full_scan_tb, 3),
+        &#x27;partitioned&#x27;:      round(partitioned_tb, 3),
+        &#x27;partitioned_clustered&#x27;: round(clustered_tb, 3),
+    }
+
+# events table: 365 daily partitions, querying 1 day, cluster selectivity 20%
+result = estimate_scan_with_optimization(
+    total_tb=10.0, partitions=365, queried_partitions=1, cluster_selectivity=0.20
+)
+
+for strategy, tb in result.items():
+    cost = estimate_bq_cost(tb * 1024**4)[&#x27;estimated_cost_usd&#x27;]
+    print(f&#x27;  {strategy:&lt;30}  {tb:&gt;6.3f} TB  -&gt;  ${cost:.4f}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D1_BigQuery_Concepts.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# A company has a 5TB transactions table with 1825 daily partitions (5 years).
+# They run 3 queries daily:
+#   Q1: filter on 7 days, cluster selectivity 30% (country filter)
+#   Q2: filter on 30 days, cluster selectivity 10% (product_id filter)
+#   Q3: full year (365 days), no clustering
+#
+# Part A: use estimate_scan_with_optimization() for each query.
+#         Print the cost comparison (no_optimization vs partitioned_clustered).
+#</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D1_BigQuery_Concepts.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — APPLIED PATTERN
+# ══════════════════════════════════════════════════════════════
+# Combine the patterns from Concepts 1 and 2 into a complete workflow.
+# The example below shows all components working together.
+#
+# EXAMPLE ───────────────────────────────────────────────────────
+# Run the complete pipeline with error handling:
+print(&#x27;All concepts combined — see exercises to apply this pattern.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D1_BigQuery_Concepts.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+write a function recommend_table_design(queries)
+#         that takes the list of query patterns and returns:
+#         &#x27;PARTITION BY date, CLUSTER BY country, product_id&#x27;
+#         based on the most common filter columns.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-2">Day 2 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="15-2"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D2_BigQuery_Read.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 15  |  DAY 2  |  BIGQUERY PYTHON CLIENT — READ
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Run a query job against BigQuery and retrieve results as a DataFrame
+#  2. Use parameterized queries to prevent injection and enable caching
+#  3. Simulate the BigQuery client API with DuckDB for local development
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;google-cloud-bigquery Python client tutorial&quot;
+#  Video: &quot;Getting Started With Google BigQuery API In Python&quot; -- Jie Jenn
+#        https://www.youtube.com/watch?v=lLPdRRy7dfE
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+import pandas as pd
+from dataclasses import dataclass, field
+from typing import Any
+
+# ─── SIMULATION MODE ──────────────────────────────────────────────────────────
+# We simulate the BigQuery client API using DuckDB.
+# The interface is identical to what you&#x27;d use in production.
+# REAL MODE: replace BigQuerySimulator with:
+#   from google.cloud import bigquery
+#   client = bigquery.Client(project=&#x27;my-project&#x27;)
+
+@dataclass
+class QueryParameter:
+    name:  str
+    type_: str
+    value: Any
+
+class BigQuerySimulator:
+    &quot;&quot;&quot;DuckDB-backed simulation of the BigQuery Python client.&quot;&quot;&quot;
+    def __init__(self):
+        self.con = duckdb.connect(&#x27;:memory:&#x27;)
+        self._bytes_scanned = 0
+
+    def query(self, sql, query_parameters=None):
+        if query_parameters:
+            for p in query_parameters:
+                val = f&quot;&#x27;{p.value}&#x27;&quot; if p.type_ in (&#x27;STRING&#x27;, &#x27;DATE&#x27;) else str(p.value)
+                sql = sql.replace(f&#x27;@{p.name}&#x27;, val)
+        df = self.con.execute(sql).fetchdf()
+        self._bytes_scanned += len(df) * 100  # simulate
+        return df
+
+    def load_table(self, table_name, df):
+        self.con.execute(f&#x27;CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM df&#x27;)
+        print(f&#x27;  Loaded {len(df)} rows into {table_name}&#x27;)
+
+client = BigQuerySimulator()
+print(&#x27;BigQuery Read lesson ready (DuckDB simulation).&#x27;)
+
+# REAL MODE (uncomment when GCP credentials are configured):
+# from google.cloud import bigquery
+# client = bigquery.Client(project=&#x27;my-project-id&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D2_BigQuery_Read.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — RUNNING A QUERY JOB
+# ══════════════════════════════════════════════════════════════
+# In BigQuery, every SQL execution is a JOB.
+# A job is asynchronous by default, but .result() blocks until done.
+#
+# REAL MODE:
+#   query_job = client.query(&#x27;SELECT ...&#x27;)
+#   df = query_job.to_dataframe()            # blocks until done
+#   print(query_job.total_bytes_processed)   # bytes scanned (for cost calc)
+#
+# Our simulation: client.query(sql) returns a DataFrame directly.
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+# Load a sample table
+client.load_table(&#x27;orders&#x27;, pd.DataFrame([
+    {&#x27;order_id&#x27;: 1, &#x27;customer_id&#x27;: 101, &#x27;order_date&#x27;: &#x27;2024-01-05&#x27;, &#x27;amount&#x27;: 250.00, &#x27;country&#x27;: &#x27;GB&#x27;},
+    {&#x27;order_id&#x27;: 2, &#x27;customer_id&#x27;: 102, &#x27;order_date&#x27;: &#x27;2024-01-10&#x27;, &#x27;amount&#x27;:  89.50, &#x27;country&#x27;: &#x27;US&#x27;},
+    {&#x27;order_id&#x27;: 3, &#x27;customer_id&#x27;: 101, &#x27;order_date&#x27;: &#x27;2024-02-01&#x27;, &#x27;amount&#x27;: 412.00, &#x27;country&#x27;: &#x27;GB&#x27;},
+    {&#x27;order_id&#x27;: 4, &#x27;customer_id&#x27;: 103, &#x27;order_date&#x27;: &#x27;2024-02-15&#x27;, &#x27;amount&#x27;: 175.00, &#x27;country&#x27;: &#x27;DE&#x27;},
+    {&#x27;order_id&#x27;: 5, &#x27;customer_id&#x27;: 102, &#x27;order_date&#x27;: &#x27;2024-03-01&#x27;, &#x27;amount&#x27;: 320.00, &#x27;country&#x27;: &#x27;US&#x27;},
+]))
+
+# SIMULATION query (identical syntax to real BigQuery SQL)
+sql = &#x27;&#x27;&#x27;
+    SELECT
+        country,
+        COUNT(*)        AS orders,
+        SUM(amount)     AS total_revenue,
+        AVG(amount)     AS avg_order_value
+    FROM orders
+    GROUP BY country
+    ORDER BY total_revenue DESC
+&#x27;&#x27;&#x27;
+
+df = client.query(sql)
+print(&#x27;Query result:&#x27;)
+print(df)
+
+# REAL MODE equivalent:
+# job = client.query(sql)
+# df = job.to_dataframe()
+# print(f&#x27;Bytes scanned: {job.total_bytes_processed:,}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D2_BigQuery_Read.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Load the employees DataFrame into BigQuery simulation, then run a query
+# that returns: department, headcount, avg_salary (rounded to 2dp),
+# ordered by avg_salary descending.
+#
+# Expected output:
+#   department  headcount  avg_salary
+#   IT                  2    85000.00
+#   Finance             1    71000.00
+#   Sales               2    57500.00
+#   HR                  1    48000.00
+#
+# --- starting data ---
+employees_df = pd.DataFrame([
+    {&#x27;employee_id&#x27;: 1, &#x27;department&#x27;: &#x27;Sales&#x27;,   &#x27;salary&#x27;: 62000},
+    {&#x27;employee_id&#x27;: 2, &#x27;department&#x27;: &#x27;IT&#x27;,      &#x27;salary&#x27;: 88000},
+    {&#x27;employee_id&#x27;: 3, &#x27;department&#x27;: &#x27;Finance&#x27;, &#x27;salary&#x27;: 71000},
+    {&#x27;employee_id&#x27;: 4, &#x27;department&#x27;: &#x27;HR&#x27;,      &#x27;salary&#x27;: 48000},
+    {&#x27;employee_id&#x27;: 5, &#x27;department&#x27;: &#x27;Sales&#x27;,   &#x27;salary&#x27;: 53000},
+    {&#x27;employee_id&#x27;: 6, &#x27;department&#x27;: &#x27;IT&#x27;,      &#x27;salary&#x27;: 82000},
+])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D2_BigQuery_Read.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — PARAMETERIZED QUERIES
+# ══════════════════════════════════════════════════════════════
+# BigQuery supports @param named parameters — just like the W6 Royal Road Standard.
+# They prevent SQL injection and enable BigQuery&#x27;s query cache.
+#
+# REAL MODE:
+#   from google.cloud.bigquery import QueryJobConfig, ScalarQueryParameter
+#   config = QueryJobConfig(query_parameters=[
+#       ScalarQueryParameter(&#x27;country&#x27;, &#x27;STRING&#x27;, &#x27;GB&#x27;),
+#       ScalarQueryParameter(&#x27;min_amount&#x27;, &#x27;FLOAT64&#x27;, 100.0)
+#   ])
+#   df = client.query(sql, job_config=config).to_dataframe()
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+parameterized_sql = &#x27;&#x27;&#x27;
+    SELECT order_id, amount, country
+    FROM orders
+    WHERE country    = @target_country
+      AND amount     &gt; @min_amount
+    ORDER BY amount DESC
+&#x27;&#x27;&#x27;
+
+params = [
+    QueryParameter(&#x27;target_country&#x27;, &#x27;STRING&#x27;,  &#x27;GB&#x27;),
+    QueryParameter(&#x27;min_amount&#x27;,     &#x27;FLOAT64&#x27;, 100.0),
+]
+
+df = client.query(parameterized_sql, query_parameters=params)
+print(&#x27;Parameterized query result (GB orders &gt; 100):&#x27;)
+print(df)
+
+# REAL MODE:
+# from google.cloud.bigquery import QueryJobConfig, ScalarQueryParameter
+# config = QueryJobConfig(query_parameters=[
+#     ScalarQueryParameter(&#x27;target_country&#x27;, &#x27;STRING&#x27;, &#x27;GB&#x27;),
+#     ScalarQueryParameter(&#x27;min_amount&#x27;, &#x27;FLOAT64&#x27;, 100.0)
+# ])
+# df = client.query(sql, job_config=config).to_dataframe()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D2_BigQuery_Read.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Write a function run_bq_report(client, department, min_salary)
+# that uses parameterized_sql to query the employees table
+# and returns a DataFrame filtered by department and min_salary.
+# Then call it twice with different parameters and print each result.
+#
+# Expected:
+#   run_bq_report(&#x27;IT&#x27;, 80000):
+#      employee_id  department  salary
+#    0           2          IT   88000
+#    1           6          IT   82000
+#
+#   run_bq_report(&#x27;Sales&#x27;, 50000):
+#      employee_id  department  salary
+#    0           1       Sales   62000
+#    1           5       Sales   53000</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D2_BigQuery_Read.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — APPLIED PATTERN
+# ══════════════════════════════════════════════════════════════
+# Combine the patterns from Concepts 1 and 2 into a complete workflow.
+# The example below shows all components working together.
+#
+# EXAMPLE ───────────────────────────────────────────────────────
+# Run the complete pipeline with error handling:
+print(&#x27;All concepts combined — see exercises to apply this pattern.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D2_BigQuery_Read.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Extend your solution from Exercise 2:
+# Add an assertion to verify the output is correct.
+# Print a PASS/FAIL message.
+#</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-3">Day 3 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="15-3"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D3_BigQuery_Write.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 15  |  DAY 3  |  BIGQUERY PYTHON CLIENT — WRITE
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Load a DataFrame to BigQuery with WRITE_TRUNCATE and WRITE_APPEND
+#  2. Understand when each write disposition is correct
+#  3. Validate loaded data with assertions before and after writing
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;BigQuery load_table_from_dataframe Python write disposition&quot;
+#  Video: &quot;How to Load Dataframe to Big Query table - Python Client&quot; -- Cloud &amp; AI Analytics
+#        https://www.youtube.com/watch?v=-NZfU3wXA2I
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+import pandas as pd
+
+class BigQuerySimulator:
+    def __init__(self):
+        self.con = duckdb.connect(&#x27;:memory:&#x27;)
+
+    def load_table_from_dataframe(self, df, table_id, write_disposition=&#x27;WRITE_TRUNCATE&#x27;):
+        &quot;&quot;&quot;Simulate BigQuery load job from a DataFrame.&quot;&quot;&quot;
+        tables = [r[0] for r in self.con.execute(&#x27;SHOW TABLES&#x27;).fetchall()]
+        if write_disposition == &#x27;WRITE_TRUNCATE&#x27; or table_id not in tables:
+            self.con.execute(f&#x27;CREATE OR REPLACE TABLE {table_id} AS SELECT * FROM df&#x27;)
+        elif write_disposition == &#x27;WRITE_APPEND&#x27;:
+            self.con.execute(f&#x27;INSERT INTO {table_id} SELECT * FROM df&#x27;)
+        elif write_disposition == &#x27;WRITE_EMPTY&#x27;:
+            if table_id in tables:
+                existing = self.con.execute(f&#x27;SELECT COUNT(*) FROM {table_id}&#x27;).fetchone()[0]
+                if existing &gt; 0:
+                    raise ValueError(f&#x27;WRITE_EMPTY failed: {table_id} already has {existing} rows&#x27;)
+            self.con.execute(f&#x27;CREATE OR REPLACE TABLE {table_id} AS SELECT * FROM df&#x27;)
+        n = self.con.execute(f&#x27;SELECT COUNT(*) FROM {table_id}&#x27;).fetchone()[0]
+        print(f&#x27;  [{write_disposition}]  {table_id}  -&gt; {n} total rows&#x27;)
+
+    def query(self, sql):
+        return self.con.execute(sql).fetchdf()
+
+client = BigQuerySimulator()
+print(&#x27;BigQuery Write lesson ready (DuckDB simulation).&#x27;)
+
+# REAL MODE:
+# from google.cloud import bigquery
+# client = bigquery.Client(project=&#x27;my-project&#x27;)
+# job_config = bigquery.LoadJobConfig(write_disposition=&#x27;WRITE_TRUNCATE&#x27;)
+# job = client.load_table_from_dataframe(df, &#x27;project.dataset.table&#x27;, job_config=job_config)
+# job.result()  # wait for completion</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D3_BigQuery_Write.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — WRITE DISPOSITIONS
+# ══════════════════════════════════════════════════════════════
+# WRITE_TRUNCATE -&gt; DELETE all existing rows, then write new rows
+#   Use for: full refresh tables (dimension tables, small lookups)
+#   Risk:    if the load fails, table is empty
+#
+# WRITE_APPEND -&gt; ADD new rows to existing rows (no delete)
+#   Use for: event/log tables, incremental fact tables
+#   Risk:    re-running creates duplicates unless you deduplicate
+#
+# WRITE_EMPTY -&gt; fail if table already has rows
+#   Use for: one-time migration, seed data loads
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+products_v1 = pd.DataFrame([
+    {&#x27;product_id&#x27;: 1, &#x27;name&#x27;: &#x27;Widget&#x27;,  &#x27;price&#x27;: 15.00},
+    {&#x27;product_id&#x27;: 2, &#x27;name&#x27;: &#x27;Gadget&#x27;,  &#x27;price&#x27;: 39.99},
+])
+
+products_v2 = pd.DataFrame([
+    {&#x27;product_id&#x27;: 1, &#x27;name&#x27;: &#x27;Widget&#x27;,  &#x27;price&#x27;: 16.50},  # price changed
+    {&#x27;product_id&#x27;: 2, &#x27;name&#x27;: &#x27;Gadget&#x27;,  &#x27;price&#x27;: 39.99},
+    {&#x27;product_id&#x27;: 3, &#x27;name&#x27;: &#x27;Gizmo&#x27;,   &#x27;price&#x27;: 59.00},  # new product
+])
+
+# Initial load
+client.load_table_from_dataframe(products_v1, &#x27;dim_products&#x27;, &#x27;WRITE_TRUNCATE&#x27;)
+print(&#x27;After initial load:&#x27;, client.query(&#x27;SELECT * FROM dim_products&#x27;).to_string())
+
+# Daily refresh: WRITE_TRUNCATE replaces everything
+client.load_table_from_dataframe(products_v2, &#x27;dim_products&#x27;, &#x27;WRITE_TRUNCATE&#x27;)
+print(&#x27;After refresh:&#x27;, client.query(&#x27;SELECT * FROM dim_products&#x27;).to_string())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D3_BigQuery_Write.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Demonstrate the WRITE_APPEND duplication problem.
+# Load events_batch_1 with WRITE_APPEND.
+# Then load events_batch_1 AGAIN with WRITE_APPEND (simulating a pipeline re-run).
+# Show the duplicate rows.
+# Then fix it: reload with WRITE_TRUNCATE and print the clean result.
+#
+# Expected output shows:
+#   After 2 appends: 6 rows (3 duplicated)
+#   After truncate reload: 3 rows
+#
+# --- starting data ---
+events_batch_1 = pd.DataFrame([
+    {&#x27;event_id&#x27;: 1, &#x27;event_date&#x27;: &#x27;2024-01-01&#x27;, &#x27;event_type&#x27;: &#x27;page_view&#x27;},
+    {&#x27;event_id&#x27;: 2, &#x27;event_date&#x27;: &#x27;2024-01-01&#x27;, &#x27;event_type&#x27;: &#x27;click&#x27;},
+    {&#x27;event_id&#x27;: 3, &#x27;event_date&#x27;: &#x27;2024-01-02&#x27;, &#x27;event_type&#x27;: &#x27;purchase&#x27;},
+])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D3_BigQuery_Write.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — PRE/POST LOAD VALIDATION
+# ══════════════════════════════════════════════════════════════
+# Production rule: VALIDATE the DataFrame before writing to BigQuery.
+# A bad load can corrupt a table that serves 50 dashboards.
+#
+# Pre-load checks (on the DataFrame):
+#   - no nulls in required columns
+#   - row count &gt; 0
+#   - column values in expected ranges
+#
+# Post-load checks (query BigQuery after loading):
+#   - row count matches source DataFrame
+#   - no nulls introduced during load
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+def validated_load(client, df, table_id, required_cols, write_disposition=&#x27;WRITE_TRUNCATE&#x27;):
+    &quot;&quot;&quot;Validate a DataFrame then load it to BigQuery.&quot;&quot;&quot;
+    # Pre-load checks
+    assert len(df) &gt; 0, &#x27;DataFrame is empty — aborting load&#x27;
+    for col in required_cols:
+        null_count = df[col].isna().sum()
+        assert null_count == 0, f&#x27;Pre-load FAIL: {col} has {null_count} null values&#x27;
+    print(f&#x27;  Pre-load checks passed for {table_id} ({len(df)} rows)&#x27;)
+
+    # Load
+    client.load_table_from_dataframe(df, table_id, write_disposition)
+
+    # Post-load check
+    bq_count = client.query(f&#x27;SELECT COUNT(*) AS n FROM {table_id}&#x27;).iloc[0][&#x27;n&#x27;]
+    assert bq_count == len(df), f&#x27;Post-load FAIL: BQ has {bq_count} rows, expected {len(df)}&#x27;
+    print(f&#x27;  Post-load check passed: {bq_count} rows confirmed in {table_id}&#x27;)
+
+clean_df = pd.DataFrame([
+    {&#x27;order_id&#x27;: 10, &#x27;customer_id&#x27;: 201, &#x27;amount&#x27;: 500.00},
+    {&#x27;order_id&#x27;: 11, &#x27;customer_id&#x27;: 202, &#x27;amount&#x27;: 120.00},
+])
+
+validated_load(client, clean_df, &#x27;orders_daily&#x27;, [&#x27;order_id&#x27;, &#x27;customer_id&#x27;, &#x27;amount&#x27;])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D3_BigQuery_Write.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Use validated_load() to load payroll_df to BigQuery.
+# First try loading the dirty_df (it has a null employee_id) — catch the AssertionError.
+# Then clean the data and load it successfully.
+# Print the final table.
+#
+# Expected output:
+#   Pre-load FAIL caught: Pre-load FAIL: employee_id has 1 null values
+#   Pre-load checks passed for payroll (3 rows)
+#   [WRITE_TRUNCATE]  payroll  -&gt; 3 total rows
+#   Post-load check passed: 3 rows confirmed in payroll
+#
+# --- starting data ---
+dirty_df = pd.DataFrame([
+    {&#x27;employee_id&#x27;: 101, &#x27;department&#x27;: &#x27;Sales&#x27;,   &#x27;salary&#x27;: 62000},
+    {&#x27;employee_id&#x27;: None, &#x27;department&#x27;: &#x27;IT&#x27;,     &#x27;salary&#x27;: 88000},
+    {&#x27;employee_id&#x27;: 103, &#x27;department&#x27;: &#x27;Finance&#x27;, &#x27;salary&#x27;: 71000},
+])
+clean_payroll_df = dirty_df.dropna(subset=[&#x27;employee_id&#x27;]).reset_index(drop=True)
+clean_payroll_df[&#x27;employee_id&#x27;] = clean_payroll_df[&#x27;employee_id&#x27;].astype(int)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D3_BigQuery_Write.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — APPLIED PATTERN
+# ══════════════════════════════════════════════════════════════
+# Combine the patterns from Concepts 1 and 2 into a complete workflow.
+# The example below shows all components working together.
+#
+# EXAMPLE ───────────────────────────────────────────────────────
+# Run the complete pipeline with error handling:
+print(&#x27;All concepts combined — see exercises to apply this pattern.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D3_BigQuery_Write.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Extend your solution from Exercise 2:
+# Add an assertion to verify the output is correct.
+# Print a PASS/FAIL message.
+#</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-4">Day 4 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="15-4"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D4_BigQuery_Cost_Control.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 15  |  DAY 4  |  BIGQUERY COST CONTROL
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Estimate query cost with a dry-run before executing
+#  2. Apply the SELECT only needed columns pattern to reduce bytes scanned
+#  3. Build a cost-aware query runner that blocks expensive queries
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;BigQuery cost optimization best practices&quot;
+#  Video: &quot;Cost optimization best practices for BigQuery&quot; -- Google Cloud Events
+#        https://www.youtube.com/watch?v=cZgTavxWO2k
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+TABLE_REGISTRY = {
+    &#x27;events&#x27;: {
+        &#x27;total_bytes&#x27;: 500_000_000_000,
+        &#x27;columns&#x27;: {
+            &#x27;event_id&#x27;:        5_000_000_000,
+            &#x27;user_id&#x27;:         5_000_000_000,
+            &#x27;event_type&#x27;:      3_000_000_000,
+            &#x27;event_timestamp&#x27;: 5_000_000_000,
+            &#x27;page_url&#x27;:       50_000_000_000,
+            &#x27;properties&#x27;:    200_000_000_000,
+            &#x27;raw_json&#x27;:      220_000_000_000,
+        }
+    }
+}
+
+def dry_run(sql, table_registry=TABLE_REGISTRY):
+    table = next((t for t in table_registry if t in sql.lower()), None)
+    if not table:
+        return {&#x27;bytes_scanned&#x27;: 0, &#x27;tb_scanned&#x27;: 0.0, &#x27;cost_usd&#x27;: 0.0}
+    meta = table_registry[table]
+    if &#x27;select *&#x27; in sql.lower():
+        bytes_scanned = meta[&#x27;total_bytes&#x27;]
+    else:
+        bytes_scanned = sum(v for col, v in meta[&#x27;columns&#x27;].items() if col in sql)
+        if bytes_scanned == 0:
+            bytes_scanned = meta[&#x27;total_bytes&#x27;]
+    tb = bytes_scanned / (1024 ** 4)
+    cost = max(0, tb - 1.0) * 5.0
+    return {&#x27;bytes_scanned&#x27;: bytes_scanned, &#x27;tb_scanned&#x27;: round(tb, 3), &#x27;cost_usd&#x27;: round(cost, 4)}
+
+print(&#x27;BigQuery Cost Control lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D4_BigQuery_Cost_Control.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — DRY-RUN BEFORE EXECUTE
+# ══════════════════════════════════════════════════════════════
+# REAL MODE dry run:
+#   from google.cloud.bigquery import QueryJobConfig
+#   config = QueryJobConfig(dry_run=True, use_query_cache=False)
+#   job = client.query(sql, job_config=config)
+#   print(job.total_bytes_processed)  # returns immediately, no charge
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+queries = [
+    (&#x27;SELECT * scan (avoid this)&#x27;,
+     &#x27;SELECT * FROM events&#x27;),
+    (&#x27;Targeted columns only&#x27;,
+     &#x27;SELECT event_id, user_id, event_type FROM events&#x27;),
+    (&#x27;Heavy: page_url + raw_json&#x27;,
+     &#x27;SELECT event_id, page_url, raw_json FROM events&#x27;),
+]
+
+print(&#x27;Dry-run cost estimates:&#x27;)
+for label, sql in queries:
+    est = dry_run(sql)
+    flag = &#x27;WARNING: expensive&#x27; if est[&#x27;cost_usd&#x27;] &gt; 1.0 else &#x27;OK&#x27;
+    print(f&#x27;  {label:&lt;35}  {est[&quot;tb_scanned&quot;]:&gt;6.3f} TB  ${est[&quot;cost_usd&quot;]:.4f}  [{flag}]&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D4_BigQuery_Cost_Control.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# A team runs these 3 queries. Use dry_run() on each.
+# Print a report showing TB scanned, cost, and OK/WARNING.
+# At the end print total estimated daily cost.
+#
+# Expected: Q1 is cheap, Q2 and Q3 are expensive.
+#
+# --- starting data ---
+analyst_queries = [
+    (&#x27;cohort_report&#x27;,   &#x27;SELECT event_id, user_id, event_type FROM events&#x27;),
+    (&#x27;full_export&#x27;,     &#x27;SELECT * FROM events&#x27;),
+    (&#x27;page_analysis&#x27;,   &#x27;SELECT event_id, page_url, properties, raw_json FROM events&#x27;),
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D4_BigQuery_Cost_Control.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — COST-AWARE QUERY RUNNER
+# ══════════════════════════════════════════════════════════════
+# Production pipelines should refuse to run queries that exceed a cost budget.
+# Pattern: dry_run -&gt; check -&gt; execute or block.
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+import duckdb
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+def cost_aware_query(sql, budget_usd=1.0):
+    est = dry_run(sql)
+    if est[&#x27;cost_usd&#x27;] &gt; budget_usd:
+        raise RuntimeError(
+            f&#x27;Query blocked: estimated ${est[&quot;cost_usd&quot;]:.4f} &#x27;
+            f&#x27;exceeds budget ${budget_usd:.4f}&#x27;
+        )
+    print(f&#x27;  [EXECUTED] cost ${est[&quot;cost_usd&quot;]:.4f}  ({est[&quot;tb_scanned&quot;]} TB scanned)&#x27;)
+
+# Cheap query: should execute
+try:
+    cost_aware_query(&#x27;SELECT event_id, user_id FROM events&#x27;, budget_usd=1.0)
+except RuntimeError as e:
+    print(f&#x27;  Blocked: {e}&#x27;)
+
+# Expensive query: should be blocked
+try:
+    cost_aware_query(&#x27;SELECT * FROM events&#x27;, budget_usd=1.0)
+except RuntimeError as e:
+    print(f&#x27;  Blocked: {e}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D4_BigQuery_Cost_Control.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Extend cost_aware_query() with a tiered budget:
+#   cost &lt;= 0.10 -&gt; execute immediately, no log
+#   cost &lt;= 1.00 -&gt; execute, log WARNING
+#   cost &gt; 1.00  -&gt; BLOCK, raise RuntimeError
+#
+# Call it on all 3 analyst_queries from Exercise 1.
+# Print the result for each (EXECUTED or BLOCKED).
+#
+# Expected:
+#   cohort_report   [EXECUTED]  cheap
+#   full_export     [BLOCKED]   exceeds $1.00
+#   page_analysis   [BLOCKED]   exceeds $1.00</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D4_BigQuery_Cost_Control.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — APPLIED PATTERN
+# ══════════════════════════════════════════════════════════════
+# Combine the patterns from Concepts 1 and 2 into a complete workflow.
+# The example below shows all components working together.
+#
+# EXAMPLE ───────────────────────────────────────────────────────
+# Run the complete pipeline with error handling:
+print(&#x27;All concepts combined — see exercises to apply this pattern.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D4_BigQuery_Cost_Control.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Extend your solution from Exercise 2:
+# Add an assertion to verify the output is correct.
+# Print a PASS/FAIL message.
+#</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D4_BigQuery_Cost_Control.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 4 — SECURITY GATE: BIGQUERY QUERY SECURITY GATE (CIA: A)
+# ══════════════════════════════════════════════════════════════
+# Analogy: the power grid&#x27;s circuit breaker — normal load flows freely,
+# but a sudden spike beyond the rated capacity trips the breaker before
+# it damages the infrastructure.
+#
+# CIA focus: Availability — runaway queries are a denial-of-service attack
+# on the data platform&#x27;s budget and slot capacity.
+#
+# Checks (in order):
+#   1. SELECT * on a large table (&gt; 1M rows) -&gt; FullTableScanError
+#   2. PII column referenced without a WHERE clause -&gt; PIIFullScanError
+#   3. Estimated cost exceeds max_cost_usd -&gt; CostLimitError
+#
+# dry_run() is defined in the header cell above — reused here.
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+class FullTableScanError(Exception):
+    pass
+
+
+class PIIFullScanError(Exception):
+    pass
+
+
+class CostLimitError(Exception):
+    pass
+
+
+def bq_security_gate(
+    query: str,
+    table_sizes: dict,
+    pii_columns: list,
+    cost_per_tb: float = 6.25,
+    max_cost_usd: float = 10.0,
+) -&gt; dict:
+    q_lower = query.lower()
+    if &quot;select *&quot; in q_lower:
+        for table, row_count in table_sizes.items():
+            if table in q_lower and row_count &gt; 1_000_000:
+                raise FullTableScanError(
+                    f&quot;SELECT * on large table &#x27;{table}&#x27; ({row_count:,} rows)&quot;
+                )
+    for col in pii_columns:
+        if col in query and &quot;WHERE&quot; not in query.upper():
+            raise PIIFullScanError(
+                f&quot;PII column &#x27;{col}&#x27; scanned without WHERE clause&quot;
+            )
+    est = dry_run(query)
+    if est[&quot;cost_usd&quot;] &gt; max_cost_usd:
+        raise CostLimitError(
+            f&quot;Estimated ${est[&#x27;cost_usd&#x27;]:.4f} exceeds budget ${max_cost_usd:.2f}&quot;
+        )
+    return {&quot;status&quot;: &quot;PASS&quot;, &quot;estimated_cost_usd&quot;: est[&quot;cost_usd&quot;]}
+
+
+GATE_TABLE_SIZES = {&quot;events&quot;: 500_000_000, &quot;sessions&quot;: 800_000}
+GATE_PII_COLS   = [&quot;user_email&quot;, &quot;user_phone&quot;]
+
+# Compliant query — passes
+result = bq_security_gate(
+    &quot;SELECT event_id, user_id FROM events&quot;,
+    table_sizes=GATE_TABLE_SIZES,
+    pii_columns=GATE_PII_COLS,
+)
+print(f&quot;Compliant query: {result}&quot;)
+
+# SELECT * on large table — blocked
+try:
+    bq_security_gate(&quot;SELECT * FROM events&quot;, GATE_TABLE_SIZES, GATE_PII_COLS)
+except FullTableScanError as e:
+    print(f&quot;FullTableScanError: {e}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D4_BigQuery_Cost_Control.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 4
+# ══════════════════════════════════════════════════════════════
+# Run bq_security_gate() on each query in test_queries.
+# For PASS: print the query label and estimated cost.
+# For violations: catch the exception and print the class name + message.
+#
+# Expected output:
+#   safe_query:  PASS  $0.0000
+#   star_query:  FullTableScanError: SELECT * on large table &#x27;events&#x27; (500,000,000 rows)
+#   pii_query:   PIIFullScanError: PII column &#x27;user_email&#x27; scanned without WHERE clause
+#
+# --- starting data ---
+GATE_TABLE_SIZES = {&quot;events&quot;: 500_000_000, &quot;sessions&quot;: 800_000}
+GATE_PII_COLS   = [&quot;user_email&quot;, &quot;user_phone&quot;]
+
+test_queries = [
+    (&quot;safe_query&quot;, &quot;SELECT event_id, user_id, event_type FROM events&quot;),
+    (&quot;star_query&quot;, &quot;SELECT * FROM events&quot;),
+    (&quot;pii_query&quot;,  &quot;SELECT user_email, event_type FROM events&quot;),
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-5">Day 5 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="15-5"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D5_BigQuery_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 15  |  DAY 5  |  BIGQUERY + dbt INTEGRATION
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Understand how dbt connects to BigQuery via profiles.yml
+#  2. Simulate a Python extract -&gt; BQ load -&gt; dbt build pipeline
+#  3. Run dbt tests and surface failures in a pipeline run report
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;dbt BigQuery profiles.yml connection setup&quot;
+#  Video: &quot;dbt Core Installation &amp; Connection With Google BigQuery&quot; -- Saad Qureshi Official
+#        https://www.youtube.com/watch?v=TVuLrOMvVco
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+import pandas as pd
+from datetime import datetime
+
+# Full pipeline simulation: Python extract -&gt; BQ (DuckDB) load -&gt; dbt build -&gt; dbt test
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+def ref(m): return m
+def source(s, t): return f&#x27;{s}__{t}&#x27;
+
+def bq_load(df, table, write_disposition=&#x27;WRITE_TRUNCATE&#x27;):
+    tables = [r[0] for r in con.execute(&#x27;SHOW TABLES&#x27;).fetchall()]
+    if write_disposition == &#x27;WRITE_TRUNCATE&#x27; or table not in tables:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {table} AS SELECT * FROM df&#x27;)
+    elif write_disposition == &#x27;WRITE_APPEND&#x27;:
+        con.execute(f&#x27;INSERT INTO {table} SELECT * FROM df&#x27;)
+    n = con.execute(f&#x27;SELECT COUNT(*) FROM {table}&#x27;).fetchone()[0]
+    return n
+
+def dbt_run(name, sql, materialized=&#x27;view&#x27;):
+    if materialized == &#x27;table&#x27;:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {name} AS {sql}&#x27;)
+    else:
+        con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+    n = con.execute(f&#x27;SELECT COUNT(*) FROM {name}&#x27;).fetchone()[0]
+    return n
+
+def dbt_test_not_null(model, col):
+    n = con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {col} IS NULL&#x27;).fetchone()[0]
+    return n == 0
+
+def dbt_test_unique(model, col):
+    n = con.execute(f&#x27;SELECT COUNT(*) FROM (SELECT {col} FROM {model} GROUP BY {col} HAVING COUNT(*) &gt; 1)&#x27;).fetchone()[0]
+    return n == 0
+
+print(&#x27;BigQuery + dbt Integration lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D5_BigQuery_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — profiles.yml FOR BIGQUERY
+# ══════════════════════════════════════════════════════════════
+# To connect dbt to BigQuery, you set profiles.yml to use the bigquery adapter.
+# dbt never reads credentials from code — always from profiles.yml or env vars.
+#
+# profiles.yml for BigQuery:
+#   my_project:
+#     target: dev
+#     outputs:
+#       dev:
+#         type: bigquery
+#         method: oauth                    # or service-account
+#         project: my-gcp-project
+#         dataset: analytics_dev          # dbt writes models here
+#         location: EU
+#         threads: 4
+#         timeout_seconds: 300
+#       prod:
+#         type: bigquery
+#         method: service-account
+#         project: my-gcp-project
+#         dataset: analytics_prod
+#         keyfile: /secrets/sa-key.json
+#         threads: 8
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+# Simulate the profile config as a Python dict
+bq_profile = {
+    &#x27;my_project&#x27;: {
+        &#x27;target&#x27;: &#x27;dev&#x27;,
+        &#x27;outputs&#x27;: {
+            &#x27;dev&#x27;: {
+                &#x27;type&#x27;: &#x27;bigquery&#x27;,
+                &#x27;method&#x27;: &#x27;oauth&#x27;,
+                &#x27;project&#x27;: &#x27;my-gcp-project&#x27;,
+                &#x27;dataset&#x27;: &#x27;analytics_dev&#x27;,
+                &#x27;location&#x27;: &#x27;EU&#x27;,
+                &#x27;threads&#x27;: 4,
+            },
+            &#x27;prod&#x27;: {
+                &#x27;type&#x27;: &#x27;bigquery&#x27;,
+                &#x27;method&#x27;: &#x27;service-account&#x27;,
+                &#x27;project&#x27;: &#x27;my-gcp-project&#x27;,
+                &#x27;dataset&#x27;: &#x27;analytics_prod&#x27;,
+                &#x27;keyfile&#x27;: &#x27;/secrets/sa-key.json&#x27;,
+                &#x27;threads&#x27;: 8,
+            }
+        }
+    }
+}
+
+target = bq_profile[&#x27;my_project&#x27;][&#x27;target&#x27;]
+cfg    = bq_profile[&#x27;my_project&#x27;][&#x27;outputs&#x27;][target]
+print(f&#x27;Active profile: {target}&#x27;)
+for k, v in cfg.items():
+    print(f&#x27;  {k}: {v}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D5_BigQuery_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Write a function get_active_dataset(profile, environment)
+# that reads the bq_profile dict and returns the dataset name for that environment.
+# Then write validate_profile(profile) that checks:
+#   - every output has &#x27;type&#x27;, &#x27;project&#x27;, &#x27;dataset&#x27; keys
+#   - threads &gt;= 1
+#   - returns a list of issues (empty list = valid)
+#
+# Expected output:
+#   dev dataset: analytics_dev
+#   prod dataset: analytics_prod
+#   Profile validation: [] (no issues)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D5_BigQuery_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — FULL PIPELINE: EXTRACT -&gt; LOAD -&gt; dbt BUILD -&gt; TEST
+# ══════════════════════════════════════════════════════════════
+# In production, a typical daily pipeline:
+#   1. Python: extract from API/DB -&gt; DataFrame
+#   2. Python: bq_client.load_table_from_dataframe(df, &#x27;raw.bookings&#x27;, WRITE_TRUNCATE)
+#   3. Shell:  dbt run --select staging+ --target prod
+#   4. Shell:  dbt test --select staging+
+#   5. Alert on failure
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+run_report = {&#x27;started_at&#x27;: datetime.now().isoformat(), &#x27;steps&#x27;: []}
+
+# Step 1: Extract (simulate API call)
+raw_df = pd.DataFrame([
+    {&#x27;booking_id&#x27;: 1, &#x27;hotel&#x27;: &#x27;City&#x27;,   &#x27;revenue&#x27;: 120.00, &#x27;country&#x27;: &#x27;GB&#x27;},
+    {&#x27;booking_id&#x27;: 2, &#x27;hotel&#x27;: &#x27;Resort&#x27;, &#x27;revenue&#x27;: 250.00, &#x27;country&#x27;: &#x27;US&#x27;},
+    {&#x27;booking_id&#x27;: 3, &#x27;hotel&#x27;: &#x27;City&#x27;,   &#x27;revenue&#x27;:  98.50, &#x27;country&#x27;: &#x27;DE&#x27;},
+])
+run_report[&#x27;steps&#x27;].append({&#x27;step&#x27;: &#x27;extract&#x27;, &#x27;rows&#x27;: len(raw_df), &#x27;status&#x27;: &#x27;ok&#x27;})
+
+# Step 2: Load to BQ
+n = bq_load(raw_df, &#x27;raw__bookings&#x27;, &#x27;WRITE_TRUNCATE&#x27;)
+run_report[&#x27;steps&#x27;].append({&#x27;step&#x27;: &#x27;bq_load&#x27;, &#x27;rows&#x27;: n, &#x27;status&#x27;: &#x27;ok&#x27;})
+
+# Step 3: dbt run
+stg_n = dbt_run(&#x27;stg_bookings&#x27;, f&#x27;&#x27;&#x27;
+    SELECT booking_id, hotel AS hotel_type,
+           ROUND(revenue, 2) AS revenue_usd, country
+    FROM {source(&quot;raw&quot;, &quot;bookings&quot;)}
+&#x27;&#x27;&#x27;)
+run_report[&#x27;steps&#x27;].append({&#x27;step&#x27;: &#x27;dbt_run:stg_bookings&#x27;, &#x27;rows&#x27;: stg_n, &#x27;status&#x27;: &#x27;ok&#x27;})
+
+fct_n = dbt_run(&#x27;fct_revenue&#x27;, f&#x27;&#x27;&#x27;
+    SELECT hotel_type, SUM(revenue_usd) AS total_revenue
+    FROM {ref(&quot;stg_bookings&quot;)}
+    GROUP BY hotel_type
+&#x27;&#x27;&#x27;, &#x27;table&#x27;)
+run_report[&#x27;steps&#x27;].append({&#x27;step&#x27;: &#x27;dbt_run:fct_revenue&#x27;, &#x27;rows&#x27;: fct_n, &#x27;status&#x27;: &#x27;ok&#x27;})
+
+# Step 4: dbt test
+tests = [
+    (&#x27;stg_bookings.booking_id not_null&#x27;, dbt_test_not_null(&#x27;stg_bookings&#x27;, &#x27;booking_id&#x27;)),
+    (&#x27;stg_bookings.booking_id unique&#x27;,   dbt_test_unique(&#x27;stg_bookings&#x27;, &#x27;booking_id&#x27;)),
+]
+failed = [t[0] for t in tests if not t[1]]
+run_report[&#x27;steps&#x27;].append({&#x27;step&#x27;: &#x27;dbt_test&#x27;, &#x27;tests&#x27;: len(tests), &#x27;failed&#x27;: len(failed)})
+run_report[&#x27;completed_at&#x27;] = datetime.now().isoformat()
+run_report[&#x27;status&#x27;] = &#x27;FAILED&#x27; if failed else &#x27;SUCCESS&#x27;
+
+import json
+print(json.dumps(run_report, indent=2))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D5_BigQuery_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Build a full pipeline for the payroll data:
+#   Step 1: extract payroll_df (5 employees)
+#   Step 2: bq_load to raw__payroll with WRITE_TRUNCATE
+#   Step 3: dbt_run stg_payroll — rename + add salary_band
+#   Step 4: dbt_run fct_dept_cost — SUM salary per department (table)
+#   Step 5: run 3 dbt tests on stg_payroll
+#   Step 6: print a run_report dict with status SUCCESS or FAILED
+#
+# --- starting data ---
+payroll_df = pd.DataFrame([
+    {&#x27;emp_id&#x27;: 1, &#x27;dept&#x27;: &#x27;Engineering&#x27;, &#x27;salary&#x27;: 95000},
+    {&#x27;emp_id&#x27;: 2, &#x27;dept&#x27;: &#x27;Sales&#x27;,        &#x27;salary&#x27;: 62000},
+    {&#x27;emp_id&#x27;: 3, &#x27;dept&#x27;: &#x27;Engineering&#x27;, &#x27;salary&#x27;: 88000},
+    {&#x27;emp_id&#x27;: 4, &#x27;dept&#x27;: &#x27;Finance&#x27;,     &#x27;salary&#x27;: 71000},
+    {&#x27;emp_id&#x27;: 5, &#x27;dept&#x27;: &#x27;Sales&#x27;,        &#x27;salary&#x27;: 58000},
+])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D5_BigQuery_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — APPLIED PATTERN
+# ══════════════════════════════════════════════════════════════
+# Combine the patterns from Concepts 1 and 2 into a complete workflow.
+# The example below shows all components working together.
+#
+# EXAMPLE ───────────────────────────────────────────────────────
+# Run the complete pipeline with error handling:
+print(&#x27;All concepts combined — see exercises to apply this pattern.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D5_BigQuery_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Extend your solution from Exercise 2:
+# Add an assertion to verify the output is correct.
+# Print a PASS/FAIL message.
+#</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-6">Day 6 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="15-6"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D6_Project_BigQuery_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 15  |  DAY 6  |  PROJECT — FULL BIGQUERY PIPELINE
+# ══════════════════════════════════════════════════════════════
+#
+#  PROJECT: Sales Analytics BigQuery Pipeline
+#  End-to-end: extract -&gt; validate -&gt; load -&gt; dbt build -&gt; test -&gt; LLM report
+#
+#  Skills stacked:
+#    W6  — parameterized SQL queries
+#    W7  — ETL validation pattern
+#    W10 — Groq LLM API (prompt engineering + structured output)
+#    W11 — LLM as data analyst (NL narration of mart data)
+#    W13 — dbt staging / mart models
+#    W15 — BigQuery load simulation (DuckDB)
+#
+#  SIMULATION MODE — runs without API keys or cloud accounts.
+#  REAL MODE       — commented blocks use Groq + BigQuery client.
+#
+#  TIME:  ~75 minutes
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+import pandas as pd
+import json
+import os
+from datetime import datetime
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+def ref(m): return m
+def source(s, t): return f&#x27;{s}__{t}&#x27;
+
+def bq_load(df, table, write_disposition=&#x27;WRITE_TRUNCATE&#x27;):
+    tables = [r[0] for r in con.execute(&#x27;SHOW TABLES&#x27;).fetchall()]
+    if write_disposition == &#x27;WRITE_TRUNCATE&#x27; or table not in tables:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {table} AS SELECT * FROM df&#x27;)
+    elif write_disposition == &#x27;WRITE_APPEND&#x27;:
+        con.execute(f&#x27;INSERT INTO {table} SELECT * FROM df&#x27;)
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {table}&#x27;).fetchone()[0]
+
+def dbt_run(name, sql, materialized=&#x27;view&#x27;):
+    if materialized == &#x27;table&#x27;:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {name} AS {sql}&#x27;)
+    else:
+        con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {name}&#x27;).fetchone()[0]
+
+def dbt_test(model, col, test_type, values=None):
+    if test_type == &#x27;not_null&#x27;:
+        return con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {col} IS NULL&#x27;).fetchone()[0] == 0
+    elif test_type == &#x27;unique&#x27;:
+        return con.execute(f&#x27;SELECT COUNT(*) FROM (SELECT {col} FROM {model} GROUP BY {col} HAVING COUNT(*) &gt; 1)&#x27;).fetchone()[0] == 0
+    elif test_type == &#x27;accepted_values&#x27;:
+        vals = &#x27;, &#x27;.join(f&quot;&#x27;{v}&#x27;&quot; for v in values)
+        return con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {col} NOT IN ({vals})&#x27;).fetchone()[0] == 0
+    return False
+
+# ── LLM helper (SIMULATION MODE) ──────────────────────────────
+# In W10_D1 you called Groq directly with the openai client.
+# Here we wrap it so the rest of the project is LLM-agnostic.
+def call_llm(system_prompt: str, user_prompt: str) -&gt; str:
+    &quot;&quot;&quot;
+    SIMULATION MODE — returns a realistic hardcoded response.
+    REAL MODE (uncomment below and set GROQ_API_KEY in .env):
+
+    from openai import OpenAI
+    client = OpenAI(
+        api_key=os.getenv(&#x27;GROQ_API_KEY&#x27;),
+        base_url=&#x27;https://api.groq.com/openai/v1&#x27;,
+    )
+    response = client.chat.completions.create(
+        model=&#x27;llama3-8b-8192&#x27;,
+        messages=[
+            {&#x27;role&#x27;: &#x27;system&#x27;, &#x27;content&#x27;: system_prompt},
+            {&#x27;role&#x27;: &#x27;user&#x27;,   &#x27;content&#x27;: user_prompt},
+        ],
+        temperature=0.2,
+    )
+    return response.choices[0].message.content
+    &quot;&quot;&quot;
+    # Simulation: deterministic response based on keyword in prompt
+    if &#x27;priorit&#x27; in user_prompt.lower():
+        return (
+            &quot;Based on the sales data, AMER should be prioritised for Q2. &quot;
+            &quot;It recorded the highest volume of orders (3) and showed growth &quot;
+            &quot;across January and February. EMEA leads on total revenue due to &quot;
+            &quot;January&#x27;s Widget bulk order, but order frequency is lower. &quot;
+            &quot;Recommendation: increase AMER marketing spend and monitor EMEA &quot;
+            &quot;for repeat purchases.&quot;
+        )
+    if &#x27;anomal&#x27; in user_prompt.lower() or &#x27;issue&#x27; in user_prompt.lower():
+        return &quot;No anomalies detected. All rows pass null, range, and domain checks.&quot;
+    return &quot;Insight: data looks consistent. No action required.&quot;
+
+# Raw source data (simulated API response)
+raw_sales = pd.DataFrame([
+    {&#x27;sale_id&#x27;: 1,  &#x27;date&#x27;: &#x27;2024-01-05&#x27;, &#x27;product&#x27;: &#x27;Widget&#x27;, &#x27;qty&#x27;: 3,  &#x27;unit_price&#x27;: 15.00, &#x27;region&#x27;: &#x27;EMEA&#x27;},
+    {&#x27;sale_id&#x27;: 2,  &#x27;date&#x27;: &#x27;2024-01-07&#x27;, &#x27;product&#x27;: &#x27;Gadget&#x27;, &#x27;qty&#x27;: 1,  &#x27;unit_price&#x27;: 39.99, &#x27;region&#x27;: &#x27;AMER&#x27;},
+    {&#x27;sale_id&#x27;: 3,  &#x27;date&#x27;: &#x27;2024-01-10&#x27;, &#x27;product&#x27;: &#x27;Gizmo&#x27;,  &#x27;qty&#x27;: 2,  &#x27;unit_price&#x27;: 59.00, &#x27;region&#x27;: &#x27;APAC&#x27;},
+    {&#x27;sale_id&#x27;: 4,  &#x27;date&#x27;: &#x27;2024-01-12&#x27;, &#x27;product&#x27;: &#x27;Widget&#x27;, &#x27;qty&#x27;: 5,  &#x27;unit_price&#x27;: 15.00, &#x27;region&#x27;: &#x27;EMEA&#x27;},
+    {&#x27;sale_id&#x27;: 5,  &#x27;date&#x27;: &#x27;2024-02-01&#x27;, &#x27;product&#x27;: &#x27;Gadget&#x27;, &#x27;qty&#x27;: 2,  &#x27;unit_price&#x27;: 39.99, &#x27;region&#x27;: &#x27;AMER&#x27;},
+    {&#x27;sale_id&#x27;: 6,  &#x27;date&#x27;: &#x27;2024-02-03&#x27;, &#x27;product&#x27;: &#x27;Gizmo&#x27;,  &#x27;qty&#x27;: 1,  &#x27;unit_price&#x27;: 59.00, &#x27;region&#x27;: &#x27;APAC&#x27;},
+    {&#x27;sale_id&#x27;: 7,  &#x27;date&#x27;: &#x27;2024-02-15&#x27;, &#x27;product&#x27;: &#x27;Widget&#x27;, &#x27;qty&#x27;: 8,  &#x27;unit_price&#x27;: 15.00, &#x27;region&#x27;: &#x27;AMER&#x27;},
+    {&#x27;sale_id&#x27;: 8,  &#x27;date&#x27;: &#x27;2024-03-01&#x27;, &#x27;product&#x27;: &#x27;Gadget&#x27;, &#x27;qty&#x27;: 3,  &#x27;unit_price&#x27;: 39.99, &#x27;region&#x27;: &#x27;EMEA&#x27;},
+])
+print(f&#x27;Raw data: {len(raw_sales)} rows&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D6_Project_BigQuery_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 1 — PRE-LOAD VALIDATION
+# ══════════════════════════════════════════════════════════════
+# Write validate_raw(df) that checks:
+#   - no nulls in sale_id, date, product, qty, unit_price
+#   - qty &gt; 0 for all rows
+#   - unit_price &gt; 0 for all rows
+#   - region in [&#x27;EMEA&#x27;, &#x27;AMER&#x27;, &#x27;APAC&#x27;]
+#   - no duplicate sale_id
+# Returns a list of issue strings (empty = valid).
+# Print PASS if valid, else print each issue.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D6_Project_BigQuery_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 2 — LOAD + dbt PIPELINE
+# ══════════════════════════════════════════════════════════════
+# After validation passes:
+#   1. bq_load raw_sales to raw__sales with WRITE_TRUNCATE
+#   2. dbt_run stg_sales:
+#       sale_id, sale_date (date renamed), product, qty,
+#       unit_price, revenue (qty * unit_price, rounded to 2dp), region
+#   3. dbt_run fct_monthly_sales (table):
+#       month (first 7 chars of sale_date), region,
+#       total_orders (COUNT), total_revenue (SUM revenue)
+#   Print row counts after each step.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D6_Project_BigQuery_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 3 — dbt TESTS + RUN REPORT
+# ══════════════════════════════════════════════════════════════
+# Run 4 dbt tests on stg_sales:
+#   1. sale_id not_null
+#   2. sale_id unique
+#   3. region accepted_values [&#x27;EMEA&#x27;, &#x27;AMER&#x27;, &#x27;APAC&#x27;]
+#   4. product not_null
+# All 4 should PASS.
+# Then print a run_report dict with:
+#   started_at, completed_at, rows_loaded, models_built, tests_passed, tests_failed, status</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D6_Project_BigQuery_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 4 — ANSWER BUSINESS QUESTIONS
+# ══════════════════════════════════════════════════════════════
+# Query fct_monthly_sales to answer:
+#   Q1: Which region had the highest total revenue in January 2024?
+#   Q2: What was the total revenue for product Widget across all months?
+#       (query stg_sales directly for this one)
+#   Q3: Which month had the most total orders?
+# Print the answer for each question with a one-line explanation.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_15_BigQuery/W15_D6_Project_BigQuery_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 5 — LLM BUSINESS ANALYST
+# ══════════════════════════════════════════════════════════════
+# This task connects your pipeline output to an LLM — the same
+# pattern you used in W10_D1 (Groq API) and W10_D2 (prompt
+# engineering).  The pipeline produces data; the LLM narrates it.
+#
+# Step 1 — build a context string from fct_monthly_sales.
+#   Query fct_monthly_sales and format each row as:
+#     &quot;Month: 2024-01 | Region: EMEA | Orders: 2 | Revenue: $120.00&quot;
+#   Join all rows into one multi-line string called mart_context.
+#
+# Step 2 — write a system prompt and a user prompt.
+#   system_prompt: tell the LLM it is a senior analytics engineer
+#     who writes concise, data-backed business recommendations.
+#   user_prompt:   include mart_context and ask which region
+#     should be prioritised for Q2 investment and why.
+#   Keep the user prompt under 300 words.
+#
+# Step 3 — call call_llm(system_prompt, user_prompt).
+#   Print &quot;LLM RECOMMENDATION:&quot; followed by the response.
+#
+# Step 4 — call call_llm again with a second prompt asking the LLM
+#   to flag any data anomalies or gaps it notices in the context.
+#   Print &quot;LLM DATA REVIEW:&quot; followed by that response.
+#
+# Expected output (simulation):
+#   LLM RECOMMENDATION:
+#   Based on the sales data, AMER should be prioritised for Q2 ...
+#   LLM DATA REVIEW:
+#   No anomalies detected. All rows pass null, range, and domain checks.
+#
+# --- starting data ---
+# mart_context is built from fct_monthly_sales (built in Task 2).
+# call_llm(system_prompt, user_prompt) is defined in the setup cell.
+system_prompt = &quot;You are a senior analytics engineer ...&quot;</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="pager"><a class="btn ghost" href="week-14.html">&larr; Week 14</a><a class="btn ghost" href="week-16.html">Week 16 &rarr;</a></div>
+</main></body></html>

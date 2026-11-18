@@ -1,0 +1,1426 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 19 — AI-Powered Detection</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 19 — AI-Powered Detection</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="19" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 19 — AI-Powered Detection</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 6 — AI/LLM Security</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>SC-200: Custom analytics rules / GCIA: Anomaly-based detection</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>Isolation Forest anomaly detector on Sysmon process dataset</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W08 (Sysmon/log collection), W09 (scikit-learn ML), W14 (network detection)</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Why ML Belongs in the SOC</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="19-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=klUWasFElxM" target="_blank" rel="noopener"><b>Machine Learning for Anomaly Detection in Networks | Exclusive Lesson</b><small>YouAccel</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=machine%20learning%20for%20threat%20detection%20SOC%20anomaly%20detection" target="_blank" rel="noopener">machine learning for threat detection SOC anomaly detection</a></p></div>
+<hr />
+<h3>Concept 1 — The Detection Coverage Problem</h3>
+<p>Every signature-based detection is a rule that fires on what analysts already know. A Sigma rule for Mimikatz catches Mimikatz — not the next lateral movement tool that borrows one API and changes two others. This is the coverage cliff: known-bad rules plateau while attacker surface area keeps growing.</p>
+<p>ML-based anomaly detection inverts the model. Instead of asking &quot;does this match pattern X?&quot; it asks &quot;does this deviate from what normal looks like?&quot; A process that spawns child processes at 2 a.m. on a server that never runs interactive sessions will score high anomaly even if it has no matching signature.</p>
+<p>The tradeoff is precision. Signature rules have near-zero false positives on known patterns; anomaly models alert on statistical rarity, which is not the same as malicious. The SOC workflow changes: signature alerts are verdicts, anomaly alerts are leads.</p>
+<p>Data engineering analogy: anomaly detection is like data quality monitoring. You define a schema and thresholds for what &quot;normal&quot; data looks like; anything outside that envelope flags for review. The monitor does not know why the data is wrong — it knows it is unexpected.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Optional
+import statistics
+
+@dataclass
+class ProcessObservation:
+    pid: int
+    process_name: str
+    parent_name: str
+    command_line: str
+    user: str
+    hour_of_day: int           # 0-23
+    child_count: int
+    network_connections: int
+    loaded_dll_count: int
+    image_load_unsigned: int
+    session_id: int
+
+    def feature_vector(self) -&gt; list[float]:
+        return [
+            float(self.hour_of_day),
+            float(self.child_count),
+            float(self.network_connections),
+            float(self.loaded_dll_count),
+            float(self.image_load_unsigned),
+            float(self.session_id),
+        ]
+
+FEATURE_NAMES = [
+    &quot;hour_of_day&quot;, &quot;child_count&quot;, &quot;network_connections&quot;,
+    &quot;loaded_dll_count&quot;, &quot;image_load_unsigned&quot;, &quot;session_id&quot;,
+]
+
+# Simulated normal baseline — server process profile
+NORMAL_OBSERVATIONS = [
+    ProcessObservation(1001, &quot;svchost.exe&quot;, &quot;services.exe&quot;, &quot;svchost -k netsvcs&quot;,
+                       &quot;SYSTEM&quot;, 9, 0, 2, 14, 0, 0),
+    ProcessObservation(1002, &quot;svchost.exe&quot;, &quot;services.exe&quot;, &quot;svchost -k NetworkService&quot;,
+                       &quot;NETWORK SERVICE&quot;, 10, 1, 3, 16, 0, 0),
+    ProcessObservation(1003, &quot;lsass.exe&quot;, &quot;wininit.exe&quot;, &quot;C:\\Windows\\system32\\lsass.exe&quot;,
+                       &quot;SYSTEM&quot;, 11, 0, 0, 22, 0, 0),
+]
+
+def describe_features(observations: list[ProcessObservation]) -&gt; dict[str, dict]:
+    vectors = [o.feature_vector() for o in observations]
+    summary = {}
+    for i, name in enumerate(FEATURE_NAMES):
+        col = [v[i] for v in vectors]
+        summary[name] = {
+            &quot;mean&quot;: statistics.mean(col),
+            &quot;stdev&quot;: statistics.stdev(col) if len(col) &gt; 1 else 0.0,
+            &quot;min&quot;: min(col),
+            &quot;max&quot;: max(col),
+        }
+    return summary
+
+summary = describe_features(NORMAL_OBSERVATIONS)
+for feat, stats in summary.items():
+    print(f&quot;{feat:30s}  mean={stats[&#x27;mean&#x27;]:.2f}  stdev={stats[&#x27;stdev&#x27;]:.2f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a <code>ProcessObservation</code> that represents a suspicious outlier: a process named <code>update.exe</code> running at 2 a.m., spawning 12 child processes, making 8 network connections, loading 3 unsigned DLLs, in session 1.
+Add it to <code>NORMAL_OBSERVATIONS</code> and call <code>describe_features()</code> again. Which features shift the most?
+Expected output: <code>child_count</code> and <code>network_connections</code> means increase substantially; <code>image_load_unsigned</code> moves from 0 to a non-zero mean.</p>
+<hr />
+<h3>Concept 2 — Feature Engineering for Process Behavior</h3>
+<p>Raw Sysmon events are not ML features. EID 1 fires once per process; EID 7 fires per DLL load; EID 3 fires per network connection. Useful ML features are aggregations: how many children did this process spawn in a 5-minute window? How many distinct destination IPs did it connect to in an hour?</p>
+<p>This aggregation step is identical to building a feature store in data engineering. The grain is (process_name, hostname, time_bucket). The metrics are counts, ratios, and rare-event flags.</p>
+<p>Feature categories for process behavior:</p>
+<ul>
+<li><strong>Frequency</strong>: child spawn rate, DLL load rate, network connection rate</li>
+<li><strong>Rarity</strong>: process name entropy (DGA-style names), parent-child pair frequency in baseline</li>
+<li><strong>Temporal</strong>: hour-of-day, day-of-week, time since last execution</li>
+<li><strong>Context</strong>: interactive session flag, signed binary flag, process path matches known-good paths</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from collections import defaultdict
+from typing import Optional
+import math
+
+@dataclass
+class SysmonEvent:
+    event_id: int
+    timestamp: str          # &quot;2024-01-15T02:34:11&quot;
+    hostname: str
+    pid: int
+    process_name: str
+    parent_pid: Optional[int]
+    parent_name: Optional[str]
+    target_ip: Optional[str]
+    image_path: Optional[str]
+    is_signed: Optional[bool]
+
+def aggregate_process_features(
+    events: list[SysmonEvent],
+    target_process: str,
+    target_hostname: str,
+) -&gt; dict[str, float]:
+    proc_events = [
+        e for e in events
+        if e.hostname == target_hostname and e.process_name == target_process
+    ]
+    child_spawn = sum(
+        1 for e in events
+        if e.parent_name == target_process and e.event_id == 1
+    )
+    net_conns = sum(
+        1 for e in proc_events if e.event_id == 3 and e.target_ip is not None
+    )
+    dll_loads = sum(1 for e in proc_events if e.event_id == 7)
+    unsigned_dlls = sum(
+        1 for e in proc_events
+        if e.event_id == 7 and e.is_signed is False
+    )
+    distinct_ips = len({
+        e.target_ip for e in proc_events
+        if e.event_id == 3 and e.target_ip
+    })
+
+    # Name entropy (short, clean names have low entropy)
+    name_no_ext = target_process.replace(&quot;.exe&quot;, &quot;&quot;).replace(&quot;.dll&quot;, &quot;&quot;)
+    char_freq = defaultdict(int)
+    for c in name_no_ext:
+        char_freq[c] += 1
+    name_len = len(name_no_ext)
+    name_entropy = 0.0
+    if name_len &gt; 0:
+        for count in char_freq.values():
+            p = count / name_len
+            name_entropy -= p * math.log2(p)
+
+    return {
+        &quot;child_spawn_count&quot;:      float(child_spawn),
+        &quot;network_connection_count&quot;: float(net_conns),
+        &quot;dll_load_count&quot;:         float(dll_loads),
+        &quot;unsigned_dll_count&quot;:     float(unsigned_dlls),
+        &quot;distinct_destination_ips&quot;: float(distinct_ips),
+        &quot;process_name_entropy&quot;:   round(name_entropy, 4),
+    }
+
+# Simulate events
+EVENTS: list[SysmonEvent] = [
+    SysmonEvent(1,  &quot;2024-01-15T02:34:11&quot;, &quot;DC01&quot;, 4400, &quot;update.exe&quot;,  4200, &quot;explorer.exe&quot;, None, None, False),
+    SysmonEvent(1,  &quot;2024-01-15T02:34:12&quot;, &quot;DC01&quot;, 4401, &quot;cmd.exe&quot;,     4400, &quot;update.exe&quot;,   None, None, True),
+    SysmonEvent(3,  &quot;2024-01-15T02:34:13&quot;, &quot;DC01&quot;, 4400, &quot;update.exe&quot;,  None, None, &quot;185.220.101.5&quot;, None, None),
+    SysmonEvent(3,  &quot;2024-01-15T02:34:14&quot;, &quot;DC01&quot;, 4400, &quot;update.exe&quot;,  None, None, &quot;10.0.0.50&quot;,     None, None),
+    SysmonEvent(7,  &quot;2024-01-15T02:34:15&quot;, &quot;DC01&quot;, 4400, &quot;update.exe&quot;,  None, None, None, &quot;C:\\Temp\\evil.dll&quot;, False),
+]
+
+features = aggregate_process_features(EVENTS, &quot;update.exe&quot;, &quot;DC01&quot;)
+for k, v in features.items():
+    print(f&quot;  {k:35s} = {v}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a <code>filter_by_time_bucket()</code> function that takes a list of events, a start string (<code>&quot;2024-01-15T02:00:00&quot;</code>), and a duration in minutes, and returns only events within that window.
+Then call <code>aggregate_process_features</code> only on events from the 2–3 a.m. bucket.
+Expected output: same feature dict but only counting events from that one-hour window.</p>
+<hr />
+<h3>Concept 3 — Baseline Collection Strategy</h3>
+<p>A model trained on attack data learns nothing useful. Isolation Forest needs a clean baseline of &quot;what normal looks like&quot; on the specific host population being monitored. Collecting that baseline is an operational decision with three trade-offs:</p>
+<p><strong>Rolling window</strong>: use the last 30 days of activity. Adapts to org changes automatically. Risk: if the network is already compromised during baseline collection, malicious behavior becomes &quot;normal.&quot;</p>
+<p><strong>Static snapshot</strong>: collect 2 weeks of data from a known-clean period, freeze the model. Safer against contamination. Requires retraining on a schedule (quarterly) or after major environment changes.</p>
+<p><strong>Peer group baseline</strong>: train on all hosts of the same role (all domain controllers, all developer workstations). More robust than single-host baseline; catches host-specific anomalies even if common to some hosts but rare across the fleet.</p>
+<p>The right choice depends on environment stability and the threat model. For a Detection Engineer, the baseline strategy is as important as the algorithm choice.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+import json
+
+class BaselineStrategy(Enum):
+    ROLLING_WINDOW  = &quot;rolling_window&quot;
+    STATIC_SNAPSHOT = &quot;static_snapshot&quot;
+    PEER_GROUP      = &quot;peer_group&quot;
+
+@dataclass
+class BaselineConfig:
+    strategy: BaselineStrategy
+    lookback_days: int
+    host_role: Optional[str]              # for peer_group: &quot;domain_controller&quot;, &quot;workstation&quot;
+    min_observations: int = 500
+    contamination_estimate: float = 0.01  # expected fraction of anomalies in baseline
+
+    def validate(self) -&gt; list[str]:
+        issues = []
+        if self.lookback_days &lt; 7:
+            issues.append(&quot;lookback_days &lt; 7 — baseline too short, high variance&quot;)
+        if self.contamination_estimate &gt; 0.05:
+            issues.append(&quot;contamination &gt; 5% — model will be noisy&quot;)
+        if self.strategy == BaselineStrategy.PEER_GROUP and not self.host_role:
+            issues.append(&quot;peer_group strategy requires host_role&quot;)
+        return issues
+
+    def to_json(self) -&gt; str:
+        return json.dumps({
+            &quot;strategy&quot;: self.strategy.value,
+            &quot;lookback_days&quot;: self.lookback_days,
+            &quot;host_role&quot;: self.host_role,
+            &quot;min_observations&quot;: self.min_observations,
+            &quot;contamination_estimate&quot;: self.contamination_estimate,
+        }, indent=2)
+
+dc_config = BaselineConfig(
+    strategy=BaselineStrategy.PEER_GROUP,
+    lookback_days=30,
+    host_role=&quot;domain_controller&quot;,
+    min_observations=1000,
+    contamination_estimate=0.01,
+)
+
+issues = dc_config.validate()
+if issues:
+    for issue in issues:
+        print(f&quot;WARNING: {issue}&quot;)
+else:
+    print(&quot;Baseline config OK&quot;)
+    print(dc_config.to_json())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Create a <code>BaselineConfig</code> for a developer workstation fleet using <code>ROLLING_WINDOW</code> with 14 days lookback, <code>min_observations=300</code>, and <code>contamination_estimate=0.03</code>.
+Call <code>validate()</code> on it and print each issue.
+Then change <code>contamination_estimate</code> to <code>0.06</code> and call <code>validate()</code> again to see the contamination warning appear.
+Expected output: first call → no issues (or none); second call → contamination warning line.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs as feature narrators — convert numeric anomaly scores into human-readable alert summaries.
+<strong>Threat:</strong> Adversarial ML — attackers learn the baseline distribution and slowly shift behavior over time (slow-burn evasion), staying just inside the anomaly threshold.
+<strong>Opportunity:</strong> LLMs can take a feature vector and its anomaly score and generate a plain-English hypothesis: &quot;This process exhibits unusual child spawn rate (12×) and unsigned DLL loading (3 DLLs) in the 2–3 a.m. window. Likely T1055 process injection or T1059 script execution.&quot;
+<strong>Prompt to try:</strong> <code>&quot;Given this process behavior feature vector: child_spawn=12, unsigned_dlls=3, hour=2, anomaly_score=-0.61 (threshold -0.5 = anomalous). Write a one-paragraph SOC analyst note explaining what this anomaly might indicate, citing the most likely MITRE ATT&amp;CK technique.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Isolation Forest Deep Dive</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="19-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=e1AsKgztz4w" target="_blank" rel="noopener"><b>Mastering Isolation Forest in Python: Anomaly Detection with Scikit-Learn</b><small>Ryan &amp; Matt Data Science</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=isolation%20forest%20anomaly%20detection%20explained%20python%20sklearn" target="_blank" rel="noopener">isolation forest anomaly detection explained python sklearn</a></p></div>
+<hr />
+<h3>Concept 1 — How Isolation Forest Works</h3>
+<p>Isolation Forest is a tree-based anomaly detector. It builds random decision trees by selecting a feature at random and splitting at a random value in the feature's range. Anomalous points — those in sparse regions — are isolated by short paths through the tree. Normal points live in dense regions and require more splits to isolate.</p>
+<p>The intuition: normal <code>svchost.exe</code> behavior clusters tightly (same parent, same DLL count, no children). A malicious <code>svchost.exe</code> spawning PowerShell children and making network connections to external IPs occupies a sparse region of feature space — it takes fewer splits to isolate it.</p>
+<p>Key hyperparameter: <code>contamination</code>. This is the fraction of the training set that the model treats as anomalous when fitting the decision threshold. Setting it to 0.01 means &quot;I expect 1% of my baseline to be anomalous.&quot; If your baseline is clean, set it very low (0.001–0.005).</p>
+<p>Data engineering analogy: Isolation Forest is like a partition-based outlier scan. Instead of WHERE clauses, it builds random splits; instead of row counts, it counts the depth needed to reach a row in the tree.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import Optional
+
+# Simulate sklearn IsolationForest without requiring the package
+# Real usage: from sklearn.ensemble import IsolationForest
+
+@dataclass
+class IsolationForestConfig:
+    n_estimators: int = 100        # number of trees
+    max_samples: int | str = &quot;auto&quot;  # samples per tree
+    contamination: float = 0.01
+    max_features: float = 1.0
+    random_state: int = 42
+
+    def validate(self) -&gt; list[str]:
+        issues = []
+        if self.n_estimators &lt; 50:
+            issues.append(&quot;n_estimators &lt; 50 — model may be unstable&quot;)
+        if isinstance(self.contamination, float) and not (0 &lt; self.contamination &lt; 0.5):
+            issues.append(&quot;contamination must be in (0, 0.5)&quot;)
+        return issues
+
+    def to_sklearn_params(self) -&gt; dict:
+        return {
+            &quot;n_estimators&quot;: self.n_estimators,
+            &quot;max_samples&quot;: self.max_samples,
+            &quot;contamination&quot;: self.contamination,
+            &quot;max_features&quot;: self.max_features,
+            &quot;random_state&quot;: self.random_state,
+        }
+
+def train_isolation_forest(X_train: list[list[float]], config: IsolationForestConfig):
+    &quot;&quot;&quot;
+    Trains an Isolation Forest.
+    In real usage:
+        from sklearn.ensemble import IsolationForest
+        model = IsolationForest(**config.to_sklearn_params())
+        model.fit(X_train)
+        return model
+    &quot;&quot;&quot;
+    issues = config.validate()
+    for issue in issues:
+        print(f&quot;CONFIG WARNING: {issue}&quot;)
+
+    # Simulation: return a dict representing the fitted model metadata
+    return {
+        &quot;n_estimators&quot;: config.n_estimators,
+        &quot;n_samples_trained&quot;: len(X_train),
+        &quot;n_features&quot;: len(X_train[0]) if X_train else 0,
+        &quot;contamination&quot;: config.contamination,
+        &quot;status&quot;: &quot;fitted_simulation&quot;,
+    }
+
+def score_observation(model: dict, observation: list[float]) -&gt; float:
+    &quot;&quot;&quot;
+    In real usage:
+        score = model.score_samples([observation])[0]  # more negative = more anomalous
+        prediction = model.predict([observation])[0]   # -1 = anomaly, 1 = normal
+    Simulation: score based on distance from feature mean.
+    &quot;&quot;&quot;
+    import statistics
+    # Simple z-score distance simulation
+    n_features = model[&quot;n_features&quot;]
+    if n_features == 0:
+        return 0.0
+    deviations = [abs(v) for v in observation[:n_features]]
+    avg_dev = statistics.mean(deviations) if deviations else 0.0
+    # Map to [-1, 0]: -1 very anomalous, 0 normal
+    simulated_score = max(-1.0, -avg_dev / 20.0)
+    return round(simulated_score, 4)
+
+X_train = [
+    [9.0, 0.0, 2.0, 14.0, 0.0, 0.0],
+    [10.0, 1.0, 3.0, 16.0, 0.0, 0.0],
+    [11.0, 0.0, 0.0, 22.0, 0.0, 0.0],
+    [9.5, 0.0, 1.0, 15.0, 0.0, 0.0],
+    [10.5, 1.0, 2.0, 18.0, 0.0, 0.0],
+]
+
+config = IsolationForestConfig(n_estimators=100, contamination=0.01)
+model = train_isolation_forest(X_train, config)
+print(f&quot;Model trained on {model[&#x27;n_samples_trained&#x27;]} samples, {model[&#x27;n_features&#x27;]} features&quot;)
+
+suspicious = [2.0, 12.0, 8.0, 3.0, 3.0, 1.0]
+score = score_observation(model, suspicious)
+threshold = -0.10 * config.contamination * 100
+print(f&quot;Anomaly score: {score:.4f}  (more negative = more anomalous)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Create an <code>IsolationForestConfig</code> with <code>contamination=0.05</code> and call <code>validate()</code>. Notice the warning does not fire since 0.05 &lt; 0.5.
+Then set <code>n_estimators=30</code> and call <code>validate()</code> again — confirm the stability warning appears.
+Expected output: first call → empty list; second call → list with one warning about n_estimators.</p>
+<hr />
+<h3>Concept 2 — Scoring and Threshold Calibration</h3>
+<p><code>score_samples()</code> returns a continuous score: more negative means more anomalous. The threshold separating &quot;anomaly&quot; from &quot;normal&quot; is not set automatically — the analyst calibrates it.</p>
+<p>The calibration workflow:</p>
+<ol>
+<li>Score the baseline dataset</li>
+<li>Plot the score distribution — it will have a peak near 0 for normal observations and a tail toward -1</li>
+<li>Choose a threshold where the false positive rate is operationally acceptable (e.g., ≤ 2% of normal traffic alerts)</li>
+<li>Validate the threshold on a labeled holdout set (if one exists)</li>
+</ol>
+<p>The score threshold is not a magic number. It is a business decision: a MSSP handling 10,000 events per hour can tolerate fewer false positives per alert than a small team seeing 200 events per hour.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Optional
+
+@dataclass
+class ScoredObservation:
+    observation: &quot;ProcessObservation&quot;
+    anomaly_score: float      # more negative = more anomalous
+    threshold: float          # decision boundary
+    prediction: str = field(init=False)
+
+    def __post_init__(self) -&gt; None:
+        self.prediction = &quot;ANOMALY&quot; if self.anomaly_score &lt; self.threshold else &quot;NORMAL&quot;
+
+    def alert_priority(self) -&gt; str:
+        if self.anomaly_score &lt; self.threshold - 0.2:
+            return &quot;HIGH&quot;
+        if self.anomaly_score &lt; self.threshold:
+            return &quot;MEDIUM&quot;
+        return &quot;NONE&quot;
+
+def calibrate_threshold(
+    baseline_scores: list[float],
+    target_fpr: float = 0.02,
+) -&gt; float:
+    &quot;&quot;&quot;
+    Returns threshold such that target_fpr fraction of baseline scores fall below it.
+    Equivalent to the (target_fpr * 100)th percentile of baseline scores.
+    &quot;&quot;&quot;
+    sorted_scores = sorted(baseline_scores)
+    cutoff_index = max(0, int(len(sorted_scores) * target_fpr) - 1)
+    return sorted_scores[cutoff_index]
+
+def evaluate_threshold(
+    scores: list[float],
+    labels: list[int],   # 1 = anomaly, 0 = normal
+    threshold: float,
+) -&gt; dict[str, float]:
+    predictions = [1 if s &lt; threshold else 0 for s in scores]
+    tp = sum(1 for p, l in zip(predictions, labels) if p == 1 and l == 1)
+    fp = sum(1 for p, l in zip(predictions, labels) if p == 1 and l == 0)
+    tn = sum(1 for p, l in zip(predictions, labels) if p == 0 and l == 0)
+    fn = sum(1 for p, l in zip(predictions, labels) if p == 0 and l == 1)
+    precision = tp / (tp + fp) if (tp + fp) &gt; 0 else 0.0
+    recall    = tp / (tp + fn) if (tp + fn) &gt; 0 else 0.0
+    fpr       = fp / (fp + tn) if (fp + tn) &gt; 0 else 0.0
+    return {&quot;precision&quot;: precision, &quot;recall&quot;: recall, &quot;fpr&quot;: fpr, &quot;tp&quot;: tp, &quot;fp&quot;: fp, &quot;fn&quot;: fn}
+
+# Simulate baseline scores (normal behavior, clustered near 0)
+import random
+random.seed(42)
+baseline_scores = [random.gauss(-0.05, 0.08) for _ in range(200)]
+
+threshold = calibrate_threshold(baseline_scores, target_fpr=0.02)
+print(f&quot;Calibrated threshold at 2% FPR: {threshold:.4f}&quot;)
+
+# Simulate mixed test set: 180 normal + 20 attack
+test_scores  = [random.gauss(-0.05, 0.08) for _ in range(180)]
+test_scores += [random.gauss(-0.55, 0.15) for _ in range(20)]
+test_labels  = [0] * 180 + [1] * 20
+
+metrics = evaluate_threshold(test_scores, test_labels, threshold)
+print(f&quot;Precision: {metrics[&#x27;precision&#x27;]:.2f}  Recall: {metrics[&#x27;recall&#x27;]:.2f}  FPR: {metrics[&#x27;fpr&#x27;]:.3f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Change <code>target_fpr</code> to <code>0.05</code> and rerun <code>calibrate_threshold</code>. Does the threshold move up or down?
+Then evaluate both thresholds (2% FPR and 5% FPR) against the same <code>test_scores</code>/<code>test_labels</code>.
+Which threshold catches more anomalies (higher recall)? Which has more false positives (higher FPR)?
+Expected output: 5% FPR threshold is higher (less strict); that threshold achieves higher recall but also higher measured FPR on the test set.</p>
+<hr />
+<h3>Concept 3 — Feature Scaling and Preprocessing</h3>
+<p>Isolation Forest is not distance-based, so it is less sensitive to feature scale than K-Nearest Neighbors or DBSCAN. However, features with vastly different ranges still affect which features dominate the random splits. Normalizing features (StandardScaler or MinMaxScaler) ensures the model gives each feature equal chance of being selected as a split dimension.</p>
+<p>Categorical features — process name, parent name — need encoding. Options:</p>
+<ul>
+<li><strong>Binary rare flag</strong>: is this process name in the top-100 most common names? (1/0)</li>
+<li><strong>Frequency encoding</strong>: replace process name with its observed frequency in the baseline</li>
+<li><strong>Hashing</strong>: hash the string to an integer (fast, loses interpretability)</li>
+</ul>
+<p>For process name entropy, no scaling needed since it already falls in [0, ~4].</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+import statistics
+
+@dataclass
+class FeatureScaler:
+    feature_names: list[str]
+    means: list[float] = None
+    stds: list[float] = None
+    fitted: bool = False
+
+    def fit(self, X: list[list[float]]) -&gt; &quot;FeatureScaler&quot;:
+        if not X:
+            raise ValueError(&quot;Cannot fit on empty dataset&quot;)
+        n_features = len(X[0])
+        self.means = []
+        self.stds = []
+        for i in range(n_features):
+            col = [row[i] for row in X]
+            self.means.append(statistics.mean(col))
+            std = statistics.stdev(col) if len(col) &gt; 1 else 1.0
+            self.stds.append(std if std &gt; 0 else 1.0)
+        self.fitted = True
+        return self
+
+    def transform(self, X: list[list[float]]) -&gt; list[list[float]]:
+        if not self.fitted:
+            raise RuntimeError(&quot;Scaler must be fitted before transform&quot;)
+        return [
+            [(val - self.means[i]) / self.stds[i] for i, val in enumerate(row)]
+            for row in X
+        ]
+
+    def fit_transform(self, X: list[list[float]]) -&gt; list[list[float]]:
+        return self.fit(X).transform(X)
+
+    def transform_one(self, row: list[float]) -&gt; list[float]:
+        if not self.fitted:
+            raise RuntimeError(&quot;Scaler must be fitted before transform&quot;)
+        return [(val - self.means[i]) / self.stds[i] for i, val in enumerate(row)]
+
+X_raw = [
+    [9.0, 0.0, 2.0, 14.0, 0.0, 0.0],
+    [10.0, 1.0, 3.0, 16.0, 0.0, 0.0],
+    [11.0, 0.0, 0.0, 22.0, 0.0, 0.0],
+    [9.5, 0.0, 1.0, 15.0, 0.0, 0.0],
+    [10.5, 1.0, 2.0, 18.0, 0.0, 0.0],
+]
+
+scaler = FeatureScaler(FEATURE_NAMES if &quot;FEATURE_NAMES&quot; in dir() else
+    [&quot;hour_of_day&quot;, &quot;child_count&quot;, &quot;network_connections&quot;,
+     &quot;loaded_dll_count&quot;, &quot;image_load_unsigned&quot;, &quot;session_id&quot;])
+X_scaled = scaler.fit_transform(X_raw)
+print(&quot;Scaled baseline (first row):&quot;, [round(v, 3) for v in X_scaled[0]])
+
+new_obs = [2.0, 12.0, 8.0, 3.0, 3.0, 1.0]
+scaled_obs = scaler.transform_one(new_obs)
+print(&quot;Scaled suspicious obs:      &quot;, [round(v, 3) for v in scaled_obs])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+After fitting the scaler on <code>X_raw</code>, add a new observation that matches the training distribution exactly: <code>[10.0, 0.5, 1.5, 17.0, 0.0, 0.0]</code>.
+Call <code>transform_one()</code> on it.
+Expected output: all scaled values close to 0 (within ±1 standard deviation), since this observation sits near the center of the training distribution.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs for anomaly triage — automated first-pass hypothesis generation on scored events.
+<strong>Threat:</strong> Slow-burn adversarial drift — an attacker incrementally shifts behavioral features over weeks to stay inside the anomaly threshold. The model adapts (rolling window) and normalizes the attack.
+<strong>Opportunity:</strong> LLMs can compare current feature values to last week's baseline and flag feature drift that the model accepted as normal: &quot;child_spawn_count increased from 0.2 avg to 4.1 avg over 7 days — review baseline recency.&quot;
+<strong>Prompt to try:</strong> <code>&quot;I have a process anomaly score of -0.62 (threshold -0.50). Features: hour_of_day=2, child_spawn=12, network_connections=8, unsigned_dlls=3. The process is svchost.exe with parent explorer.exe. Write a 3-sentence analyst note explaining why this combination is suspicious and what to investigate next.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — Building the Sysmon Anomaly Detector</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="19-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=sysmon%20process%20anomaly%20detection%20python%20pipeline" target="_blank" rel="noopener">sysmon process anomaly detection python pipeline</a></p></div>
+<hr />
+<h3>Concept 1 — Ingesting Sysmon Events for ML</h3>
+<p>Sysmon logs arrive as Windows Event Log XML or as EVTX. For ML, you need tabular format: one row per process execution window, one column per feature. The pipeline is: parse events → group by (hostname, process_name, time_bucket) → aggregate features → scale → score.</p>
+<p>This is the same aggregation-then-score pattern used in fraud detection and network beaconing detection (W14). The key difference: process behavior features are richer and require cross-event-ID joins (EID 1 + EID 3 + EID 7 all contribute to the same process row).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Optional
+from collections import defaultdict
+import json
+
+@dataclass
+class SysmonRecord:
+    event_id: int
+    timestamp: str
+    hostname: str
+    pid: int
+    process_name: str
+    ppid: Optional[int]
+    parent_name: Optional[str]
+    image_path: Optional[str]
+    command_line: Optional[str]
+    target_ip: Optional[str]
+    target_port: Optional[int]
+    loaded_image: Optional[str]
+    is_signed: Optional[bool]
+    user: Optional[str]
+
+@dataclass
+class ProcessWindow:
+    &quot;&quot;&quot;One row in the ML feature matrix: one process across all its events.&quot;&quot;&quot;
+    hostname: str
+    pid: int
+    process_name: str
+    parent_name: str
+    user: str
+    first_seen: str
+    child_pids: list[int] = field(default_factory=list)
+    network_conns: list[str] = field(default_factory=list)
+    loaded_dlls: list[str] = field(default_factory=list)
+    unsigned_dlls: int = 0
+    command_line: str = &quot;&quot;
+
+    def add_event(self, record: SysmonRecord) -&gt; None:
+        if record.event_id == 1 and record.ppid == self.pid:
+            self.child_pids.append(record.pid)
+        elif record.event_id == 3 and record.target_ip:
+            self.network_conns.append(record.target_ip)
+        elif record.event_id == 7 and record.loaded_image:
+            self.loaded_dlls.append(record.loaded_image)
+            if record.is_signed is False:
+                self.unsigned_dlls += 1
+
+    def to_feature_vector(self) -&gt; list[float]:
+        try:
+            hour = int(self.first_seen[11:13])
+        except (ValueError, IndexError):
+            hour = 12.0
+        return [
+            float(hour),
+            float(len(self.child_pids)),
+            float(len(set(self.network_conns))),
+            float(len(self.loaded_dlls)),
+            float(self.unsigned_dlls),
+            float(0),  # session_id placeholder
+        ]
+
+def build_process_windows(records: list[SysmonRecord]) -&gt; dict[tuple, ProcessWindow]:
+    windows: dict[tuple, ProcessWindow] = {}
+    for r in records:
+        if r.event_id == 1:
+            key = (r.hostname, r.pid)
+            if key not in windows:
+                windows[key] = ProcessWindow(
+                    hostname=r.hostname,
+                    pid=r.pid,
+                    process_name=r.process_name,
+                    parent_name=r.parent_name or &quot;&quot;,
+                    user=r.user or &quot;UNKNOWN&quot;,
+                    first_seen=r.timestamp,
+                    command_line=r.command_line or &quot;&quot;,
+                )
+    for r in records:
+        for key, window in windows.items():
+            if key[0] == r.hostname:
+                window.add_event(r)
+    return windows
+
+SAMPLE_RECORDS = [
+    SysmonRecord(1, &quot;2024-01-15T09:05:00&quot;, &quot;WS01&quot;, 2200, &quot;svchost.exe&quot;, 600, &quot;services.exe&quot;,
+                 &quot;C:\\Windows\\system32\\svchost.exe&quot;, &quot;svchost -k netsvcs&quot;, None, None, None, True, &quot;SYSTEM&quot;),
+    SysmonRecord(1, &quot;2024-01-15T02:30:00&quot;, &quot;WS01&quot;, 4400, &quot;update.exe&quot;, 1200, &quot;explorer.exe&quot;,
+                 &quot;C:\\Temp\\update.exe&quot;, &quot;update.exe /silent&quot;, None, None, None, False, &quot;user1&quot;),
+    SysmonRecord(3, &quot;2024-01-15T02:30:01&quot;, &quot;WS01&quot;, 4400, &quot;update.exe&quot;, None, None, None, None,
+                 &quot;185.220.101.5&quot;, 443, None, None, &quot;user1&quot;),
+    SysmonRecord(7, &quot;2024-01-15T02:30:02&quot;, &quot;WS01&quot;, 4400, &quot;update.exe&quot;, None, None,
+                 &quot;C:\\Temp\\evil.dll&quot;, None, None, None, None, False, &quot;user1&quot;),
+    SysmonRecord(1, &quot;2024-01-15T02:30:03&quot;, &quot;WS01&quot;, 4401, &quot;cmd.exe&quot;, 4400, &quot;update.exe&quot;,
+                 &quot;C:\\Windows\\system32\\cmd.exe&quot;, &quot;cmd.exe /c whoami&quot;, None, None, None, True, &quot;user1&quot;),
+]
+
+windows = build_process_windows(SAMPLE_RECORDS)
+for key, w in windows.items():
+    fv = w.to_feature_vector()
+    print(f&quot;PID {w.pid:6d}  {w.process_name:20s}  features={[round(f,1) for f in fv]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add three more <code>SysmonRecord</code> events for the <code>update.exe</code> PID (4400): two more network connections to different IPs and one more unsigned DLL load.
+Rebuild windows and check that <code>network_conns</code> length increases to 3 and <code>unsigned_dlls</code> increases to 2.
+Expected output: <code>update.exe</code> feature vector shows <code>network_connections=3.0</code>, <code>unsigned_dlls=2.0</code>.</p>
+<hr />
+<h3>Concept 2 — Training and Persisting the Model</h3>
+<p>A trained Isolation Forest must be saved so the same model is used across shifts and restarts. In production, models are versioned artifacts — like Parquet files or dbt models, they have a creation timestamp, a training dataset hash, and a retirement date.</p>
+<p>The minimal persistence format: serialize the model with <code>joblib</code> (for sklearn) or pickle (for custom implementations). Alongside the model binary, save a metadata JSON: training date, n_samples, contamination, threshold, feature names, and scaler parameters. The metadata lets a new analyst reconstruct what the model represents without running the training pipeline.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Optional
+import json
+import hashlib
+
+@dataclass
+class ModelMetadata:
+    model_id: str
+    created_at: str
+    training_host_role: str
+    n_samples: int
+    n_features: int
+    feature_names: list[str]
+    contamination: float
+    threshold: float
+    scaler_means: list[float]
+    scaler_stds: list[float]
+    baseline_strategy: str
+    notes: str = &quot;&quot;
+
+    def to_json(self) -&gt; str:
+        return json.dumps(self.__dict__, indent=2)
+
+    @classmethod
+    def from_json(cls, data: str) -&gt; &quot;ModelMetadata&quot;:
+        return cls(**json.loads(data))
+
+    def fingerprint(self) -&gt; str:
+        &quot;&quot;&quot;SHA-256 of metadata (excluding notes) for change detection.&quot;&quot;&quot;
+        stable = {k: v for k, v in self.__dict__.items() if k != &quot;notes&quot;}
+        raw = json.dumps(stable, sort_keys=True).encode()
+        return hashlib.sha256(raw).hexdigest()[:16]
+
+def save_model_metadata(meta: ModelMetadata, path: str) -&gt; None:
+    &quot;&quot;&quot;
+    Real usage:
+        import joblib
+        joblib.dump({&quot;model&quot;: model, &quot;scaler&quot;: scaler, &quot;meta&quot;: meta}, path)
+    Simulation: write metadata JSON to &lt;path&gt;.meta.json
+    &quot;&quot;&quot;
+    meta_path = path + &quot;.meta.json&quot;
+    with open(meta_path, &quot;w&quot;) as f:
+        f.write(meta.to_json())
+    print(f&quot;Metadata saved to {meta_path}&quot;)
+
+def load_model_metadata(path: str) -&gt; ModelMetadata:
+    meta_path = path + &quot;.meta.json&quot;
+    with open(meta_path) as f:
+        return ModelMetadata.from_json(f.read())
+
+meta = ModelMetadata(
+    model_id=&quot;iforest_dc_v1&quot;,
+    created_at=&quot;2024-01-15T08:00:00Z&quot;,
+    training_host_role=&quot;domain_controller&quot;,
+    n_samples=5,
+    n_features=6,
+    feature_names=[&quot;hour_of_day&quot;,&quot;child_count&quot;,&quot;network_connections&quot;,
+                   &quot;loaded_dll_count&quot;,&quot;image_load_unsigned&quot;,&quot;session_id&quot;],
+    contamination=0.01,
+    threshold=-0.08,
+    scaler_means=[10.1, 0.4, 1.6, 17.0, 0.0, 0.0],
+    scaler_stds=[0.71, 0.55, 1.14, 3.16, 0.0, 1.0],
+    baseline_strategy=&quot;peer_group&quot;,
+)
+
+import tempfile, os
+tmp_path = os.path.join(tempfile.gettempdir(), &quot;iforest_dc_v1.pkl&quot;)
+save_model_metadata(meta, tmp_path)
+
+loaded = load_model_metadata(tmp_path)
+print(f&quot;Loaded model: {loaded.model_id}  fingerprint: {loaded.fingerprint()}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+After loading the metadata, change <code>loaded.notes = &quot;Retrained after Q1 2024 red team exercise&quot;</code> and save it back to a new path (use <code>tmp_path + &quot;_v2&quot;</code>).
+Then load the v2 metadata and confirm the <code>notes</code> field is set but the <code>fingerprint()</code> is the same as the original (since fingerprint excludes notes).
+Expected output: fingerprint is identical for both versions; notes field differs.</p>
+<hr />
+<h3>Concept 3 — Detecting Process Anomalies End-to-End</h3>
+<p>Putting it together: ingest → aggregate → scale → score → alert. Each stage produces a structured output that the next stage consumes. This is the same ETL pattern from W07 applied to a real-time security pipeline.</p>
+<p>The alert output should include: the anomaly score, which features drove the score (top-k most deviant features from the scaler output), the process metadata, and a recommended investigation action.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Optional
+import json
+
+@dataclass
+class AnomalyAlert:
+    alert_id: str
+    hostname: str
+    pid: int
+    process_name: str
+    parent_name: str
+    command_line: str
+    anomaly_score: float
+    threshold: float
+    priority: str
+    top_anomalous_features: list[tuple[str, float, float]]  # (name, raw_value, scaled_value)
+    investigation_actions: list[str]
+    technique_hypotheses: list[str]
+    timestamp: str
+
+    def to_json(self) -&gt; str:
+        return json.dumps({
+            &quot;alert_id&quot;: self.alert_id,
+            &quot;timestamp&quot;: self.timestamp,
+            &quot;hostname&quot;: self.hostname,
+            &quot;pid&quot;: self.pid,
+            &quot;process_name&quot;: self.process_name,
+            &quot;parent_name&quot;: self.parent_name,
+            &quot;command_line&quot;: self.command_line,
+            &quot;anomaly_score&quot;: self.anomaly_score,
+            &quot;threshold&quot;: self.threshold,
+            &quot;priority&quot;: self.priority,
+            &quot;top_anomalous_features&quot;: self.top_anomalous_features,
+            &quot;investigation_actions&quot;: self.investigation_actions,
+            &quot;technique_hypotheses&quot;: self.technique_hypotheses,
+        }, indent=2)
+
+INVESTIGATION_TEMPLATES = {
+    &quot;child_count&quot;:            &quot;Review child process tree in Sysmon EID 1 for PID {pid}&quot;,
+    &quot;network_connections&quot;:    &quot;Check network connections in Sysmon EID 3 for PID {pid} — review destination IPs in threat intel&quot;,
+    &quot;unsigned_dlls&quot;:          &quot;List unsigned DLLs loaded by PID {pid} via Sysmon EID 7&quot;,
+    &quot;hour_of_day&quot;:            &quot;Verify whether {process} is expected to run at this hour on {hostname}&quot;,
+}
+
+TECHNIQUE_HYPOTHESES = {
+    &quot;child_count&quot;:         &quot;T1059 — Command and Scripting Interpreter (unexpected child processes)&quot;,
+    &quot;network_connections&quot;: &quot;T1071 — Application Layer Protocol (C2 over HTTP/HTTPS)&quot;,
+    &quot;unsigned_dlls&quot;:       &quot;T1574 — Hijack Execution Flow or T1055 — Process Injection (unsigned DLL)&quot;,
+}
+
+def build_alert(
+    window: &quot;ProcessWindow&quot;,
+    raw_features: list[float],
+    scaled_features: list[float],
+    feature_names: list[str],
+    anomaly_score: float,
+    threshold: float,
+    alert_id: str,
+) -&gt; AnomalyAlert:
+    priority = &quot;HIGH&quot; if anomaly_score &lt; threshold - 0.20 else &quot;MEDIUM&quot;
+
+    deviations = [(feature_names[i], raw_features[i], scaled_features[i])
+                  for i in range(len(feature_names))]
+    top = sorted(deviations, key=lambda x: abs(x[2]), reverse=True)[:3]
+
+    actions = []
+    hypotheses = []
+    for name, raw, scaled in top:
+        if abs(scaled) &gt; 1.0 and name in INVESTIGATION_TEMPLATES:
+            actions.append(
+                INVESTIGATION_TEMPLATES[name].format(
+                    pid=window.pid, process=window.process_name, hostname=window.hostname
+                )
+            )
+        if abs(scaled) &gt; 1.0 and name in TECHNIQUE_HYPOTHESES:
+            hypotheses.append(TECHNIQUE_HYPOTHESES[name])
+
+    return AnomalyAlert(
+        alert_id=alert_id,
+        hostname=window.hostname,
+        pid=window.pid,
+        process_name=window.process_name,
+        parent_name=window.parent_name,
+        command_line=window.command_line,
+        anomaly_score=anomaly_score,
+        threshold=threshold,
+        priority=priority,
+        top_anomalous_features=top,
+        investigation_actions=list(dict.fromkeys(actions)),
+        technique_hypotheses=list(dict.fromkeys(hypotheses)),
+        timestamp=window.first_seen,
+    )
+
+# Use window from Day 3 Concept 1
+if &quot;windows&quot; in dir():
+    for key, w in windows.items():
+        if w.process_name == &quot;update.exe&quot;:
+            raw_fv  = w.to_feature_vector()
+            # Simulate scaled values
+            scaled_fv = [-3.4, 8.2, 4.1, -3.9, 5.2, 0.0]
+            alert = build_alert(
+                w, raw_fv, scaled_fv,
+                [&quot;hour_of_day&quot;,&quot;child_count&quot;,&quot;network_connections&quot;,
+                 &quot;loaded_dll_count&quot;,&quot;image_load_unsigned&quot;,&quot;session_id&quot;],
+                anomaly_score=-0.62,
+                threshold=-0.08,
+                alert_id=&quot;ALERT-2024-001&quot;,
+            )
+            print(alert.to_json())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Modify <code>build_alert</code> to also include a <code>risk_summary</code> string field in <code>AnomalyAlert</code>.
+Compute it as: <code>f&quot;Score {anomaly_score:.3f} vs threshold {threshold:.3f}: {len(top_anomalous_features)} features deviated &gt;1σ&quot;</code>.
+Expected output: the JSON includes a <code>risk_summary</code> key with the formatted string.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Automated alert enrichment — LLM receives alert JSON and returns an analyst-ready triage note.
+<strong>Threat:</strong> Alert flooding — if contamination is set too high or the baseline is dirty, the anomaly model generates more alerts than analysts can triage. LLMs can pre-triage and de-duplicate before human review.
+<strong>Opportunity:</strong> LLM takes <code>AnomalyAlert.to_json()</code> and returns: (1) most likely MITRE technique, (2) 3 investigation steps in order, (3) confidence level, (4) suggested SOAR playbook trigger.
+<strong>Prompt to try:</strong> <code>&quot;You are a SOC tier-2 analyst. Here is an anomaly alert JSON: [paste alert JSON]. Write a 5-bullet triage note covering: (1) why this is suspicious, (2) most likely ATT&amp;CK technique, (3) next investigation step, (4) whether containment is needed immediately, (5) confidence level (Low/Medium/High).&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Model Evaluation and Drift Detection</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="19-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=hQXYjMIXKok" target="_blank" rel="noopener"><b>How to Detect Data Drift in Production (ML Interview Question Explained)</b><small>Epython Lab</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=ML%20model%20drift%20detection%20monitoring%20production%20anomaly%20detection" target="_blank" rel="noopener">ML model drift detection monitoring production anomaly detection</a></p></div>
+<hr />
+<h3>Concept 1 — Evaluating an Anomaly Model Without Ground Truth</h3>
+<p>Anomaly detection in security is semi-supervised: the training set is assumed normal, but there is no clean labeled test set of attacks. Evaluation options:</p>
+<p><strong>Red team labeled data</strong>: if you ran a red team exercise, use those events as the positive class. Precision and recall against red team events are the most meaningful metrics.</p>
+<p><strong>Synthetic attacks</strong>: inject known-malicious feature vectors into the test set (e.g., a <code>mimikatz.exe</code> feature profile). Useful for regression testing after model updates.</p>
+<p><strong>Operational metrics</strong>: false-positive rate measured by analyst verdict (analyst closes alert as FP → record that score). Over time, build a FP label set for threshold re-calibration.</p>
+<p><strong>Cluster analysis</strong>: cluster the anomaly-scored observations; inspect the anomalous cluster manually. If it contains known-bad processes, the model is working. If it contains legitimate business applications running at odd hours, the baseline needs adjustment.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Optional
+import statistics
+
+@dataclass
+class EvaluationResult:
+    model_id: str
+    eval_date: str
+    n_total: int
+    n_anomalies_flagged: int
+    n_true_positives: int    # confirmed malicious
+    n_false_positives: int   # analyst closed as FP
+    n_false_negatives: int   # known-bad that model missed
+    threshold_used: float
+    notes: str = &quot;&quot;
+
+    def precision(self) -&gt; float:
+        denom = self.n_true_positives + self.n_false_positives
+        return self.n_true_positives / denom if denom &gt; 0 else 0.0
+
+    def recall(self) -&gt; float:
+        denom = self.n_true_positives + self.n_false_negatives
+        return self.n_true_positives / denom if denom &gt; 0 else 0.0
+
+    def false_positive_rate(self) -&gt; float:
+        n_normal = self.n_total - self.n_true_positives - self.n_false_negatives
+        denom = n_normal
+        return self.n_false_positives / denom if denom &gt; 0 else 0.0
+
+    def summary(self) -&gt; str:
+        return (
+            f&quot;Model {self.model_id} | &quot;
+            f&quot;Precision={self.precision():.2f} Recall={self.recall():.2f} &quot;
+            f&quot;FPR={self.false_positive_rate():.3f} | &quot;
+            f&quot;TP={self.n_true_positives} FP={self.n_false_positives} FN={self.n_false_negatives}&quot;
+        )
+
+def compare_evaluations(results: list[EvaluationResult]) -&gt; None:
+    for r in sorted(results, key=lambda x: x.eval_date):
+        print(r.summary())
+
+evals = [
+    EvaluationResult(&quot;iforest_dc_v1&quot;, &quot;2024-01-15&quot;, 5000, 85, 12, 73, 3, -0.08),
+    EvaluationResult(&quot;iforest_dc_v2&quot;, &quot;2024-02-15&quot;, 5200, 62, 14,  4, 2, -0.12, &quot;Recalibrated after red team&quot;),
+]
+compare_evaluations(evals)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a third <code>EvaluationResult</code> for <code>&quot;iforest_dc_v3&quot;</code> on <code>&quot;2024-03-15&quot;</code> where the analyst tightened the threshold further and achieved <code>n_false_positives=1</code>, <code>n_true_positives=11</code>, <code>n_false_negatives=4</code>.
+Call <code>compare_evaluations</code> on all three. Which model has the best precision? Which has the best recall?
+Expected output: v3 has highest precision (near 0.92); v2 has better recall than v3; v1 has worst precision but catches the most with highest FP count.</p>
+<hr />
+<h3>Concept 2 — Feature Drift Detection</h3>
+<p>An anomaly model trained in January will degrade by March if software deployments changed process behavior on the fleet. Windows Update might introduce a new <code>svchost.exe</code> pattern that the January baseline never saw; the model flags it as anomalous even though it is legitimate.</p>
+<p>Feature drift detection: periodically compute the distribution of each feature in the current window and compare it to the training baseline. If the KL divergence or the mean shift exceeds a threshold, trigger a retrain.</p>
+<p>Practical approach for detection teams: track rolling 7-day feature means. If any feature mean drifts more than 2 standard deviations from the training mean, raise a &quot;baseline staleness&quot; alert — not a security alert, but an operational one for the detection engineer.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Optional
+import statistics
+import math
+
+@dataclass
+class FeatureDriftReport:
+    feature_name: str
+    training_mean: float
+    training_std: float
+    current_mean: float
+    current_std: float
+    z_score_of_mean: float = field(init=False)
+    drift_detected: bool = field(init=False)
+    drift_threshold_z: float = 2.0
+
+    def __post_init__(self) -&gt; None:
+        if self.training_std &gt; 0:
+            self.z_score_of_mean = abs(self.current_mean - self.training_mean) / self.training_std
+        else:
+            self.z_score_of_mean = 0.0
+        self.drift_detected = self.z_score_of_mean &gt; self.drift_threshold_z
+
+def detect_feature_drift(
+    training_stats: dict[str, dict],
+    current_observations: list[list[float]],
+    feature_names: list[str],
+) -&gt; list[FeatureDriftReport]:
+    reports = []
+    for i, name in enumerate(feature_names):
+        col = [row[i] for row in current_observations]
+        current_mean = statistics.mean(col) if col else 0.0
+        current_std  = statistics.stdev(col) if len(col) &gt; 1 else 0.0
+        stats = training_stats.get(name, {&quot;mean&quot;: 0.0, &quot;stdev&quot;: 1.0})
+        reports.append(FeatureDriftReport(
+            feature_name=name,
+            training_mean=stats[&quot;mean&quot;],
+            training_std=stats[&quot;stdev&quot;],
+            current_mean=current_mean,
+            current_std=current_std,
+        ))
+    return reports
+
+# Simulate current week data — child_count has drifted up (new deployment)
+current_data = [
+    [9.0, 3.0, 2.0, 14.0, 0.0, 0.0],
+    [10.0, 4.0, 3.0, 16.0, 0.0, 0.0],
+    [11.0, 2.0, 0.0, 22.0, 0.0, 0.0],
+    [9.5,  3.5, 1.0, 15.0, 0.0, 0.0],
+    [10.5, 4.5, 2.0, 18.0, 0.0, 0.0],
+]
+
+training_stats_sim = {
+    &quot;hour_of_day&quot;:          {&quot;mean&quot;: 10.1, &quot;stdev&quot;: 0.71},
+    &quot;child_count&quot;:          {&quot;mean&quot;: 0.4,  &quot;stdev&quot;: 0.55},
+    &quot;network_connections&quot;:  {&quot;mean&quot;: 1.6,  &quot;stdev&quot;: 1.14},
+    &quot;loaded_dll_count&quot;:     {&quot;mean&quot;: 17.0, &quot;stdev&quot;: 3.16},
+    &quot;image_load_unsigned&quot;:  {&quot;mean&quot;: 0.0,  &quot;stdev&quot;: 1.0},
+    &quot;session_id&quot;:           {&quot;mean&quot;: 0.0,  &quot;stdev&quot;: 1.0},
+}
+
+FEAT_NAMES = [&quot;hour_of_day&quot;,&quot;child_count&quot;,&quot;network_connections&quot;,
+              &quot;loaded_dll_count&quot;,&quot;image_load_unsigned&quot;,&quot;session_id&quot;]
+
+reports = detect_feature_drift(training_stats_sim, current_data, FEAT_NAMES)
+for r in reports:
+    flag = &quot;DRIFT&quot; if r.drift_detected else &quot;OK&quot;
+    print(f&quot;  {flag}  {r.feature_name:30s}  z={r.z_score_of_mean:.2f}  &quot;
+          f&quot;train_mean={r.training_mean:.2f}  current_mean={r.current_mean:.2f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Modify <code>current_data</code> so that <code>network_connections</code> (column index 2) also drifts — change all values to <code>6.0</code>.
+Run <code>detect_feature_drift</code> again. Confirm that both <code>child_count</code> and <code>network_connections</code> show <code>DRIFT</code>.
+Expected output: two rows marked <code>DRIFT</code>; four rows marked <code>OK</code>.</p>
+<hr />
+<h3>Concept 3 — Model Retraining Governance</h3>
+<p>Retraining a production anomaly model is a risk event. If the new baseline accidentally incorporates attacker behavior, the model becomes blind to the active intrusion. Retraining governance requires:</p>
+<ol>
+<li><strong>Human approval gate</strong>: a detection engineer reviews the drift report and approves retraining</li>
+<li><strong>Contamination scan</strong>: before training, run existing YARA and Sigma rules against the proposed baseline dataset — reject it if more than the contamination threshold of events match</li>
+<li><strong>Shadow deployment</strong>: run the new model in parallel with the old one for 24 hours, compare alert rates and overlap</li>
+<li><strong>Rollback path</strong>: keep the previous model version active; rollback procedure is documented</li>
+</ol>
+<p>This mirrors blue/green deployment from software engineering. The old model is &quot;blue&quot; (stable); the new model is &quot;green&quot; (candidate). You cut over only after validation.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+import json
+
+class RetrainingStatus(Enum):
+    PROPOSED    = &quot;proposed&quot;
+    CONTAMINATION_CHECK = &quot;contamination_check&quot;
+    APPROVED    = &quot;approved&quot;
+    SHADOW_RUNNING = &quot;shadow_running&quot;
+    PROMOTED    = &quot;promoted&quot;
+    REJECTED    = &quot;rejected&quot;
+    ROLLED_BACK = &quot;rolled_back&quot;
+
+@dataclass
+class RetrainingRequest:
+    request_id: str
+    model_id: str
+    new_version: str
+    triggered_by: str         # &quot;drift_alert&quot; or &quot;schedule&quot; or &quot;manual&quot;
+    drift_features: list[str]
+    proposed_baseline_size: int
+    contamination_fraction: float   # from YARA/Sigma scan of proposed baseline
+    status: RetrainingStatus = RetrainingStatus.PROPOSED
+    approver: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    shadow_alert_delta_pct: Optional[float] = None  # new_alerts / old_alerts - 1
+
+    MAX_CONTAMINATION = 0.02
+
+    def approve_retraining(self, approver: str) -&gt; bool:
+        if self.contamination_fraction &gt; self.MAX_CONTAMINATION:
+            self.status = RetrainingStatus.REJECTED
+            self.rejection_reason = (
+                f&quot;Contamination {self.contamination_fraction:.1%} exceeds &quot;
+                f&quot;max {self.MAX_CONTAMINATION:.1%}&quot;
+            )
+            return False
+        self.approver = approver
+        self.status = RetrainingStatus.APPROVED
+        return True
+
+    def start_shadow(self) -&gt; None:
+        if self.status != RetrainingStatus.APPROVED:
+            raise RuntimeError(&quot;Cannot start shadow: request not approved&quot;)
+        self.status = RetrainingStatus.SHADOW_RUNNING
+
+    def promote(self, shadow_delta: float) -&gt; None:
+        self.shadow_alert_delta_pct = shadow_delta
+        if abs(shadow_delta) &gt; 0.50:
+            self.status = RetrainingStatus.REJECTED
+            self.rejection_reason = f&quot;Shadow alert delta {shadow_delta:.0%} exceeds ±50%&quot;
+            return
+        self.status = RetrainingStatus.PROMOTED
+
+    def to_json(self) -&gt; str:
+        d = self.__dict__.copy()
+        d[&quot;status&quot;] = self.status.value
+        return json.dumps(d, indent=2)
+
+req = RetrainingRequest(
+    request_id=&quot;RETRAIN-2024-003&quot;,
+    model_id=&quot;iforest_dc_v2&quot;,
+    new_version=&quot;v3&quot;,
+    triggered_by=&quot;drift_alert&quot;,
+    drift_features=[&quot;child_count&quot;, &quot;network_connections&quot;],
+    proposed_baseline_size=8000,
+    contamination_fraction=0.008,
+)
+approved = req.approve_retraining(&quot;soc_lead@example.com&quot;)
+print(f&quot;Approved: {approved}  status: {req.status.value}&quot;)
+req.start_shadow()
+req.promote(shadow_delta=0.12)
+print(f&quot;Final status: {req.status.value}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Create a second <code>RetrainingRequest</code> with <code>contamination_fraction=0.025</code> (above the 2% max).
+Call <code>approve_retraining</code> on it and confirm the status becomes <code>REJECTED</code> and <code>rejection_reason</code> is set.
+Expected output: <code>Approved: False  status: rejected  reason: Contamination 2.5% exceeds max 2.0%</code>.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLM-assisted drift analysis — summarize which features drifted, probable cause, and whether retraining is safe.
+<strong>Threat:</strong> Poisoning via insider threat — a malicious insider deliberately runs anomalous processes during the proposed baseline collection window to normalize their behavior into the new model.
+<strong>Opportunity:</strong> LLM reviews the drift report and contamination scan results and writes a decision memo: &quot;Two features drifted after Patch Tuesday. YARA scan shows 0.4% contamination. Recommend approve with shadow deployment for 48 hours.&quot;
+<strong>Prompt to try:</strong> <code>&quot;I have a feature drift report showing child_count drifted from mean=0.4 to mean=3.5 (z=5.6) and network_connections from mean=1.6 to mean=6.1 (z=3.9). Contamination scan shows 0.8%. Should I approve model retraining? Write a 3-sentence decision memo.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Operationalizing ML Detections</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="19-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=detection%20engineering%20ML%20SIEM%20integration%20production%20deployment" target="_blank" rel="noopener">detection engineering ML SIEM integration production deployment</a></p></div>
+<hr />
+<h3>Concept 1 — Wrapping ML Detections as Sigma-Compatible Alerts</h3>
+<p>Sigma rules are the standard format for detection logic in the SOC. An ML anomaly score is not a Sigma rule — it is a continuous score from a model. To integrate into a SIEM workflow, the ML output needs to be materialized as a structured event that a Sigma rule can match.</p>
+<p>Pattern: the anomaly pipeline writes a synthetic event to a log stream (e.g., a custom table <code>ml_anomalies</code>) with fields: <code>alert_id</code>, <code>anomaly_score</code>, <code>priority</code>, <code>process_name</code>, <code>hostname</code>. A Sigma rule then matches on <code>priority: HIGH</code> in that table. This way, the ML model is treated like any other log source — it produces structured events, and analysts write rules against those events.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+import json
+
+@dataclass
+class MLAnomalyEvent:
+    &quot;&quot;&quot;Synthetic event written to SIEM for downstream Sigma matching.&quot;&quot;&quot;
+    event_source: str = &quot;ml_anomaly_detector&quot;
+    model_id: str = &quot;&quot;
+    alert_id: str = &quot;&quot;
+    timestamp: str = &quot;&quot;
+    hostname: str = &quot;&quot;
+    pid: int = 0
+    process_name: str = &quot;&quot;
+    parent_name: str = &quot;&quot;
+    anomaly_score: float = 0.0
+    priority: str = &quot;NONE&quot;
+    top_feature_1: str = &quot;&quot;
+    top_feature_1_z: float = 0.0
+    top_feature_2: str = &quot;&quot;
+    top_feature_2_z: float = 0.0
+    technique_hypothesis: str = &quot;&quot;
+
+    def to_siem_json(self) -&gt; str:
+        return json.dumps(self.__dict__, indent=2)
+
+SIGMA_RULE_FOR_ML_HIGH = &quot;&quot;&quot;
+title: ML Anomaly Detector — HIGH Priority Alert
+id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+status: experimental
+description: Fires when the process anomaly ML model raises a HIGH priority alert
+logsource:
+    product: custom
+    service: ml_anomaly_detector
+detection:
+    selection:
+        event_source: ml_anomaly_detector
+        priority: HIGH
+    condition: selection
+falsepositives:
+    - Software deployments that significantly change process behavior
+    - Patch Tuesday activity not reflected in the current baseline
+level: high
+tags:
+    - attack.defense_evasion
+    - attack.t1055
+&quot;&quot;&quot;
+
+event = MLAnomalyEvent(
+    model_id=&quot;iforest_dc_v2&quot;,
+    alert_id=&quot;ALERT-2024-001&quot;,
+    timestamp=&quot;2024-01-15T02:34:11Z&quot;,
+    hostname=&quot;WS01&quot;,
+    pid=4400,
+    process_name=&quot;update.exe&quot;,
+    parent_name=&quot;explorer.exe&quot;,
+    anomaly_score=-0.62,
+    priority=&quot;HIGH&quot;,
+    top_feature_1=&quot;child_count&quot;,
+    top_feature_1_z=8.2,
+    top_feature_2=&quot;unsigned_dlls&quot;,
+    top_feature_2_z=5.2,
+    technique_hypothesis=&quot;T1055&quot;,
+)
+print(event.to_siem_json())
+print(&quot;\n--- Sigma rule that matches this event ---&quot;)
+print(SIGMA_RULE_FOR_ML_HIGH)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Create a second <code>MLAnomalyEvent</code> with <code>priority=&quot;MEDIUM&quot;</code> and write a <code>SIGMA_RULE_FOR_ML_MEDIUM</code> YAML string that adds a filter: only match events where <code>top_feature_1_z</code> &gt; <code>3.0</code> (approximate it as a threshold value in the Sigma <code>filter</code> section using a string comparison).
+Print both the event JSON and the Sigma rule.
+Expected output: MEDIUM rule has an additional condition line referencing the z-score field.</p>
+<hr />
+<h3>Concept 2 — Connecting ML Output to the Detection Pipeline</h3>
+<p>The anomaly detector fits into the detection pipeline as a processing stage, not a replacement for Sigma rules. The architecture:</p>
+<pre><code>Sysmon events
+    → Aggregation layer (build ProcessWindows)
+    → Feature extraction
+    → Scale
+    → Isolation Forest score
+    → Threshold filter
+    → MLAnomalyEvent written to synthetic log stream
+    → SIEM ingests synthetic log stream
+    → Sigma rule on ml_anomaly_detector fires
+    → Alert in queue
+    → Analyst triage
+</code></pre><p>For Python-based pipelines (offline or near-real-time), the full pipeline runs as a scheduled job. The output is a JSON file of <code>MLAnomalyEvent</code> records that the SIEM imports on the next ingest cycle.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Optional
+import json
+
+@dataclass
+class PipelineRun:
+    run_id: str
+    started_at: str
+    model_id: str
+    n_events_ingested: int = 0
+    n_windows_built: int = 0
+    n_scored: int = 0
+    n_anomalies: int = 0
+    n_high_priority: int = 0
+    output_path: str = &quot;&quot;
+    errors: list[str] = field(default_factory=list)
+    completed_at: Optional[str] = None
+
+    def record_error(self, msg: str) -&gt; None:
+        self.errors.append(msg)
+
+    def to_json(self) -&gt; str:
+        return json.dumps(self.__dict__, indent=2)
+
+def run_anomaly_pipeline(
+    events: list,
+    model_meta: &quot;ModelMetadata&quot;,
+    scaler: &quot;FeatureScaler&quot;,
+    threshold: float,
+    output_path: str,
+    run_id: str,
+) -&gt; PipelineRun:
+    &quot;&quot;&quot;
+    Full pipeline: events → windows → features → scale → score → alerts.
+    Uses simulated scoring since sklearn not required.
+    &quot;&quot;&quot;
+    run = PipelineRun(
+        run_id=run_id,
+        started_at=&quot;2024-01-15T03:00:00Z&quot;,
+        model_id=model_meta.model_id if model_meta else &quot;unknown&quot;,
+        output_path=output_path,
+    )
+    run.n_events_ingested = len(events)
+
+    try:
+        windows = build_process_windows(events) if &quot;build_process_windows&quot; in dir() else {}
+        run.n_windows_built = len(windows)
+
+        alerts: list[MLAnomalyEvent] = []
+        for key, window in windows.items():
+            raw_fv = window.to_feature_vector()
+            if scaler and scaler.fitted:
+                scaled_fv = scaler.transform_one(raw_fv)
+            else:
+                scaled_fv = raw_fv
+
+            # Simulate score
+            import statistics
+            z_scores = [abs(v) for v in scaled_fv]
+            simulated_score = -statistics.mean(z_scores) / 5.0 if z_scores else 0.0
+            run.n_scored += 1
+
+            if simulated_score &lt; threshold:
+                run.n_anomalies += 1
+                priority = &quot;HIGH&quot; if simulated_score &lt; threshold - 0.2 else &quot;MEDIUM&quot;
+                if priority == &quot;HIGH&quot;:
+                    run.n_high_priority += 1
+
+                feat_names = model_meta.feature_names if model_meta else [str(i) for i in range(len(raw_fv))]
+                top = sorted(zip(feat_names, raw_fv, scaled_fv),
+                             key=lambda x: abs(x[2]), reverse=True)
+
+                alert = MLAnomalyEvent(
+                    model_id=model_meta.model_id if model_meta else &quot;unknown&quot;,
+                    alert_id=f&quot;{run_id}-{key[1]}&quot;,
+                    timestamp=window.first_seen,
+                    hostname=window.hostname,
+                    pid=window.pid,
+                    process_name=window.process_name,
+                    parent_name=window.parent_name,
+                    anomaly_score=simulated_score,
+                    priority=priority,
+                    top_feature_1=top[0][0] if len(top) &gt; 0 else &quot;&quot;,
+                    top_feature_1_z=round(top[0][2], 2) if len(top) &gt; 0 else 0.0,
+                    top_feature_2=top[1][0] if len(top) &gt; 1 else &quot;&quot;,
+                    top_feature_2_z=round(top[1][2], 2) if len(top) &gt; 1 else 0.0,
+                )
+                alerts.append(alert)
+
+        run.completed_at = &quot;2024-01-15T03:00:05Z&quot;
+
+        with open(output_path, &quot;w&quot;) as f:
+            json.dump([json.loads(a.to_siem_json()) for a in alerts], f, indent=2)
+        print(f&quot;Pipeline complete: {run.n_anomalies} anomalies written to {output_path}&quot;)
+
+    except Exception as e:
+        run.record_error(str(e))
+
+    return run
+
+import tempfile, os
+output = os.path.join(tempfile.gettempdir(), &quot;ml_anomaly_alerts.json&quot;)
+run = run_anomaly_pipeline(
+    SAMPLE_RECORDS if &quot;SAMPLE_RECORDS&quot; in dir() else [],
+    meta if &quot;meta&quot; in dir() else None,
+    scaler if &quot;scaler&quot; in dir() and scaler.fitted else FeatureScaler([&quot;a&quot;,&quot;b&quot;,&quot;c&quot;,&quot;d&quot;,&quot;e&quot;,&quot;f&quot;]),
+    threshold=-0.08,
+    output_path=output,
+    run_id=&quot;RUN-2024-001&quot;,
+)
+print(run.to_json())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Modify <code>run_anomaly_pipeline</code> to write a second output file at <code>output_path + &quot;.run_log.json&quot;</code> containing the <code>PipelineRun</code> metadata.
+Call the pipeline and verify both files exist in <code>tempfile.gettempdir()</code>.
+Expected output: two files created; the run log file contains <code>n_events_ingested</code>, <code>n_anomalies</code>, and <code>completed_at</code>.</p>
+<hr />
+<h3>Concept 3 — ML Coverage Gaps and Limitations</h3>
+<p>ML anomaly detection is a complement to signature-based detection, not a replacement. The coverage gap map:</p>
+<table>
+<thead>
+<tr>
+<th>Attack pattern</th>
+<th>Best detector</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Known malware hash</td>
+<td>File hash rule (Sigma/YARA)</td>
+</tr>
+<tr>
+<td>Known C2 domain</td>
+<td>DNS/proxy rule (Sigma/TI feed)</td>
+</tr>
+<tr>
+<td>Novel process injection</td>
+<td>Anomaly detector (behavioral deviation)</td>
+</tr>
+<tr>
+<td>Novel living-off-the-land</td>
+<td>Anomaly detector (rare parent-child pairs)</td>
+</tr>
+<tr>
+<td>Slow-burn persistence</td>
+<td>Anomaly detector (if baseline is clean)</td>
+</tr>
+<tr>
+<td>Fileless attacks</td>
+<td>Memory scanning (YARA on process memory) + anomaly</td>
+</tr>
+<tr>
+<td>Credential dumping</td>
+<td>Sigma on LSASS access events (EID 4656 + EID 10)</td>
+</tr>
+</tbody>
+</table>
+<p>The detection engineer's job is to know which quadrant each detection lives in and ensure coverage across all attack patterns, not just the ones that are easy to write rules for.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+
+class DetectorType(Enum):
+    SIGNATURE  = &quot;signature&quot;    # Sigma, YARA, IOC match
+    ANOMALY    = &quot;anomaly&quot;      # ML model, statistical baseline
+    HYBRID     = &quot;hybrid&quot;       # Sigma on ML output + direct rule
+
+@dataclass
+class CoverageEntry:
+    technique_id: str
+    technique_name: str
+    primary_detector: DetectorType
+    fallback_detector: Optional[DetectorType]
+    ml_adds_value: bool
+    ml_limitation: str
+    detection_asset: str        # rule name, model name, or &quot;GAP&quot;
+
+def build_coverage_map() -&gt; list[CoverageEntry]:
+    return [
+        CoverageEntry(&quot;T1055.012&quot;, &quot;Process Hollowing&quot;,
+                      DetectorType.ANOMALY, DetectorType.SIGNATURE, True,
+                      &quot;Slow injection evasion keeps feature values in range&quot;,
+                      &quot;iforest_dc_v2 + YARA T1055_hollow_process_injector&quot;),
+        CoverageEntry(&quot;T1003.001&quot;, &quot;LSASS Memory Dump&quot;,
+                      DetectorType.SIGNATURE, None, False,
+                      &quot;LSASS access is rare; anomaly model not needed&quot;,
+                      &quot;Sigma: lsass_access_eid4656&quot;),
+        CoverageEntry(&quot;T1059.001&quot;, &quot;PowerShell Execution&quot;,
+                      DetectorType.HYBRID, DetectorType.SIGNATURE, True,
+                      &quot;Obfuscated PS may evade child-count feature&quot;,
+                      &quot;Sigma: powershell_encoded_cmd + iforest child_count feature&quot;),
+        CoverageEntry(&quot;T1071.001&quot;, &quot;C2 over HTTP/HTTPS&quot;,
+                      DetectorType.ANOMALY, DetectorType.SIGNATURE, True,
+                      &quot;If C2 beaconing interval matches normal traffic rhythm&quot;,
+                      &quot;iforest network_connections feature + beaconing detector W14&quot;),
+        CoverageEntry(&quot;T1547.001&quot;, &quot;Registry Run Keys&quot;,
+                      DetectorType.SIGNATURE, None, False,
+                      &quot;Registry event-based; process behavior model irrelevant&quot;,
+                      &quot;Sigma: registry_run_key_modification&quot;),
+    ]
+
+coverage = build_coverage_map()
+print(f&quot;{&#x27;Technique&#x27;:12s} {&#x27;Detector&#x27;:12s} {&#x27;ML Value&#x27;:9s} {&#x27;Asset&#x27;}&quot;)
+print(&quot;-&quot; * 80)
+for e in coverage:
+    ml_flag = &quot;YES&quot; if e.ml_adds_value else &quot;no&quot;
+    print(f&quot;{e.technique_id:12s} {e.primary_detector.value:12s} {ml_flag:9s} {e.detection_asset}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a <code>CoverageEntry</code> for <code>T1078</code> (Valid Accounts — adversary uses legitimate credentials) with <code>ml_adds_value=True</code>, <code>primary_detector=DetectorType.ANOMALY</code>, and a <code>ml_limitation</code> explaining that the model needs identity features (login hour, source IP) that are not in the current Sysmon-based feature set.
+Set <code>detection_asset=&quot;GAP — identity features not in current model&quot;</code>.
+Expected output: the new row appears in the printed table with <code>ml_adds_value=YES</code> and <code>GAP</code> in the asset column.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLM-generated detection gap analysis — given coverage map, identify which techniques have no reliable detection.
+<strong>Threat:</strong> Detection engineering bottleneck — a small team cannot write rules for every technique; attackers prioritize uncovered areas. LLMs can summarize coverage gaps and suggest rule stubs.
+<strong>Opportunity:</strong> LLM receives the <code>CoverageEntry</code> list and generates a prioritized gap report: &quot;Three techniques have no ML coverage and no fallback: T1021 (Lateral Movement), T1134 (Access Token Manipulation), T1070 (Indicator Removal). Recommended next detections in priority order...&quot;
+<strong>Prompt to try:</strong> <code>&quot;I have a detection coverage map. Uncovered techniques: T1021 Remote Services, T1134 Access Token Manipulation, T1070 Indicator Removal. Rank them by detection priority for a Detection Engineer at a mid-size financial company in Israel. For each, suggest whether ML anomaly or Sigma is the better primary detector and why.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 19</h2>
+<p><strong>Task:</strong> Build an Isolation Forest anomaly detector on a simulated Sysmon process dataset.</p>
+<p><strong>Builds on:</strong> W08 (Sysmon log ingestion and parsing), W09 (scikit-learn model training and evaluation), W14 (behavioral detection patterns)</p>
+<p><strong>Deliverable:</strong></p>
+<pre><code>ml_detection/
+├── sysmon_features.py     ← SysmonRecord, ProcessWindow, build_process_windows(),
+│                            aggregate_process_features(), FeatureScaler
+├── anomaly_detector.py    ← IsolationForestConfig, train_isolation_forest(),
+│                            score_observation(), calibrate_threshold(),
+│                            AnomalyAlert, build_alert(), run_anomaly_pipeline()
+├── drift_monitor.py       ← FeatureDriftReport, detect_feature_drift(),
+│                            RetrainingRequest, RetrainingStatus
+└── pipeline_output/
+    └── ml_anomaly_alerts.json   ← output of run_anomaly_pipeline() on SAMPLE_RECORDS
+</code></pre><pre><code># Run the full pipeline
+python anomaly_detector.py \
+    --events sysmon_export.json \
+    --model iforest_dc_v2.meta.json \
+    --threshold -0.08 \
+    --output pipeline_output/ml_anomaly_alerts.json
+</code></pre><p><strong>Stretch goal:</strong> Integrate the anomaly pipeline output into the W16 triage script: if <code>triage_output.json</code> references a process, query <code>ml_anomaly_alerts.json</code> for that PID and append the anomaly score to the triage record under <code>ml_enrichment</code>.</p>
+<div class="pager"><a class="btn ghost" href="week-18.html">&larr; Week 18</a><a class="btn ghost" href="week-20.html">Week 20 &rarr;</a></div>
+</main></body></html>

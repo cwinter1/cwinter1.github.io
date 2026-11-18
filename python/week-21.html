@@ -1,0 +1,1478 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 21 — Infra CICD</title>
+<link rel="stylesheet" href="style.css"><script>window.SITE_DATASETS = ["datasets/titanic_train.csv"];</script>
+<script src="app.js" defer></script></head>
+<body data-site="python">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Python Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 21 — Infra CICD</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a><a class="btn ghost" href="#day-6">Day 6</a><a class="btn ghost" href="#day-7">Day 7</a></div><p class="note">Done this week: <span data-week-count="21" data-size="7"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><p class="note">Cells that need a file other than the Titanic table, a web connection, a database server or a package that is not available in the browser will show an error when run. Read those instead.</p><h2 id="day-1">Day 1 — Kubernetes Hands-On: Manifests For A Local Kind Cluster</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="21-1"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 21  |  DAY 1  |  KUBERNETES HANDS-ON: MANIFESTS FOR A LOCAL KIND CLUSTER</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Describe a local `kind` cluster and the commands that create it
+ 2. Build a Deployment manifest for the W18 FastAPI image (probes, resources, security)
+ 3. Lint a manifest for the mistakes that cause production incidents
+ 4. Write a Job and a CronJob for batch data work
+ 5. Add up the CPU and memory a Deployment asks the cluster for
+
+ TIME:  ~45 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;kind kubernetes in docker tutorial local cluster&quot;
+ Search: &quot;kubernetes deployment readiness liveness probe explained&quot;
+ Search: &quot;kubernetes cronjob concurrencyPolicy backoffLimit&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: Kubernetes vs managed serverless (Cloud Run, Lambda) vs a plain VM for data jobs.
+ Rule of thumb: use serverless for one stateless API or a scheduled job. Use Kubernetes when you run many services and jobs that need shared networking, quotas and one deploy method. A VM is fine for one long-lived process.
+ Insurance angle: a regulated workload often needs network policy and audit trails. Kubernetes gives both, at the price of running a platform.
+
+ REQUIREMENTS
+ ────────────
+ pip install pyyaml
+ Optional: docker, kind and kubectl. This lesson runs without them. Steps that need
+ a cluster are guarded and are skipped with a message when the tools are missing.
+ Theory of Deployment, Service, HPA and Secrets is in W8_D1 CONCEPT 6. This lesson runs it.
+ The image is the one built in W18_D2 (port 8000, /health endpoint).</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ SETUP</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D1_Kubernetes_Local_Kind.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import shutil
+import subprocess
+import yaml
+
+
+def tool_available(name):
+    return shutil.which(name) is not None
+
+
+def cluster_reachable():
+    &quot;&quot;&quot;True only when kubectl exists and a cluster answers.&quot;&quot;&quot;
+    if not tool_available(&quot;kubectl&quot;):
+        return False
+    try:
+        done = subprocess.run([&quot;kubectl&quot;, &quot;version&quot;, &quot;--request-timeout=3s&quot;], capture_output=True, timeout=10)
+        return done.returncode == 0
+    except Exception:
+        return False
+
+
+print(&quot;docker :&quot;, tool_available(&quot;docker&quot;))
+print(&quot;kind   :&quot;, tool_available(&quot;kind&quot;))
+print(&quot;kubectl:&quot;, tool_available(&quot;kubectl&quot;))
+print(&quot;cluster reachable:&quot;, cluster_reachable())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — A LOCAL CLUSTER WITH KIND</pre><pre class="box">══════════════════════════════════════════════════════════════
+kind (&quot;Kubernetes in Docker&quot;) runs each Kubernetes node as a Docker container.
+It starts in about a minute, costs nothing, and is the cluster CI systems use.
+The cluster itself is described by a small YAML file.
+
+Commands you run on your own machine (shown, not executed here):
+  kind create cluster --name claims --config kind-config.yaml
+  kind load docker-image claims-api:1.0.0 --name claims   # no registry needed
+  kubectl apply -f deployment.yaml
+  kubectl get pods -w
+  kind delete cluster --name claims
+
+Because kubectl reads YAML, you can GENERATE manifests from Python dicts and
+lint them in a test before any cluster exists. That is what the rest of this
+lesson does.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D1_Kubernetes_Local_Kind.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>kind_config = {
+    &quot;kind&quot;: &quot;Cluster&quot;,
+    &quot;apiVersion&quot;: &quot;kind.x-k8s.io/v1alpha4&quot;,
+    &quot;nodes&quot;: [
+        {&quot;role&quot;: &quot;control-plane&quot;, &quot;extraPortMappings&quot;: [{&quot;containerPort&quot;: 30080, &quot;hostPort&quot;: 8080}]},
+        {&quot;role&quot;: &quot;worker&quot;},
+    ],
+}
+print(yaml.safe_dump(kind_config, sort_keys=False))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — A DEPLOYMENT FOR THE FASTAPI IMAGE</pre><pre class="box">══════════════════════════════════════════════════════════════
+A production-ready Deployment has four things beyond &quot;run this image&quot;:
+  readinessProbe   traffic is sent only when /health answers
+  livenessProbe    a stuck process is restarted
+  resources        requests (what the scheduler reserves) and limits (the ceiling)
+  securityContext  do not run as root
+Pin a version tag. &quot;:latest&quot; makes rollbacks and audits impossible.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D1_Kubernetes_Local_Kind.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def make_deployment(name, image, replicas, port):
+    return {
+        &quot;apiVersion&quot;: &quot;apps/v1&quot;,
+        &quot;kind&quot;: &quot;Deployment&quot;,
+        &quot;metadata&quot;: {&quot;name&quot;: name, &quot;labels&quot;: {&quot;app&quot;: name}},
+        &quot;spec&quot;: {
+            &quot;replicas&quot;: replicas,
+            &quot;selector&quot;: {&quot;matchLabels&quot;: {&quot;app&quot;: name}},
+            &quot;template&quot;: {
+                &quot;metadata&quot;: {&quot;labels&quot;: {&quot;app&quot;: name}},
+                &quot;spec&quot;: {
+                    &quot;securityContext&quot;: {&quot;runAsNonRoot&quot;: True},
+                    &quot;containers&quot;: [
+                        {
+                            &quot;name&quot;: name,
+                            &quot;image&quot;: image,
+                            &quot;ports&quot;: [{&quot;containerPort&quot;: port}],
+                            &quot;readinessProbe&quot;: {&quot;httpGet&quot;: {&quot;path&quot;: &quot;/health&quot;, &quot;port&quot;: port}, &quot;periodSeconds&quot;: 5},
+                            &quot;livenessProbe&quot;: {&quot;httpGet&quot;: {&quot;path&quot;: &quot;/health&quot;, &quot;port&quot;: port}, &quot;periodSeconds&quot;: 10},
+                            &quot;resources&quot;: {
+                                &quot;requests&quot;: {&quot;cpu&quot;: &quot;250m&quot;, &quot;memory&quot;: &quot;256Mi&quot;},
+                                &quot;limits&quot;: {&quot;cpu&quot;: &quot;500m&quot;, &quot;memory&quot;: &quot;512Mi&quot;},
+                            },
+                        }
+                    ],
+                },
+            },
+        },
+    }
+
+
+deployment = make_deployment(&quot;claims-api&quot;, &quot;claims-api:1.0.0&quot;, 3, 8000)
+print(yaml.safe_dump(deployment, sort_keys=False)[:420], &quot;...&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write lint_deployment(doc) that returns a list of problems found in the FIRST
+container of a Deployment dict, in this fixed order:
+  &quot;image uses :latest&quot;        image ends with &quot;:latest&quot; or has no tag at all
+  &quot;no resource limits&quot;        container has no resources.limits
+  &quot;no readinessProbe&quot;         container has no readinessProbe
+  &quot;runAsNonRoot not set&quot;      pod securityContext.runAsNonRoot is not True
+Run it on bad_deployment and print the list. Run it on the good deployment from
+the example above and print the list too.
+
+Expected output:
+    [&#x27;image uses :latest&#x27;, &#x27;no resource limits&#x27;, &#x27;no readinessProbe&#x27;, &#x27;runAsNonRoot not set&#x27;]
+    []
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D1_Kubernetes_Local_Kind.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>bad_deployment = {
+    &quot;apiVersion&quot;: &quot;apps/v1&quot;,
+    &quot;kind&quot;: &quot;Deployment&quot;,
+    &quot;metadata&quot;: {&quot;name&quot;: &quot;claims-api&quot;},
+    &quot;spec&quot;: {
+        &quot;replicas&quot;: 2,
+        &quot;selector&quot;: {&quot;matchLabels&quot;: {&quot;app&quot;: &quot;claims-api&quot;}},
+        &quot;template&quot;: {
+            &quot;metadata&quot;: {&quot;labels&quot;: {&quot;app&quot;: &quot;claims-api&quot;}},
+            &quot;spec&quot;: {&quot;containers&quot;: [{&quot;name&quot;: &quot;claims-api&quot;, &quot;image&quot;: &quot;claims-api:latest&quot;}]},
+        },
+    },
+}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — JOBS AND CRONJOBS FOR DATA WORK</pre><pre class="box">══════════════════════════════════════════════════════════════
+A Deployment keeps something running. Data pipelines run and FINISH, so they
+use a Job (run to completion) or a CronJob (a Job on a schedule).
+
+  restartPolicy      must be Never or OnFailure for a Job
+  backoffLimit       how many times to retry a failed pod before giving up
+  concurrencyPolicy  Forbid stops a slow run from overlapping the next one
+                     (two writers on the same table is how you get duplicates)
+  activeDeadlineSeconds  kill a run that hangs
+
+The container runs the same command you would run locally, for example the
+W20 lakehouse job: python -m claims_lakehouse.run --batch 2026-04-20
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D1_Kubernetes_Local_Kind.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def make_job(name, image, command, backoff_limit=3):
+    return {
+        &quot;apiVersion&quot;: &quot;batch/v1&quot;,
+        &quot;kind&quot;: &quot;Job&quot;,
+        &quot;metadata&quot;: {&quot;name&quot;: name},
+        &quot;spec&quot;: {
+            &quot;backoffLimit&quot;: backoff_limit,
+            &quot;template&quot;: {
+                &quot;spec&quot;: {
+                    &quot;restartPolicy&quot;: &quot;Never&quot;,
+                    &quot;containers&quot;: [{&quot;name&quot;: name, &quot;image&quot;: image, &quot;command&quot;: command}],
+                }
+            },
+        },
+    }
+
+
+job = make_job(&quot;load-claims&quot;, &quot;claims-lakehouse:1.0.0&quot;, [&quot;python&quot;, &quot;-m&quot;, &quot;claims_lakehouse.run&quot;])
+print(job[&quot;spec&quot;][&quot;backoffLimit&quot;], job[&quot;spec&quot;][&quot;template&quot;][&quot;spec&quot;][&quot;restartPolicy&quot;])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+Wrap the Job from the example in a CronJob called nightly-claims that runs at
+02:00 every day (&quot;0 2 * * *&quot;), forbids overlapping runs, keeps 3 successful
+job records, and uses the job as its job template. Print on three lines:
+the schedule, the concurrencyPolicy and the successfulJobsHistoryLimit.
+
+Expected output:
+    0 2 * * *
+    Forbid
+    3
+
+--- starting data ---
+(reuse the job dict from the example above)</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — WHAT THE SCHEDULER SEES: REQUESTS AND LIMITS</pre><pre class="box">══════════════════════════════════════════════════════════════
+The scheduler places a pod on a node that has enough UNRESERVED capacity for its
+requests. The kubelet enforces the limits: exceed the memory limit and the
+container is killed (OOMKilled, tomorrow&#x27;s lesson). Exceed the CPU limit and it is
+only slowed down.
+
+Units: cpu &quot;250m&quot; = 0.25 core, &quot;1&quot; = 1 core. memory &quot;256Mi&quot; = 256 mebibytes,
+&quot;1Gi&quot; = 1024 Mi. A small parser lets you check a manifest against a node
+before applying it.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D1_Kubernetes_Local_Kind.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def cpu_cores(text):
+    text = str(text)
+    return int(text[:-1]) / 1000 if text.endswith(&quot;m&quot;) else float(text)
+
+
+def memory_mi(text):
+    text = str(text)
+    if text.endswith(&quot;Gi&quot;):
+        return float(text[:-2]) * 1024
+    if text.endswith(&quot;Mi&quot;):
+        return float(text[:-2])
+    raise ValueError(&quot;unsupported unit: &quot; + text)
+
+
+print(cpu_cores(&quot;250m&quot;), cpu_cores(&quot;2&quot;), memory_mi(&quot;256Mi&quot;), memory_mi(&quot;1Gi&quot;))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write total_resources(doc, section) that returns (cpu_cores, memory_mi) summed
+over all replicas of the first container of a Deployment, for section &quot;requests&quot;
+or &quot;limits&quot;. Use cpu_cores and memory_mi from the example. Print both sections
+for the good deployment (3 replicas).
+
+Expected output:
+    requests: 0.75 cpu, 768.0 Mi
+    limits: 1.5 cpu, 1536.0 Mi
+
+--- starting data ---
+(reuse the deployment dict from Concept 2)</pre><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 4</pre><pre class="box">══════════════════════════════════════════════════════════════
+A kind worker node has 2 cores and 2 Gi of memory, and the cluster already
+runs workloads that reserve 1 core and 1024 Mi. Using total_resources from
+Exercise 3, decide whether the deployment&#x27;s REQUESTS still fit and print one
+line that shows the free capacity and the verdict.
+
+Expected output:
+    free: 1.0 cpu, 1024.0 Mi -&gt; fits: True
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D1_Kubernetes_Local_Kind.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>node_cpu_cores = 2.0
+node_memory_mi = 2048.0
+reserved_cpu_cores = 1.0
+reserved_memory_mi = 1024.0</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 5 — GUARDED CLUSTER STEPS (RUN ONLY WHERE KUBECTL EXISTS)</pre><pre class="box">══════════════════════════════════════════════════════════════
+A client-side dry run asks kubectl to validate a manifest without a cluster
+change. Wrap every cluster call in a guard so the notebook runs anywhere.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D1_Kubernetes_Local_Kind.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def kubectl_dry_run(doc):
+    if not tool_available(&quot;kubectl&quot;):
+        return &quot;skipped: kubectl not installed (manifest was only linted)&quot;
+    done = subprocess.run(
+        [&quot;kubectl&quot;, &quot;apply&quot;, &quot;--dry-run=client&quot;, &quot;-f&quot;, &quot;-&quot;],
+        input=yaml.safe_dump(doc), capture_output=True, text=True, timeout=30,
+    )
+    return done.stdout.strip() or done.stderr.strip()
+
+
+print(kubectl_dry_run(deployment).split(&quot;:&quot;)[0])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-2">Day 2 — Kubernetes Debugging: Crashloopbackoff, Oomkilled, Pending</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="21-2"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 21  |  DAY 2  |  KUBERNETES DEBUGGING: CRASHLOOPBACKOFF, OOMKILLED, PENDING</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Read pod status fields and name the failure (CrashLoopBackOff, OOMKilled, ImagePullBackOff, Unschedulable)
+ 2. Pull the useful lines out of `kubectl describe` events
+ 3. Fix a manifest from evidence instead of guessing
+ 4. Explain restart back-off timing
+
+ TIME:  ~40 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;kubernetes CrashLoopBackOff troubleshooting&quot;
+ Search: &quot;kubernetes OOMKilled exit code 137 memory limit&quot;
+ Search: &quot;kubectl describe pod events debugging&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: set memory limit = request (guaranteed) vs limit well above request (burstable).
+ Rule of thumb: for data jobs with a predictable peak, set request close to the measured peak and limit with 30% headroom.
+ A limit equal to a too-low request just moves the OOM kill earlier.
+
+ REQUIREMENTS
+ ────────────
+ Runs offline with plain Python. The status dicts below have the same shape as
+ `kubectl get pod -o json`, so the same code works on live output on a machine with a cluster.</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D2_Kubernetes_Debugging.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import math
+import re
+import shutil
+import subprocess</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — THE DEBUGGING LOOP</pre><pre class="box">══════════════════════════════════════════════════════════════
+Always the same four commands, in this order:
+  kubectl get pods                       what is the status?
+  kubectl describe pod &lt;name&gt;            what do the EVENTS say? (bottom of output)
+  kubectl logs &lt;name&gt; --previous         what did the crashed container print?
+  kubectl get pod &lt;name&gt; -o json         exact reason and exit code
+
+The status fields that matter:
+  waiting.reason                CrashLoopBackOff, ImagePullBackOff, ErrImagePull
+  lastState.terminated.reason   OOMKilled, Error, Completed
+  lastState.terminated.exitCode 137 = killed (usually OOM), 1 = app error
+  conditions[PodScheduled]      False + Unschedulable = no node has room
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D2_Kubernetes_Debugging.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>pods = [
+    {&quot;name&quot;: &quot;api-1&quot;, &quot;phase&quot;: &quot;Running&quot;, &quot;containerStatuses&quot;: [
+        {&quot;state&quot;: {&quot;waiting&quot;: {&quot;reason&quot;: &quot;CrashLoopBackOff&quot;}},
+         &quot;lastState&quot;: {&quot;terminated&quot;: {&quot;reason&quot;: &quot;OOMKilled&quot;, &quot;exitCode&quot;: 137}}, &quot;restartCount&quot;: 5}]},
+    {&quot;name&quot;: &quot;api-2&quot;, &quot;phase&quot;: &quot;Pending&quot;, &quot;containerStatuses&quot;: [
+        {&quot;state&quot;: {&quot;waiting&quot;: {&quot;reason&quot;: &quot;ImagePullBackOff&quot;}}, &quot;restartCount&quot;: 0}]},
+    {&quot;name&quot;: &quot;etl-3&quot;, &quot;phase&quot;: &quot;Pending&quot;, &quot;conditions&quot;: [
+        {&quot;type&quot;: &quot;PodScheduled&quot;, &quot;status&quot;: &quot;False&quot;, &quot;reason&quot;: &quot;Unschedulable&quot;,
+         &quot;message&quot;: &quot;0/2 nodes are available: 2 Insufficient memory.&quot;}]},
+    {&quot;name&quot;: &quot;job-4&quot;, &quot;phase&quot;: &quot;Running&quot;, &quot;containerStatuses&quot;: [
+        {&quot;state&quot;: {&quot;waiting&quot;: {&quot;reason&quot;: &quot;CrashLoopBackOff&quot;}},
+         &quot;lastState&quot;: {&quot;terminated&quot;: {&quot;reason&quot;: &quot;Error&quot;, &quot;exitCode&quot;: 1}}, &quot;restartCount&quot;: 3}]},
+    {&quot;name&quot;: &quot;ok-5&quot;, &quot;phase&quot;: &quot;Running&quot;, &quot;containerStatuses&quot;: [
+        {&quot;state&quot;: {&quot;running&quot;: {}}, &quot;restartCount&quot;: 0}]},
+]
+
+for pod in pods:
+    status = pod.get(&quot;containerStatuses&quot;, [{}])[0]
+    waiting = status.get(&quot;state&quot;, {}).get(&quot;waiting&quot;, {}).get(&quot;reason&quot;, &quot;-&quot;)
+    print(f&quot;{pod[&#x27;name&#x27;]:6} phase={pod[&#x27;phase&#x27;]:8} waiting={waiting:18} restarts={status.get(&#x27;restartCount&#x27;, 0)}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write diagnose(pod) that returns one of these exact strings, checked in this order:
+  &quot;OOMKilled: raise memory limit&quot;                      lastState.terminated.reason is OOMKilled
+  &quot;ImagePullBackOff: check image name, tag, registry secret&quot;   waiting reason is ImagePullBackOff or ErrImagePull
+  &quot;CrashLoopBackOff: read logs --previous&quot;             waiting reason is CrashLoopBackOff
+  &quot;Unschedulable: lower requests or add nodes&quot;         any condition has reason Unschedulable
+  &quot;healthy&quot;                                            none of the above
+Print &quot;&lt;name&gt;: &lt;diagnosis&gt;&quot; for every pod in the pods list above.
+
+Expected output:
+    api-1: OOMKilled: raise memory limit
+    api-2: ImagePullBackOff: check image name, tag, registry secret
+    etl-3: Unschedulable: lower requests or add nodes
+    job-4: CrashLoopBackOff: read logs --previous
+    ok-5: healthy
+
+--- starting data ---
+(reuse the pods list from the example above)</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — READING EVENTS</pre><pre class="box">══════════════════════════════════════════════════════════════
+The Events table at the bottom of `kubectl describe pod` is the fastest
+evidence. Columns: Type, Reason, Age, From, Message. Normal events are the
+happy path. Warning events are where the cause is.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D2_Kubernetes_Debugging.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>describe_events = &quot;&quot;&quot;\
+Type     Reason            Age   From               Message
+Normal   Scheduled         3m    default-scheduler  Successfully assigned default/etl-3 to kind-worker
+Warning  FailedScheduling  2m    default-scheduler  0/2 nodes are available: 2 Insufficient memory.
+Normal   Pulled            2m    kubelet            Container image already present on machine
+Warning  BackOff           1m    kubelet            Back-off restarting failed container
+Warning  Unhealthy         30s   kubelet            Readiness probe failed: HTTP probe failed with statuscode: 503
+&quot;&quot;&quot;
+
+event_rows = [re.split(r&quot;\s{2,}&quot;, line.strip(), maxsplit=4) for line in describe_events.splitlines()[1:]]
+print(len(event_rows), &quot;events;&quot;, sum(1 for row in event_rows if row[0] == &quot;Warning&quot;), &quot;are warnings&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+From describe_events, print the Reason of every Warning event, in order, as a
+Python list, then print the message of the LAST warning (what the probe said).
+
+Expected output:
+    [&#x27;FailedScheduling&#x27;, &#x27;BackOff&#x27;, &#x27;Unhealthy&#x27;]
+    Readiness probe failed: HTTP probe failed with statuscode: 503
+
+--- starting data ---
+(reuse describe_events and the parsing idea from the example above)</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — FIX FROM EVIDENCE: SIZING MEMORY</pre><pre class="box">══════════════════════════════════════════════════════════════
+api-1 was OOMKilled at a 256Mi limit. Do not double the limit and hope.
+Measure the peak (kubectl top pod, or your metrics), then:
+  request = peak, rounded up to the next 64Mi
+  limit   = peak x 1.3, rounded up to the next 64Mi
+Rounding to 64Mi keeps manifests readable and avoids odd values.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D2_Kubernetes_Debugging.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def round_up(value, step):
+    return math.ceil(value / step) * step
+
+
+print(round_up(100, 64), round_up(128, 64), round_up(129, 64))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+The container of api-1 peaked at 410Mi. Write size_memory(peak_mi) returning
+(request_mi, limit_mi) by the rule above (use round_up). Apply it to the
+resources block below IN PLACE (memory strings like &quot;448Mi&quot;) and print the
+whole resources dict.
+
+Expected output:
+    {&#x27;requests&#x27;: {&#x27;cpu&#x27;: &#x27;250m&#x27;, &#x27;memory&#x27;: &#x27;448Mi&#x27;}, &#x27;limits&#x27;: {&#x27;cpu&#x27;: &#x27;500m&#x27;, &#x27;memory&#x27;: &#x27;576Mi&#x27;}}
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D2_Kubernetes_Debugging.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>peak_mi = 410
+resources = {
+    &quot;requests&quot;: {&quot;cpu&quot;: &quot;250m&quot;, &quot;memory&quot;: &quot;128Mi&quot;},
+    &quot;limits&quot;: {&quot;cpu&quot;: &quot;500m&quot;, &quot;memory&quot;: &quot;256Mi&quot;},
+}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — BACK-OFF: WHY A BROKEN POD &quot;SLOWS DOWN&quot;</pre><pre class="box">══════════════════════════════════════════════════════════════
+After each failed start the kubelet waits before the next one. The wait starts
+at 10 seconds, doubles every time, and is capped at 300 seconds (5 minutes).
+That is why a broken pod looks busy at first and then seems to do nothing.
+After you fix the manifest, delete the pod to skip the wait.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D2_Kubernetes_Debugging.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def backoff_delay(restart_number):
+    return min(10 * 2 ** (restart_number - 1), 300)
+
+
+print([backoff_delay(n) for n in range(1, 4)])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 4</pre><pre class="box">══════════════════════════════════════════════════════════════
+Using backoff_delay from the example, print the list of waits before restarts
+1 to 8, then the total seconds waited, then the same total in minutes rounded
+to 1 decimal.
+
+Expected output:
+    [10, 20, 40, 80, 160, 300, 300, 300]
+    1210
+    20.2
+
+--- starting data ---
+(reuse backoff_delay from the example above)</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 5 — GUARDED LIVE COMMANDS</pre><pre class="box">══════════════════════════════════════════════════════════════
+On a machine with a cluster the same loop runs from Python. The guard keeps
+the notebook runnable everywhere.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D2_Kubernetes_Debugging.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def kubectl(*args):
+    if shutil.which(&quot;kubectl&quot;) is None:
+        return &quot;skipped: kubectl not installed&quot;
+    done = subprocess.run([&quot;kubectl&quot;, *args], capture_output=True, text=True, timeout=30)
+    return (done.stdout or done.stderr).strip()
+
+
+print(kubectl(&quot;get&quot;, &quot;pods&quot;).splitlines()[0])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-3">Day 3 — Airflow And Spark On Kubernetes</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="21-3"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 21  |  DAY 3  |  AIRFLOW AND SPARK ON KUBERNETES</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Generate an Airflow DAG that runs a task as a Kubernetes pod (KubernetesPodOperator)
+ 2. Build a `spark-submit` command for Spark on Kubernetes
+ 3. Size a Spark job: partitions, cores and waves
+ 4. Decide when NOT to use Kubernetes for a data job
+
+ TIME:  ~40 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;airflow KubernetesPodOperator tutorial&quot;
+ Search: &quot;spark on kubernetes spark-submit cluster mode explained&quot;
+ Search: &quot;when not to use kubernetes data engineering&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: one pod per task (KubernetesPodOperator) vs shared Airflow workers (PythonOperator).
+ Rule of thumb: pod per task when tasks need their own image, their own dependencies, or hard resource limits. Shared workers when tasks are small Python calls with the same dependencies.
+ Pod per task isolates a heavy Spark client or a memory-hungry job from the scheduler.
+
+ REQUIREMENTS
+ ────────────
+ Runs offline with plain Python. Airflow and a cluster are NOT needed: the lesson
+ generates the code and checks it with the standard library `ast` module.
+ Airflow basics are in W16. Job and CronJob manifests are in W21_D1.</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D3_Airflow_And_Spark_On_K8s.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ast
+import math</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — KUBERNETESPODOPERATOR</pre><pre class="box">══════════════════════════════════════════════════════════════
+Airflow decides WHEN and in what ORDER. Kubernetes decides WHERE and with
+what resources. The operator creates a pod, streams its logs into the Airflow
+task log, waits, and marks the task by the pod&#x27;s exit code. The pod image holds
+the code, so Airflow itself stays free of heavy dependencies.
+
+A real task looks like this (needs the cncf.kubernetes provider, shown as text):
+
+  from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
+  load = KubernetesPodOperator(
+      task_id=&quot;load_claims&quot;,
+      name=&quot;load-claims&quot;,
+      image=&quot;claims-lakehouse:1.0.0&quot;,
+      cmds=[&quot;python&quot;, &quot;-m&quot;, &quot;claims_lakehouse.run&quot;],
+      get_logs=True,
+      container_resources={&quot;limits&quot;: {&quot;memory&quot;: &quot;1Gi&quot;}},
+  )
+
+Because the DAG file is just Python text, a generator can write it and a test
+can check it without running Airflow.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D3_Airflow_And_Spark_On_K8s.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def make_dag_source(dag_id, schedule, tasks):
+    &quot;&quot;&quot;tasks: list of (task_id, image, command_list). Tasks run in the order given.&quot;&quot;&quot;
+    lines = [
+        &quot;from airflow import DAG&quot;,
+        &quot;from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator&quot;,
+        &quot;import datetime&quot;,
+        &quot;&quot;,
+        f&quot;with DAG({dag_id!r}, schedule={schedule!r}, start_date=datetime.datetime(2026, 1, 1), catchup=False) as dag:&quot;,
+    ]
+    for task_id, image, command in tasks:
+        lines.append(
+            f&quot;    {task_id} = KubernetesPodOperator(task_id={task_id!r}, name={task_id.replace(&#x27;_&#x27;, &#x27;-&#x27;)!r}, &quot;
+            f&quot;image={image!r}, cmds={command!r}, get_logs=True)&quot;
+        )
+    ids = [t[0] for t in tasks]
+    lines.append(&quot;    &quot; + &quot; &gt;&gt; &quot;.join(ids))
+    return &quot;\n&quot;.join(lines) + &quot;\n&quot;
+
+
+example_source = make_dag_source(&quot;claims_nightly&quot;, &quot;0 2 * * *&quot;, [(&quot;load_claims&quot;, &quot;claims-lakehouse:1.0.0&quot;, [&quot;python&quot;, &quot;-m&quot;, &quot;run&quot;])])
+ast.parse(example_source)
+print(&quot;generated&quot;, len(example_source.splitlines()), &quot;lines of valid Python&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+Use make_dag_source to generate the DAG &quot;claims_pipeline&quot; with schedule
+&quot;0 3 * * *&quot; and these three tasks in order:
+  extract_claims  image extractor:2.1.0   command [&quot;python&quot;, &quot;extract.py&quot;]
+  build_silver    image claims-lakehouse:1.0.0  command [&quot;python&quot;, &quot;-m&quot;, &quot;silver&quot;]
+  build_gold      image claims-lakehouse:1.0.0  command [&quot;python&quot;, &quot;-m&quot;, &quot;gold&quot;]
+Check the source is valid Python with ast.parse. Then, using ast.walk, collect
+the task_id keyword of every KubernetesPodOperator call and print the list.
+
+Expected output:
+    [&#x27;extract_claims&#x27;, &#x27;build_silver&#x27;, &#x27;build_gold&#x27;]
+
+--- starting data ---
+(reuse make_dag_source from the example above)</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — SPARK ON KUBERNETES</pre><pre class="box">══════════════════════════════════════════════════════════════
+Spark can use Kubernetes as the cluster manager. `spark-submit` creates a driver
+pod, and the driver asks the API server for executor pods. When the job ends the
+executor pods are deleted. You pay for compute only while the job runs, and
+there is no permanent Spark cluster to patch.
+
+The parts that matter in the command:
+  --master k8s://https://&lt;api-server&gt;:6443    the cluster
+  --deploy-mode cluster                       the driver runs inside the cluster
+  --conf spark.kubernetes.container.image=... image with Spark and your code
+  --conf spark.executor.instances=N           how many executor pods
+  --conf spark.executor.memory / cores        size of each executor
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D3_Airflow_And_Spark_On_K8s.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def spark_submit_command(api_server, image, executors, executor_memory, executor_cores, app):
+    parts = [
+        &quot;spark-submit&quot;,
+        f&quot;--master k8s://{api_server}&quot;,
+        &quot;--deploy-mode cluster&quot;,
+        f&quot;--conf spark.kubernetes.container.image={image}&quot;,
+        f&quot;--conf spark.executor.instances={executors}&quot;,
+        f&quot;--conf spark.executor.memory={executor_memory}&quot;,
+        f&quot;--conf spark.executor.cores={executor_cores}&quot;,
+        app,
+    ]
+    return &quot; &quot;.join(parts)
+
+
+print(spark_submit_command(&quot;https://10.0.0.1:6443&quot;, &quot;spark-claims:1.0.0&quot;, 4, &quot;2g&quot;, 2, &quot;local:///opt/app/run.py&quot;))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+The lakehouse reprocess needs 10 executors with 4g memory and 2 cores each,
+image spark-claims:2.0.0, API server https://kind.local:6443, application
+local:///opt/app/reprocess.py. Print the command, then print how many pods the
+job needs in total (executors plus 1 driver) and the total executor memory in
+gigabytes.
+
+Expected output:
+    spark-submit --master k8s://https://kind.local:6443 --deploy-mode cluster --conf spark.kubernetes.container.image=spark-claims:2.0.0 --conf spark.executor.instances=10 --conf spark.executor.memory=4g --conf spark.executor.cores=2 local:///opt/app/reprocess.py
+    pods: 11
+    executor memory: 40 GB
+
+--- starting data ---
+(reuse spark_submit_command from the example above)</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — SIZING A SPARK JOB</pre><pre class="box">══════════════════════════════════════════════════════════════
+A task processes one partition. A good partition is about 128 MB. The job
+runs in WAVES: if you have 40 cores and 960 partitions, 40 tasks run at once,
+so there are 960 / 40 = 24 waves. More executors means fewer waves, until the
+partitions run out. Memory per core matters too: 4g for 2 cores is 2 GB per task.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D3_Airflow_And_Spark_On_K8s.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def partitions_for(data_gb, target_mb=128):
+    return math.ceil(data_gb * 1024 / target_mb)
+
+
+print(partitions_for(1), partitions_for(120))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+The historic reprocess reads 450 GB. With 128 MB partitions, 10 executors of
+4 cores each: print the number of partitions, the total cores, the number of
+waves (round up) and the memory available per task in GB if each executor has
+16 GB.
+
+Expected output:
+    partitions: 3600
+    cores: 40
+    waves: 90
+    memory per task: 4.0 GB
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D3_Airflow_And_Spark_On_K8s.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>data_gb = 450
+executors = 10
+cores_per_executor = 4
+memory_per_executor_gb = 16</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — WHEN NOT TO USE KUBERNETES</pre><pre class="box">══════════════════════════════════════════════════════════════
+Kubernetes is a platform, and a platform has a cost: someone upgrades it,
+secures it, and debugs it at night. Use the smallest thing that works:
+
+  always-on small service     one VM or a managed service
+  short, small, scheduled     serverless function (limited to about 15 minutes)
+  long or heavy batch         Kubernetes Job (or a managed batch service)
+  large distributed data      Spark on Kubernetes (or Databricks/EMR if you do not want to run it)
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D3_Airflow_And_Spark_On_K8s.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def choose_runtime(always_on, data_gb, minutes):
+    if always_on:
+        return &quot;plain vm&quot;
+    if data_gb &gt; 100:
+        return &quot;spark on kubernetes&quot;
+    if minutes &gt; 15:
+        return &quot;kubernetes job&quot;
+    return &quot;serverless function&quot;
+
+
+print(choose_runtime(False, 2, 5))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 4</pre><pre class="box">══════════════════════════════════════════════════════════════
+For each job below print &quot;&lt;name&gt;: &lt;runtime&gt;&quot; using choose_runtime from the
+example (call it with always_on, data_gb, minutes).
+
+Expected output:
+    daily claims export: serverless function
+    nightly lakehouse rebuild: kubernetes job
+    yearly history reprocess: spark on kubernetes
+    internal dashboard: plain vm
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D3_Airflow_And_Spark_On_K8s.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>jobs = [
+    (&quot;daily claims export&quot;, False, 2, 5),
+    (&quot;nightly lakehouse rebuild&quot;, False, 8, 40),
+    (&quot;yearly history reprocess&quot;, False, 450, 120),
+    (&quot;internal dashboard&quot;, True, 0, 0),
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-4">Day 4 — Terraform Fundamentals</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="21-4"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 21  |  DAY 4  |  TERRAFORM FUNDAMENTALS</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Explain the Terraform workflow: init, plan, apply, destroy, and what state is
+ 2. Generate HCL (variables, resources, outputs) from Python
+ 3. Read a plan summary and gate on destructive changes
+ 4. Compare desired configuration with state to find what will change
+ 5. Run a real Terraform workflow with the local provider (no cloud account)
+
+ TIME:  ~45 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;terraform tutorial for beginners init plan apply&quot;
+ Search: &quot;terraform state explained remote backend locking&quot;
+ Search: &quot;terraform modules variables outputs&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: Terraform vs console clicks vs CloudFormation/Pulumi.
+ Rule of thumb: Terraform when you want one tool across clouds and a reviewed plan before any change. Console clicks only for exploring, never for anything that must be repeated. CloudFormation if you are all-in on AWS. Pulumi if the team prefers a general-purpose language.
+ Insurance angle: every infrastructure change should be a reviewed plan in a pull request. That is the audit trail.
+
+ REQUIREMENTS
+ ────────────
+ pip install nothing. Optional: the `terraform` binary on PATH (version 1.5 or later).
+ Without it, the exercises that need it print a skip message and the rest run fully offline.
+ Uses the `local` provider (writes files on your machine). No cloud account, no cost.</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D4_Terraform_Fundamentals.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — THE WORKFLOW AND STATE</pre><pre class="box">══════════════════════════════════════════════════════════════
+You DECLARE what should exist in .tf files. Terraform compares that to its STATE
+(a JSON file recording what it created) and to reality, then works out the steps.
+
+  terraform init      download providers (the plugins that talk to an API)
+  terraform plan      show what would change. Changes nothing.
+  terraform apply     make the change (asks for approval unless -auto-approve)
+  terraform destroy   remove everything in the state
+
+The plan is the safety net. In CI the plan is posted on the pull request, and
+apply runs only after a human approves it (W21_D6).
+
+State is the part people get wrong. It maps each resource address in your code
+(local_file.claims) to the real object. Lose the state and Terraform forgets what
+it owns. Edit infrastructure by hand and the next plan shows DRIFT.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D4_Terraform_Fundamentals.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def terraform(*args, cwd):
+    &quot;&quot;&quot;Run terraform in cwd and return its output. Skips cleanly if it is not installed.&quot;&quot;&quot;
+    if shutil.which(&quot;terraform&quot;) is None:
+        return &quot;skipped: terraform not installed&quot;
+    done = subprocess.run([&quot;terraform&quot;, *args, &quot;-no-color&quot;], cwd=cwd, capture_output=True, text=True, timeout=300)
+    return done.stdout + done.stderr
+
+
+print(&quot;terraform installed:&quot;, shutil.which(&quot;terraform&quot;) is not None)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — VARIABLES, RESOURCES, OUTPUTS (HCL FROM PYTHON)</pre><pre class="box">══════════════════════════════════════════════════════════════
+A configuration has three main building blocks:
+  variable   an input, with a type and a default
+  resource   a thing to create. Its address is &lt;type&gt;.&lt;name&gt;
+  output     a value to show or pass on to another configuration or module
+
+A module is a folder of these blocks you call with `module &quot;x&quot; { source = &quot;./x&quot; }`.
+Use modules to repeat a pattern (one per environment) without copy and paste.
+
+Python can write HCL text. That is useful for tests and for generating many
+similar blocks, but real projects keep .tf files in git as the source of truth.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D4_Terraform_Fundamentals.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def hcl_variable(name, default):
+    return f&#x27;variable &quot;{name}&quot; {{\n  type    = string\n  default = &quot;{default}&quot;\n}}\n&#x27;
+
+
+def hcl_file_resource(name, content):
+    return (
+        f&#x27;resource &quot;local_file&quot; &quot;{name}&quot; {{\n&#x27;
+        f&#x27;  filename = &quot;${{path.module}}/out/{name}.txt&quot;\n&#x27;
+        f&#x27;  content  = &quot;{content}&quot;\n&#x27;
+        f&#x27;}}\n&#x27;
+    )
+
+
+print(hcl_variable(&quot;environment&quot;, &quot;dev&quot;))
+print(hcl_file_resource(&quot;claims&quot;, &quot;claims export&quot;))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write generate_hcl(files) for a dict {resource_name: content}. It returns a
+full configuration string made of: a terraform block requiring the hashicorp/local
+provider, one local_file resource per entry (use hcl_file_resource from the
+example), and one output called file_count whose value is the number of files
+as a string. Call it with files below. Print the number of `resource &quot;local_file&quot;`
+blocks (count them with a regular expression) and the first resource header line.
+
+Expected output:
+    3 resource blocks
+    resource &quot;local_file&quot; &quot;claims&quot; {
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D4_Terraform_Fundamentals.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>files = {&quot;claims&quot;: &quot;claims export&quot;, &quot;policies&quot;: &quot;policy export&quot;, &quot;readme&quot;: &quot;hello&quot;}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — READING A PLAN AND GATING ON IT</pre><pre class="box">══════════════════════════════════════════════════════════════
+The last line of a plan is a summary:
+  Plan: 3 to add, 1 to change, 0 to destroy.
+or, when nothing differs:
+  No changes. Your infrastructure matches the configuration.
+
+A pipeline can read that line and apply a policy: adds and changes are routine,
+but ANY destroy needs a human, because a destroyed database does not come back.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D4_Terraform_Fundamentals.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>PLAN_LINE = re.compile(r&quot;Plan: (\d+) to add, (\d+) to change, (\d+) to destroy&quot;)
+
+
+def parse_plan(text):
+    match = PLAN_LINE.search(text)
+    if match is None:
+        return {&quot;add&quot;: 0, &quot;change&quot;: 0, &quot;destroy&quot;: 0}
+    add, change, destroy = (int(x) for x in match.groups())
+    return {&quot;add&quot;: add, &quot;change&quot;: change, &quot;destroy&quot;: destroy}
+
+
+print(parse_plan(&quot;Plan: 3 to add, 1 to change, 0 to destroy.&quot;))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+For each plan text below, use parse_plan and print one line:
+  add=&lt;n&gt; change=&lt;n&gt; destroy=&lt;n&gt; -&gt; OK            when destroy is 0
+  add=&lt;n&gt; change=&lt;n&gt; destroy=&lt;n&gt; -&gt; BLOCKED (needs approval)   when destroy is more than 0
+
+Expected output:
+    add=3 change=0 destroy=0 -&gt; OK
+    add=1 change=2 destroy=1 -&gt; BLOCKED (needs approval)
+    add=0 change=0 destroy=0 -&gt; OK
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D4_Terraform_Fundamentals.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>plans = [
+    &quot;Plan: 3 to add, 0 to change, 0 to destroy.&quot;,
+    &quot;Plan: 1 to add, 2 to change, 1 to destroy.&quot;,
+    &quot;No changes. Your infrastructure matches the configuration.&quot;,
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — STATE AND DRIFT</pre><pre class="box">══════════════════════════════════════════════════════════════
+terraform.tfstate is JSON. Each entry in &quot;resources&quot; has a type, a name and its
+real attributes. The address is type + &quot;.&quot; + name. Comparing the set of
+addresses you DECLARE with the set in STATE tells you what apply will do:
+  declared, not in state  -&gt; will be CREATED
+  in state, not declared  -&gt; will be DESTROYED
+(Changed attributes need the plan to compare values; the sets are the first check.)
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D4_Terraform_Fundamentals.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def state_addresses(state):
+    return {f&quot;{r[&#x27;type&#x27;]}.{r[&#x27;name&#x27;]}&quot; for r in state[&quot;resources&quot;]}
+
+
+sample_state = {&quot;version&quot;: 4, &quot;resources&quot;: [{&quot;type&quot;: &quot;local_file&quot;, &quot;name&quot;: &quot;claims&quot;, &quot;instances&quot;: [{&quot;attributes&quot;: {&quot;id&quot;: &quot;abc&quot;}}]}]}
+print(sorted(state_addresses(sample_state)))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+Compare declared with the state below. Print two lines, each a sorted list:
+the addresses that will be created, then the addresses that will be destroyed.
+
+Expected output:
+    to create: [&#x27;local_file.readme&#x27;]
+    to destroy: [&#x27;local_file.old_export&#x27;]
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D4_Terraform_Fundamentals.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>declared = {&quot;local_file.claims&quot;, &quot;local_file.policies&quot;, &quot;local_file.readme&quot;}
+current_state = {
+    &quot;version&quot;: 4,
+    &quot;resources&quot;: [
+        {&quot;type&quot;: &quot;local_file&quot;, &quot;name&quot;: &quot;claims&quot;, &quot;instances&quot;: [{&quot;attributes&quot;: {&quot;id&quot;: &quot;a1&quot;}}]},
+        {&quot;type&quot;: &quot;local_file&quot;, &quot;name&quot;: &quot;policies&quot;, &quot;instances&quot;: [{&quot;attributes&quot;: {&quot;id&quot;: &quot;b2&quot;}}]},
+        {&quot;type&quot;: &quot;local_file&quot;, &quot;name&quot;: &quot;old_export&quot;, &quot;instances&quot;: [{&quot;attributes&quot;: {&quot;id&quot;: &quot;c3&quot;}}]},
+    ],
+}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 5 — REMOTE STATE, AND WHY IT MATTERS</pre><pre class="box">══════════════════════════════════════════════════════════════
+Local state works for one person. A team needs the state in ONE shared place with
+LOCKING, so two applies cannot run at once and corrupt it. Typical backends:
+
+  terraform {
+    backend &quot;gcs&quot; {                    # or &quot;s3&quot; with a DynamoDB lock table
+      bucket = &quot;claims-tfstate&quot;
+      prefix = &quot;prod&quot;
+    }
+  }
+
+State can contain secrets in plain text. Store it in a private, versioned,
+encrypted bucket, and never commit it to git. Add *.tfstate and .terraform/ to
+.gitignore.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D4_Terraform_Fundamentals.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>GITIGNORE_LINES = [&quot;*.tfstate&quot;, &quot;*.tfstate.*&quot;, &quot;.terraform/&quot;, &quot;crash.log&quot;]
+print(GITIGNORE_LINES)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 4</pre><pre class="box">══════════════════════════════════════════════════════════════
+Run the real workflow in a temporary folder with the terraform() helper from
+Concept 1. Write main_tf (below) to main.tf in the folder, then: init, plan,
+apply with -auto-approve, destroy with -auto-approve. After each of plan, apply
+and destroy, print the one line that starts with &quot;Plan:&quot;, &quot;Apply complete!&quot; or
+&quot;Destroy complete!&quot;. If terraform is not installed, print the skip message once
+and stop.
+
+Expected output (with terraform installed):
+    Plan: 2 to add, 0 to change, 0 to destroy.
+    Apply complete! Resources: 2 added, 0 changed, 0 destroyed.
+    Destroy complete! Resources: 2 destroyed.
+
+Expected output (without terraform):
+    skipped: terraform not installed
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D4_Terraform_Fundamentals.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>main_tf = &quot;&quot;&quot;
+terraform {
+  required_providers {
+    local = {
+      source = &quot;hashicorp/local&quot;
+    }
+  }
+}
+
+resource &quot;local_file&quot; &quot;claims&quot; {
+  filename = &quot;${path.module}/out/claims.txt&quot;
+  content  = &quot;claims export&quot;
+}
+
+resource &quot;local_file&quot; &quot;policies&quot; {
+  filename = &quot;${path.module}/out/policies.txt&quot;
+  content  = &quot;policy export&quot;
+}
+&quot;&quot;&quot;
+tf_dir = tempfile.mkdtemp(prefix=&quot;w21_d4_&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-5">Day 5 — Terraform: The Data Stack As Code</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="21-5"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 21  |  DAY 5  |  TERRAFORM: THE DATA STACK AS CODE</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Declare the W12 stack (Postgres, MinIO, Kafka) as Terraform with the Docker provider
+ 2. Detect drift between declared and running containers
+ 3. Keep secrets out of .tf files
+ 4. Map each local service to its cloud equivalent (BigQuery, GCS, Pub/Sub)
+ 5. Validate a configuration without a Docker daemon
+
+ TIME:  ~45 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;terraform docker provider tutorial&quot;
+ Search: &quot;terraform sensitive variables secrets best practices&quot;
+ Search: &quot;terraform drift detection plan refresh&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: one big Terraform root for everything vs a root per environment with shared modules.
+ Rule of thumb: one root per environment (dev, prod) calling the same module. A single state for everything means one mistake can touch production.
+ Keep the module the same and change only the variables.
+
+ REQUIREMENTS
+ ────────────
+ Optional: `terraform` on PATH. The lesson generates HCL and checks it with plain Python.
+ Step 5 runs `terraform validate`, which downloads the Docker provider but does NOT need
+ Docker running. Applying the stack needs Docker; that part is shown as text.
+ Builds on W21_D4 (workflow, state) and the W12 capstone stack (docker compose).</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D5_Terraform_Data_Stack.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+import shutil
+import subprocess
+import tempfile</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — THE STACK AS DATA, THEN AS CODE</pre><pre class="box">══════════════════════════════════════════════════════════════
+In W12 you ran Postgres, MinIO and Kafka with docker compose. Terraform does the
+same job with two differences that matter: it keeps STATE (so it knows what it
+owns and can show drift) and it shows a PLAN before changing anything.
+
+Each service needs two resources: a docker_image (pulls a pinned tag) and a
+docker_container (runs it). A password comes from a sensitive variable, never
+from a literal in the file.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D5_Terraform_Data_Stack.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>stack = {
+    &quot;postgres&quot;: {&quot;image&quot;: &quot;postgres:16&quot;, &quot;ports&quot;: {5432: 5432}, &quot;env&quot;: [&quot;POSTGRES_PASSWORD=${var.pg_password}&quot;]},
+    &quot;minio&quot;: {&quot;image&quot;: &quot;minio/minio:RELEASE.2025-01-20T14-49-07Z&quot;, &quot;ports&quot;: {9000: 9000, 9001: 9001}, &quot;env&quot;: []},
+    &quot;kafka&quot;: {&quot;image&quot;: &quot;apache/kafka:3.8.0&quot;, &quot;ports&quot;: {9092: 9092}, &quot;env&quot;: []},
+}
+
+HCL_HEADER = &quot;&quot;&quot;terraform {
+  required_providers {
+    docker = {
+      source  = &quot;kreuzwerker/docker&quot;
+      version = &quot;~&gt; 3.0&quot;
+    }
+  }
+}
+
+provider &quot;docker&quot; {}
+
+variable &quot;pg_password&quot; {
+  type      = string
+  sensitive = true
+  default   = &quot;change-me&quot;
+}
+&quot;&quot;&quot;
+
+
+def container_hcl(name, spec):
+    ports = &quot;&quot;.join(
+        f&quot;  ports {{\n    internal = {internal}\n    external = {external}\n  }}\n&quot;
+        for internal, external in spec[&quot;ports&quot;].items()
+    )
+    env = &quot;&quot;
+    if spec[&quot;env&quot;]:
+        env = &quot;  env   = [&quot; + &quot;, &quot;.join(f&#x27;&quot;{item}&quot;&#x27; for item in spec[&quot;env&quot;]) + &quot;]\n&quot;
+    return (
+        f&#x27;resource &quot;docker_image&quot; &quot;{name}&quot; {{\n  name = &quot;{spec[&quot;image&quot;]}&quot;\n}}\n\n&#x27;
+        f&#x27;resource &quot;docker_container&quot; &quot;{name}&quot; {{\n&#x27;
+        f&#x27;  name  = &quot;claims-{name}&quot;\n&#x27;
+        f&#x27;  image = docker_image.{name}.image_id\n&#x27;
+        f&#x27;{env}{ports}}}\n&#x27;
+    )
+
+
+def stack_hcl(services):
+    return HCL_HEADER + &quot;\n&quot; + &quot;\n&quot;.join(container_hcl(n, s) for n, s in services.items())
+
+
+text = stack_hcl(stack)
+print(len(text.splitlines()), &quot;lines;&quot;, len(re.findall(r&#x27;resource &quot;docker_container&quot;&#x27;, text)), &quot;containers&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+Add a fourth service to a COPY of the stack: &quot;metabase&quot; with image
+metabase/metabase:v0.50.0, port 3000 mapped to 3000, no env. Generate the HCL
+with stack_hcl. Print the number of docker_container resources in the result,
+then the sorted list of all external ports found in the text (use a regular
+expression on the lines &quot;external = N&quot;).
+
+Expected output:
+    4 containers
+    [3000, 5432, 9000, 9001, 9092]
+
+--- starting data ---
+(reuse stack and stack_hcl from the example above)</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — DRIFT: WHEN REALITY NO LONGER MATCHES THE CODE</pre><pre class="box">══════════════════════════════════════════════════════════════
+Someone runs `docker run` by hand, or upgrades an image in place. The code
+says one thing, the machine another. `terraform plan` refreshes state from the
+real world and shows the difference, so drift is visible the next time anyone
+runs plan. A scheduled plan in CI (W21_D6) catches it within a day.
+
+Three kinds of drift to look for:
+  changed    the container exists but with a different image
+  missing    declared but not running
+  unmanaged  running but not declared (nobody owns it)
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D5_Terraform_Data_Stack.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def expected_containers(services):
+    return {f&quot;claims-{name}&quot;: spec[&quot;image&quot;] for name, spec in services.items()}
+
+
+print(sorted(expected_containers(stack)))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+Compare expected_containers(stack) with the actual dict below. Print, in this
+order and sorted by container name inside each group:
+  changed   &quot;&lt;name&gt;: image &lt;actual&gt; != &lt;declared&gt;&quot;
+  missing   &quot;missing: &lt;name&gt;&quot;
+  unmanaged &quot;unmanaged: &lt;name&gt;&quot;
+
+Expected output:
+    claims-postgres: image postgres:15 != postgres:16
+    missing: claims-kafka
+    unmanaged: claims-extra
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D5_Terraform_Data_Stack.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>actual = {
+    &quot;claims-postgres&quot;: &quot;postgres:15&quot;,
+    &quot;claims-minio&quot;: &quot;minio/minio:RELEASE.2025-01-20T14-49-07Z&quot;,
+    &quot;claims-extra&quot;: &quot;nginx:1.27&quot;,
+}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — NO SECRETS IN .TF FILES</pre><pre class="box">══════════════════════════════════════════════════════════════
+.tf files go to git. A literal password in one is a leaked password, forever,
+because git remembers. Rules:
+  - mark variables sensitive = true (hidden in plan output)
+  - supply values from the environment (TF_VAR_pg_password) or a secret manager
+  - reference them as var.name, never as a quoted literal
+  - remember the STATE can still hold the value: protect the state (W21_D4)
+
+A cheap guard is a lint step in CI that fails on suspicious literals.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D5_Terraform_Data_Stack.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>SECRET_LINE = re.compile(r&#x27;^\s*(\w*(?:password|secret|token|key)\w*)\s*=\s*&quot;([^&quot;]*)&quot;&#x27;, re.IGNORECASE)
+
+
+def first_secret_match(line):
+    match = SECRET_LINE.match(line)
+    return match.group(1) if match else None
+
+
+print(first_secret_match(&#x27;  password = &quot;hunter2&quot;&#x27;), first_secret_match(&quot;  name = \&quot;db\&quot;&quot;))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write find_hardcoded_secrets(hcl_text) that returns a list of (line_number,
+key) for every line whose key looks secret AND whose value is a quoted literal
+that does not start with &quot;${&quot;. Line numbers start at 1. Use SECRET_LINE from
+the example. Print the result for bad_hcl.
+
+Expected output:
+    [(2, &#x27;password&#x27;), (4, &#x27;api_token&#x27;)]
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D5_Terraform_Data_Stack.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>bad_hcl = &#x27;&#x27;&#x27;resource &quot;x&quot; &quot;db&quot; {
+  password   = &quot;hunter2&quot;
+  env        = [&quot;POSTGRES_PASSWORD=${var.pg_password}&quot;]
+  api_token  = &quot;abc123&quot;
+  secret_key = var.signing_key
+  name       = &quot;claims-db&quot;
+  admin_pass = &quot;${var.admin}&quot;
+}&#x27;&#x27;&#x27;</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — FROM LOCAL SERVICES TO CLOUD RESOURCES</pre><pre class="box">══════════════════════════════════════════════════════════════
+The point of declaring the local stack as code is that the SAME workflow
+creates the cloud version. Only the provider and resource types change.
+
+  local (Docker)         GCP                              AWS
+  postgres container     google_sql_database_instance     aws_db_instance
+  minio container        google_storage_bucket            aws_s3_bucket
+  kafka container        google_pubsub_topic (or Managed Kafka)   aws_msk_cluster
+  (analytics store)      google_bigquery_dataset          aws_redshift_cluster
+
+A commented template (never applied in this course, it costs money):
+
+  # resource &quot;google_storage_bucket&quot; &quot;bronze&quot; {
+  #   name                        = &quot;claims-bronze-${var.project_id}&quot;
+  #   location                    = &quot;EU&quot;
+  #   uniform_bucket_level_access = true
+  #   versioning { enabled = true }
+  # }
+  # resource &quot;google_bigquery_dataset&quot; &quot;gold&quot; {
+  #   dataset_id = &quot;claims_gold&quot;
+  #   location   = &quot;EU&quot;
+  # }
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D5_Terraform_Data_Stack.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>CLOUD_MAP = {
+    &quot;postgres&quot;: &quot;google_sql_database_instance&quot;,
+    &quot;minio&quot;: &quot;google_storage_bucket&quot;,
+    &quot;kafka&quot;: &quot;google_pubsub_topic&quot;,
+}
+print(CLOUD_MAP[&quot;minio&quot;])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 4</pre><pre class="box">══════════════════════════════════════════════════════════════
+Validate the stack configuration with the real terraform binary, without Docker:
+write stack_hcl(stack) to main.tf in tf_dir, run `terraform init -backend=false`
+and then `terraform validate`, and print the first line of the validate output
+that starts with &quot;Success&quot; (or &quot;Error&quot; if one appears). If terraform is not
+installed print the skip message instead. Use run_terraform from Concept 5.
+
+Expected output (with terraform installed):
+    Success! The configuration is valid.
+
+Expected output (without terraform):
+    skipped: terraform not installed
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D5_Terraform_Data_Stack.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>tf_dir = tempfile.mkdtemp(prefix=&quot;w21_d5_&quot;)
+
+
+def run_terraform(*args, cwd):
+    if shutil.which(&quot;terraform&quot;) is None:
+        return &quot;skipped: terraform not installed&quot;
+    done = subprocess.run([&quot;terraform&quot;, *args, &quot;-no-color&quot;], cwd=cwd, capture_output=True, text=True, timeout=300)
+    return done.stdout + done.stderr</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-6">Day 6 — Ci/Cd For Data Pipelines</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="21-6"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 21  |  DAY 6  |  CI/CD FOR DATA PIPELINES</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Build a GitHub Actions workflow as data and lint it for unsafe patterns
+ 2. Order jobs into parallel stages from their `needs`
+ 3. Gate deployment: tests, a Terraform plan, then an approved apply
+ 4. Run dbt on a pull request for only the changed models (slim CI)
+ 5. Handle secrets without leaking them
+
+ TIME:  ~45 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;github actions for data engineers ci cd pipeline&quot;
+ Search: &quot;dbt slim ci state modified defer&quot;
+ Search: &quot;terraform plan on pull request github actions environments approval&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: trunk-based development (small PRs into main, deploy from main) vs long-lived release branches.
+ Rule of thumb: trunk-based for data pipelines. Pipelines change often, are small, and a release branch means two versions of the transformation logic running at once.
+ Protect main: required checks, review, no direct push.
+
+ REQUIREMENTS
+ ────────────
+ pip install pyyaml
+ Extends W8_D7 CONCEPT 6 (a basic workflow with pytest and ruff). That one tests code.
+ This lesson adds what a data platform also needs: dbt on the PR, a Terraform plan on the PR,
+ an approval gate before apply, and environment promotion.</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D6_CICD_For_Data_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+import shutil
+import yaml</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — THE PIPELINE, END TO END</pre><pre class="box">══════════════════════════════════════════════════════════════
+On a PULL REQUEST (nothing is changed in the real world):
+  lint    ruff, sqlfluff
+  test    pytest (the W20 lakehouse tests)
+  dbt     dbt build for the changed models only, in a throwaway schema
+  plan    terraform plan, posted as a comment for the reviewer
+After MERGE to main:
+  deploy  needs plan; runs in a protected ENVIRONMENT, which waits for a human
+          approval before it can use production secrets
+
+The rule behind all of it: nothing ships without a green pipeline, and every
+infrastructure change is a reviewed plan, never a console edit.
+
+A workflow is YAML, so Python can build it as a dict and a test can check it.
+One gotcha: in YAML 1.1 the bare key `on` means the boolean True. PyYAML follows
+1.1, so safe_load turns the `on:` key of a workflow into True.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D6_CICD_For_Data_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def make_workflow():
+    checkout = {&quot;uses&quot;: &quot;actions/checkout@v4&quot;}
+    return {
+        &quot;name&quot;: &quot;data-ci&quot;,
+        &quot;on&quot;: {&quot;pull_request&quot;: {&quot;branches&quot;: [&quot;main&quot;]}, &quot;push&quot;: {&quot;branches&quot;: [&quot;main&quot;]}},
+        &quot;jobs&quot;: {
+            &quot;lint&quot;: {&quot;runs-on&quot;: &quot;ubuntu-latest&quot;, &quot;steps&quot;: [checkout, {&quot;run&quot;: &quot;ruff check . &amp;&amp; sqlfluff lint models/&quot;}]},
+            &quot;test&quot;: {&quot;runs-on&quot;: &quot;ubuntu-latest&quot;, &quot;steps&quot;: [checkout, {&quot;run&quot;: &quot;pytest -q&quot;}]},
+            &quot;plan&quot;: {
+                &quot;runs-on&quot;: &quot;ubuntu-latest&quot;,
+                &quot;needs&quot;: [&quot;lint&quot;, &quot;test&quot;],
+                &quot;steps&quot;: [checkout, {&quot;run&quot;: &quot;terraform init &amp;&amp; terraform plan -out=tfplan&quot;}],
+            },
+            &quot;deploy&quot;: {
+                &quot;runs-on&quot;: &quot;ubuntu-latest&quot;,
+                &quot;needs&quot;: [&quot;plan&quot;],
+                &quot;environment&quot;: &quot;prod&quot;,
+                &quot;if&quot;: &quot;github.ref == &#x27;refs/heads/main&#x27; &amp;&amp; github.event_name == &#x27;push&#x27;&quot;,
+                &quot;steps&quot;: [
+                    checkout,
+                    {&quot;run&quot;: &quot;terraform apply -auto-approve&quot;, &quot;env&quot;: {&quot;TF_VAR_pg_password&quot;: &quot;${{ secrets.PG_PASSWORD }}&quot;}},
+                ],
+            },
+        },
+    }
+
+
+workflow = make_workflow()
+loaded = yaml.safe_load(yaml.safe_dump(workflow))
+print(&quot;jobs:&quot;, list(loaded[&quot;jobs&quot;]))
+print(&quot;&#x27;on&#x27; key survives as a string:&quot;, &quot;on&quot; in loaded, &quot;| becomes True in unquoted YAML:&quot;, yaml.safe_load(&quot;on: 1&quot;) == {True: 1})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write lint_workflow(wf) that returns a list of problems, in this order:
+  &quot;no pull_request trigger&quot;                 if wf[&quot;on&quot;] has no pull_request key
+then for each job in dict order:
+  &quot;&lt;job&gt;: missing needs&quot;                    only for the job named deploy
+  &quot;&lt;job&gt;: missing environment&quot;              only for the job named deploy
+  &quot;&lt;job&gt;: unpinned action &lt;name&gt;&quot;           for every step with a `uses` that has no &quot;@&quot;
+Run it on bad_workflow and on make_workflow() and print both lists.
+
+Expected output:
+    [&#x27;no pull_request trigger&#x27;, &#x27;deploy: missing needs&#x27;, &#x27;deploy: missing environment&#x27;, &#x27;deploy: unpinned action actions/checkout&#x27;]
+    []
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D6_CICD_For_Data_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>bad_workflow = {
+    &quot;name&quot;: &quot;data-ci&quot;,
+    &quot;on&quot;: {&quot;push&quot;: {&quot;branches&quot;: [&quot;main&quot;]}},
+    &quot;jobs&quot;: {
+        &quot;test&quot;: {&quot;runs-on&quot;: &quot;ubuntu-latest&quot;, &quot;steps&quot;: [{&quot;uses&quot;: &quot;actions/checkout@v4&quot;}, {&quot;run&quot;: &quot;pytest&quot;}]},
+        &quot;deploy&quot;: {&quot;runs-on&quot;: &quot;ubuntu-latest&quot;, &quot;steps&quot;: [{&quot;uses&quot;: &quot;actions/checkout&quot;}, {&quot;run&quot;: &quot;terraform apply -auto-approve&quot;}]},
+    },
+}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — NEEDS, STAGES AND PARALLELISM</pre><pre class="box">══════════════════════════════════════════════════════════════
+Jobs without `needs` start together. A job with `needs` waits for those jobs and
+is skipped if any of them fails. Grouping jobs into layers shows the shortest
+possible pipeline: every job runs as soon as its needs are done.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D6_CICD_For_Data_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def stages(needs):
+    remaining = {job: set(deps) for job, deps in needs.items()}
+    done = set()
+    layers = []
+    while remaining:
+        ready = sorted(job for job, deps in remaining.items() if deps &lt;= done)
+        if not ready:
+            raise ValueError(&quot;cycle in needs&quot;)
+        layers.append(ready)
+        done.update(ready)
+        for job in ready:
+            del remaining[job]
+    return layers
+
+
+print(stages({&quot;a&quot;: [], &quot;b&quot;: [&quot;a&quot;]}))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+Turn the jobs of make_workflow() plus an extra job &quot;notify&quot; that needs deploy
+into a needs dict ({job: list of needs}, a job without needs has an empty list)
+and print the stages. Then print the number of stages. Reuse stages().
+
+Expected output:
+    [[&#x27;lint&#x27;, &#x27;test&#x27;], [&#x27;plan&#x27;], [&#x27;deploy&#x27;], [&#x27;notify&#x27;]]
+    4
+
+--- starting data ---
+(reuse make_workflow and stages from above)</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — PROMOTION RULES</pre><pre class="box">══════════════════════════════════════════════════════════════
+The decision &quot;what should this run do&quot; is a small function of three facts: what
+triggered it, whether the checks passed, and whether the plan destroys anything.
+
+  pull request, checks green        -&gt; checks only (merge is now allowed)
+  pull request, checks red          -&gt; blocked
+  push to main, checks red          -&gt; blocked
+  push to main, plan destroys &gt; 0   -&gt; blocked: destroy needs review
+  push to main, all green           -&gt; deploy dev, then prod after approval
+  anything else                     -&gt; ignore
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D6_CICD_For_Data_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def decide(event, branch, checks_green, plan_destroys):
+    if event == &quot;pull_request&quot;:
+        return &quot;checks only&quot; if checks_green else &quot;blocked&quot;
+    if event == &quot;push&quot; and branch == &quot;main&quot;:
+        if not checks_green:
+            return &quot;blocked&quot;
+        if plan_destroys &gt; 0:
+            return &quot;blocked: destroy needs review&quot;
+        return &quot;deploy dev, then prod after approval&quot;
+    return &quot;ignore&quot;
+
+
+print(decide(&quot;pull_request&quot;, &quot;feature/x&quot;, True, 0))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+For every case below print &quot;&lt;n&gt;: &lt;decision&gt;&quot; where n is the 1-based position,
+using decide() from the example.
+
+Expected output:
+    1: checks only
+    2: blocked
+    3: deploy dev, then prod after approval
+    4: blocked: destroy needs review
+    5: ignore
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D6_CICD_For_Data_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>cases = [
+    (&quot;pull_request&quot;, &quot;feature/x&quot;, True, 0),
+    (&quot;pull_request&quot;, &quot;feature/y&quot;, False, 0),
+    (&quot;push&quot;, &quot;main&quot;, True, 0),
+    (&quot;push&quot;, &quot;main&quot;, True, 2),
+    (&quot;push&quot;, &quot;dev&quot;, True, 0),
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — DBT ON A PULL REQUEST (SLIM CI)</pre><pre class="box">══════════════════════════════════════════════════════════════
+Building the whole warehouse on every PR is slow and costly. Slim CI builds only
+what changed and everything DOWNSTREAM of it:
+
+  dbt build --select stg_claims+ fct_claims+
+
+The trailing + means &quot;and all models that depend on it&quot;. In dbt there is also
+`--select state:modified+ --defer --state prod-artifacts`, which finds the
+changed models by comparing with the manifest of the last production run and reads
+the unchanged parents from production instead of rebuilding them.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D6_CICD_For_Data_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def model_name(path):
+    match = re.match(r&quot;models/.+/(\w+)\.sql$&quot;, path)
+    return match.group(1) if match else None
+
+
+print(model_name(&quot;models/staging/stg_claims.sql&quot;), model_name(&quot;README.md&quot;))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 4</pre><pre class="box">══════════════════════════════════════════════════════════════
+From the list of changed files, keep only dbt models (use model_name), keep their
+order, and build the command &quot;dbt build --select &lt;m1&gt;+ &lt;m2&gt;+&quot;. If no model changed,
+print &quot;dbt: nothing to build&quot;. Print the command for changed_files, then the
+result for no_model_changes.
+
+Expected output:
+    dbt build --select stg_claims+ fct_claims+
+    dbt: nothing to build
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D6_CICD_For_Data_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>changed_files = [&quot;models/staging/stg_claims.sql&quot;, &quot;README.md&quot;, &quot;models/marts/fct_claims.sql&quot;, &quot;tests/test_run.py&quot;]
+no_model_changes = [&quot;README.md&quot;, &quot;docs/notes.md&quot;]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 5 — SECRETS, AND RUNNING THE WORKFLOW LOCALLY</pre><pre class="box">══════════════════════════════════════════════════════════════
+Secrets live in the repository or environment settings and are read with
+${{ secrets.NAME }}. They are masked in logs, but only if GitHub knows the value:
+a secret you print after transforming it (base64, split in two) is NOT masked.
+Pull requests from forks do not receive secrets. The prod environment holds the
+production secrets and requires an approval, so a PR can never reach them.
+
+`act` runs a workflow in Docker on your machine so you can test before pushing:
+  act pull_request -n      (-n is a dry run: it lists the jobs without running them)
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D6_CICD_For_Data_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def act_dry_run():
+    if shutil.which(&quot;act&quot;) is None:
+        return &quot;skipped: act not installed&quot;
+    return &quot;act is installed: run `act pull_request -n` in the repo&quot;
+
+
+print(act_dry_run())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-7">Day 7 — Project — Ship The Lakehouse</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="21-7"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 21  |  DAY 7  |  PROJECT — SHIP THE LAKEHOUSE</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ PROJECT: from a commit to a gated deployment of the W20 claims lakehouse job
+ A pull request runs checks and a Terraform plan. A merge deploys the lakehouse
+ job to Kubernetes, but only after the pipeline is green and a human approves.
+ End result: a release record you can audit, and a rollback you can run.
+
+ Skills stacked:
+   W20 D7 — the claims lakehouse job (bronze, silver, gold)
+   W21 D1 — Kubernetes Job manifest, resources, no :latest
+   W21 D4 — Terraform plan summary and the destroy gate
+   W21 D6 — GitHub Actions workflow, needs, promotion rules
+
+ TIME:  ~60 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;gitops deploy pipeline kubernetes job github actions end to end&quot;
+ Search: &quot;rollback strategy data pipeline release&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: tag images with the git commit sha vs a moving tag like &quot;prod&quot;.
+ Rule of thumb: always the commit sha. It ties every running job to the exact code, makes rollback a one-line change, and gives auditors a clear answer to &quot;what ran on that date&quot;.
+
+ REQUIREMENTS
+ ────────────
+ pip install pyyaml
+ Runs fully offline. The &quot;kit&quot; below holds the small tools from D1, D4 and D6 so this
+ project can focus on composing them. Cluster and Terraform steps are text, not executed.</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D7_Project_Ship_The_Lakehouse.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+import re</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ THE KIT (tools from earlier lessons, ready to use)</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D7_Project_Ship_The_Lakehouse.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def make_job(name, image, command, limits, backoff_limit=3):
+    return {
+        &quot;apiVersion&quot;: &quot;batch/v1&quot;,
+        &quot;kind&quot;: &quot;Job&quot;,
+        &quot;metadata&quot;: {&quot;name&quot;: name},
+        &quot;spec&quot;: {
+            &quot;backoffLimit&quot;: backoff_limit,
+            &quot;template&quot;: {
+                &quot;spec&quot;: {
+                    &quot;restartPolicy&quot;: &quot;Never&quot;,
+                    &quot;containers&quot;: [{&quot;name&quot;: name, &quot;image&quot;: image, &quot;command&quot;: command, &quot;resources&quot;: {&quot;limits&quot;: limits}}],
+                }
+            },
+        },
+    }
+
+
+def lint_job(job):
+    spec = job[&quot;spec&quot;][&quot;template&quot;][&quot;spec&quot;]
+    container = spec[&quot;containers&quot;][0]
+    problems = []
+    image = container[&quot;image&quot;]
+    if image.endswith(&quot;:latest&quot;) or &quot;:&quot; not in image:
+        problems.append(&quot;image uses :latest&quot;)
+    if not container.get(&quot;resources&quot;, {}).get(&quot;limits&quot;):
+        problems.append(&quot;no resource limits&quot;)
+    if spec.get(&quot;restartPolicy&quot;) not in (&quot;Never&quot;, &quot;OnFailure&quot;):
+        problems.append(&quot;bad restartPolicy&quot;)
+    return problems
+
+
+def make_workflow():
+    checkout = {&quot;uses&quot;: &quot;actions/checkout@v4&quot;}
+    return {
+        &quot;name&quot;: &quot;ship-lakehouse&quot;,
+        &quot;on&quot;: {&quot;pull_request&quot;: {&quot;branches&quot;: [&quot;main&quot;]}, &quot;push&quot;: {&quot;branches&quot;: [&quot;main&quot;]}},
+        &quot;jobs&quot;: {
+            &quot;lint&quot;: {&quot;runs-on&quot;: &quot;ubuntu-latest&quot;, &quot;steps&quot;: [checkout, {&quot;run&quot;: &quot;ruff check .&quot;}]},
+            &quot;test&quot;: {&quot;runs-on&quot;: &quot;ubuntu-latest&quot;, &quot;steps&quot;: [checkout, {&quot;run&quot;: &quot;pytest -q&quot;}]},
+            &quot;plan&quot;: {&quot;runs-on&quot;: &quot;ubuntu-latest&quot;, &quot;needs&quot;: [&quot;lint&quot;, &quot;test&quot;], &quot;steps&quot;: [checkout, {&quot;run&quot;: &quot;terraform plan&quot;}]},
+            &quot;deploy&quot;: {
+                &quot;runs-on&quot;: &quot;ubuntu-latest&quot;,
+                &quot;needs&quot;: [&quot;plan&quot;],
+                &quot;environment&quot;: &quot;prod&quot;,
+                &quot;steps&quot;: [checkout, {&quot;run&quot;: &quot;kubectl apply -f job.yaml&quot;}],
+            },
+        },
+    }
+
+
+def stages(needs):
+    remaining = {job: set(deps) for job, deps in needs.items()}
+    done, layers = set(), []
+    while remaining:
+        ready = sorted(job for job, deps in remaining.items() if deps &lt;= done)
+        layers.append(ready)
+        done.update(ready)
+        for job in ready:
+            del remaining[job]
+    return layers
+
+
+def parse_plan(text):
+    match = re.search(r&quot;Plan: (\d+) to add, (\d+) to change, (\d+) to destroy&quot;, text)
+    if match is None:
+        return {&quot;add&quot;: 0, &quot;change&quot;: 0, &quot;destroy&quot;: 0}
+    add, change, destroy = (int(x) for x in match.groups())
+    return {&quot;add&quot;: add, &quot;change&quot;: change, &quot;destroy&quot;: destroy}
+
+
+def decide(event, branch, checks_green, plan_destroys):
+    if event == &quot;pull_request&quot;:
+        return &quot;checks only&quot; if checks_green else &quot;blocked&quot;
+    if event == &quot;push&quot; and branch == &quot;main&quot;:
+        if not checks_green:
+            return &quot;blocked&quot;
+        if plan_destroys &gt; 0:
+            return &quot;blocked: destroy needs review&quot;
+        return &quot;deploy dev, then prod after approval&quot;
+    return &quot;ignore&quot;
+
+
+commit_sha = &quot;9f3c2ab41d7e5c0a8b6f&quot;
+print(&quot;kit loaded; commit&quot;, commit_sha[:7])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 1 — BUILD THE JOB FOR THIS COMMIT</pre><pre class="box">══════════════════════════════════════════════════════════════
+Tag the image with the first 7 characters of commit_sha:
+  claims-lakehouse:&lt;sha7&gt;
+Build the Job with make_job: name load-claims, command
+[&quot;python&quot;, &quot;-m&quot;, &quot;claims_lakehouse.run&quot;], limits {&quot;cpu&quot;: &quot;1&quot;, &quot;memory&quot;: &quot;2Gi&quot;}.
+Keep the variable name job. Print lint_job(job), then the image of its first container.
+
+Expected output:
+    []
+    claims-lakehouse:9f3c2ab</pre><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 2 — CHECK THAT THE PIPELINE IS GATED</pre><pre class="box">══════════════════════════════════════════════════════════════
+Build the workflow with make_workflow(). Create a needs dict ({job: needs list},
+empty list when a job has no needs) and print the stages. Then print whether
+deploy is gated, which means: it has an &quot;environment&quot; key AND &quot;plan&quot; is in its needs.
+
+Expected output:
+    [[&#x27;lint&#x27;, &#x27;test&#x27;], [&#x27;plan&#x27;], [&#x27;deploy&#x27;]]
+    deploy gated: True</pre><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 3 — DECIDE FOR EACH RUN</pre><pre class="box">══════════════════════════════════════════════════════════════
+For each scenario, read the destroy count from the plan text with parse_plan and
+print &quot;&lt;n&gt;: &lt;decision&gt;&quot; (n starts at 1) using decide().
+
+Expected output:
+    1: checks only
+    2: deploy dev, then prod after approval
+    3: blocked: destroy needs review
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D7_Project_Ship_The_Lakehouse.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>scenarios = [
+    (&quot;pull_request&quot;, &quot;feature/silver-fix&quot;, True, &quot;Plan: 2 to add, 0 to change, 0 to destroy.&quot;),
+    (&quot;push&quot;, &quot;main&quot;, True, &quot;Plan: 2 to add, 1 to change, 0 to destroy.&quot;),
+    (&quot;push&quot;, &quot;main&quot;, True, &quot;Plan: 0 to add, 0 to change, 1 to destroy.&quot;),
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 4 — THE RELEASE RECORD</pre><pre class="box">══════════════════════════════════════════════════════════════
+Build a dict called release for the second scenario (the successful push) with keys
+  sha       the 7 character sha
+  image     the image from Task 1
+  job       the Job name
+  decision  the decision from Task 3 scenario 2
+Check that release[&quot;image&quot;] equals the image inside the job manifest. Print the
+release as JSON with sorted keys (json.dumps with sort_keys=True), then print
+&quot;consistent: True&quot; when the check passes.
+
+Expected output:
+    {&quot;decision&quot;: &quot;deploy dev, then prod after approval&quot;, &quot;image&quot;: &quot;claims-lakehouse:9f3c2ab&quot;, &quot;job&quot;: &quot;load-claims&quot;, &quot;sha&quot;: &quot;9f3c2ab&quot;}
+    consistent: True</pre><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 5 — ROLL BACK</pre><pre class="box">══════════════════════════════════════════════════════════════
+The new release failed in production. From the history below (oldest first), find
+the most recent release whose status is &quot;healthy&quot; and print
+  rollback to &lt;image&gt;
+then print the command that runs that image as a new Job:
+  kubectl create job load-claims-rollback --image=&lt;image&gt;
+
+Expected output:
+    rollback to claims-lakehouse:b2c3d4e
+    kubectl create job load-claims-rollback --image=claims-lakehouse:b2c3d4e
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_21_Infra_CICD/W21_D7_Project_Ship_The_Lakehouse.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>history = [
+    {&quot;image&quot;: &quot;claims-lakehouse:a1b2c3d&quot;, &quot;status&quot;: &quot;healthy&quot;},
+    {&quot;image&quot;: &quot;claims-lakehouse:b2c3d4e&quot;, &quot;status&quot;: &quot;healthy&quot;},
+    {&quot;image&quot;: &quot;claims-lakehouse:9f3c2ab&quot;, &quot;status&quot;: &quot;failed&quot;},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="pager"><a class="btn ghost" href="week-20.html">&larr; Week 20</a><span></span></div>
+</main></body></html>

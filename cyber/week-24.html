@@ -1,0 +1,1456 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 24 — Capstone</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 24 — Capstone</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="24" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 24 — Capstone</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 7 — Cert Review &amp; Capstone</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: all / SC-200: all / GCIA: all</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>Full GitHub portfolio: ingestion + rules + CI/CD + ML + LLM triage</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W01–W23</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Portfolio Architecture and Repository Structure</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="24-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=p59B-I67yf8" target="_blank" rel="noopener"><b>Create a Cybersecurity Portfolio on Github (GUIDE)</b><small>MyDFIR</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=detection%20engineer%20portfolio%20github%20structure%20cybersecurity" target="_blank" rel="noopener">detection engineer portfolio github structure cybersecurity</a></p></div>
+<hr />
+<h3>Concept 1 — Portfolio as a System, Not a Collection</h3>
+<p>A portfolio that passes a technical screen at an Israeli security company is not a list of file names — it is a demonstrable system. The hiring engineer will clone the repo, run a script, and expect to see output. If anything requires a cloud credential or live SIEM to run, the reviewer will close the terminal and move on.</p>
+<p>The capstone portfolio has four non-negotiable properties: everything runs locally (simulation mode), every component has a README that says exactly what command to run, the repo passes a lint/validate CI check on every push, and the Royal Road artifacts from W01–W22 are connected into a single end-to-end flow.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+
+@dataclass
+class PortfolioComponent:
+    name: str
+    path: str
+    runs_without_credentials: bool
+    entry_command: str
+    output_description: str
+    week_origin: str
+
+PORTFOLIO_COMPONENTS = [
+    PortfolioComponent(
+        &quot;PCAP Ingestion Parser&quot;,
+        &quot;ingestion/pcap_parser.py&quot;,
+        True,
+        &quot;python ingestion/pcap_parser.py --input samples/sample.pcap --output data/connections.csv&quot;,
+        &quot;CSV: timestamp, src_ip, src_port, dst_ip, dst_port, proto, bytes&quot;,
+        &quot;W01&quot;,
+    ),
+    PortfolioComponent(
+        &quot;Windows Event Log Parser&quot;,
+        &quot;ingestion/evtx_parser.py&quot;,
+        True,
+        &quot;python ingestion/evtx_parser.py --input samples/sample.evtx --output data/events.json&quot;,
+        &quot;JSON lines: event_id, timestamp, account, computer, message&quot;,
+        &quot;W02&quot;,
+    ),
+    PortfolioComponent(
+        &quot;Sigma Rules (3 production rules)&quot;,
+        &quot;rules/sigma/&quot;,
+        True,
+        &quot;sigma-cli validate rules/sigma/*.yml&quot;,
+        &quot;Exit 0 = all rules valid; stderr = validation errors&quot;,
+        &quot;W13&quot;,
+    ),
+    PortfolioComponent(
+        &quot;Beaconing Detector&quot;,
+        &quot;detection/beaconing_detector.py&quot;,
+        True,
+        &quot;python detection/beaconing_detector.py --input data/connections.csv --output data/beacons.json&quot;,
+        &quot;JSON: suspected_beacons list with host, interval_seconds, jitter_pct, score&quot;,
+        &quot;W14&quot;,
+    ),
+    PortfolioComponent(
+        &quot;Isolation Forest Anomaly Detector&quot;,
+        &quot;ml/anomaly_detector.py&quot;,
+        True,
+        &quot;python ml/anomaly_detector.py --input data/events.json --output data/anomalies.csv&quot;,
+        &quot;CSV: event rows with anomaly_score column; score &lt; -0.1 = anomalous&quot;,
+        &quot;W19&quot;,
+    ),
+    PortfolioComponent(
+        &quot;RAG Enrichment Pipeline&quot;,
+        &quot;enrichment/pipeline.py&quot;,
+        True,
+        &quot;python enrichment/pipeline.py --input data/beacons.json --output data/enriched_alerts.json&quot;,
+        &quot;JSON: each beacon enriched with verdict, confidence, investigation_steps&quot;,
+        &quot;W22&quot;,
+    ),
+]
+
+def validate_portfolio_structure(components: list[PortfolioComponent]) -&gt; list[str]:
+    issues = []
+    for c in components:
+        if not c.runs_without_credentials:
+            issues.append(f&quot;{c.name}: requires credentials — add simulation mode&quot;)
+        if not c.entry_command:
+            issues.append(f&quot;{c.name}: missing entry command&quot;)
+    return issues
+
+issues = validate_portfolio_structure(PORTFOLIO_COMPONENTS)
+print(&quot;Portfolio validation:&quot;, issues if issues else &quot;PASS — all components runnable&quot;)
+print(f&quot;\nComponents: {len(PORTFOLIO_COMPONENTS)}&quot;)
+for c in PORTFOLIO_COMPONENTS:
+    print(f&quot;  [{c.week_origin}] {c.name}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>generate_portfolio_readme(components: list[PortfolioComponent]) -&gt; str</code> that returns a markdown string. The README must include:</p>
+<ol>
+<li>A &quot;Quick Start&quot; section with each component's entry command as a numbered step</li>
+<li>A &quot;Component Overview&quot; table: Name | Path | Origin Week | Output</li>
+<li>A &quot;Requirements&quot; section listing <code>python&gt;=3.10</code>, <code>pip install -r requirements.txt</code></li>
+</ol>
+<p>Expected format (abbreviated):</p>
+<pre><code>## Quick Start
+1. `python ingestion/pcap_parser.py --input samples/sample.pcap --output data/connections.csv`
+2. ...
+
+## Component Overview
+| Name | Path | Week | Output |
+|------|------|------|--------|
+| PCAP Ingestion Parser | ingestion/pcap_parser.py | W01 | CSV: timestamp, src_ip... |
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class PortfolioComponent:
+    name: str
+    path: str
+    runs_without_credentials: bool
+    entry_command: str
+    output_description: str
+    week_origin: str
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — End-to-End Pipeline Wiring</h3>
+<p>The portfolio components from W01–W22 were built independently. The capstone connects them: PCAP parser → beaconing detector → RAG enrichment → final alert report. The output of each component is the input of the next. This is the same pattern as a data engineering ETL pipeline — which you already know how to build.</p>
+<p>The key new skill is writing a <code>pipeline_runner.py</code> that orchestrates the full flow, handles component failures gracefully, and produces a single output file that a reviewer can inspect.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import subprocess
+import sys
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+@dataclass
+class PipelineStep:
+    name: str
+    command: list[str]
+    output_path: str
+    required: bool = True
+
+def run_step(step: PipelineStep) -&gt; tuple[bool, str]:
+    result = subprocess.run(
+        step.command,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, result.stderr.strip()
+    if not Path(step.output_path).exists():
+        return False, f&quot;Output file not created: {step.output_path}&quot;
+    return True, f&quot;Output: {step.output_path}&quot;
+
+PIPELINE_STEPS = [
+    PipelineStep(
+        &quot;PCAP Ingestion&quot;,
+        [&quot;python&quot;, &quot;ingestion/pcap_parser.py&quot;, &quot;--input&quot;, &quot;samples/sample.pcap&quot;, &quot;--output&quot;, &quot;data/connections.csv&quot;],
+        &quot;data/connections.csv&quot;,
+    ),
+    PipelineStep(
+        &quot;Beaconing Detection&quot;,
+        [&quot;python&quot;, &quot;detection/beaconing_detector.py&quot;, &quot;--input&quot;, &quot;data/connections.csv&quot;, &quot;--output&quot;, &quot;data/beacons.json&quot;],
+        &quot;data/beacons.json&quot;,
+    ),
+    PipelineStep(
+        &quot;RAG Enrichment&quot;,
+        [&quot;python&quot;, &quot;enrichment/pipeline.py&quot;, &quot;--input&quot;, &quot;data/beacons.json&quot;, &quot;--output&quot;, &quot;data/enriched_alerts.json&quot;],
+        &quot;data/enriched_alerts.json&quot;,
+    ),
+]
+
+def run_pipeline(steps: list[PipelineStep]) -&gt; dict:
+    results = []
+    for step in steps:
+        success, message = run_step(step)
+        results.append({&quot;step&quot;: step.name, &quot;success&quot;: success, &quot;message&quot;: message})
+        if not success and step.required:
+            print(f&quot;FAILED: {step.name} — {message}&quot;)
+            break
+        status = &quot;OK&quot; if success else &quot;SKIP&quot;
+        print(f&quot;[{status}] {step.name}: {message}&quot;)
+    return {&quot;steps&quot;: results, &quot;passed&quot;: sum(1 for r in results if r[&quot;success&quot;])}
+
+# Example call (simulation — does not actually run subprocesses in this exercise)
+# results = run_pipeline(PIPELINE_STEPS)
+# print(json.dumps(results, indent=2))
+print(&quot;Pipeline defined:&quot;, [s.name for s in PIPELINE_STEPS])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>pipeline_summary_report(results: dict) -&gt; str</code> that returns a plain-text report from pipeline results. Include:</p>
+<ul>
+<li>Total steps, passed, failed</li>
+<li>For each failed step: step name and error message</li>
+<li>Overall verdict: &quot;PIPELINE OK&quot; if all required steps passed, else &quot;PIPELINE FAILED&quot;</li>
+</ul>
+<p>Expected output for a run where step 2 fails:</p>
+<pre><code>Pipeline Summary
+================
+Steps: 3 total | 1 passed | 2 skipped/failed
+
+Failed:
+  Beaconing Detection: Output file not created: data/beacons.csv
+
+Verdict: PIPELINE FAILED
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>sample_results = {
+    &quot;steps&quot;: [
+        {&quot;step&quot;: &quot;PCAP Ingestion&quot;,     &quot;success&quot;: True,  &quot;message&quot;: &quot;Output: data/connections.csv&quot;},
+        {&quot;step&quot;: &quot;Beaconing Detection&quot;,&quot;success&quot;: False, &quot;message&quot;: &quot;Output file not created: data/beacons.csv&quot;},
+        {&quot;step&quot;: &quot;RAG Enrichment&quot;,     &quot;success&quot;: False, &quot;message&quot;: &quot;&quot;},
+    ],
+    &quot;passed&quot;: 1,
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — GitHub Actions CI for the Portfolio</h3>
+<p>A portfolio repository with a green CI badge is visually compelling and technically credible. The CI workflow runs on every push: it validates Sigma rules, runs Python syntax checks with ruff, and executes the pipeline in simulation mode. If the badge is green, the reviewer knows the code is not just demo-ware.</p>
+<p>This extends the GitHub Actions pattern from W10 into the security domain. The workflow is nearly identical — only the commands differ.</p>
+<p><strong>Example:</strong></p>
+<pre><code># .github/workflows/portfolio_ci.yml
+name: Portfolio CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: &quot;3.11&quot;
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint with ruff
+        run: ruff check . --select E,F,W
+
+      - name: Validate Sigma rules
+        run: |
+          pip install sigma-cli
+          sigma-cli validate rules/sigma/*.yml
+
+      - name: Run pipeline simulation
+        run: python pipeline_runner.py --simulation
+        env:
+          SIMULATION_MODE: &quot;true&quot;
+
+      - name: Check output artifacts exist
+        run: |
+          test -f data/enriched_alerts.json &amp;&amp; echo &quot;enriched_alerts.json OK&quot;
+          test -f data/anomalies.csv        &amp;&amp; echo &quot;anomalies.csv OK&quot;
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Equivalent Python representation for programmatic generation
+from dataclasses import dataclass
+
+@dataclass
+class CIStep:
+    name: str
+    run: str
+    env: dict[str, str] | None = None
+
+CI_STEPS = [
+    CIStep(&quot;Lint with ruff&quot;,         &quot;ruff check . --select E,F,W&quot;),
+    CIStep(&quot;Validate Sigma rules&quot;,    &quot;sigma-cli validate rules/sigma/*.yml&quot;),
+    CIStep(&quot;Run pipeline simulation&quot;, &quot;python pipeline_runner.py --simulation&quot;,
+           env={&quot;SIMULATION_MODE&quot;: &quot;true&quot;}),
+    CIStep(&quot;Check output artifacts&quot;,  &quot;test -f data/enriched_alerts.json &amp;&amp; test -f data/anomalies.csv&quot;),
+]
+
+for step in CI_STEPS:
+    env_note = f&quot; (env: {step.env})&quot; if step.env else &quot;&quot;
+    print(f&quot;  - {step.name}{env_note}&quot;)
+    print(f&quot;    run: {step.run}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>generate_github_actions_yaml(steps: list[CIStep]) -&gt; str</code> that returns a valid GitHub Actions YAML string for a workflow named &quot;Portfolio CI&quot; that runs on push and pull_request to main. Each step should use <code>run:</code> with the command and add <code>env:</code> block if the step has environment variables.</p>
+<p>Expected output (abbreviated):</p>
+<pre><code>name: Portfolio CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        ...
+      - name: Lint with ruff
+        run: ruff check . --select E,F,W
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class CIStep:
+    name: str
+    run: str
+    env: dict[str, str] | None = None
+
+CI_STEPS = [
+    CIStep(&quot;Lint with ruff&quot;,          &quot;ruff check . --select E,F,W&quot;),
+    CIStep(&quot;Validate Sigma rules&quot;,     &quot;sigma-cli validate rules/sigma/*.yml&quot;),
+    CIStep(&quot;Run pipeline simulation&quot;,  &quot;python pipeline_runner.py --simulation&quot;,
+            env={&quot;SIMULATION_MODE&quot;: &quot;true&quot;}),
+    CIStep(&quot;Check output artifacts&quot;,   &quot;test -f data/enriched_alerts.json &amp;&amp; test -f data/anomalies.csv&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLM-generated portfolio README from code metadata.
+<strong>Threat:</strong> Auto-generated READMEs from LLMs often include plausible but fabricated claims (&quot;Processes 10M events/second&quot;) that a reviewer will attempt to verify and immediately distrust. Every claim in your portfolio README must be reproducible.
+<strong>Opportunity:</strong> Feed your <code>PORTFOLIO_COMPONENTS</code> list and <code>CI_STEPS</code> to an LLM and ask it to draft a README section that is verifiable — every performance claim tied to a specific test, every feature tied to a specific file. The LLM draft removes the blank-page problem; you verify every sentence before committing.
+<strong>Prompt to try:</strong> <code>&quot;Here is a list of portfolio components for a Detection Engineer GitHub repo: [component list]. Write a README.md that would impress a senior SOC engineer reviewing this for a hire. Requirements: (1) Every claim must reference a specific file; (2) No fabricated metrics; (3) Include a 'How to run' section with exact commands; (4) Max 400 words; (5) No emojis. Flag any place where you wrote a claim you cannot verify from the component list.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Detection Engineering Artifacts Deep Dive</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="24-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=caZCMtWlx8k" target="_blank" rel="noopener"><b>Write Better Detection Rules with Sigma, Yara &amp; Snort</b><small>Level Effect</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Sigma%20rule%20writing%20best%20practices%20detection%20engineering%20production" target="_blank" rel="noopener">Sigma rule writing best practices detection engineering production</a></p></div>
+<hr />
+<h3>Concept 1 — Production Sigma Rule Quality Standards</h3>
+<p>A Sigma rule submitted to an employer or open-source rule set will be reviewed against the same checklist as production code: correct MITRE mapping, meaningful description, tuned FP filter, proper logsource definition. Rules that fail these checks are rejected regardless of whether the detection logic is correct.</p>
+<p>This concept walks through the review checklist using the three rules built in W13 as the base.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class SigmaRuleMetadata:
+    title: str
+    id: str           # UUID format
+    status: str       # test | experimental | stable
+    description: str
+    references: list[str]
+    author: str
+    date: str         # YYYY-MM-DD
+    tags: list[str]   # mitre tags e.g. &quot;attack.t1059.001&quot;
+    logsource_category: str
+    logsource_product: str
+    detection_keywords: list[str]  # simplified; real rules have condition logic
+    falsepositives: list[str]
+    level: str        # informational | low | medium | high | critical
+
+    def quality_issues(self) -&gt; list[str]:
+        issues = []
+        if len(self.description) &lt; 30:
+            issues.append(&quot;description too short — explain what the rule detects and why&quot;)
+        if not self.tags:
+            issues.append(&quot;no MITRE ATT&amp;CK tags — add attack.tNNNN&quot;)
+        if not self.falsepositives:
+            issues.append(&quot;no falsepositives entry — add at least one known FP scenario&quot;)
+        if self.status == &quot;stable&quot; and not self.references:
+            issues.append(&quot;stable rules require at least one reference URL&quot;)
+        if self.level not in {&quot;informational&quot;, &quot;low&quot;, &quot;medium&quot;, &quot;high&quot;, &quot;critical&quot;}:
+            issues.append(f&quot;invalid level: {self.level}&quot;)
+        return issues
+
+powershell_rule = SigmaRuleMetadata(
+    title=&quot;PowerShell Encoded Command Execution&quot;,
+    id=&quot;a1b2c3d4-e5f6-7890-abcd-ef1234567890&quot;,
+    status=&quot;test&quot;,
+    description=&quot;Detects PowerShell execution with encoded command flag, commonly used to obfuscate malicious scripts&quot;,
+    references=[&quot;https://attack.mitre.org/techniques/T1059/001/&quot;],
+    author=&quot;Chris Winter&quot;,
+    date=&quot;2026-05-05&quot;,
+    tags=[&quot;attack.execution&quot;, &quot;attack.t1059.001&quot;],
+    logsource_category=&quot;process_creation&quot;,
+    logsource_product=&quot;windows&quot;,
+    detection_keywords=[&quot;-EncodedCommand&quot;, &quot;-enc &quot;, &quot;-e &quot;],
+    falsepositives=[&quot;Legitimate admin scripts using encoded commands for cross-platform compatibility&quot;],
+    level=&quot;high&quot;,
+)
+
+issues = powershell_rule.quality_issues()
+print(f&quot;Rule: {powershell_rule.title}&quot;)
+print(f&quot;Quality issues: {issues if issues else &#x27;None — rule passes quality check&#x27;}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>sigma_to_yaml(rule: SigmaRuleMetadata) -&gt; str</code> that converts the rule to a YAML string matching the Sigma format. The detection block should use a simple <code>keywords</code> list with the <code>condition: keywords</code>. Include all fields in the correct Sigma YAML structure.</p>
+<p>Expected output (first 10 lines):</p>
+<pre><code>title: PowerShell Encoded Command Execution
+id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+status: test
+description: Detects PowerShell execution with encoded command flag...
+references:
+    - https://attack.mitre.org/techniques/T1059/001/
+author: Chris Winter
+date: 2026-05-05
+tags:
+    - attack.execution
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class SigmaRuleMetadata:
+    title: str
+    id: str
+    status: str
+    description: str
+    references: list[str]
+    author: str
+    date: str
+    tags: list[str]
+    logsource_category: str
+    logsource_product: str
+    detection_keywords: list[str]
+    falsepositives: list[str]
+    level: str
+
+powershell_rule = SigmaRuleMetadata(
+    title=&quot;PowerShell Encoded Command Execution&quot;,
+    id=&quot;a1b2c3d4-e5f6-7890-abcd-ef1234567890&quot;,
+    status=&quot;test&quot;,
+    description=&quot;Detects PowerShell execution with encoded command flag, commonly used to obfuscate malicious scripts&quot;,
+    references=[&quot;https://attack.mitre.org/techniques/T1059/001/&quot;],
+    author=&quot;Chris Winter&quot;,
+    date=&quot;2026-05-05&quot;,
+    tags=[&quot;attack.execution&quot;, &quot;attack.t1059.001&quot;],
+    logsource_category=&quot;process_creation&quot;,
+    logsource_product=&quot;windows&quot;,
+    detection_keywords=[&quot;-EncodedCommand&quot;, &quot;-enc &quot;, &quot;-e &quot;],
+    falsepositives=[&quot;Legitimate admin scripts using encoded commands for cross-platform compatibility&quot;],
+    level=&quot;high&quot;,
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — Detection Coverage Dashboard</h3>
+<p>The coverage dashboard from W12 showed which ATT&amp;CK techniques are covered by Sigma rules. The capstone version extends this to three layers: rules that exist, rules that have been tested in CI, and rules that have fired at least once against a log sample. A rule that exists but has never been tested or fired is technically &quot;coverage&quot; but practically dead weight.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from enum import Enum
+
+class RuleMaturity(Enum):
+    EXISTS      = &quot;exists&quot;       # rule file exists and validates
+    TESTED      = &quot;tested&quot;       # rule ran against log sample, produced expected match
+    PRODUCTION  = &quot;production&quot;   # rule deployed, fired at least once in real/simulated data
+
+@dataclass
+class CoverageEntry:
+    technique_id: str
+    technique_name: str
+    rule_file: str | None
+    maturity: RuleMaturity | None  # None = GAP
+    last_fired: str | None         # ISO date or None
+
+    def is_gap(self) -&gt; bool:
+        return self.maturity is None
+
+    def maturity_score(self) -&gt; int:
+        scores = {None: 0, RuleMaturity.EXISTS: 1, RuleMaturity.TESTED: 2, RuleMaturity.PRODUCTION: 3}
+        return scores[self.maturity]
+
+COVERAGE = [
+    CoverageEntry(&quot;T1059.001&quot;, &quot;PowerShell&quot;,           &quot;rules/sigma/powershell_encoded.yml&quot;, RuleMaturity.TESTED,      &quot;2026-05-01&quot;),
+    CoverageEntry(&quot;T1071.001&quot;, &quot;Web Protocols C2&quot;,      &quot;rules/sigma/c2_beaconing.yml&quot;,       RuleMaturity.PRODUCTION,  &quot;2026-05-04&quot;),
+    CoverageEntry(&quot;T1003.001&quot;, &quot;LSASS Memory Dump&quot;,     &quot;rules/sigma/lsass_dump.yml&quot;,         RuleMaturity.EXISTS,      None),
+    CoverageEntry(&quot;T1078&quot;,     &quot;Valid Accounts&quot;,         None,                                 None,                     None),
+    CoverageEntry(&quot;T1566.001&quot;, &quot;Spearphishing Attach&quot;,  None,                                 None,                     None),
+]
+
+def coverage_stats(entries: list[CoverageEntry]) -&gt; dict:
+    total = len(entries)
+    gaps = sum(1 for e in entries if e.is_gap())
+    by_maturity = {}
+    for e in entries:
+        key = e.maturity.value if e.maturity else &quot;GAP&quot;
+        by_maturity[key] = by_maturity.get(key, 0) + 1
+    coverage_pct = (total - gaps) / total * 100 if total &gt; 0 else 0.0
+    return {&quot;total&quot;: total, &quot;gaps&quot;: gaps, &quot;coverage_pct&quot;: coverage_pct, &quot;by_maturity&quot;: by_maturity}
+
+stats = coverage_stats(COVERAGE)
+print(f&quot;Coverage: {stats[&#x27;coverage_pct&#x27;]:.0f}% ({stats[&#x27;total&#x27;] - stats[&#x27;gaps&#x27;]}/{stats[&#x27;total&#x27;]} techniques)&quot;)
+print(f&quot;By maturity: {stats[&#x27;by_maturity&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>coverage_to_navigator_json(entries: list[CoverageEntry]) -&gt; dict</code> that returns a dict matching the ATT&amp;CK Navigator layer JSON format. Only include techniques that are not gaps. Color code by maturity: EXISTS = <code>&quot;#ffcc00&quot;</code> (yellow), TESTED = <code>&quot;#66b3ff&quot;</code> (blue), PRODUCTION = <code>&quot;#00cc44&quot;</code> (green).</p>
+<p>Expected structure:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>{
+    &quot;name&quot;: &quot;Portfolio Coverage&quot;,
+    &quot;domain&quot;: &quot;enterprise-attack&quot;,
+    &quot;techniques&quot;: [
+        {&quot;techniqueID&quot;: &quot;T1059.001&quot;, &quot;color&quot;: &quot;#66b3ff&quot;, &quot;comment&quot;: &quot;rules/sigma/powershell_encoded.yml&quot;},
+        {&quot;techniqueID&quot;: &quot;T1071.001&quot;, &quot;color&quot;: &quot;#00cc44&quot;, &quot;comment&quot;: &quot;rules/sigma/c2_beaconing.yml&quot;},
+        {&quot;techniqueID&quot;: &quot;T1003.001&quot;, &quot;color&quot;: &quot;#ffcc00&quot;, &quot;comment&quot;: &quot;rules/sigma/lsass_dump.yml&quot;},
+    ]
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from enum import Enum
+
+class RuleMaturity(Enum):
+    EXISTS     = &quot;exists&quot;
+    TESTED     = &quot;tested&quot;
+    PRODUCTION = &quot;production&quot;
+
+@dataclass
+class CoverageEntry:
+    technique_id: str
+    technique_name: str
+    rule_file: str | None
+    maturity: RuleMaturity | None
+    last_fired: str | None
+
+    def is_gap(self) -&gt; bool:
+        return self.maturity is None
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — YARA Rule Integration</h3>
+<p>YARA rules from W18 scan file content for malware signatures. The capstone connects YARA into the pipeline: when the RAG enrichment pipeline returns a verdict of ESCALATE, a YARA scan runs on any associated file artifacts. This is the same pattern as a data quality gate — a downstream check that only activates when the upstream signal crosses a threshold.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class YaraRule:
+    rule_name: str
+    description: str
+    tags: list[str]
+    strings: dict[str, str]  # name → pattern
+    condition: str
+
+    def to_yara_text(self) -&gt; str:
+        tag_str = &quot; &quot;.join(self.tags)
+        strings_block = &quot;\n&quot;.join(
+            f&quot;        ${name} = {pattern}&quot;
+            for name, pattern in self.strings.items()
+        )
+        return f&quot;&quot;&quot;rule {self.rule_name} : {tag_str}
+{{
+    meta:
+        description = &quot;{self.description}&quot;
+    strings:
+{strings_block}
+    condition:
+        {self.condition}
+}}&quot;&quot;&quot;
+
+YARA_RULES = [
+    YaraRule(
+        rule_name=&quot;Cobalt_Strike_Beacon_Shellcode&quot;,
+        description=&quot;Detects Cobalt Strike beacon shellcode by MZ header position and config marker&quot;,
+        tags=[&quot;APT&quot;, &quot;CobaltStrike&quot;, &quot;Shellcode&quot;],
+        strings={
+            &quot;mz_header&quot;:    &#x27;&quot;MZ&quot;&#x27;,
+            &quot;config_marker&quot;: &#x27;{ FC 48 83 E4 F0 }&#x27;,
+            &quot;sleep_mask&quot;:    &#x27;&quot;sleeptime&quot;&#x27;,
+        },
+        condition=&quot;$mz_header at 0 and ($config_marker or $sleep_mask)&quot;,
+    ),
+    YaraRule(
+        rule_name=&quot;Mimikatz_Strings&quot;,
+        description=&quot;Detects Mimikatz credential dumping tool by embedded strings&quot;,
+        tags=[&quot;CredentialDumping&quot;, &quot;Mimikatz&quot;],
+        strings={
+            &quot;sekurlsa&quot;:  &#x27;&quot;sekurlsa&quot;&#x27;,
+            &quot;wdigest&quot;:   &#x27;&quot;wdigest&quot;&#x27;,
+            &quot;kerberos&quot;:  &#x27;&quot;kerberos&quot;&#x27;,
+        },
+        condition=&quot;2 of ($sekurlsa, $wdigest, $kerberos)&quot;,
+    ),
+]
+
+for rule in YARA_RULES:
+    print(rule.to_yara_text())
+    print()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>simulate_yara_scan(file_content: str, rules: list[YaraRule]) -&gt; list[str]</code> that returns a list of rule names that &quot;match&quot; the file content. Simulate matching by checking if any string value (after stripping <code>&quot;</code> and <code>{</code> <code>}</code> and spaces) appears as a case-insensitive substring of <code>file_content</code>. Hex patterns (those containing only hex chars and spaces between <code>{ }</code>) always count as a match to simulate binary matching.</p>
+<p>Expected output:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># file_content = &quot;wdigest kerberos some other bytes&quot;
+# → [&quot;Mimikatz_Strings&quot;]   (2 of the 3 strings matched → condition &quot;2 of&quot; satisfied)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Note: for this simulation, if at least 2 string values match → the rule matches. For rules with &quot;at 0&quot; conditions, ignore the position constraint.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+import re
+
+@dataclass
+class YaraRule:
+    rule_name: str
+    description: str
+    tags: list[str]
+    strings: dict[str, str]
+    condition: str
+
+YARA_RULES = [
+    YaraRule(
+        &quot;Cobalt_Strike_Beacon_Shellcode&quot;, &quot;&quot;, [&quot;APT&quot;],
+        {&quot;mz_header&quot;: &#x27;&quot;MZ&quot;&#x27;, &quot;config_marker&quot;: &quot;{ FC 48 83 E4 F0 }&quot;, &quot;sleep_mask&quot;: &#x27;&quot;sleeptime&quot;&#x27;},
+        &quot;$mz_header at 0 and ($config_marker or $sleep_mask)&quot;,
+    ),
+    YaraRule(
+        &quot;Mimikatz_Strings&quot;, &quot;&quot;, [&quot;CredentialDumping&quot;],
+        {&quot;sekurlsa&quot;: &#x27;&quot;sekurlsa&quot;&#x27;, &quot;wdigest&quot;: &#x27;&quot;wdigest&quot;&#x27;, &quot;kerberos&quot;: &#x27;&quot;kerberos&quot;&#x27;},
+        &quot;2 of ($sekurlsa, $wdigest, $kerberos)&quot;,
+    ),
+]
+
+sample_file_content = &quot;wdigest kerberos some other bytes&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLM-assisted detection rule review — using a code review prompt to catch quality issues in Sigma and YARA rules.
+<strong>Threat:</strong> An attacker who has access to the LLM review tool could submit a malformed rule that the LLM rates as &quot;high quality&quot; due to plausible-sounding metadata — while the detection condition silently never matches anything. LLM review is a supplement to, not a replacement for, testing against real log samples.
+<strong>Opportunity:</strong> Paste a Sigma rule into an LLM with the prompt below. The LLM catches common issues (overly broad <code>keywords</code>, missing logsource product, condition that can never fire) before you run the rule in CI. This is a pre-commit quality gate that costs zero compute resources in your CI pipeline.
+<strong>Prompt to try:</strong> <code>&quot;Review this Sigma rule as a senior detection engineer would. Check: (1) Is the logsource definition complete? (2) Is the detection condition logically sound? (3) Are the falsepositives plausible and specific? (4) Is the MITRE tag accurate for this technique? (5) Would this rule fire on the malicious behavior described and not on the FP scenarios listed? Rate each: PASS / WARN / FAIL with one sentence of explanation. Rule: [paste rule YAML]&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — ML and LLM Components Integration</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="24-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=7d6dtyAKtck" target="_blank" rel="noopener"><b>Detecting Network Anomalies with Machine Learning | Exclusive Lesson</b><small>YouAccel</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=machine%20learning%20anomaly%20detection%20cybersecurity%20pipeline%20Python" target="_blank" rel="noopener">machine learning anomaly detection cybersecurity pipeline Python</a></p></div>
+<hr />
+<h3>Concept 1 — Connecting ML Output to Detection Rules</h3>
+<p>The Isolation Forest anomaly detector from W19 produces a scored CSV. The capstone step converts anomalous scores into actionable alerts that feed the RAG enrichment pipeline. This connection — ML score → alert → enrichment → verdict — is the architecture that modern detection platforms are moving toward.</p>
+<p>The key design decision: at what threshold does an anomaly score become an alert? Set it too low and every event becomes an alert; too high and real attacks slip through. This is the precision-recall trade-off applied to detection engineering.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class AnomalyEvent:
+    event_id: str
+    timestamp: str
+    process_name: str
+    parent_process: str
+    command_line: str
+    anomaly_score: float    # Isolation Forest: &lt; -0.1 = anomalous, lower = more anomalous
+
+@dataclass
+class AlertThresholdConfig:
+    low_threshold: float    = -0.10   # informational
+    medium_threshold: float = -0.25   # medium priority
+    high_threshold: float   = -0.50   # high priority — feeds enrichment pipeline
+
+    def classify(self, score: float) -&gt; str:
+        if score &lt;= self.high_threshold:
+            return &quot;HIGH&quot;
+        if score &lt;= self.medium_threshold:
+            return &quot;MEDIUM&quot;
+        if score &lt;= self.low_threshold:
+            return &quot;LOW&quot;
+        return &quot;NORMAL&quot;
+
+def events_to_alerts(events: list[AnomalyEvent], config: AlertThresholdConfig) -&gt; list[dict]:
+    alerts = []
+    for e in events:
+        level = config.classify(e.anomaly_score)
+        if level == &quot;NORMAL&quot;:
+            continue
+        alerts.append({
+            &quot;alert_id&quot;:      f&quot;ML-{e.event_id}&quot;,
+            &quot;severity&quot;:      level,
+            &quot;source&quot;:        &quot;isolation_forest&quot;,
+            &quot;timestamp&quot;:     e.timestamp,
+            &quot;process&quot;:       e.process_name,
+            &quot;parent&quot;:        e.parent_process,
+            &quot;command_line&quot;:  e.command_line,
+            &quot;anomaly_score&quot;: e.anomaly_score,
+            &quot;send_to_enrichment&quot;: level == &quot;HIGH&quot;,
+        })
+    return alerts
+
+sample_events = [
+    AnomalyEvent(&quot;evt-001&quot;, &quot;2026-05-05T09:00:00Z&quot;, &quot;powershell.exe&quot;, &quot;winword.exe&quot;,  &quot;powershell -enc abc123&quot;, -0.62),
+    AnomalyEvent(&quot;evt-002&quot;, &quot;2026-05-05T09:01:00Z&quot;, &quot;cmd.exe&quot;,        &quot;explorer.exe&quot;, &quot;cmd /c whoami&quot;,           -0.18),
+    AnomalyEvent(&quot;evt-003&quot;, &quot;2026-05-05T09:02:00Z&quot;, &quot;notepad.exe&quot;,    &quot;explorer.exe&quot;, &quot;notepad.exe report.txt&quot;,   0.05),
+]
+
+config = AlertThresholdConfig()
+alerts = events_to_alerts(sample_events, config)
+for a in alerts:
+    enrichment_flag = &quot;→ enrichment&quot; if a[&quot;send_to_enrichment&quot;] else &quot;&quot;
+    print(f&quot;[{a[&#x27;severity&#x27;]}] {a[&#x27;alert_id&#x27;]} | score={a[&#x27;anomaly_score&#x27;]} | {a[&#x27;process&#x27;]} {enrichment_flag}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>precision_recall_at_threshold(events: list[AnomalyEvent], threshold: float, true_positive_ids: set[str]) -&gt; dict</code> that computes precision and recall for a given threshold. An event is &quot;predicted positive&quot; if its score &lt;= threshold. An event is a true positive if its <code>event_id</code> is in <code>true_positive_ids</code>.</p>
+<p>Expected output (threshold=-0.10, true_positive_ids={&quot;evt-001&quot;}):</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>{&quot;threshold&quot;: -0.10, &quot;predicted_positive&quot;: 2, &quot;true_positives&quot;: 1, &quot;precision&quot;: 0.5, &quot;recall&quot;: 1.0}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class AnomalyEvent:
+    event_id: str
+    timestamp: str
+    process_name: str
+    parent_process: str
+    command_line: str
+    anomaly_score: float
+
+sample_events = [
+    AnomalyEvent(&quot;evt-001&quot;, &quot;2026-05-05T09:00:00Z&quot;, &quot;powershell.exe&quot;, &quot;winword.exe&quot;,  &quot;powershell -enc abc123&quot;, -0.62),
+    AnomalyEvent(&quot;evt-002&quot;, &quot;2026-05-05T09:01:00Z&quot;, &quot;cmd.exe&quot;,        &quot;explorer.exe&quot;, &quot;cmd /c whoami&quot;,           -0.18),
+    AnomalyEvent(&quot;evt-003&quot;, &quot;2026-05-05T09:02:00Z&quot;, &quot;notepad.exe&quot;,    &quot;explorer.exe&quot;, &quot;notepad.exe report.txt&quot;,   0.05),
+]
+
+true_positive_ids = {&quot;evt-001&quot;}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — LLM Triage Summary as Final Report</h3>
+<p>The RAG enrichment pipeline from W22 produces a <code>TriageSummary</code> per alert. The capstone converts a batch of triage summaries into a single incident report — the artifact a SOC analyst would hand to an incident commander. This is structured writing from structured data, the same problem as a data engineering summary report.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class TriageSummary:
+    alert_id: str
+    verdict: str          # ESCALATE / MONITOR / CLOSE_FP
+    confidence: float
+    primary_evidence: str
+    investigation_steps: list[str]
+    explanation: str
+    model_used: str
+    context_chunks_used: int
+
+@dataclass
+class IncidentReport:
+    report_id: str
+    generated_at: str
+    escalated_alerts: list[TriageSummary]
+    monitor_alerts: list[TriageSummary]
+    closed_alerts: list[TriageSummary]
+
+    def summary_stats(self) -&gt; dict:
+        total = len(self.escalated_alerts) + len(self.monitor_alerts) + len(self.closed_alerts)
+        return {
+            &quot;total&quot;: total,
+            &quot;escalated&quot;: len(self.escalated_alerts),
+            &quot;monitor&quot;: len(self.monitor_alerts),
+            &quot;closed&quot;: len(self.closed_alerts),
+        }
+
+    def to_markdown(self) -&gt; str:
+        stats = self.summary_stats()
+        lines = [
+            f&quot;# Incident Report {self.report_id}&quot;,
+            f&quot;Generated: {self.generated_at}&quot;,
+            &quot;&quot;,
+            &quot;## Summary&quot;,
+            f&quot;Total alerts processed: {stats[&#x27;total&#x27;]}&quot;,
+            f&quot;- Escalated: {stats[&#x27;escalated&#x27;]}&quot;,
+            f&quot;- Monitor: {stats[&#x27;monitor&#x27;]}&quot;,
+            f&quot;- Closed (FP): {stats[&#x27;closed&#x27;]}&quot;,
+            &quot;&quot;,
+        ]
+        if self.escalated_alerts:
+            lines.append(&quot;## Escalated Alerts&quot;)
+            for alert in self.escalated_alerts:
+                lines.append(f&quot;### {alert.alert_id} (confidence: {alert.confidence:.0%})&quot;)
+                lines.append(f&quot;**Evidence:** {alert.primary_evidence}&quot;)
+                lines.append(f&quot;**Explanation:** {alert.explanation}&quot;)
+                lines.append(&quot;**Next steps:**&quot;)
+                for step in alert.investigation_steps:
+                    lines.append(f&quot;- {step}&quot;)
+                lines.append(&quot;&quot;)
+        return &quot;\n&quot;.join(lines)
+
+sample_summaries = [
+    TriageSummary(&quot;ML-evt-001&quot;, &quot;ESCALATE&quot;, 0.87,
+        &quot;powershell.exe spawned from winword.exe with encoded command&quot;,
+        [&quot;Isolate host W10-LAPTOP-07&quot;, &quot;Collect full process tree&quot;, &quot;Check for lateral movement&quot;],
+        &quot;Office process spawning PowerShell with encoded args is consistent with macro-based initial access&quot;,
+        &quot;claude-sonnet-4-6&quot;, 4),
+    TriageSummary(&quot;ML-evt-002&quot;, &quot;MONITOR&quot;,  0.55,
+        &quot;cmd.exe from explorer.exe running whoami&quot;,
+        [&quot;Correlate with user login time&quot;, &quot;Check if admin activity&quot;],
+        &quot;Whoami from explorer.exe is suspicious but could be a helpdesk tool&quot;,
+        &quot;claude-sonnet-4-6&quot;, 2),
+]
+
+escalated = [s for s in sample_summaries if s.verdict == &quot;ESCALATE&quot;]
+monitored = [s for s in sample_summaries if s.verdict == &quot;MONITOR&quot;]
+closed    = [s for s in sample_summaries if s.verdict == &quot;CLOSE_FP&quot;]
+
+report = IncidentReport(&quot;RPT-2026-001&quot;, &quot;2026-05-05T10:00:00Z&quot;, escalated, monitored, closed)
+print(report.to_markdown())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>IncidentReport</code> with a method <code>executive_summary(self) -&gt; str</code> that returns a 3-sentence plain English summary suitable for a CISO briefing. Rules:</p>
+<ul>
+<li>Sentence 1: total alerts, breakdown by verdict</li>
+<li>Sentence 2: most critical escalated alert (highest confidence) with primary evidence</li>
+<li>Sentence 3: recommended immediate action or &quot;No immediate action required&quot; if no escalations</li>
+</ul>
+<p>Expected output for the sample above:</p>
+<pre><code>Processed 2 alerts: 1 escalated, 1 for monitoring, 0 closed as false positives.
+Highest-confidence escalation (87%): powershell.exe spawned from winword.exe with encoded command.
+Recommended action: Isolate host W10-LAPTOP-07 and collect full process tree.
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class TriageSummary:
+    alert_id: str
+    verdict: str
+    confidence: float
+    primary_evidence: str
+    investigation_steps: list[str]
+    explanation: str
+    model_used: str
+    context_chunks_used: int
+
+@dataclass
+class IncidentReport:
+    report_id: str
+    generated_at: str
+    escalated_alerts: list[TriageSummary]
+    monitor_alerts: list[TriageSummary]
+    closed_alerts: list[TriageSummary]
+
+    def summary_stats(self) -&gt; dict:
+        total = len(self.escalated_alerts) + len(self.monitor_alerts) + len(self.closed_alerts)
+        return {&quot;total&quot;: total, &quot;escalated&quot;: len(self.escalated_alerts),
+                &quot;monitor&quot;: len(self.monitor_alerts), &quot;closed&quot;: len(self.closed_alerts)}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — Model Version Tracking for Detection ML</h3>
+<p>A detection ML model is a production artifact. When the anomaly detector is retrained (new log samples, new features), the old version must be preserved and the new version tracked — so you can roll back if the new model generates too many false positives. This mirrors MLflow experiment tracking from W09, applied to the security domain.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+
+@dataclass
+class ModelVersion:
+    version: str          # semver e.g. &quot;1.2.0&quot;
+    trained_on: str       # ISO date
+    training_samples: int
+    features: list[str]
+    contamination: float  # Isolation Forest contamination parameter
+    threshold_high: float
+    threshold_medium: float
+    precision_at_high: float
+    recall_at_high: float
+    f1_at_high: float
+    notes: str = &quot;&quot;
+
+MODEL_REGISTRY: list[ModelVersion] = [
+    ModelVersion(
+        version=&quot;1.0.0&quot;,
+        trained_on=&quot;2026-04-01&quot;,
+        training_samples=5000,
+        features=[&quot;process_name&quot;, &quot;parent_process&quot;, &quot;command_length&quot;, &quot;has_encoded_flag&quot;],
+        contamination=0.05,
+        threshold_high=-0.50,
+        threshold_medium=-0.25,
+        precision_at_high=0.72,
+        recall_at_high=0.58,
+        f1_at_high=0.64,
+        notes=&quot;Initial model — trained on EVTX sample from W02 parser&quot;,
+    ),
+    ModelVersion(
+        version=&quot;1.1.0&quot;,
+        trained_on=&quot;2026-05-01&quot;,
+        training_samples=12000,
+        features=[&quot;process_name&quot;, &quot;parent_process&quot;, &quot;command_length&quot;, &quot;has_encoded_flag&quot;,
+                  &quot;network_connection_made&quot;, &quot;file_write_count&quot;],
+        contamination=0.03,
+        threshold_high=-0.45,
+        threshold_medium=-0.20,
+        precision_at_high=0.81,
+        recall_at_high=0.65,
+        f1_at_high=0.72,
+        notes=&quot;Added network and file features; reduced contamination after FP review&quot;,
+    ),
+]
+
+def current_model(registry: list[ModelVersion]) -&gt; ModelVersion:
+    return sorted(registry, key=lambda m: m.version)[-1]
+
+def model_changelog(registry: list[ModelVersion]) -&gt; list[str]:
+    lines = []
+    sorted_registry = sorted(registry, key=lambda m: m.version)
+    for i, m in enumerate(sorted_registry):
+        prev = sorted_registry[i - 1] if i &gt; 0 else None
+        f1_delta = f&quot; (F1: {prev.f1_at_high:.2f} → {m.f1_at_high:.2f})&quot; if prev else &quot;&quot;
+        lines.append(f&quot;v{m.version} ({m.trained_on}){f1_delta}: {m.notes}&quot;)
+    return lines
+
+print(&quot;Current model:&quot;, current_model(MODEL_REGISTRY).version)
+print(&quot;\nChangelog:&quot;)
+for entry in model_changelog(MODEL_REGISTRY):
+    print(f&quot;  {entry}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>model_rollback_needed(registry: list[ModelVersion], fp_rate_pct: float, fp_threshold_pct: float = 15.0) -&gt; tuple[bool, str]</code> that returns <code>(True, reason)</code> if the current model's false positive rate exceeds the threshold, and <code>(False, &quot;&quot;)</code> if not. The reason string should name the previous safe version to roll back to.</p>
+<p>Expected output (fp_rate_pct=20.0):</p>
+<pre><code>(True, &quot;Roll back from v1.1.0 to v1.0.0 — FP rate 20.0% exceeds threshold 15.0%&quot;)
+</code></pre><p>Expected output (fp_rate_pct=8.0):</p>
+<pre><code>(False, &quot;&quot;)
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class ModelVersion:
+    version: str
+    trained_on: str
+    training_samples: int
+    features: list[str]
+    contamination: float
+    threshold_high: float
+    threshold_medium: float
+    precision_at_high: float
+    recall_at_high: float
+    f1_at_high: float
+    notes: str = &quot;&quot;
+
+MODEL_REGISTRY = [
+    ModelVersion(&quot;1.0.0&quot;, &quot;2026-04-01&quot;, 5000,  [&quot;process_name&quot;, &quot;parent_process&quot;], 0.05, -0.50, -0.25, 0.72, 0.58, 0.64, &quot;Initial model&quot;),
+    ModelVersion(&quot;1.1.0&quot;, &quot;2026-05-01&quot;, 12000, [&quot;process_name&quot;, &quot;parent_process&quot;, &quot;network_connection_made&quot;], 0.03, -0.45, -0.20, 0.81, 0.65, 0.72, &quot;Added network features&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLM-assisted model performance explanation for non-technical stakeholders.
+<strong>Threat:</strong> When an LLM explains model metrics in plain English, it may use persuasive framing that overstates confidence (&quot;the model correctly identifies 81% of attacks&quot;) while understating risk (&quot;it misses 35% of attacks and flags 1 in 5 benign events as malicious&quot;). Detection models must be represented honestly to decision-makers.
+<strong>Opportunity:</strong> Feed precision, recall, and F1 values to an LLM with the constraint that it must represent both the benefit and the risk in equal terms. Use this as the basis for your model card — the governance document that travels with each deployed model version.
+<strong>Prompt to try:</strong> <code>&quot;I have an Isolation Forest anomaly detector with these metrics at the HIGH threshold: precision=0.81, recall=0.65, F1=0.72, contamination=0.03. Write a 3-paragraph model card section titled 'Performance and Limitations'. Paragraph 1: what the model does well. Paragraph 2: specific failure modes and their operational impact. Paragraph 3: recommended monitoring cadence and rollback trigger. Do not use percentages without also stating the absolute meaning (e.g., '81% precision means 19 of every 100 HIGH alerts will be false positives').&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Portfolio Polish and Recruiter-Facing Documentation</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="24-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=technical%20portfolio%20github%20detection%20engineer%20job%20application%20Israel" target="_blank" rel="noopener">technical portfolio github detection engineer job application Israel</a></p></div>
+<hr />
+<h3>Concept 1 — The Hiring Manager's 90-Second Test</h3>
+<p>An Israeli security hiring manager reviewing a candidate GitHub profile has approximately 90 seconds before moving to the next candidate. In that window they look at three things: the root-level README (what is this?), one script chosen at random (can this person code?), and the CI badge (does it run?). Everything else is secondary.</p>
+<p>The 90-second test defines what must be true about the portfolio before sending it to any employer: README loads fast with a one-paragraph description and a working example command, every script has a <code>if __name__ == &quot;__main__&quot;</code> block that demonstrates it with hardcoded sample data, and the CI badge is green.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class PortfolioReadinessCheck:
+    check_name: str
+    passes: bool
+    blocker: bool  # if True, must fix before applying
+    note: str
+
+def run_readiness_checks(repo_path: str) -&gt; list[PortfolioReadinessCheck]:
+    from pathlib import Path
+    root = Path(repo_path)
+    checks = []
+
+    # Check 1: Root README exists
+    readme_exists = (root / &quot;README.md&quot;).exists()
+    checks.append(PortfolioReadinessCheck(
+        &quot;Root README.md exists&quot;, readme_exists, True,
+        &quot;&quot; if readme_exists else &quot;Create README.md at repo root&quot;
+    ))
+
+    # Check 2: CI workflow file exists
+    ci_exists = (root / &quot;.github&quot; / &quot;workflows&quot;).exists()
+    checks.append(PortfolioReadinessCheck(
+        &quot;CI workflow defined&quot;, ci_exists, True,
+        &quot;&quot; if ci_exists else &quot;Create .github/workflows/portfolio_ci.yml&quot;
+    ))
+
+    # Check 3: requirements.txt exists
+    req_exists = (root / &quot;requirements.txt&quot;).exists()
+    checks.append(PortfolioReadinessCheck(
+        &quot;requirements.txt present&quot;, req_exists, True,
+        &quot;&quot; if req_exists else &quot;Add requirements.txt with pinned versions&quot;
+    ))
+
+    # Check 4: At least one Sigma rule
+    sigma_rules = list((root / &quot;rules&quot; / &quot;sigma&quot;).glob(&quot;*.yml&quot;)) if (root / &quot;rules&quot; / &quot;sigma&quot;).exists() else []
+    checks.append(PortfolioReadinessCheck(
+        &quot;Sigma rules present&quot;, len(sigma_rules) &gt;= 3, False,
+        &quot;&quot; if len(sigma_rules) &gt;= 3 else f&quot;Only {len(sigma_rules)} Sigma rules — target is 3+&quot;
+    ))
+
+    return checks
+
+def readiness_summary(checks: list[PortfolioReadinessCheck]) -&gt; str:
+    blockers = [c for c in checks if c.blocker and not c.passes]
+    warnings = [c for c in checks if not c.blocker and not c.passes]
+    if not blockers:
+        verdict = &quot;READY TO APPLY&quot;
+    else:
+        verdict = f&quot;NOT READY — {len(blockers)} blocker(s)&quot;
+    lines = [verdict]
+    for b in blockers:
+        lines.append(f&quot;  [BLOCKER] {b.check_name}: {b.note}&quot;)
+    for w in warnings:
+        lines.append(f&quot;  [WARN]    {b.check_name}: {b.note}&quot;)
+    return &quot;\n&quot;.join(lines)
+
+# Simulated check results (replace with run_readiness_checks(&quot;path/to/portfolio&quot;) in real use)
+sample_checks = [
+    PortfolioReadinessCheck(&quot;Root README.md exists&quot;, True,  True, &quot;&quot;),
+    PortfolioReadinessCheck(&quot;CI workflow defined&quot;,   False, True, &quot;Create .github/workflows/portfolio_ci.yml&quot;),
+    PortfolioReadinessCheck(&quot;requirements.txt present&quot;, True, True, &quot;&quot;),
+    PortfolioReadinessCheck(&quot;Sigma rules present&quot;,   True,  False, &quot;&quot;),
+]
+print(readiness_summary(sample_checks))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>generate_linkedin_summary(components: list, cert_status: dict) -&gt; str</code> that returns a LinkedIn &quot;About&quot; section paragraph (150-200 words) for a Detection Engineer candidate. Use the component names as proof points and cert_status (dict mapping cert name to &quot;completed&quot; / &quot;in progress&quot; / &quot;planned&quot;) to frame the certification path.</p>
+<p>Expected output structure (not exact words):</p>
+<pre><code>Detection Engineer with a background in data engineering, specializing in [skills].
+Built [N] components covering [areas] — [specific artifact examples].
+Pursuing [certs]: [completed] completed, [in progress] in progress.
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>components = [
+    &quot;Python PCAP parser (W01)&quot;,
+    &quot;Sigma rules — PowerShell, LOLBin, process hollowing (W13)&quot;,
+    &quot;Network beaconing detector in Python (W14)&quot;,
+    &quot;Isolation Forest anomaly detector on Sysmon events (W19)&quot;,
+    &quot;RAG alert enrichment pipeline with ChromaDB simulation (W22)&quot;,
+]
+cert_status = {
+    &quot;SC-200&quot;: &quot;in progress&quot;,
+    &quot;BTL1&quot;:   &quot;planned&quot;,
+    &quot;GCIA&quot;:   &quot;planned&quot;,
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — Tailoring the Portfolio for Israeli Employers</h3>
+<p>Israeli security companies (CyberProof, Sygnia, Profero, Cybereason, Claroty, and the many startup SOC teams) have distinct hiring patterns. Understanding these patterns lets you frame the same portfolio differently depending on the target company without fabricating anything.</p>
+<p>The Israeli market prioritizes operational experience over certifications, values English fluency for client-facing roles, and responds strongly to Python automation in a security context — which is exactly what this portfolio demonstrates.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class EmployerProfile:
+    company: str
+    company_type: str         # MSSP / vendor / startup / enterprise_soc
+    primary_stack: list[str]
+    values_most: list[str]
+    portfolio_framing: str    # which portfolio angle resonates most
+
+ISRAELI_EMPLOYER_PROFILES = [
+    EmployerProfile(
+        &quot;CyberProof (UST Global)&quot;,
+        &quot;MSSP&quot;,
+        [&quot;Microsoft Sentinel&quot;, &quot;Azure&quot;, &quot;KQL&quot;, &quot;Defender XDR&quot;],
+        [&quot;SC-200 certification&quot;, &quot;KQL proficiency&quot;, &quot;multi-client alert triage&quot;],
+        &quot;Lead with the KQL detection rules and Sentinel analytics rule structure from W09-W11. &quot;
+        &quot;Mention SC-200 progress. Frame the RAG pipeline as alert enrichment automation reducing analyst load.&quot;,
+    ),
+    EmployerProfile(
+        &quot;Sygnia (Temasek)&quot;,
+        &quot;Incident Response / Threat Intel&quot;,
+        [&quot;Splunk&quot;, &quot;Elastic&quot;, &quot;Python&quot;, &quot;Volatility&quot;, &quot;YARA&quot;],
+        [&quot;IR forensics depth&quot;, &quot;Python automation&quot;, &quot;threat hunting mindset&quot;],
+        &quot;Lead with the IR triage script (W16), Volatility correlation (W17), and YARA rules (W18). &quot;
+        &quot;Sygnia hires for IR depth — the portfolio coverage of forensics + malware analysis is the differentiator.&quot;,
+    ),
+    EmployerProfile(
+        &quot;Cybereason&quot;,
+        &quot;EDR vendor&quot;,
+        [&quot;Python&quot;, &quot;machine learning&quot;, &quot;behavioral detection&quot;],
+        [&quot;ML-based detection&quot;, &quot;behavioral rules&quot;, &quot;Python pipeline engineering&quot;],
+        &quot;Lead with the Isolation Forest anomaly detector (W19) and pipeline engineering. &quot;
+        &quot;Frame the data engineering background as an advantage for building detection data pipelines at scale.&quot;,
+    ),
+    EmployerProfile(
+        &quot;Early-stage security startup&quot;,
+        &quot;startup&quot;,
+        [&quot;Python&quot;, &quot;AWS/GCP&quot;, &quot;whatever works&quot;],
+        [&quot;breadth&quot;, &quot;shipping fast&quot;, &quot;generalist engineering&quot;],
+        &quot;Lead with end-to-end pipeline (W01→W22) and the CI/CD automation. &quot;
+        &quot;Startups want engineers who can own a full stack — the 24-week breadth is the story.&quot;,
+    ),
+]
+
+def cover_letter_angle(profile: EmployerProfile) -&gt; str:
+    return (
+        f&quot;Target: {profile.company} ({profile.company_type})\n&quot;
+        f&quot;Stack match: {&#x27;, &#x27;.join(profile.primary_stack[:3])}\n&quot;
+        f&quot;Framing: {profile.portfolio_framing[:120]}...&quot;
+    )
+
+for p in ISRAELI_EMPLOYER_PROFILES:
+    print(cover_letter_angle(p))
+    print()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>match_portfolio_to_jd(jd_keywords: list[str], components: list[dict]) -&gt; list[dict]</code> where each component is a dict with keys <code>&quot;name&quot;</code>, <code>&quot;keywords&quot;</code>, <code>&quot;week&quot;</code>. Return components whose keywords overlap with <code>jd_keywords</code> (case-insensitive), sorted by overlap count descending.</p>
+<p>Expected output (jd=[&quot;KQL&quot;,&quot;Sentinel&quot;,&quot;Python&quot;,&quot;detection&quot;]):</p>
+<pre><code>[
+  {&quot;name&quot;: &quot;KQL detection rules&quot;,        &quot;overlap&quot;: 3, &quot;week&quot;: &quot;W09&quot;},
+  {&quot;name&quot;: &quot;RAG enrichment pipeline&quot;,    &quot;overlap&quot;: 2, &quot;week&quot;: &quot;W22&quot;},
+  {&quot;name&quot;: &quot;Sigma rules&quot;,                &quot;overlap&quot;: 2, &quot;week&quot;: &quot;W13&quot;},
+]
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>jd_keywords = [&quot;KQL&quot;, &quot;Sentinel&quot;, &quot;Python&quot;, &quot;detection&quot;]
+
+portfolio_components = [
+    {&quot;name&quot;: &quot;PCAP parser&quot;,           &quot;keywords&quot;: [&quot;Python&quot;, &quot;network&quot;, &quot;PCAP&quot;],                  &quot;week&quot;: &quot;W01&quot;},
+    {&quot;name&quot;: &quot;KQL detection rules&quot;,   &quot;keywords&quot;: [&quot;KQL&quot;, &quot;Sentinel&quot;, &quot;detection&quot;, &quot;Microsoft&quot;],  &quot;week&quot;: &quot;W09&quot;},
+    {&quot;name&quot;: &quot;Sigma rules&quot;,           &quot;keywords&quot;: [&quot;detection&quot;, &quot;SIEM&quot;, &quot;Python&quot;, &quot;YAML&quot;],        &quot;week&quot;: &quot;W13&quot;},
+    {&quot;name&quot;: &quot;Beaconing detector&quot;,    &quot;keywords&quot;: [&quot;Python&quot;, &quot;network&quot;, &quot;Zeek&quot;],                  &quot;week&quot;: &quot;W14&quot;},
+    {&quot;name&quot;: &quot;Anomaly detector&quot;,      &quot;keywords&quot;: [&quot;Python&quot;, &quot;ML&quot;, &quot;Sysmon&quot;],                     &quot;week&quot;: &quot;W19&quot;},
+    {&quot;name&quot;: &quot;RAG enrichment pipeline&quot;, &quot;keywords&quot;: [&quot;Python&quot;, &quot;LLM&quot;, &quot;detection&quot;, &quot;ChromaDB&quot;],  &quot;week&quot;: &quot;W22&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — Interview Technical Scenario Preparation</h3>
+<p>Israeli security interviews include a technical scenario round: the interviewer describes an incident (or shows you a log excerpt) and asks you to walk through your investigation approach. Having built everything in W01–W23, you can answer these scenarios by referencing actual artifacts rather than describing hypothetical approaches.</p>
+<p>This concept maps common interview scenarios to the portfolio artifacts that answer them directly.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class InterviewScenario:
+    scenario: str
+    what_interviewer_wants: str
+    portfolio_answer: str
+    code_to_reference: str
+
+INTERVIEW_SCENARIOS = [
+    InterviewScenario(
+        &quot;A user&#x27;s workstation is beaconing to an external IP every 60 seconds. How do you investigate?&quot;,
+        &quot;Systematic investigation: log sources, query approach, pivot strategy, containment decision&quot;,
+        (
+            &quot;I would start with our Zeek conn.log beaconing detector from W14. &quot;
+            &quot;The script flags connections with interval regularity (jitter &lt; 10%) and scores them. &quot;
+            &quot;If the beacon scores HIGH, it feeds our RAG enrichment pipeline from W22 which queries our &quot;
+            &quot;asset inventory and threat intel knowledge base. If the verdict is ESCALATE, we run &quot;
+            &quot;the YARA scan from W18 on any file artifacts and initiate the IR triage from W16.&quot;
+        ),
+        &quot;detection/beaconing_detector.py → enrichment/pipeline.py → yara_scan.py → ir_triage.py&quot;,
+    ),
+    InterviewScenario(
+        &quot;We have 500 Sigma rules. How do you know which ones are actually detecting anything?&quot;,
+        &quot;Understanding of rule maturity, testing methodology, coverage gap analysis&quot;,
+        (
+            &quot;In W12 I built a coverage dashboard that tracks three maturity levels: EXISTS, TESTED, PRODUCTION. &quot;
+            &quot;A rule is TESTED only after it matches at least one event in our log sample CI run. &quot;
+            &quot;PRODUCTION means it fired against real or simulated data. The ATT&amp;CK Navigator layer JSON &quot;
+            &quot;from the capstone shows which techniques have production-grade coverage vs. just file coverage.&quot;
+        ),
+        &quot;coverage_dashboard.py → navigator_layer.json&quot;,
+    ),
+    InterviewScenario(
+        &quot;How would you reduce false positive rate on our noisy detection rules?&quot;,
+        &quot;Understanding of rule tuning, threshold setting, FP analysis&quot;,
+        (
+            &quot;In W11 I built a rare-process behavioral detector that uses statistical baseline comparison — &quot;
+            &quot;a process is flagged only if its parent/command combination has never appeared in the last 30 days &quot;
+            &quot;of clean data. For signature-based rules, I add a threshold block (min 3 events in 5 minutes) &quot;
+            &quot;before firing. The Isolation Forest model from W19 also helps: I can use its anomaly score &quot;
+            &quot;as a secondary filter on noisy signature hits.&quot;
+        ),
+        &quot;detection/rare_process_detector.py → ml/anomaly_detector.py&quot;,
+    ),
+]
+
+for s in INTERVIEW_SCENARIOS:
+    print(f&quot;Q: {s.scenario[:60]}...&quot;)
+    print(f&quot;   References: {s.code_to_reference}\n&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>build_interview_prep_card(scenario: InterviewScenario) -&gt; str</code> that returns a formatted study card string. Format:</p>
+<pre><code>SCENARIO
+--------
+&lt;scenario text&gt;
+
+WHAT THEY WANT
+--------------
+&lt;what_interviewer_wants&gt;
+
+YOUR ANSWER (reference portfolio)
+----------------------------------
+&lt;portfolio_answer&gt;
+
+CODE TO PULL UP
+---------------
+&lt;code_to_reference&gt;
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class InterviewScenario:
+    scenario: str
+    what_interviewer_wants: str
+    portfolio_answer: str
+    code_to_reference: str
+
+sample_scenario = InterviewScenario(
+    scenario=&quot;A user&#x27;s workstation is beaconing to an external IP every 60 seconds. How do you investigate?&quot;,
+    what_interviewer_wants=&quot;Systematic investigation: log sources, query approach, pivot strategy, containment decision&quot;,
+    portfolio_answer=&quot;Start with the Zeek conn.log beaconing detector from W14...&quot;,
+    code_to_reference=&quot;detection/beaconing_detector.py → enrichment/pipeline.py&quot;,
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLM as mock interview partner — practicing technical scenario responses.
+<strong>Threat:</strong> If you use an LLM to practice and it gives uniformly positive feedback (&quot;great answer!&quot;), you develop false confidence. Ask the LLM to play an adversarial interviewer who follows up on every vague statement with &quot;can you show me the code?&quot; or &quot;what would that look like in KQL?&quot;
+<strong>Opportunity:</strong> Paste an interview scenario and your portfolio answer into the LLM. Ask it to play the role of a senior detection engineer interviewer who: (1) asks follow-up questions on anything vague, (2) challenges any claim that cannot be directly demonstrated, (3) asks you to write a specific query or code snippet for the hardest follow-up. This rehearsal catches weaknesses before the real interview.
+<strong>Prompt to try:</strong> <code>&quot;You are a senior detection engineer interviewing me for a Detection Engineer role at an Israeli MSSP. Ask me the following scenario question, then ask 3 follow-up questions that probe whether my answer is real or theoretical. After my responses, give me a 1-10 score and explain what you would have wanted to hear. Scenario: [paste scenario]&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Capstone Completion and Career Roadmap</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="24-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=detection%20engineer%20career%20path%20threat%20hunter%20Israel%20cybersecurity%202025" target="_blank" rel="noopener">detection engineer career path threat hunter Israel cybersecurity 2025</a></p></div>
+<hr />
+<h3>Concept 1 — The 90-Day Post-Curriculum Action Plan</h3>
+<p>Completing 24 weeks of curriculum is the foundation, not the finish line. The 90-day plan converts study artifacts into job applications using a weekly cadence: apply to 3-5 roles, complete one portfolio improvement, run one mock interview per week. Israeli hiring cycles are fast — companies often move from CV screen to offer in 2-3 weeks — so the cadence must stay active.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class WeeklyAction:
+    week: int
+    applications: int
+    portfolio_task: str
+    interview_prep: str
+    cert_study_hours: int
+
+NINETY_DAY_PLAN: list[WeeklyAction] = [
+    # Month 1 — Launch
+    WeeklyAction(1,  3, &quot;Polish root README, green CI badge&quot;,                 &quot;BTL1 practice exam 1&quot;,        6),
+    WeeklyAction(2,  3, &quot;Add PCAP parser sample + output to repo&quot;,            &quot;SC-200 KQL patterns review&quot;,  6),
+    WeeklyAction(3,  5, &quot;Record 2-min demo video of pipeline end-to-end&quot;,     &quot;BTL1 practice exam 2&quot;,        6),
+    WeeklyAction(4,  5, &quot;Add CERT_COVERAGE.md to repo root&quot;,                  &quot;SC-200 practice exam 1&quot;,      6),
+    # Month 2 — Build momentum
+    WeeklyAction(5,  5, &quot;Translate one Sigma rule to Sentinel analytics rule&quot;,&quot;Mock interview — scenario 1&quot;, 4),
+    WeeklyAction(6,  5, &quot;Add Isolation Forest model card PDF&quot;,                &quot;GCIA open-book index draft&quot;,  4),
+    WeeklyAction(7,  5, &quot;Add real ChromaDB mode to RAG pipeline&quot;,             &quot;Mock interview — scenario 2&quot;, 4),
+    WeeklyAction(8,  5, &quot;Write one public blog post on beaconing detection&quot;,  &quot;SC-200 practice exam 2&quot;,      4),
+    # Month 3 — Close loop
+    WeeklyAction(9,  5, &quot;Book SC-200 exam date&quot;,                              &quot;SC-200 final review&quot;,         8),
+    WeeklyAction(10, 5, &quot;Add Zeek integration to PCAP pipeline&quot;,              &quot;Mock interview — scenario 3&quot;, 4),
+    WeeklyAction(11, 5, &quot;Contribute one Sigma rule to SigmaHQ&quot;,               &quot;BTL1 exam booking&quot;,           6),
+    WeeklyAction(12, 5, &quot;Portfolio final review — remove anything not working&quot;,&quot;Post-exam recovery / BTL1&quot;,   6),
+]
+
+def month_summary(plan: list[WeeklyAction], month: int) -&gt; dict:
+    weeks = plan[(month - 1) * 4 : month * 4]
+    return {
+        &quot;month&quot;: month,
+        &quot;applications&quot;: sum(w.applications for w in weeks),
+        &quot;cert_hours&quot;: sum(w.cert_study_hours for w in weeks),
+        &quot;portfolio_tasks&quot;: [w.portfolio_task for w in weeks],
+    }
+
+for m in [1, 2, 3]:
+    summary = month_summary(NINETY_DAY_PLAN, m)
+    print(f&quot;Month {m}: {summary[&#x27;applications&#x27;]} applications | {summary[&#x27;cert_hours&#x27;]} cert hours&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>applications_tracker(plan: list[WeeklyAction], applied_this_week: dict[int, int]) -&gt; list[str]</code> where <code>applied_this_week</code> maps week number to actual applications submitted. Return a list of strings for weeks where actual &lt; planned (behind) or actual &gt; planned (ahead). Skip weeks not in <code>applied_this_week</code>.</p>
+<p>Expected output (applied_this_week={1: 1, 2: 5, 3: 3}):</p>
+<pre><code>Week 1: BEHIND (1 of 3 applications — 2 remaining)
+Week 2: AHEAD (5 of 3 applications — 2 extra)
+Week 3: ON TRACK (3 of 3 applications)
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class WeeklyAction:
+    week: int
+    applications: int
+    portfolio_task: str
+    interview_prep: str
+    cert_study_hours: int
+
+NINETY_DAY_PLAN = [
+    WeeklyAction(1, 3, &quot;Polish README&quot;, &quot;BTL1 practice exam&quot;, 6),
+    WeeklyAction(2, 3, &quot;Add sample output&quot;, &quot;KQL review&quot;, 6),
+    WeeklyAction(3, 5, &quot;Demo video&quot;, &quot;BTL1 practice exam 2&quot;, 6),
+]
+
+applied_this_week = {1: 1, 2: 5, 3: 3}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — Israeli Cybersecurity Market Context for 2026</h3>
+<p>The Israeli security job market in 2026 has specific structural features that affect how you position yourself. Understanding these features lets you target the right companies with the right framing rather than spraying identical applications.</p>
+<p>Three dominant patterns: MSSPs (CyberProof, Sygnia, Cympire, CYREBRO) hire Detection Engineers who can handle multiple client environments simultaneously — tool-agnostic proficiency matters more than deep vendor specialization. Product companies (Cybereason, Claroty, Armis, Ermetic) hire engineers who can build detection logic at platform scale — the ML and pipeline background is the differentiator. Pure startups (many, always in flux) want engineers who can own the detection stack end-to-end with minimal guidance.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class MarketSegment:
+    segment: str
+    example_companies: list[str]
+    hiring_volume: str       # low / medium / high
+    salary_range_ils: tuple[int, int]  # monthly gross NIS
+    what_they_hire_for: str
+    your_portfolio_strength: str
+    typical_time_to_offer_days: int
+
+MARKET_2026 = [
+    MarketSegment(
+        &quot;MSSP&quot;,
+        [&quot;CyberProof&quot;, &quot;Sygnia&quot;, &quot;CYREBRO&quot;, &quot;Cympire&quot;],
+        &quot;high&quot;,
+        (18_000, 30_000),
+        &quot;Alert triage at scale, multi-client detection rules, shift work tolerance&quot;,
+        &quot;KQL rules + Sigma + RAG enrichment pipeline — directly addresses triage automation&quot;,
+        14,
+    ),
+    MarketSegment(
+        &quot;EDR/XDR Vendor&quot;,
+        [&quot;Cybereason&quot;, &quot;Cynet&quot;, &quot;Deep Instinct&quot;],
+        &quot;medium&quot;,
+        (22_000, 38_000),
+        &quot;Behavioral detection logic, ML model development, platform-scale engineering&quot;,
+        &quot;Isolation Forest pipeline + model versioning — matches ML-in-detection focus&quot;,
+        21,
+    ),
+    MarketSegment(
+        &quot;ICS/OT Security&quot;,
+        [&quot;Claroty&quot;, &quot;Armis&quot;, &quot;Radiflow&quot;],
+        &quot;low&quot;,
+        (24_000, 40_000),
+        &quot;Protocol analysis (Modbus/DNP3), OT-specific threat modeling&quot;,
+        &quot;Network detection skills transfer; OT protocols are gaps — honest framing needed&quot;,
+        28,
+    ),
+    MarketSegment(
+        &quot;Security Startup (&lt;50 employees)&quot;,
+        [&quot;Many, changes quarterly&quot;],
+        &quot;high&quot;,
+        (15_000, 28_000),
+        &quot;Full-stack detection ownership, Python engineering, fast shipping&quot;,
+        &quot;24-week portfolio breadth + CI/CD + pipeline automation — strongest fit&quot;,
+        7,
+    ),
+]
+
+def prioritize_by_fit(market: list[MarketSegment]) -&gt; list[MarketSegment]:
+    # Prioritize: medium/high volume, faster offers, strong portfolio match
+    return sorted(
+        market,
+        key=lambda m: (m.hiring_volume == &quot;high&quot;, -m.typical_time_to_offer_days)
+    )
+
+prioritized = prioritize_by_fit(MARKET_2026)
+print(&quot;Application priority order:&quot;)
+for i, m in enumerate(prioritized, 1):
+    print(f&quot;  {i}. {m.segment} ({&#x27;, &#x27;.join(m.example_companies[:2])}) — {m.typical_time_to_offer_days}d to offer&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>salary_expectation(segment: MarketSegment, years_experience: int, has_cert: bool) -&gt; int</code> that returns a monthly gross NIS salary target. Base: midpoint of range. Adjustment: +5% per year of relevant experience up to 3 years, +7% if <code>has_cert=True</code>. Cap at range maximum.</p>
+<p>Expected output (MSSP segment, 2 years, has_cert=True):</p>
+<pre><code>24150  # (24000 midpoint + 10% experience + 7% cert, capped at 30000)
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class MarketSegment:
+    segment: str
+    salary_range_ils: tuple[int, int]
+
+mssp = MarketSegment(&quot;MSSP&quot;, (18_000, 30_000))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — Sustained Learning After the 24 Weeks</h3>
+<p>The detection engineering field evolves faster than any 24-week curriculum can track. Sustaining skills after the curriculum means subscribing to the right signal sources, running one lab exercise per week, and contributing to open-source rule sets. This is the difference between a one-time effort and a career trajectory.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class LearningSignal:
+    name: str
+    type: str         # blog / repo / discord / newsletter / lab
+    url_hint: str     # keyword, not a live URL
+    frequency: str
+    why_worth_it: str
+
+SUSTAINED_LEARNING_SOURCES = [
+    LearningSignal(
+        &quot;SigmaHQ&quot;,
+        &quot;repo&quot;,
+        &quot;github sigmahq sigma&quot;,
+        &quot;weekly PR review&quot;,
+        &quot;Production Sigma rules from the community — see how real detections are written and reviewed&quot;,
+    ),
+    LearningSignal(
+        &quot;Detection Engineering Weekly&quot;,
+        &quot;newsletter&quot;,
+        &quot;detectionengineering.net weekly&quot;,
+        &quot;weekly email&quot;,
+        &quot;Curated detection engineering content — new techniques, rule releases, blog posts&quot;,
+    ),
+    LearningSignal(
+        &quot;Blue Team Labs Online&quot;,
+        &quot;lab&quot;,
+        &quot;blueteamlabs.online&quot;,
+        &quot;2 labs per month&quot;,
+        &quot;Hands-on SOC investigations — directly maps to BTL1 exam format&quot;,
+    ),
+    LearningSignal(
+        &quot;MITRE ATT&amp;CK updates&quot;,
+        &quot;repo&quot;,
+        &quot;attack.mitre.org what&#x27;s new&quot;,
+        &quot;quarterly release&quot;,
+        &quot;New techniques added each quarter — detection gaps appear immediately after each release&quot;,
+    ),
+    LearningSignal(
+        &quot;Florian Roth blog&quot;,
+        &quot;blog&quot;,
+        &quot;cyb3rops medium Florian Roth&quot;,
+        &quot;irregular / high quality&quot;,
+        &quot;Author of Sigma and YARA formats — directly relevant to production rule writing&quot;,
+    ),
+    LearningSignal(
+        &quot;LetsDefend&quot;,
+        &quot;lab&quot;,
+        &quot;letsdefend.io&quot;,
+        &quot;1-2 scenarios per week&quot;,
+        &quot;SOC analyst simulation with real SIEM data — builds practical alert triage speed&quot;,
+    ),
+]
+
+def weekly_learning_plan(sources: list[LearningSignal], hours_per_week: int) -&gt; list[LearningSignal]:
+    priority = {&quot;lab&quot;: 1, &quot;repo&quot;: 2, &quot;newsletter&quot;: 3, &quot;blog&quot;: 4}
+    sorted_sources = sorted(sources, key=lambda s: priority.get(s.type, 5))
+    allocated = []
+    remaining = hours_per_week
+    hours_per_source = {&quot;lab&quot;: 2, &quot;repo&quot;: 1, &quot;newsletter&quot;: 0.5, &quot;blog&quot;: 0.5}
+    for s in sorted_sources:
+        cost = hours_per_source.get(s.type, 1)
+        if remaining &gt;= cost:
+            allocated.append(s)
+            remaining -= cost
+    return allocated
+
+plan = weekly_learning_plan(SUSTAINED_LEARNING_SOURCES, hours_per_week=5)
+print(&quot;Weekly learning plan (5 hours):&quot;)
+for s in plan:
+    print(f&quot;  [{s.type}] {s.name} — {s.frequency}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>contribution_goal(weeks_since_curriculum: int) -&gt; dict</code> that returns a learning milestone dict. Rules:</p>
+<ul>
+<li>Week 1-4: goal is &quot;Complete 2 BTL1-style labs on Blue Team Labs Online&quot;</li>
+<li>Week 5-8: goal is &quot;Submit 1 Sigma rule PR to SigmaHQ&quot;</li>
+<li>Week 9-12: goal is &quot;Write 1 blog post on a detection technique you built&quot;</li>
+<li>After week 12: goal is &quot;Contribute to 1 open-source detection project quarterly&quot;
+Also include <code>&quot;cert_action&quot;</code>: book the next cert exam if no exam is booked.</li>
+</ul>
+<p>Expected output (weeks_since_curriculum=6):</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>{&quot;goal&quot;: &quot;Submit 1 Sigma rule PR to SigmaHQ&quot;, &quot;cert_action&quot;: &quot;Book SC-200 exam date if not yet scheduled&quot;}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def contribution_goal(weeks_since_curriculum: int) -&gt; dict:
+    pass  # implement this
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLM-generated custom learning paths from market job descriptions.
+<strong>Threat:</strong> LLMs trained on public data will recommend whatever detection tools appear most in English-language content — which skews toward US market tools (Splunk, CrowdStrike) even when the target market (Israel) is heavily Microsoft Sentinel and startup-specific stacks. Always ground LLM recommendations in actual job postings from Israeli boards (Drushim, AllJobs, LinkedIn IL).
+<strong>Opportunity:</strong> Collect 10 job descriptions from Israeli security companies on LinkedIn IL or Drushim. Paste them into an LLM and ask it to extract the most frequently required skills, tools, and certifications. Use the frequency list to prioritize your remaining portfolio improvements and post-curriculum study. This is a living process — repeat monthly.
+<strong>Prompt to try:</strong> <code>&quot;Here are 5 Israeli cybersecurity job descriptions for Detection Engineer roles: [paste JDs]. Extract: (1) top 10 required technical skills by frequency, (2) top 5 preferred tools, (3) certifications mentioned most, (4) any skills mentioned in 4+ JDs that are NOT in my portfolio: [paste component list]. Output as three tables. Note any skills that appear only in Israeli JDs and not in typical US/UK detection engineering posts.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 24</h2>
+<p><strong>Task:</strong> Assemble and publish the complete capstone portfolio as a standalone GitHub repository (or top-level folder within <code>python-gstat</code>) that demonstrates the full detection engineering lifecycle.
+<strong>Builds on:</strong> Every Royal Road artifact from W01–W23 — PCAP parser (W01), EVTX parser (W02), CTI IOC database (W07), Sysmon Parquet dataset (W08), KQL detections (W09), Sigma rules (W13), beaconing detector (W14), cloud rules (W15), IR triage script (W16), Volatility correlation (W17), YARA rules (W18), Isolation Forest detector (W19), LLM API abuse rule (W20), SOC agent design doc (W21), RAG enrichment pipeline (W22), CERT_COVERAGE.md (W23).
+<strong>Deliverable:</strong> <code>CyberSecurity/PortfolioProject/</code> folder containing:</p>
+<ul>
+<li><code>README.md</code> — hiring-manager-facing, passes the 90-second test</li>
+<li><code>pipeline_runner.py</code> — orchestrates ingestion → detection → enrichment in one command</li>
+<li><code>ingestion/</code> — PCAP parser, EVTX parser</li>
+<li><code>rules/sigma/</code> — 3+ production Sigma rules validated by sigma-cli</li>
+<li><code>detection/</code> — beaconing detector, rare-process detector</li>
+<li><code>ml/</code> — Isolation Forest anomaly detector with model registry JSON</li>
+<li><code>enrichment/</code> — RAG pipeline (simulation mode, no API key needed)</li>
+<li><code>soc_agent_design/</code> — design_v1.json from W21</li>
+<li><code>CERT_COVERAGE.md</code> — competency map from W23</li>
+<li><code>.github/workflows/portfolio_ci.yml</code> — green CI on push to main</li>
+<li><code>requirements.txt</code> — all dependencies pinned
+<strong>Stretch goal:</strong> Record a 2-minute screen capture walking through <code>python pipeline_runner.py --simulation</code> from a clean clone. Link the video in the README. This turns the portfolio from static files into a live demonstration.</li>
+</ul>
+<div class="pager"><a class="btn ghost" href="week-23.html">&larr; Week 23</a><span></span></div>
+</main></body></html>

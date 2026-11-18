@@ -1,0 +1,3277 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 07 — Data Engineering</title>
+<link rel="stylesheet" href="style.css"><script>window.SITE_DATASETS = ["datasets/titanic_train.csv"];</script>
+<script src="app.js" defer></script></head>
+<body data-site="python">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Python Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 07 — Data Engineering</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a><a class="btn ghost" href="#day-6">Day 6</a><a class="btn ghost" href="#day-7">Day 7</a><a class="btn ghost" href="#day-8">Day 8</a></div><p class="note">Done this week: <span data-week-count="07" data-size="8"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><p class="note">Cells that need a file other than the Titanic table, a web connection, a database server or a package that is not available in the browser will show an error when run. Read those instead.</p><h2 id="day-1">Day 1 — Etl Pipelines</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-1"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 7  |  DAY 1  |  ETL PIPELINES</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Understand the ETL (Extract, Transform, Load) architecture as a code pattern
+ 2. Build an Extract function that reads from a CSV source
+ 3. Build Transform and Load functions and chain them into a complete pipeline
+
+ TIME:  ~30 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;ETL pipeline Python tutorial extract transform load&quot;
+ Video: &quot;Build Your First ETL Pipeline in Python - Using Titanic Data&quot; -- Data with Måns
+       https://www.youtube.com/watch?v=Yj_d4MV01KM
+       (verified live; kept alongside the search string in case it rots)
+ Search: &quot;Python data pipeline architecture functions&quot;
+ Video: &quot;Data Engineering Pipeline using Python and Pandas - Design Walkthrough&quot; -- itversity
+       https://www.youtube.com/watch?v=P_6s24d0bJ8
+       (verified live; kept alongside the search string in case it rots)</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D1_ETL_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+import io
+import os
+
+# We use io.StringIO to embed CSV data directly in memory --
+# no files on disk required, so the lesson works anywhere.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — ETL ARCHITECTURE: EXTRACT, TRANSFORM, LOAD AS A PATTERN</pre><pre class="box">══════════════════════════════════════════════════════════════
+ETL stands for Extract, Transform, Load -- the three stages of moving data
+from a source system into a destination like a data warehouse or database.
+
+EXTRACT:  Pull raw data from source systems (CSV, DB, API, Excel)
+TRANSFORM: Clean, validate, enrich, and reshape the data
+LOAD:     Write the transformed data to a destination
+
+WHY STRUCTURE CODE THIS WAY?
+  - Each stage is testable in isolation
+  - Failures are easier to pinpoint (did extract fail? or transform?)
+  - Stages can be swapped independently (change the source without touching transform)
+  - Makes pipelines readable and maintainable
+
+A simple ETL pipeline in Python looks like this:
+
+  def extract(source):    ...  return raw_df
+  def transform(raw_df):  ...  return clean_df
+  def load(clean_df, dest): ...
+
+  def run_pipeline():
+      raw    = extract(&quot;sales_2024.csv&quot;)
+      clean  = transform(raw)
+      load(clean, &quot;warehouse.db&quot;)
+
+EXAMPLE ──────────────────────────────────────────────────────
+
+ETL METADATA: track what happened during a run</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D1_ETL_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>pipeline_metadata = {
+    &quot;pipeline_name&quot;:    &quot;daily_sales_etl&quot;,
+    &quot;version&quot;:          &quot;1.0.0&quot;,
+    &quot;rows_extracted&quot;:   0,
+    &quot;rows_transformed&quot;: 0,
+    &quot;rows_loaded&quot;:      0,
+    &quot;errors&quot;:           [],
+    &quot;status&quot;:           &quot;not_started&quot;,
+}
+
+# Embedded CSV -- simulates a real daily sales file received from a source system
+RAW_CSV = &quot;&quot;&quot;sale_id,sale_date,rep_name,region,product,quantity,unit_price,discount_pct
+1,2024-01-10,Alice Ng,West,Laptop,1,1299.99,0
+2,2024-01-10,Bob Chen,East,Monitor,2,399.99,10
+3,2024-01-11,Carol Diaz,West,Keyboard,3,149.99,0
+4,2024-01-11,Alice Ng,West,Mouse,5,79.99,5
+5,2024-01-12,INVALID,UNKNOWN,,0,-50,
+6,2024-01-12,Bob Chen,East,Headset,1,199.99,0
+7,2024-01-13,Carol Diaz,West,Laptop,2,1299.99,15
+8,2024-01-14,Dave Park,Central,USB Hub,10,49.99,0
+9,,Alice Ng,West,Mouse,2,79.99,0
+10,2024-01-15,Eve Torres,East,Webcam,3,89.99,20
+&quot;&quot;&quot;
+
+print(&quot;=== ETL Pipeline Architecture Demo ===&quot;)
+print(&quot;Source: embedded CSV (io.StringIO)&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+Without writing any real transformation logic yet, write a function called
+pipeline_skeleton() that:
+  1. Prints &quot;EXTRACT: Reading from source...&quot;
+  2. Prints &quot;TRANSFORM: Cleaning and validating...&quot;
+  3. Prints &quot;LOAD: Writing to destination...&quot;
+  4. Returns a dict with keys &quot;extract&quot;, &quot;transform&quot;, &quot;load&quot;
+     each having value &quot;complete&quot;
+
+Call the function and print the returned dict.
+
+Expected output:
+  EXTRACT: Reading from source...
+  TRANSFORM: Cleaning and validating...
+  LOAD: Writing to destination...
+  {&#x27;extract&#x27;: &#x27;complete&#x27;, &#x27;transform&#x27;: &#x27;complete&#x27;, &#x27;load&#x27;: &#x27;complete&#x27;}</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — BUILDING AN EXTRACT FUNCTION (FROM CSV FILE)</pre><pre class="box">══════════════════════════════════════════════════════════════
+The extract function is responsible for:
+  - Reading raw data from the source
+  - Returning it as a pandas DataFrame (unchanged)
+  - Handling read errors (file not found, network failure, etc.)
+  - NOT transforming anything -- extraction is purely about reading
+
+Return the raw data and a metadata dict describing what was read.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D1_ETL_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def extract_from_csv_string(csv_string, source_name=&quot;inline_csv&quot;):
+    &quot;&quot;&quot;
+    Read CSV data from a string (simulates reading from a file or API).
+    Returns (DataFrame, metadata_dict).
+    &quot;&quot;&quot;
+    print(f&quot;\n[EXTRACT] Reading from: {source_name}&quot;)
+    try:
+        df = pd.read_csv(io.StringIO(csv_string))
+        rows = len(df)
+        cols = len(df.columns)
+        print(f&quot;[EXTRACT] Read {rows} rows x {cols} columns&quot;)
+        return df, {&quot;rows&quot;: rows, &quot;columns&quot;: cols, &quot;source&quot;: source_name, &quot;status&quot;: &quot;ok&quot;}
+    except Exception as e:
+        print(f&quot;[EXTRACT] ERROR: {e}&quot;)
+        return pd.DataFrame(), {&quot;rows&quot;: 0, &quot;columns&quot;: 0, &quot;source&quot;: source_name,
+                                 &quot;status&quot;: &quot;error&quot;, &quot;error_message&quot;: str(e)}
+
+def extract_from_file(filepath):
+    &quot;&quot;&quot;
+    Read CSV data from a real file path.
+    Returns (DataFrame, metadata_dict).
+    &quot;&quot;&quot;
+    print(f&quot;\n[EXTRACT] Reading file: {filepath}&quot;)
+    try:
+        df = pd.read_csv(filepath)
+        print(f&quot;[EXTRACT] Read {len(df)} rows from {os.path.basename(filepath)}&quot;)
+        return df, {&quot;rows&quot;: len(df), &quot;source&quot;: filepath, &quot;status&quot;: &quot;ok&quot;}
+    except FileNotFoundError:
+        print(f&quot;[EXTRACT] ERROR: File not found: {filepath}&quot;)
+        return pd.DataFrame(), {&quot;rows&quot;: 0, &quot;source&quot;: filepath, &quot;status&quot;: &quot;error&quot;,
+                                 &quot;error_message&quot;: &quot;File not found&quot;}
+
+# Run the extract
+raw_df, extract_meta = extract_from_csv_string(RAW_CSV, &quot;daily_sales_feed&quot;)
+pipeline_metadata[&quot;rows_extracted&quot;] = extract_meta[&quot;rows&quot;]
+
+print(&quot;\n=== Raw Data (first 5 rows) ===&quot;)
+print(raw_df.head())
+print(&quot;\nData types:&quot;)
+print(raw_df.dtypes)
+print(&quot;\nNull counts:&quot;)
+print(raw_df.isnull().sum())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write a function called extract_all_sources(sources) that:
+  1. Accepts a list of (source_name, csv_string) tuples
+  2. Calls extract_from_csv_string for each one
+  3. Concatenates all resulting DataFrames into one combined DataFrame
+     using pd.concat() with ignore_index=True
+  4. Returns (combined_df, summary_dict) where summary_dict has:
+     {&quot;total_rows&quot;: n, &quot;sources&quot;: [list of source names], &quot;status&quot;: &quot;ok&quot;}
+
+Call it with the two CSV strings defined below and print:
+  - The shape of the combined DataFrame
+  - The sources in the summary
+
+Expected output:
+  [EXTRACT] Reading from: region_west
+  [EXTRACT] Read 3 rows x 4 columns
+  [EXTRACT] Reading from: region_east
+  [EXTRACT] Read 3 rows x 4 columns
+  Combined shape: (6, 4)
+  Sources: [&#x27;region_west&#x27;, &#x27;region_east&#x27;]
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D1_ETL_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>west_csv = &quot;rep,product,qty,revenue\nAlice,Laptop,1,1299.99\nAlice,Mouse,2,159.98\nCarol,Keyboard,3,449.97&quot;
+east_csv = &quot;rep,product,qty,revenue\nBob,Monitor,2,799.98\nBob,Headset,1,199.99\nEve,Webcam,3,269.97&quot;</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — TRANSFORM AND LOAD FUNCTIONS, CHAINING INTO A PIPELINE</pre><pre class="box">══════════════════════════════════════════════════════════════
+The transform function:
+  - Cleans data (handle nulls, fix types, remove invalid rows)
+  - Validates data (check ranges, required fields)
+  - Enriches data (add calculated columns, lookups)
+  - Returns a clean DataFrame
+
+The load function:
+  - Writes the clean DataFrame to a destination
+  - Handles the &quot;if_exists&quot; logic (replace vs append)
+  - Returns a count of rows written
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D1_ETL_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def transform_sales(df):
+    &quot;&quot;&quot;
+    Clean and enrich the raw sales DataFrame.
+    Returns (clean_df, metadata_dict).
+    &quot;&quot;&quot;
+    print(&quot;\n[TRANSFORM] Starting transformation...&quot;)
+    errors = []
+    df_clean = df.copy()
+
+    # Fix column names: strip whitespace and lowercase
+    df_clean.columns = [c.strip().lower() for c in df_clean.columns]
+
+    # Parse dates -- invalid dates become NaT
+    df_clean[&quot;sale_date&quot;] = pd.to_datetime(df_clean[&quot;sale_date&quot;], errors=&quot;coerce&quot;)
+
+    # Drop rows with null sale_date or null product (required fields)
+    before = len(df_clean)
+    df_clean = df_clean.dropna(subset=[&quot;sale_date&quot;, &quot;product&quot;])
+    dropped = before - len(df_clean)
+    if dropped &gt; 0:
+        errors.append(f&quot;Dropped {dropped} rows with missing sale_date or product&quot;)
+        print(f&quot;[TRANSFORM] Dropped {dropped} invalid rows&quot;)
+
+    # Convert numeric columns, coerce errors to NaN
+    df_clean[&quot;quantity&quot;]     = pd.to_numeric(df_clean[&quot;quantity&quot;],   errors=&quot;coerce&quot;).fillna(0).astype(int)
+    df_clean[&quot;unit_price&quot;]   = pd.to_numeric(df_clean[&quot;unit_price&quot;], errors=&quot;coerce&quot;).fillna(0.0)
+    df_clean[&quot;discount_pct&quot;] = pd.to_numeric(df_clean[&quot;discount_pct&quot;], errors=&quot;coerce&quot;).fillna(0.0)
+
+    # Remove rows with invalid data
+    df_clean = df_clean[df_clean[&quot;quantity&quot;] &gt; 0]
+    df_clean = df_clean[df_clean[&quot;unit_price&quot;] &gt; 0]
+
+    # Add calculated columns
+    df_clean[&quot;discount_amount&quot;] = (df_clean[&quot;unit_price&quot;] * df_clean[&quot;discount_pct&quot;] / 100).round(2)
+    df_clean[&quot;final_price&quot;]     = (df_clean[&quot;unit_price&quot;] - df_clean[&quot;discount_amount&quot;]).round(2)
+    df_clean[&quot;line_revenue&quot;]    = (df_clean[&quot;quantity&quot;] * df_clean[&quot;final_price&quot;]).round(2)
+
+    # Standardize region
+    df_clean[&quot;region&quot;] = df_clean[&quot;region&quot;].str.strip().str.title()
+
+    rows_out = len(df_clean)
+    print(f&quot;[TRANSFORM] Output: {rows_out} clean rows&quot;)
+    return df_clean, {&quot;rows_in&quot;: before, &quot;rows_out&quot;: rows_out, &quot;errors&quot;: errors, &quot;status&quot;: &quot;ok&quot;}
+
+def load_to_csv(df, output_path):
+    &quot;&quot;&quot;Write the DataFrame to a CSV file. Returns rows written.&quot;&quot;&quot;
+    print(f&quot;\n[LOAD] Writing {len(df)} rows to: {output_path}&quot;)
+    df.to_csv(output_path, index=False)
+    print(f&quot;[LOAD] Complete.&quot;)
+    return len(df)
+
+def run_pipeline(csv_data, output_path):
+    &quot;&quot;&quot;Run the full ETL pipeline and return a summary dict.&quot;&quot;&quot;
+    meta = {&quot;pipeline&quot;: &quot;daily_sales_etl&quot;, &quot;errors&quot;: []}
+
+    # Extract
+    raw, extract_info = extract_from_csv_string(csv_data, &quot;daily_sales_feed&quot;)
+    meta[&quot;rows_extracted&quot;] = extract_info[&quot;rows&quot;]
+
+    if extract_info[&quot;status&quot;] != &quot;ok&quot;:
+        meta[&quot;status&quot;] = &quot;failed_at_extract&quot;
+        return meta
+
+    # Transform
+    clean, transform_info = transform_sales(raw)
+    meta[&quot;rows_transformed&quot;] = transform_info[&quot;rows_out&quot;]
+    meta[&quot;errors&quot;].extend(transform_info[&quot;errors&quot;])
+
+    # Load
+    rows_loaded = load_to_csv(clean, output_path)
+    meta[&quot;rows_loaded&quot;] = rows_loaded
+    meta[&quot;status&quot;] = &quot;success&quot;
+
+    return meta
+
+# Run the complete pipeline
+output_path = os.path.join(os.path.dirname(__file__), &quot;pipeline_output.csv&quot;)
+summary = run_pipeline(RAW_CSV, output_path)
+
+print(&quot;\n=== PIPELINE RUN SUMMARY ===&quot;)
+for key, value in summary.items():
+    print(f&quot;  {key:&lt;20}: {value}&quot;)
+
+# Verify the output
+df_loaded = pd.read_csv(output_path)
+print(f&quot;\nOutput file shape: {df_loaded.shape}&quot;)
+print(df_loaded[[&quot;sale_date&quot;, &quot;rep_name&quot;, &quot;product&quot;, &quot;quantity&quot;, &quot;line_revenue&quot;]].head())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+Extend the pipeline by writing a function called validate_sales(df) that
+runs between transform and load.
+The function should check 3 rules and return a validation report:
+
+Rule 1: All sale_date values must be non-null
+Rule 2: All unit_price values must be &gt; 0
+Rule 3: All region values must be in [&quot;West&quot;, &quot;East&quot;, &quot;Central&quot;, &quot;North&quot;, &quot;South&quot;]
+
+For each rule, the report should say how many rows pass and fail.
+If any rule has failures, print a WARNING but do NOT stop the pipeline.
+
+Returns: (is_valid: bool, report: dict)
+is_valid = True only if ALL rules pass (0 failures)
+
+Use the clean DataFrame from transform_sales(raw_df) as input.
+
+Expected output:
+  [VALIDATE] Rule: sale_date not null     | Pass: 8 | Fail: 0
+  [VALIDATE] Rule: unit_price &gt; 0        | Pass: 8 | Fail: 0
+  [VALIDATE] Rule: region in allowed set | Pass: 7 | Fail: 1
+  WARNING: 1 validation failure(s) detected
+  is_valid: False
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D1_ETL_Pipelines.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>raw_df_exercise, _ = extract_from_csv_string(RAW_CSV)
+clean_df_exercise, _ = transform_sales(raw_df_exercise)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-2">Day 2 — Data Extraction</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-2"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 7  |  DAY 2  |  DATA EXTRACTION</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Extract from multiple CSV files in a folder using glob and pd.concat
+ 2. Extract from a SQLite database using sqlite3 and pd.read_sql
+ 3. Extract from a REST API using requests with error handling
+
+ TIME:  ~30 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;Python glob read multiple CSV files pandas concat&quot;
+ Video: &quot;Python in the newsroom: concatenate multiple files with glob&quot; -- Chris Ullery
+       https://www.youtube.com/watch?v=d4m7RNlHW_4
+       (verified live; kept alongside the search string in case it rots)
+ Search: &quot;pandas read_sql database extraction&quot;
+ Video: &quot;Read SQL Data into Pandas DataFrame in Python (Quick Tutorial)&quot; -- It&#x27;s Easy to learn new things
+       https://www.youtube.com/watch?v=DcAqAHK9BSI
+       (verified live; kept alongside the search string in case it rots)</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D2_Data_Extraction.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+import sqlite3
+import os
+import glob
+import io</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — EXTRACT FROM MULTIPLE CSV FILES IN A FOLDER</pre><pre class="box">══════════════════════════════════════════════════════════════
+In production, data often arrives as daily or monthly files in a folder.
+Pattern:  sales_2024_01.csv, sales_2024_02.csv, sales_2024_03.csv, ...
+We need to read ALL matching files and combine them into one DataFrame.
+
+TOOLS:
+  glob.glob(pattern)  -- returns a list of file paths matching a pattern
+  pd.concat([df1, df2, ...])  -- stack DataFrames vertically
+  pd.read_csv(path)  -- read one file at a time
+
+GLOB PATTERNS:
+  &quot;*.csv&quot;             -- all CSV files in the current folder
+  &quot;data/*.csv&quot;        -- all CSVs in the &#x27;data&#x27; subfolder
+  &quot;sales_2024_*.csv&quot;  -- files matching the naming convention
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D2_Data_Extraction.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>this_dir = os.path.dirname(__file__)
+
+# First, create several small CSV files to simulate a folder of monthly data
+monthly_csvs = {
+    &quot;sales_2024_01.csv&quot;: &quot;date,rep,region,product,revenue\n2024-01-10,Alice,West,Laptop,1299.99\n2024-01-15,Bob,East,Monitor,399.99\n2024-01-20,Carol,West,Keyboard,149.99&quot;,
+    &quot;sales_2024_02.csv&quot;: &quot;date,rep,region,product,revenue\n2024-02-05,Alice,West,Mouse,79.99\n2024-02-12,Bob,East,Headset,199.99\n2024-02-18,Dave,Central,Webcam,89.99&quot;,
+    &quot;sales_2024_03.csv&quot;: &quot;date,rep,region,product,revenue\n2024-03-01,Carol,West,Laptop,1299.99\n2024-03-08,Bob,East,Keyboard,149.99\n2024-03-22,Eve,East,Monitor,399.99&quot;,
+}
+
+for filename, content in monthly_csvs.items():
+    with open(os.path.join(this_dir, filename), &quot;w&quot;) as f:
+        f.write(content)
+
+print(&quot;Sample CSV files created in:&quot;, this_dir)
+
+# --- Read all matching files using glob ---
+def extract_from_folder(folder_path, pattern=&quot;*.csv&quot;):
+    &quot;&quot;&quot;
+    Read all CSV files matching pattern in folder_path.
+    Returns (combined_DataFrame, list_of_files_read).
+    &quot;&quot;&quot;
+    search_path = os.path.join(folder_path, pattern)
+    file_paths = sorted(glob.glob(search_path))
+
+    if not file_paths:
+        print(f&quot;[EXTRACT] No files matching &#x27;{pattern}&#x27; in {folder_path}&quot;)
+        return pd.DataFrame(), []
+
+    print(f&quot;[EXTRACT] Found {len(file_paths)} file(s):&quot;)
+    dfs = []
+    for path in file_paths:
+        try:
+            df = pd.read_csv(path)
+            df[&quot;_source_file&quot;] = os.path.basename(path)   # track which file each row came from
+            dfs.append(df)
+            print(f&quot;  {os.path.basename(path)}: {len(df)} rows&quot;)
+        except Exception as e:
+            print(f&quot;  ERROR reading {path}: {e}&quot;)
+
+    combined = pd.concat(dfs, ignore_index=True)
+    print(f&quot;[EXTRACT] Combined: {len(combined)} rows total&quot;)
+    return combined, file_paths
+
+# Extract only the monthly sales files (not all CSVs in the folder)
+df_combined, files = extract_from_folder(this_dir, pattern=&quot;sales_2024_*.csv&quot;)
+print(&quot;\n=== Combined Sales Data ===&quot;)
+print(df_combined)
+
+# Aggregate across all files
+print(&quot;\nRevenue by region (all months):&quot;)
+print(df_combined.groupby(&quot;region&quot;)[&quot;revenue&quot;].sum().round(2))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write a function called extract_with_metadata(folder_path, pattern) that:
+  1. Reads all matching CSV files using glob
+  2. Adds two metadata columns to each DataFrame:
+     &quot;_source_file&quot;: just the filename (os.path.basename)
+     &quot;_extract_month&quot;: the filename without path and extension
+       e.g. &quot;sales_2024_01.csv&quot; -&gt; &quot;sales_2024_01&quot;
+  3. Returns (combined_df, extraction_summary) where extraction_summary is:
+     {&quot;files_read&quot;: n, &quot;total_rows&quot;: n, &quot;columns&quot;: list_of_cols}
+
+Call it on this_dir with pattern=&quot;sales_2024_*.csv&quot; and print the summary.
+
+Expected output:
+  {&#x27;files_read&#x27;: 3, &#x27;total_rows&#x27;: 9, &#x27;columns&#x27;: [&#x27;date&#x27;, &#x27;rep&#x27;, &#x27;region&#x27;,
+   &#x27;product&#x27;, &#x27;revenue&#x27;, &#x27;_source_file&#x27;, &#x27;_extract_month&#x27;]}</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — EXTRACT FROM A DATABASE (sqlite3 + pd.read_sql)</pre><pre class="box">══════════════════════════════════════════════════════════════
+Extracting from a database involves:
+  1. Connecting to the database
+  2. Writing a SELECT query
+  3. Using pd.read_sql() to load results into a DataFrame
+  4. Closing the connection
+
+When extracting large tables:
+  - Use WHERE to filter (only load data you actually need)
+  - Use SELECT specific_columns (avoid SELECT *)
+  - Use LIMIT or WHERE date &gt; &#x27;last_run_date&#x27; for incremental extraction
+  - Use chunksize= in pd.read_sql() for very large tables
+
+EXAMPLE ──────────────────────────────────────────────────────
+
+Create an in-memory SQLite database with CRM data to extract from</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D2_Data_Extraction.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>conn = sqlite3.connect(&quot;:memory:&quot;)
+cur = conn.cursor()
+
+cur.executescript(&quot;&quot;&quot;
+    CREATE TABLE crm_deals (
+        deal_id     INTEGER PRIMARY KEY,
+        rep_name    TEXT,
+        stage       TEXT,
+        value       REAL,
+        close_date  TEXT,
+        is_won      INTEGER DEFAULT 0
+    );
+
+    INSERT INTO crm_deals VALUES (1,&#x27;Alice Ng&#x27;,&#x27;closed_won&#x27;,45000,&#x27;2024-01-31&#x27;,1);
+    INSERT INTO crm_deals VALUES (2,&#x27;Bob Chen&#x27;,&#x27;negotiation&#x27;,22000,NULL,0);
+    INSERT INTO crm_deals VALUES (3,&#x27;Priya Mehta&#x27;,&#x27;closed_won&#x27;,67000,&#x27;2024-02-28&#x27;,1);
+    INSERT INTO crm_deals VALUES (4,&#x27;Sara Jones&#x27;,&#x27;closed_won&#x27;,31000,&#x27;2024-03-15&#x27;,1);
+    INSERT INTO crm_deals VALUES (5,&#x27;Bob Chen&#x27;,&#x27;prospecting&#x27;,8000,NULL,0);
+    INSERT INTO crm_deals VALUES (6,&#x27;Priya Mehta&#x27;,&#x27;negotiation&#x27;,55000,NULL,0);
+    INSERT INTO crm_deals VALUES (7,&#x27;Alice Ng&#x27;,&#x27;closed_won&#x27;,89000,&#x27;2024-04-01&#x27;,1);
+
+    CREATE TABLE crm_activities (
+        activity_id INTEGER PRIMARY KEY,
+        deal_id     INTEGER,
+        activity    TEXT,
+        activity_date TEXT,
+        notes       TEXT
+    );
+
+    INSERT INTO crm_activities VALUES (1,1,&#x27;call&#x27;,&#x27;2024-01-10&#x27;,&#x27;Initial discovery&#x27;);
+    INSERT INTO crm_activities VALUES (2,1,&#x27;demo&#x27;,&#x27;2024-01-17&#x27;,&#x27;Product demo delivered&#x27;);
+    INSERT INTO crm_activities VALUES (3,2,&#x27;call&#x27;,&#x27;2024-02-01&#x27;,&#x27;Follow-up call&#x27;);
+    INSERT INTO crm_activities VALUES (4,3,&#x27;demo&#x27;,&#x27;2024-02-10&#x27;,&#x27;Technical deep-dive&#x27;);
+    INSERT INTO crm_activities VALUES (5,7,&#x27;call&#x27;,&#x27;2024-03-15&#x27;,&#x27;Negotiation call&#x27;);
+&quot;&quot;&quot;)
+conn.commit()
+
+def extract_from_database(connection, query, params=None):
+    &quot;&quot;&quot;
+    Execute a SQL query and return the result as a DataFrame.
+    &quot;&quot;&quot;
+    print(f&quot;\n[EXTRACT DB] Running query...&quot;)
+    try:
+        if params:
+            df = pd.read_sql(query, connection, params=params)
+        else:
+            df = pd.read_sql(query, connection)
+        print(f&quot;[EXTRACT DB] {len(df)} rows returned&quot;)
+        return df, {&quot;rows&quot;: len(df), &quot;status&quot;: &quot;ok&quot;}
+    except Exception as e:
+        print(f&quot;[EXTRACT DB] ERROR: {e}&quot;)
+        return pd.DataFrame(), {&quot;rows&quot;: 0, &quot;status&quot;: &quot;error&quot;, &quot;error&quot;: str(e)}
+
+# Extract all won deals
+df_won, meta = extract_from_database(conn, &quot;SELECT * FROM crm_deals WHERE is_won = 1&quot;)
+print(&quot;\nWon deals:&quot;)
+print(df_won)
+
+# Extract with parameters
+df_rep, meta = extract_from_database(
+    conn,
+    &quot;SELECT * FROM crm_deals WHERE rep_name = ?&quot;,
+    params=(&quot;Alice Ng&quot;,)
+)
+print(&quot;\nAlice&#x27;s deals:&quot;)
+print(df_rep)
+
+# Multi-table extract with JOIN
+df_joined, meta = extract_from_database(conn, &quot;&quot;&quot;
+    SELECT d.deal_id, d.rep_name, d.stage, d.value,
+           COUNT(a.activity_id) AS activity_count
+    FROM   crm_deals d
+    LEFT JOIN crm_activities a ON d.deal_id = a.deal_id
+    GROUP BY d.deal_id, d.rep_name, d.stage, d.value
+    ORDER BY d.value DESC
+&quot;&quot;&quot;)
+print(&quot;\nDeals with activity count:&quot;)
+print(df_joined)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write a function called extract_new_deals(connection, last_close_date) that:
+  1. Queries crm_deals for all closed deals with close_date &gt; last_close_date
+  2. Prints how many new deals were found
+  3. Returns the DataFrame
+
+Call it twice:
+  extract_new_deals(conn, &quot;2024-01-31&quot;)  -&gt; should find 2 deals (Feb and March)
+  extract_new_deals(conn, &quot;2024-04-01&quot;)  -&gt; should find 0 new deals
+
+Expected output:
+  [EXTRACT DB] 3 rows returned
+  New deals since 2024-01-31: 3
+  [EXTRACT DB] 0 rows returned
+  New deals since 2024-04-01: 0</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — EXTRACT FROM A REST API</pre><pre class="box">══════════════════════════════════════════════════════════════
+Extracting from an API follows a consistent pattern:
+  1. Make a GET request to the endpoint
+  2. Parse the JSON response
+  3. Convert to a DataFrame
+  4. Handle pagination if the API returns data in pages
+
+JSONPLACEHOLDER: https://jsonplaceholder.typicode.com
+This is a free, public fake API perfect for learning.
+No authentication required.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D2_Data_Extraction.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def extract_from_api(url, params=None, timeout=10):
+    &quot;&quot;&quot;
+    Fetch JSON data from a REST API and return as a DataFrame.
+    Returns (DataFrame, metadata_dict).
+    &quot;&quot;&quot;
+    try:
+        import requests
+        print(f&quot;\n[EXTRACT API] GET {url}&quot;)
+        response = requests.get(url, params=params, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        # Handle both list responses and nested responses
+        if isinstance(data, list):
+            df = pd.DataFrame(data)
+        elif isinstance(data, dict):
+            df = pd.DataFrame([data])
+        else:
+            df = pd.DataFrame()
+        print(f&quot;[EXTRACT API] {len(df)} records returned&quot;)
+        return df, {&quot;rows&quot;: len(df), &quot;status&quot;: &quot;ok&quot;, &quot;url&quot;: url}
+    except ImportError:
+        print(&quot;[EXTRACT API] requests not installed. Run: pip install requests&quot;)
+        return pd.DataFrame(), {&quot;rows&quot;: 0, &quot;status&quot;: &quot;error&quot;, &quot;error&quot;: &quot;requests not installed&quot;}
+    except Exception as e:
+        print(f&quot;[EXTRACT API] ERROR: {e}&quot;)
+        return pd.DataFrame(), {&quot;rows&quot;: 0, &quot;status&quot;: &quot;error&quot;, &quot;error&quot;: str(e)}
+
+# Extract posts from JSONPlaceholder
+df_posts, meta = extract_from_api(&quot;https://jsonplaceholder.typicode.com/posts&quot;,
+                                   params={&quot;userId&quot;: 1})
+if not df_posts.empty:
+    print(&quot;\nPosts for user 1:&quot;)
+    print(df_posts[[&quot;id&quot;, &quot;title&quot;]].head(5))
+    print(f&quot;Total posts: {len(df_posts)}&quot;)
+
+# Extract users
+df_users, meta = extract_from_api(&quot;https://jsonplaceholder.typicode.com/users&quot;)
+if not df_users.empty:
+    print(&quot;\nUsers:&quot;)
+    print(df_users[[&quot;id&quot;, &quot;name&quot;, &quot;email&quot;]].head(5))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+JSONPlaceholder supports a simple pagination-like filter via userId.
+Write a function called extract_posts_for_users(user_ids) that:
+  1. Loops through the list of user_ids
+  2. For each, calls extract_from_api with params={&quot;userId&quot;: uid}
+  3. Adds a &quot;user_id&quot; column to each DataFrame
+  4. Combines all results into one DataFrame using pd.concat
+  5. Returns (combined_df, summary) where summary has:
+     {&quot;total_rows&quot;: n, &quot;users_processed&quot;: n, &quot;users_failed&quot;: n}
+
+Call it with user_ids=[1, 2, 3, 4] and print:
+  - Total rows
+  - Users processed
+  - First 5 rows (id, userId, title columns)
+
+Expected output:
+  [EXTRACT API] GET https://jsonplaceholder.typicode.com/posts  (x4)
+  Total rows: 40
+  Users processed: 4
+  [first 5 rows]</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D2_Data_Extraction.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>conn.close()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D2_Data_Extraction.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 4 — EXTRACT FROM A STREAMING SOURCE (KAFKA)
+# ══════════════════════════════════════════════════════════════
+# CSV, database, and API extractions are PULL-based — you initiate
+# the request and wait for a response.
+# Kafka is PUSH-based — events arrive continuously and your consumer
+# processes them as they come in.
+#
+# Core Kafka concepts:
+#   topic           — a named stream of events (like a table in a DB)
+#   producer        — the process that writes events to the topic
+#   consumer        — the process that reads events from the topic
+#   consumer group  — multiple consumers sharing the work of a topic
+#   offset          — position of the last consumed message
+#                     at-least-once: commit after processing
+#
+# When to use Kafka instead of batch extraction:
+#   - events happen continuously (orders, clicks, sensor readings)
+#   - you need real-time or near-real-time processing
+#   - multiple teams need the same event stream (fan-out)
+#
+# SIMULATION MODE — Python deque as the topic (no Docker needed).
+# REAL MODE (uncomment when Docker is running):
+#
+#   from confluent_kafka import Producer, Consumer
+#   docker_compose_yml = &quot;&quot;&quot;
+#   version: &#x27;3&#x27;
+#   services:
+#     zookeeper:
+#       image: confluentinc/cp-zookeeper:latest
+#       environment:
+#         ZOOKEEPER_CLIENT_PORT: 2181
+#     kafka:
+#       image: confluentinc/cp-kafka:latest
+#       depends_on: [zookeeper]
+#       ports: [&quot;9092:9092&quot;]
+#       environment:
+#         KAFKA_BROKER_ID: 1
+#         KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+#         KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+#   &quot;&quot;&quot;
+#   # Run: docker-compose up -d
+#   # Then use Producer/Consumer below (see W17_D8 for full implementation)
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+from collections import deque
+import json
+
+# Simulate a Kafka topic as a deque (first-in first-out queue)
+_topics = {}  # topic_name -&gt; deque of messages
+
+def kafka_produce(topic, message: dict):
+    &quot;&quot;&quot;Append a JSON message to a topic.&quot;&quot;&quot;
+    if topic not in _topics:
+        _topics[topic] = deque()
+    _topics[topic].append(json.dumps(message))
+
+def kafka_consume(topic, group_id, max_msgs=None):
+    &quot;&quot;&quot;
+    Pop messages from a topic and yield (offset, message_dict).
+    Tracks offset per consumer group in a simple dict.
+    &quot;&quot;&quot;
+    if topic not in _topics:
+        return
+    _offsets = {}
+    key = f&#x27;{group_id}::{topic}&#x27;
+    count = 0
+    while _topics[topic]:
+        if max_msgs and count &gt;= max_msgs:
+            break
+        raw = _topics[topic].popleft()
+        _offsets[key] = _offsets.get(key, -1) + 1
+        yield _offsets[key], json.loads(raw)
+        count += 1
+
+# Produce 5 sales events
+events = [
+    {&#x27;sale_id&#x27;: 101, &#x27;product&#x27;: &#x27;Widget&#x27;, &#x27;amount&#x27;: 250.00, &#x27;ts&#x27;: &#x27;2024-01-10T09:00:00&#x27;},
+    {&#x27;sale_id&#x27;: 102, &#x27;product&#x27;: &#x27;Gadget&#x27;, &#x27;amount&#x27;:  89.50, &#x27;ts&#x27;: &#x27;2024-01-10T09:01:00&#x27;},
+    {&#x27;sale_id&#x27;: 103, &#x27;product&#x27;: &#x27;Gizmo&#x27;,  &#x27;amount&#x27;: 412.00, &#x27;ts&#x27;: &#x27;2024-01-10T09:02:00&#x27;},
+    {&#x27;sale_id&#x27;: 104, &#x27;product&#x27;: &#x27;Widget&#x27;, &#x27;amount&#x27;:  -5.00, &#x27;ts&#x27;: &#x27;2024-01-10T09:03:00&#x27;},  # bad event
+    {&#x27;sale_id&#x27;: 105, &#x27;product&#x27;: &#x27;Gadget&#x27;, &#x27;amount&#x27;: 175.00, &#x27;ts&#x27;: &#x27;2024-01-10T09:04:00&#x27;},
+]
+
+for e in events:
+    kafka_produce(&#x27;sales-events&#x27;, e)
+
+print(f&#x27;Produced {len(events)} events to topic: sales-events&#x27;)
+print()
+
+# Consume and process
+processed = []
+for offset, msg in kafka_consume(&#x27;sales-events&#x27;, group_id=&#x27;analytics&#x27;):
+    status = &#x27;PASS&#x27; if msg[&#x27;amount&#x27;] &gt; 0 else &#x27;DEAD-LETTER (negative amount)&#x27;
+    print(f&#x27;  offset={offset}  sale_id={msg[&quot;sale_id&quot;]}  amount={msg[&quot;amount&quot;]:&gt;8.2f}  {status}&#x27;)
+    if msg[&#x27;amount&#x27;] &gt; 0:
+        processed.append(msg)
+
+print(f&#x27;\nConsumed: {len(processed)} valid events (1 dead-lettered)&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D2_Data_Extraction.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 4
+# ══════════════════════════════════════════════════════════════
+# Produce all 8 order_events to topic &#x27;order-stream&#x27;.
+# Then write a consume loop that processes each event:
+#   - if amount &lt; 0: print &#x27;offset=N  order_id=X  SKIP (negative amount)&#x27;
+#   - otherwise:     print &#x27;offset=N  order_id=X  amount=$XXX.XX  PASS&#x27;
+# Collect all PASS events into a list called valid_orders.
+# After consuming, print:
+#   &#x27;Total produced: 8&#x27;
+#   &#x27;Valid: N  Skipped: N&#x27;
+#
+# Expected output:
+#   offset=0  order_id=201  amount=$  99.50  PASS
+#   offset=1  order_id=202  amount=$ 340.00  PASS
+#   offset=2  order_id=203  SKIP (negative amount)
+#   offset=3  order_id=204  amount=$  18.00  PASS
+#   offset=4  order_id=205  amount=$ 210.00  PASS
+#   offset=5  order_id=206  amount=$  75.00  PASS
+#   offset=6  order_id=207  SKIP (negative amount)
+#   offset=7  order_id=208  amount=$  55.00  PASS
+#   Total produced: 8
+#   Valid: 6  Skipped: 2
+#
+# --- starting data ---
+# kafka_produce, kafka_consume, _topics are defined in CONCEPT 4 above.
+order_events = [
+    {&#x27;order_id&#x27;: 201, &#x27;product&#x27;: &#x27;Widget&#x27;, &#x27;amount&#x27;:  99.50, &#x27;region&#x27;: &#x27;EMEA&#x27;},
+    {&#x27;order_id&#x27;: 202, &#x27;product&#x27;: &#x27;Gadget&#x27;, &#x27;amount&#x27;: 340.00, &#x27;region&#x27;: &#x27;AMER&#x27;},
+    {&#x27;order_id&#x27;: 203, &#x27;product&#x27;: &#x27;Gizmo&#x27;,  &#x27;amount&#x27;:  -8.00, &#x27;region&#x27;: &#x27;APAC&#x27;},
+    {&#x27;order_id&#x27;: 204, &#x27;product&#x27;: &#x27;Widget&#x27;, &#x27;amount&#x27;:  18.00, &#x27;region&#x27;: &#x27;EMEA&#x27;},
+    {&#x27;order_id&#x27;: 205, &#x27;product&#x27;: &#x27;Gadget&#x27;, &#x27;amount&#x27;: 210.00, &#x27;region&#x27;: &#x27;AMER&#x27;},
+    {&#x27;order_id&#x27;: 206, &#x27;product&#x27;: &#x27;Gizmo&#x27;,  &#x27;amount&#x27;:  75.00, &#x27;region&#x27;: &#x27;APAC&#x27;},
+    {&#x27;order_id&#x27;: 207, &#x27;product&#x27;: &#x27;Widget&#x27;, &#x27;amount&#x27;: -12.00, &#x27;region&#x27;: &#x27;EMEA&#x27;},
+    {&#x27;order_id&#x27;: 208, &#x27;product&#x27;: &#x27;Gadget&#x27;, &#x27;amount&#x27;:  55.00, &#x27;region&#x27;: &#x27;AMER&#x27;},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-3">Day 3 — Data Transformation</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-3"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 7  |  DAY 3  |  DATA TRANSFORMATION</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Standardize column names for clean, consistent DataFrames
+ 2. Validate data by checking for nulls, value ranges, and data types
+ 3. Apply business rules: calculate derived columns and map categories
+
+ TIME:  ~30 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;pandas data transformation cleaning tutorial&quot;
+ Video: &quot;Data Cleaning in Pandas | Python Pandas Tutorials&quot; -- Alex The Analyst
+       https://www.youtube.com/watch?v=bDhvCp3_lYw
+       (verified live; kept alongside the search string in case it rots)
+ Search: &quot;Python data validation pipeline business rules&quot;
+ Video: &quot;Data Validation in Python With Pydantic&quot; -- Real Python
+       https://www.youtube.com/watch?v=ySCtmCTm1lE
+       (verified live; kept alongside the search string in case it rots)</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D3_Data_Transformation.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+import numpy as np
+
+# Sample dirty DataFrame that represents raw data from an ERP system import
+raw_data = pd.DataFrame({
+    &quot;Employee ID&quot;:     [&quot;E001&quot;, &quot;E002&quot;, &quot;E003&quot;, &quot;E004&quot;, &quot;E005&quot;, &quot;E006&quot;, &quot;E007&quot;],
+    &quot;Full Name&quot;:       [&quot;Alice Ng&quot;, &quot;Bob Chen&quot;, &quot;carol diaz&quot;, &quot;Dave  Park&quot;, &quot;&quot;, &quot;FRANK WU&quot;, &quot;Grace Lee&quot;],
+    &quot;Department Code&quot;: [&quot;ENG&quot;, &quot;SLS&quot;, &quot;FIN&quot;, &quot;ENG&quot;, &quot;SLS&quot;, &quot;XYZ&quot;, None],
+    &quot;  Salary  &quot;:      [95000, 72000, 81000, 88000, -500, 1200000, 105000],
+    &quot;Start Date&quot;:      [&quot;2021-03-15&quot;, &quot;2019-07-01&quot;, &quot;2020-11-20&quot;, &quot;2022/01/10&quot;,
+                        &quot;2023-05-30&quot;, &quot;NotADate&quot;, &quot;2018-04-22&quot;],
+    &quot;Status &quot;:         [&quot;Active&quot;, &quot;ACTIVE&quot;, &quot;inactive&quot;, &quot;Active&quot;, &quot;active&quot;, &quot;Active&quot;, &quot;Terminated&quot;],
+    &quot;Performance Score&quot;: [4.5, 3.2, 4.8, None, 2.1, 3.9, 4.2],
+    &quot; Manager?&quot;:       [&quot;Yes&quot;, &quot;No&quot;, &quot;No&quot;, &quot;Yes&quot;, &quot;No&quot;, &quot;no&quot;, &quot;Yes&quot;],
+})
+
+print(&quot;=== RAW DATA ===&quot;)
+print(raw_data)
+print(&quot;\nColumn names (note spaces and mixed casing):&quot;)
+print(list(raw_data.columns))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — STANDARDIZING COLUMN NAMES</pre><pre class="box">══════════════════════════════════════════════════════════════
+Inconsistent column names cause errors and make code hard to write.
+The standard in data engineering is:
+  - All lowercase
+  - Words separated by underscores
+  - No leading or trailing spaces
+  - No special characters
+
+This is called &quot;snake_case&quot; naming.
+
+TECHNIQUES:
+  df.columns = [c.strip().lower().replace(&quot; &quot;, &quot;_&quot;) for c in df.columns]
+  df.rename(columns={&quot;Old Name&quot;: &quot;new_name&quot;}) -- rename specific columns
+  df.columns = df.columns.str.strip().str.lower().str.replace(&quot; &quot;, &quot;_&quot;)
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D3_Data_Transformation.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def standardize_column_names(df):
+    &quot;&quot;&quot;
+    Strip whitespace, lowercase, and replace spaces with underscores.
+    Returns a new DataFrame with clean column names.
+    &quot;&quot;&quot;
+    new_cols = []
+    for col in df.columns:
+        clean = col.strip()                          # remove leading/trailing spaces
+        clean = clean.lower()                        # lowercase
+        clean = clean.replace(&quot; &quot;, &quot;_&quot;)              # spaces to underscores
+        clean = clean.replace(&quot;?&quot;, &quot;&quot;)               # remove punctuation
+        clean = clean.replace(&quot;(&quot;, &quot;&quot;).replace(&quot;)&quot;, &quot;&quot;)
+        new_cols.append(clean)
+    df_clean = df.copy()
+    df_clean.columns = new_cols
+    return df_clean
+
+df = standardize_column_names(raw_data)
+print(&quot;\n=== AFTER COLUMN NAME STANDARDIZATION ===&quot;)
+print(list(df.columns))
+# [&#x27;employee_id&#x27;, &#x27;full_name&#x27;, &#x27;department_code&#x27;, &#x27;salary&#x27;, &#x27;start_date&#x27;,
+#  &#x27;status&#x27;, &#x27;performance_score&#x27;, &#x27;manager&#x27;]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+The messy_cols DataFrame below has poorly named columns.
+Apply standardize_column_names() to it and also:
+  1. Rename &quot;emp_id&quot; to &quot;employee_id&quot; using df.rename(columns={...})
+  2. Rename &quot;dept&quot; to &quot;department&quot;
+  3. Print the final column names
+
+Expected output:
+  [&#x27;employee_id&#x27;, &#x27;department&#x27;, &#x27;annual_salary&#x27;, &#x27;hire_year&#x27;, &#x27;is_full_time&#x27;]
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D3_Data_Transformation.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>messy_cols = pd.DataFrame({
+    &quot;  EMP ID&quot;:          [1, 2, 3],
+    &quot;  DEPT&quot;:            [&quot;ENG&quot;, &quot;SLS&quot;, &quot;FIN&quot;],
+    &quot;Annual Salary (USD)&quot;: [95000, 72000, 81000],
+    &quot;HIRE YEAR&quot;:         [2021, 2019, 2020],
+    &quot;Full Time? &quot;:       [True, True, False],
+})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — DATA VALIDATION</pre><pre class="box">══════════════════════════════════════════════════════════════
+Data validation checks that the data meets expected quality standards BEFORE
+it enters a database or report. Catching bad data early prevents downstream errors.
+
+COMMON VALIDATION CHECKS:
+  1. Null check:       required columns have no NaN values
+  2. Range check:      numeric values are within acceptable bounds
+  3. Type check:       columns have the right data type
+  4. Domain check:     categorical values come from an allowed set
+  5. Uniqueness check: key columns have no duplicates
+  6. Format check:     strings match expected patterns (dates, IDs)
+
+A validation function should:
+  - Return True/False for each rule
+  - Collect ALL failures before stopping (so you fix all at once)
+  - Log which rows violated each rule
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D3_Data_Transformation.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def validate_employees(df):
+    &quot;&quot;&quot;
+    Run validation checks on the employees DataFrame.
+    Returns a validation report dict.
+    &quot;&quot;&quot;
+    report = {&quot;checks&quot;: [], &quot;total_failures&quot;: 0, &quot;is_valid&quot;: True}
+
+    def add_check(rule_name, failing_count, detail=&quot;&quot;):
+        status = &quot;PASS&quot; if failing_count == 0 else &quot;FAIL&quot;
+        report[&quot;checks&quot;].append({
+            &quot;rule&quot;: rule_name,
+            &quot;status&quot;: status,
+            &quot;failures&quot;: failing_count,
+            &quot;detail&quot;: detail,
+        })
+        if failing_count &gt; 0:
+            report[&quot;total_failures&quot;] += failing_count
+            report[&quot;is_valid&quot;] = False
+
+    # Check 1: Required columns not null
+    required_cols = [&quot;employee_id&quot;, &quot;full_name&quot;, &quot;department_code&quot;, &quot;salary&quot;]
+    for col in required_cols:
+        if col in df.columns:
+            nulls = df[col].isnull().sum() + (df[col] == &quot;&quot;).sum()
+            add_check(f&quot;no_null_{col}&quot;, nulls, f&quot;{nulls} null/empty values&quot;)
+
+    # Check 2: Salary range
+    if &quot;salary&quot; in df.columns:
+        sal = pd.to_numeric(df[&quot;salary&quot;], errors=&quot;coerce&quot;)
+        below_min = (sal &lt; 20000).sum()
+        above_max = (sal &gt; 500000).sum()
+        add_check(&quot;salary_min_20000&quot;, below_min,
+                  df.loc[sal &lt; 20000, &quot;employee_id&quot;].tolist() if below_min else &quot;&quot;)
+        add_check(&quot;salary_max_500000&quot;, above_max,
+                  df.loc[sal &gt; 500000, &quot;employee_id&quot;].tolist() if above_max else &quot;&quot;)
+
+    # Check 3: Valid department codes
+    valid_depts = {&quot;ENG&quot;, &quot;SLS&quot;, &quot;FIN&quot;, &quot;OPS&quot;, &quot;HR&quot;}
+    if &quot;department_code&quot; in df.columns:
+        invalid_depts = df[~df[&quot;department_code&quot;].isin(valid_depts) &amp; df[&quot;department_code&quot;].notna()]
+        add_check(&quot;valid_department_code&quot;, len(invalid_depts),
+                  invalid_depts[&quot;employee_id&quot;].tolist() if len(invalid_depts) else &quot;&quot;)
+
+    # Check 4: Performance score 0-5
+    if &quot;performance_score&quot; in df.columns:
+        score = pd.to_numeric(df[&quot;performance_score&quot;], errors=&quot;coerce&quot;)
+        out_of_range = ((score &lt; 0) | (score &gt; 5)).sum()
+        add_check(&quot;performance_score_0_to_5&quot;, out_of_range)
+
+    return report
+
+validation_result = validate_employees(df)
+
+print(&quot;\n=== VALIDATION REPORT ===&quot;)
+for check in validation_result[&quot;checks&quot;]:
+    status_str = &quot;PASS&quot; if check[&quot;status&quot;] == &quot;PASS&quot; else &quot;FAIL&quot;
+    print(f&quot;  [{status_str}] {check[&#x27;rule&#x27;]:&lt;35} | Failures: {check[&#x27;failures&#x27;]:&gt;3}  {check[&#x27;detail&#x27;]}&quot;)
+
+print(f&quot;\nTotal failures: {validation_result[&#x27;total_failures&#x27;]}&quot;)
+print(f&quot;Is valid: {validation_result[&#x27;is_valid&#x27;]}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+The pipeline_runs DataFrame below simulates ETL job logs.
+Write a function called validate_pipeline_runs(df) that checks:
+
+  Rule 1: &quot;run_id&quot; must be unique (no duplicates)
+  Rule 2: &quot;status&quot; must be in [&quot;success&quot;, &quot;failure&quot;, &quot;running&quot;, &quot;skipped&quot;]
+  Rule 3: &quot;rows_processed&quot; must be &gt;= 0
+  Rule 4: &quot;duration_sec&quot; must be &gt; 0 and &lt; 7200 (2 hours)
+  Rule 5: &quot;pipeline_name&quot; must not be null
+
+Return the same report structure as validate_employees.
+Print the report in the same format.
+
+Expected output:
+  [PASS] unique_run_id          | Failures:   0
+  [FAIL] valid_status           | Failures:   1  [&#x27;RUN-004&#x27;]
+  [FAIL] rows_processed &gt;= 0    | Failures:   1  [&#x27;RUN-002&#x27;]
+  [PASS] duration_0_to_7200     | Failures:   0
+  [PASS] pipeline_name_not_null | Failures:   0
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D3_Data_Transformation.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>pipeline_runs = pd.DataFrame({
+    &quot;run_id&quot;:         [&quot;RUN-001&quot;, &quot;RUN-002&quot;, &quot;RUN-003&quot;, &quot;RUN-004&quot;, &quot;RUN-005&quot;],
+    &quot;pipeline_name&quot;:  [&quot;daily_sales&quot;, &quot;inventory_sync&quot;, &quot;daily_sales&quot;, &quot;crm_export&quot;, &quot;daily_sales&quot;],
+    &quot;status&quot;:         [&quot;success&quot;, &quot;failure&quot;, &quot;success&quot;, &quot;crashed&quot;, &quot;success&quot;],
+    &quot;rows_processed&quot;: [15000, -100, 8500, 0, 22000],
+    &quot;duration_sec&quot;:   [42.7, 5.3, 38.1, 120.5, 55.8],
+})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — BUSINESS RULES TRANSFORMATION</pre><pre class="box">══════════════════════════════════════════════════════════════
+Business rules transform raw data into business-meaningful values.
+These are domain-specific calculations and mappings your organization defines.
+
+COMMON PATTERNS:
+  1. Derived columns: calculate new columns from existing ones
+     e.g. revenue = quantity * unit_price
+     e.g. tenure_years = (today - hire_date).days / 365
+
+  2. Category mapping: convert codes to human-readable labels
+     e.g. dept_code &quot;ENG&quot; -&gt; &quot;Engineering&quot;
+
+  3. Bucketing/binning: group continuous values into categories
+     e.g. salary &lt; 60k = &quot;Junior&quot;, 60k-90k = &quot;Mid&quot;, 90k+ = &quot;Senior&quot;
+
+  4. Flag creation: create boolean indicators
+     e.g. is_high_performer = performance_score &gt;= 4.0
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D3_Data_Transformation.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def apply_business_rules(df):
+    &quot;&quot;&quot;
+    Apply business logic transformations to the employees DataFrame.
+    Returns transformed DataFrame.
+    &quot;&quot;&quot;
+    df = df.copy()
+
+    # 1. Parse and standardize the start_date
+    df[&quot;start_date&quot;] = pd.to_datetime(df[&quot;start_date&quot;], errors=&quot;coerce&quot;)
+
+    # 2. Calculate tenure in years (rounded to 1 decimal)
+    today = pd.Timestamp(&quot;2024-12-31&quot;)   # use fixed date for reproducibility
+    df[&quot;tenure_years&quot;] = ((today - df[&quot;start_date&quot;]).dt.days / 365.25).round(1)
+    df[&quot;tenure_years&quot;] = df[&quot;tenure_years&quot;].clip(lower=0)   # no negative tenure
+
+    # 3. Standardize full_name
+    df[&quot;full_name&quot;] = df[&quot;full_name&quot;].str.strip().str.title()
+
+    # 4. Standardize status
+    df[&quot;status&quot;] = df[&quot;status&quot;].str.strip().str.lower().str.capitalize()
+
+    # 5. Map department code to full name
+    dept_map = {
+        &quot;ENG&quot;: &quot;Engineering&quot;,
+        &quot;SLS&quot;: &quot;Sales&quot;,
+        &quot;FIN&quot;: &quot;Finance&quot;,
+        &quot;OPS&quot;: &quot;Operations&quot;,
+        &quot;HR&quot;:  &quot;Human Resources&quot;,
+    }
+    df[&quot;department&quot;] = df[&quot;department_code&quot;].map(dept_map).fillna(&quot;Unknown&quot;)
+
+    # 6. Salary band bucketing
+    salary_col = pd.to_numeric(df[&quot;salary&quot;], errors=&quot;coerce&quot;)
+    df[&quot;salary_band&quot;] = pd.cut(
+        salary_col,
+        bins=[0, 60000, 90000, 120000, float(&quot;inf&quot;)],
+        labels=[&quot;Junior&quot;, &quot;Mid&quot;, &quot;Senior&quot;, &quot;Executive&quot;],
+        right=True,
+    )
+
+    # 7. Boolean flags
+    df[&quot;is_manager&quot;]      = df[&quot;manager&quot;].str.lower().str.strip().isin([&quot;yes&quot;]) if &quot;manager&quot; in df.columns else False
+    df[&quot;is_high_performer&quot;] = pd.to_numeric(df[&quot;performance_score&quot;], errors=&quot;coerce&quot;) &gt;= 4.0
+    df[&quot;is_active&quot;]       = df[&quot;status&quot;].str.lower() == &quot;active&quot;
+
+    # 8. Performance tier
+    score = pd.to_numeric(df[&quot;performance_score&quot;], errors=&quot;coerce&quot;)
+    df[&quot;performance_tier&quot;] = pd.cut(
+        score,
+        bins=[0, 2.5, 3.5, 4.5, 5.0],
+        labels=[&quot;Needs Improvement&quot;, &quot;Meets Expectations&quot;, &quot;Exceeds&quot;, &quot;Outstanding&quot;],
+        right=True,
+    )
+
+    return df
+
+df_transformed = apply_business_rules(df)
+print(&quot;\n=== AFTER BUSINESS RULES ===&quot;)
+cols_to_show = [&quot;employee_id&quot;, &quot;full_name&quot;, &quot;department&quot;, &quot;salary&quot;, &quot;salary_band&quot;,
+                &quot;tenure_years&quot;, &quot;is_manager&quot;, &quot;performance_tier&quot;]
+print(df_transformed[[c for c in cols_to_show if c in df_transformed.columns]])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+Apply business rules to the raw_sales DataFrame below.
+Write a function called transform_sales_rules(df) that:
+
+  Rule 1: Calculate &quot;net_revenue&quot; = quantity * unit_price * (1 - discount_pct/100)
+  Rule 2: Calculate &quot;commission&quot; = net_revenue * commission_rate
+          where commission_rate is looked up from this dict:
+          {&quot;West&quot;: 0.08, &quot;East&quot;: 0.09, &quot;Central&quot;: 0.07} (default 0.07 if not found)
+  Rule 3: Categorize each deal:
+          net_revenue &lt; 1000: &quot;Small Deal&quot;
+          1000-4999: &quot;Medium Deal&quot;
+          5000+: &quot;Large Deal&quot;
+          Store as &quot;deal_size&quot;
+  Rule 4: Flag high-value reps:
+          is_top_rep = True if net_revenue &gt;= 2000, else False
+
+Print the transformed DataFrame (all columns).
+
+Expected output:
+  [DataFrame with net_revenue, commission, deal_size, is_top_rep columns]
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D3_Data_Transformation.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>raw_sales = pd.DataFrame({
+    &quot;rep&quot;:          [&quot;Alice&quot;, &quot;Bob&quot;, &quot;Carol&quot;, &quot;Dave&quot;, &quot;Eve&quot;],
+    &quot;region&quot;:       [&quot;West&quot;, &quot;East&quot;, &quot;Central&quot;, &quot;West&quot;, &quot;East&quot;],
+    &quot;product&quot;:      [&quot;Laptop&quot;, &quot;Monitor&quot;, &quot;Keyboard&quot;, &quot;Headset&quot;, &quot;Laptop&quot;],
+    &quot;quantity&quot;:     [2, 3, 5, 1, 4],
+    &quot;unit_price&quot;:   [1299.99, 399.99, 149.99, 199.99, 1299.99],
+    &quot;discount_pct&quot;: [10, 5, 0, 15, 20],
+})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 4 -- SCHEMA DRIFT DETECTION
+# ══════════════════════════════════════════════════════════════
+#
+#  Schema drift happens when an upstream data source changes its
+#  column names or structure without warning. A pipeline that
+#  expects &#x27;user_id&#x27; will crash silently if it receives &#x27;customer_id&#x27;.
+#
+#  Production pipelines detect drift before processing:
+#    expected_cols = {&#x27;user_id&#x27;, &#x27;email&#x27;, &#x27;signup_date&#x27;, &#x27;country&#x27;}
+#    actual_cols   = set(df.columns)
+#
+#    added   = actual_cols - expected_cols   # new columns in source
+#    removed = expected_cols - actual_cols   # columns that disappeared
+#
+#  A robust pipeline:
+#    1. Compares column sets on every run
+#    2. Logs drift as a warning (not a crash) -- missing cols filled with None
+#    3. Flags potential renames (column removed + column added -&gt; likely renamed)
+#    4. Sends a Slack alert or writes to an audit table
+#
+#  EXAMPLE ----------------------------------------------------------</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D3_Data_Transformation.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+
+def detect_schema_drift(df: pd.DataFrame, expected_cols: set) -&gt; dict:
+    &quot;&quot;&quot;
+    Compare actual DataFrame columns against the expected schema.
+    Returns a drift report dict.
+    &quot;&quot;&quot;
+    actual_cols = set(df.columns)
+    added       = actual_cols - expected_cols
+    removed     = expected_cols - actual_cols
+    report = {
+        &#x27;status&#x27;:      &#x27;ok&#x27; if not added and not removed else &#x27;drift_detected&#x27;,
+        &#x27;added&#x27;:       sorted(added),
+        &#x27;removed&#x27;:     sorted(removed),
+        &#x27;matched&#x27;:     sorted(actual_cols &amp; expected_cols),
+        &#x27;rename_hint&#x27;: sorted(added) if len(added) == len(removed) else [],
+    }
+    return report
+
+
+# Simulate a column rename in the upstream source
+EXPECTED = {&#x27;user_id&#x27;, &#x27;email&#x27;, &#x27;signup_date&#x27;, &#x27;country&#x27;, &#x27;plan&#x27;}
+
+df_v1 = pd.DataFrame({
+    &#x27;user_id&#x27;: [1, 2], &#x27;email&#x27;: [&#x27;a@x.com&#x27;, &#x27;b@x.com&#x27;],
+    &#x27;signup_date&#x27;: [&#x27;2024-01-01&#x27;, &#x27;2024-01-02&#x27;],
+    &#x27;country&#x27;: [&#x27;US&#x27;, &#x27;CA&#x27;], &#x27;plan&#x27;: [&#x27;free&#x27;, &#x27;pro&#x27;],
+})
+
+df_v2 = pd.DataFrame({
+    &#x27;customer_id&#x27;: [1, 2], &#x27;email&#x27;: [&#x27;a@x.com&#x27;, &#x27;b@x.com&#x27;],  # user_id -&gt; customer_id
+    &#x27;signup_date&#x27;:  [&#x27;2024-01-01&#x27;, &#x27;2024-01-02&#x27;],
+    &#x27;country&#x27;: [&#x27;US&#x27;, &#x27;CA&#x27;], &#x27;plan&#x27;: [&#x27;free&#x27;, &#x27;pro&#x27;],
+    &#x27;referral_code&#x27;: [&#x27;REF01&#x27;, None],   # new column added
+})
+
+report_v1 = detect_schema_drift(df_v1, EXPECTED)
+report_v2 = detect_schema_drift(df_v2, EXPECTED)
+
+print(&#x27;v1 schema check:&#x27;, report_v1[&#x27;status&#x27;])
+print(&#x27;v2 schema check:&#x27;, report_v2[&#x27;status&#x27;])
+print(f&#x27;  Added   : {report_v2[&quot;added&quot;]}&#x27;)
+print(f&#x27;  Removed : {report_v2[&quot;removed&quot;]}&#x27;)
+if report_v2[&#x27;rename_hint&#x27;]:
+    print(f&#x27;  Possible renames: {report_v2[&quot;removed&quot;]} -&gt; {report_v2[&quot;rename_hint&quot;]}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  EXERCISE 4
+# ══════════════════════════════════════════════════════════════
+#
+#  A nightly ETL pipeline expects a fixed schema from an HR system.
+#  Write check_hr_schema(df, expected) -&gt; dict that:
+#
+#    1. Compares set(df.columns) vs the expected set
+#    2. Returns a dict with keys:
+#         &#x27;status&#x27;          : &#x27;ok&#x27; or &#x27;drift_detected&#x27;
+#         &#x27;added&#x27;           : list of new columns (sorted)
+#         &#x27;removed&#x27;         : list of missing columns (sorted)
+#         &#x27;safe_to_proceed&#x27; : True only when status is &#x27;ok&#x27;
+#    3. Print a readable summary for each DataFrame
+#
+#  Expected output:
+#    daily_hr_v1 -- status: ok, safe: True
+#    daily_hr_v2 -- status: drift_detected, safe: False
+#      Added  : [&#x27;hire_date&#x27;, &#x27;manager_email&#x27;]
+#      Removed: [&#x27;manager_id&#x27;, &#x27;start_date&#x27;]
+#
+# --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D3_Data_Transformation.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+
+EXPECTED_HR = {&#x27;employee_id&#x27;, &#x27;full_name&#x27;, &#x27;department&#x27;, &#x27;salary&#x27;, &#x27;manager_id&#x27;, &#x27;start_date&#x27;}
+
+daily_hr_v1 = pd.DataFrame({
+    &#x27;employee_id&#x27;: [1, 2, 3],
+    &#x27;full_name&#x27;:   [&#x27;Alice&#x27;, &#x27;Bob&#x27;, &#x27;Carol&#x27;],
+    &#x27;department&#x27;:  [&#x27;Eng&#x27;, &#x27;Sales&#x27;, &#x27;Finance&#x27;],
+    &#x27;salary&#x27;:      [95000, 72000, 85000],
+    &#x27;manager_id&#x27;:  [10, 11, 12],
+    &#x27;start_date&#x27;:  [&#x27;2022-03-01&#x27;, &#x27;2021-06-15&#x27;, &#x27;2023-01-10&#x27;],
+})
+
+daily_hr_v2 = pd.DataFrame({
+    &#x27;employee_id&#x27;:    [1, 2, 3],
+    &#x27;full_name&#x27;:      [&#x27;Alice&#x27;, &#x27;Bob&#x27;, &#x27;Carol&#x27;],
+    &#x27;department&#x27;:     [&#x27;Eng&#x27;, &#x27;Sales&#x27;, &#x27;Finance&#x27;],
+    &#x27;salary&#x27;:         [95000, 72000, 85000],
+    &#x27;manager_email&#x27;:  [&#x27;mgr1@co.com&#x27;, &#x27;mgr2@co.com&#x27;, &#x27;mgr3@co.com&#x27;],
+    &#x27;hire_date&#x27;:      [&#x27;2022-03-01&#x27;, &#x27;2021-06-15&#x27;, &#x27;2023-01-10&#x27;],
+})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-4">Day 4 — Data Loading</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-4"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 7  |  DAY 4  |  DATA LOADING</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Load data to CSV files — both full refresh and incremental append modes
+ 2. Load a DataFrame to a SQLite database using to_sql with replace/append
+ 3. Verify a load with row count checks, sample comparison, and logging
+
+ TIME:  ~30-35 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;pandas to_csv to_sql load data tutorial&quot;
+ Video: &quot;CSV to Pandas | Pandas to SQL with Python Code | Jupyter Notebook&quot; -- Dr Pi
+       https://www.youtube.com/watch?v=xpshK6Pk4Og
+       (verified live; kept alongside the search string in case it rots)
+ Search: &quot;Python ETL load verification row count&quot;
+ Video: &quot;ETL Testing ( using Python - Pandas ) : How to validate the duplicates at source and target system&quot; -- ETL QA Labs
+       https://www.youtube.com/watch?v=cVwXBJK4e-w
+       (verified live; kept alongside the search string in case it rots)</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D4_Data_Loading.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+import sqlite3
+import os
+from datetime import datetime
+
+this_dir = os.path.dirname(__file__)
+
+# Sample clean DataFrame (as if it just came out of the transform stage)
+clean_sales = pd.DataFrame({
+    &quot;sale_id&quot;:      range(1, 11),
+    &quot;sale_date&quot;:    [&quot;2024-01-10&quot;, &quot;2024-01-15&quot;, &quot;2024-01-22&quot;, &quot;2024-02-03&quot;,
+                     &quot;2024-02-10&quot;, &quot;2024-02-18&quot;, &quot;2024-03-01&quot;, &quot;2024-03-12&quot;,
+                     &quot;2024-03-22&quot;, &quot;2024-04-05&quot;],
+    &quot;rep_name&quot;:     [&quot;Alice Ng&quot;, &quot;Bob Chen&quot;, &quot;Carol Diaz&quot;, &quot;Alice Ng&quot;, &quot;Dave Park&quot;,
+                     &quot;Eve Torres&quot;, &quot;Carol Diaz&quot;, &quot;Bob Chen&quot;, &quot;Grace Lee&quot;, &quot;Alice Ng&quot;],
+    &quot;region&quot;:       [&quot;West&quot;, &quot;East&quot;, &quot;West&quot;, &quot;West&quot;, &quot;Central&quot;,
+                     &quot;East&quot;, &quot;West&quot;, &quot;East&quot;, &quot;East&quot;, &quot;West&quot;],
+    &quot;product&quot;:      [&quot;Laptop&quot;, &quot;Monitor&quot;, &quot;Keyboard&quot;, &quot;Headset&quot;, &quot;Webcam&quot;,
+                     &quot;Monitor&quot;, &quot;Laptop&quot;, &quot;Keyboard&quot;, &quot;Headset&quot;, &quot;Mouse&quot;],
+    &quot;quantity&quot;:     [1, 2, 3, 1, 4, 1, 2, 5, 1, 3],
+    &quot;net_revenue&quot;:  [1169.99, 759.98, 449.97, 169.99, 359.96,
+                     399.99, 2209.98, 674.95, 169.99, 223.97],
+})
+
+print(&quot;=== CLEAN SALES DATA TO LOAD ===&quot;)
+print(clean_sales)
+print(f&quot;Shape: {clean_sales.shape}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — LOADING TO CSV (FULL AND INCREMENTAL/APPEND)</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+FULL LOAD:
+  Write the entire DataFrame to a new file (or overwrite existing).
+  Used when you want a fresh, complete snapshot each time.
+  df.to_csv(&quot;output.csv&quot;, index=False)
+
+INCREMENTAL/APPEND LOAD:
+  Add new rows to an existing file without rewriting it.
+  Used for logs, history tables, and cumulative exports.
+  df.to_csv(&quot;output.csv&quot;, mode=&quot;a&quot;, header=False, index=False)
+
+KEY PARAMETERS:
+  index=False          -- do not write the row number as a column
+  mode=&quot;w&quot;             -- write (overwrite) [default]
+  mode=&quot;a&quot;             -- append to existing file
+  header=True/False    -- write column names as header row
+  encoding=&quot;utf-8&quot;     -- consistent text encoding
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D4_Data_Loading.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def load_to_csv_full(df, output_path):
+    &quot;&quot;&quot;
+    Full refresh: overwrite the CSV with the entire DataFrame.
+    Returns the number of rows written.
+    &quot;&quot;&quot;
+    df.to_csv(output_path, index=False, encoding=&quot;utf-8&quot;)
+    print(f&quot;[LOAD CSV] Full load: {len(df)} rows -&gt; {os.path.basename(output_path)}&quot;)
+    return len(df)
+
+def load_to_csv_append(df, output_path):
+    &quot;&quot;&quot;
+    Incremental append: add new rows to an existing CSV.
+    If the file does not exist, creates it with a header.
+    Returns the number of rows appended.
+    &quot;&quot;&quot;
+    file_exists = os.path.exists(output_path)
+    df.to_csv(
+        output_path,
+        mode=&quot;a&quot;,
+        header=not file_exists,  # write header only if file is new
+        index=False,
+        encoding=&quot;utf-8&quot;,
+    )
+    print(f&quot;[LOAD CSV] Appended: {len(df)} rows -&gt; {os.path.basename(output_path)}&quot;)
+    return len(df)
+
+# Full load
+full_output = os.path.join(this_dir, &quot;sales_full.csv&quot;)
+rows_written = load_to_csv_full(clean_sales, full_output)
+
+# Verify
+df_verify = pd.read_csv(full_output)
+print(f&quot;Verification — rows in file: {len(df_verify)}&quot;)   # should match rows_written
+
+# Incremental load — simulate three daily runs
+daily_run_1 = clean_sales.iloc[:3].copy()
+daily_run_2 = clean_sales.iloc[3:7].copy()
+daily_run_3 = clean_sales.iloc[7:].copy()
+
+incremental_output = os.path.join(this_dir, &quot;sales_incremental.csv&quot;)
+
+# Remove old file if it exists (for clean demo)
+if os.path.exists(incremental_output):
+    os.remove(incremental_output)
+
+load_to_csv_append(daily_run_1, incremental_output)
+load_to_csv_append(daily_run_2, incremental_output)
+load_to_csv_append(daily_run_3, incremental_output)
+
+# Verify cumulative rows
+df_cum = pd.read_csv(incremental_output)
+print(f&quot;\nIncremental file rows after 3 runs: {len(df_cum)}&quot;)   # 10</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1 — Timestamped Export</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+Write a function called load_with_timestamp(df, output_dir, base_name) that:
+  1. Generates a timestamped filename: &quot;&lt;base_name&gt;_&lt;YYYYMMDD_HHMMSS&gt;.csv&quot;
+     Use datetime.now().strftime(&quot;%Y%m%d_%H%M%S&quot;)
+  2. Saves the DataFrame to that file (full load, index=False)
+  3. Prints: &quot;Saved &lt;rows&gt; rows to &lt;filename&gt;&quot;
+  4. Returns the full file path
+
+Call it with clean_sales, this_dir, and &quot;sales_export&quot;
+Print the returned path.
+
+Expected output:
+    Saved 10 rows to sales_export_20240101_120000.csv
+    Full path: c:\...\sales_export_20240101_120000.csv</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — LOADING TO SQLite DATABASE (to_sql, if_exists)</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+pandas to_sql() writes a DataFrame directly to a SQL table.
+Works with any SQLAlchemy-compatible database (SQLite, PostgreSQL, SQL Server).
+
+Syntax:
+  df.to_sql(&quot;table_name&quot;, connection_or_engine, if_exists=&quot;replace&quot;, index=False)
+
+if_exists options:
+  &quot;fail&quot;    -- raise error if table exists (safe default)
+  &quot;replace&quot; -- drop and recreate the table (full refresh)
+  &quot;append&quot;  -- insert rows into existing table (incremental)
+
+IMPORTANT: to_sql() with sqlite3 connection works directly.
+For production databases (SQL Server, PostgreSQL), use SQLAlchemy engine.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D4_Data_Loading.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>db_path = os.path.join(this_dir, &quot;sales_warehouse.db&quot;)
+
+# Remove old DB for clean demo
+if os.path.exists(db_path):
+    os.remove(db_path)
+
+# Full load to SQLite
+conn = sqlite3.connect(db_path)
+
+# First load: full replace (creates or overwrites the table)
+clean_sales.to_sql(&quot;fact_sales&quot;, conn, if_exists=&quot;replace&quot;, index=False)
+print(f&quot;\n[LOAD DB] Full load: {len(clean_sales)} rows to fact_sales&quot;)
+
+# Verify
+df_db = pd.read_sql(&quot;SELECT COUNT(*) AS row_count FROM fact_sales&quot;, conn)
+print(f&quot;DB row count: {df_db[&#x27;row_count&#x27;].iloc[0]}&quot;)
+
+# Append: simulate loading next day&#x27;s new records
+new_records = pd.DataFrame({
+    &quot;sale_id&quot;:     [11, 12],
+    &quot;sale_date&quot;:   [&quot;2024-04-10&quot;, &quot;2024-04-11&quot;],
+    &quot;rep_name&quot;:    [&quot;Bob Chen&quot;, &quot;Eve Torres&quot;],
+    &quot;region&quot;:      [&quot;East&quot;, &quot;East&quot;],
+    &quot;product&quot;:     [&quot;Laptop&quot;, &quot;Webcam&quot;],
+    &quot;quantity&quot;:    [1, 2],
+    &quot;net_revenue&quot;: [1169.99, 161.99],
+})
+
+new_records.to_sql(&quot;fact_sales&quot;, conn, if_exists=&quot;append&quot;, index=False)
+print(f&quot;[LOAD DB] Appended: {len(new_records)} rows to fact_sales&quot;)
+
+# Verify append
+df_after = pd.read_sql(&quot;SELECT COUNT(*) AS row_count FROM fact_sales&quot;, conn)
+print(f&quot;DB row count after append: {df_after[&#x27;row_count&#x27;].iloc[0]}&quot;)   # should be 12
+
+# Create a dimension table
+dim_products = pd.DataFrame({
+    &quot;product&quot;:    [&quot;Laptop&quot;, &quot;Monitor&quot;, &quot;Keyboard&quot;, &quot;Headset&quot;, &quot;Webcam&quot;, &quot;Mouse&quot;],
+    &quot;category&quot;:   [&quot;Electronics&quot;, &quot;Electronics&quot;, &quot;Accessories&quot;, &quot;Accessories&quot;, &quot;Peripherals&quot;, &quot;Accessories&quot;],
+    &quot;unit_price&quot;: [1299.99, 399.99, 149.99, 199.99, 89.99, 79.99],
+})
+dim_products.to_sql(&quot;dim_products&quot;, conn, if_exists=&quot;replace&quot;, index=False)
+print(f&quot;[LOAD DB] dim_products: {len(dim_products)} rows&quot;)
+
+conn.close()
+print(&quot;Database saved to:&quot;, db_path)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2 — Upsert Pattern</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+In production, you often want to &quot;upsert&quot; data: insert new rows and
+update existing rows (replace if duplicate key).
+SQLite does not have MERGE, but we can simulate it.
+
+Write a function called upsert_to_sqlite(df, db_path, table_name, key_col) that:
+  1. Opens a connection to db_path
+  2. Tries to read the existing table into a DataFrame (or starts with empty)
+  3. Concatenates the new df with the existing data
+  4. Drops duplicates based on key_col, keeping the LAST occurrence (new data wins)
+  5. Writes the result back with if_exists=&quot;replace&quot;
+  6. Returns the final row count
+
+Call it with clean_sales, db_path, &quot;fact_sales&quot;, &quot;sale_id&quot;
+Then call it again with updated_records (some existing, some new)
+Print row counts before and after.
+
+Expected output:
+    After initial load: 12 rows
+    After upsert: 13 rows (1 new + 1 updated, no duplicates)
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D4_Data_Loading.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>updated_records = pd.DataFrame({
+    &quot;sale_id&quot;:     [5, 13],       # sale_id=5 is an update, sale_id=13 is new
+    &quot;sale_date&quot;:   [&quot;2024-02-10&quot;, &quot;2024-04-15&quot;],
+    &quot;rep_name&quot;:    [&quot;Dave Park&quot;, &quot;Alice Ng&quot;],
+    &quot;region&quot;:      [&quot;Central&quot;, &quot;West&quot;],
+    &quot;product&quot;:     [&quot;Webcam&quot;, &quot;Laptop&quot;],
+    &quot;quantity&quot;:    [6, 2],        # sale_id=5 quantity changed from 4 to 6
+    &quot;net_revenue&quot;: [539.94, 2339.98],
+})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — LOAD VERIFICATION: ROW COUNTS, SAMPLES, LOGGING</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+After every load, verify that:
+  1. The row count in the destination matches what was loaded
+  2. A sample of the data looks correct (spot check)
+  3. The load is logged with timestamp, row counts, and status
+
+This protects against silent failures (partial loads, truncations, etc.)
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D4_Data_Loading.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def verify_csv_load(source_df, output_path):
+    &quot;&quot;&quot;
+    Verify a CSV load was successful.
+    Returns a dict with verification results.
+    &quot;&quot;&quot;
+    result = {
+        &quot;output_path&quot;: output_path,
+        &quot;expected_rows&quot;: len(source_df),
+        &quot;actual_rows&quot;: None,
+        &quot;row_count_match&quot;: False,
+        &quot;sample_match&quot;: False,
+        &quot;status&quot;: &quot;unknown&quot;,
+    }
+
+    try:
+        df_loaded = pd.read_csv(output_path)
+        result[&quot;actual_rows&quot;] = len(df_loaded)
+        result[&quot;row_count_match&quot;] = (result[&quot;actual_rows&quot;] == result[&quot;expected_rows&quot;])
+
+        # Sample check: compare first and last row values
+        if len(df_loaded) &gt; 0 and len(source_df) &gt; 0:
+            first_match = (source_df.iloc[0].tolist() == df_loaded.iloc[0].tolist())
+            last_match  = (source_df.iloc[-1].tolist() == df_loaded.iloc[-1].tolist())
+            result[&quot;sample_match&quot;] = first_match and last_match
+
+        result[&quot;status&quot;] = &quot;pass&quot; if (result[&quot;row_count_match&quot;] and result[&quot;sample_match&quot;]) else &quot;fail&quot;
+    except Exception as e:
+        result[&quot;status&quot;] = &quot;error&quot;
+        result[&quot;error&quot;] = str(e)
+
+    return result
+
+def log_pipeline_run(pipeline_name, rows_extracted, rows_loaded, status, log_path):
+    &quot;&quot;&quot;
+    Append a run record to a pipeline log CSV.
+    &quot;&quot;&quot;
+    run_record = pd.DataFrame([{
+        &quot;timestamp&quot;:       datetime.now().strftime(&quot;%Y-%m-%d %H:%M:%S&quot;),
+        &quot;pipeline&quot;:        pipeline_name,
+        &quot;rows_extracted&quot;:  rows_extracted,
+        &quot;rows_loaded&quot;:     rows_loaded,
+        &quot;status&quot;:          status,
+    }])
+    file_exists = os.path.exists(log_path)
+    run_record.to_csv(log_path, mode=&quot;a&quot;, header=not file_exists, index=False)
+    print(f&quot;[LOG] Run recorded: {status}&quot;)
+
+# Verify the full CSV load
+print(&quot;\n=== LOAD VERIFICATION ===&quot;)
+verify_result = verify_csv_load(clean_sales, full_output)
+for key, value in verify_result.items():
+    print(f&quot;  {key:&lt;20}: {value}&quot;)
+
+# Log the run
+log_path = os.path.join(this_dir, &quot;pipeline_run_log.csv&quot;)
+log_pipeline_run(&quot;daily_sales_etl&quot;, len(clean_sales), len(clean_sales), &quot;success&quot;, log_path)
+log_pipeline_run(&quot;daily_sales_etl&quot;, 15, 15, &quot;success&quot;, log_path)
+
+# Read log back
+df_log = pd.read_csv(log_path)
+print(&quot;\n=== PIPELINE RUN LOG ===&quot;)
+print(df_log)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3 — Full Load Verification Suite</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+Write a function called run_load_verification(source_df, db_path, table_name) that:
+  1. Connects to the SQLite database
+  2. Counts rows in the table: SELECT COUNT(*) FROM &lt;table_name&gt;
+  3. Checks that the count matches len(source_df)
+  4. Reads a sample of 3 rows from the DB and prints them
+  5. Checks that all column names in source_df exist in the DB table
+  6. Returns a dict: {&quot;row_count_match&quot;: bool, &quot;columns_match&quot;: bool,
+                      &quot;db_row_count&quot;: int, &quot;expected&quot;: int, &quot;status&quot;: &quot;pass&quot;/&quot;fail&quot;}
+
+Call it for the &quot;fact_sales&quot; table in sales_warehouse.db.
+(row count will be 12 since we appended 2 extra records earlier)
+
+Expected output:
+    Row count match: True  (DB=12, Expected=10 -- False, since we appended extras)
+    Columns match: True
+    Status: fail (or pass if you adjusted expected count)
+
+Note: The &quot;row_count_match&quot; will be False because we appended extra rows.
+The function should still run and report accurately.</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — SMART SCHEMA AGENT: STAGE 2 — AUDIT LOG
+══════════════════════════════════════════════════════════════
+ CUMULATIVE PROJECT — Stage 2 builds on Stage 1 (W6).
+ The agent now records every query it executes to an audit_log table.
+
+ Why this matters: production systems must be auditable. When something goes
+ wrong at 2am, the audit log tells you what ran, when, and whether it failed.
+ This is also a compliance requirement in regulated industries.
+
+ New this week:
+   - _init_audit_log(): creates the audit_log table on startup
+   - execute_query(sql, params): runs the query and writes a log entry
+   - get_audit_history(limit): reads back the last N log entries
+
+ The audit_log is just another table in the same SQLite database.
+
+ EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D4_Data_Loading.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import sqlite3
+from datetime import datetime
+
+
+class SmartSchemaAgent:
+    &quot;&quot;&quot;
+    A governed database agent. Grows each week (W6-W11).
+    Stage 2 — adds audit logging for every executed query.
+    &quot;&quot;&quot;
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+        self.cur  = conn.cursor()
+        self._init_audit_log()
+
+    def _init_audit_log(self):
+        self.cur.execute(&#x27;&#x27;&#x27;
+            CREATE TABLE IF NOT EXISTS audit_log (
+                log_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT    NOT NULL,
+                sql_text  TEXT    NOT NULL,
+                row_count INTEGER,
+                status    TEXT    NOT NULL
+            )
+        &#x27;&#x27;&#x27;)
+        self.conn.commit()
+
+    def _write_log(self, timestamp, sql, row_count, status):
+        self.cur.execute(
+            &quot;INSERT INTO audit_log (timestamp, sql_text, row_count, status) VALUES (?,?,?,?)&quot;,
+            (timestamp, sql[:200], row_count, status),
+        )
+        self.conn.commit()
+
+    def execute_query(self, sql: str, params: tuple = ()) -&gt; list:
+        &quot;&quot;&quot;Execute any SQL and record the outcome in audit_log.&quot;&quot;&quot;
+        ts = datetime.now().strftime(&quot;%Y-%m-%d %H:%M:%S&quot;)
+        try:
+            self.cur.execute(sql, params)
+            rows = self.cur.fetchall()
+            self.conn.commit()
+            self._write_log(ts, sql, len(rows), &quot;OK&quot;)
+            return rows
+        except Exception as e:
+            self._write_log(ts, sql, 0, f&quot;ERROR: {e}&quot;)
+            raise
+
+    def get_audit_history(self, limit: int = 10) -&gt; list:
+        &quot;&quot;&quot;Return the last N audit log entries, newest first.&quot;&quot;&quot;
+        self.cur.execute(
+            &quot;SELECT log_id, timestamp, sql_text, row_count, status &quot;
+            &quot;FROM audit_log ORDER BY log_id DESC LIMIT ?&quot;,
+            (limit,),
+        )
+        return self.cur.fetchall()
+
+
+# Demo
+conn = sqlite3.connect(&quot;:memory:&quot;)
+cur = conn.cursor()
+cur.execute(&quot;CREATE TABLE employees (id INTEGER PRIMARY KEY, name TEXT, dept TEXT, salary REAL)&quot;)
+cur.executemany(&quot;INSERT INTO employees VALUES (?,?,?,?)&quot;, [
+    (1, &quot;Alice&quot;, &quot;Engineering&quot;, 95000),
+    (2, &quot;Bob&quot;,   &quot;Sales&quot;,       72000),
+    (3, &quot;Carol&quot;, &quot;Finance&quot;,     81000),
+])
+conn.commit()
+
+agent = SmartSchemaAgent(conn)
+
+agent.execute_query(&quot;SELECT * FROM employees WHERE dept = ?&quot;, (&quot;Engineering&quot;,))
+agent.execute_query(&quot;SELECT COUNT(*) FROM employees&quot;)
+agent.execute_query(&quot;UPDATE employees SET salary = ? WHERE name = ?&quot;, (98000, &quot;Alice&quot;))
+
+print(&quot;Audit trail:&quot;)
+for log_id, ts, sql, rows, status in agent.get_audit_history():
+    print(f&quot;  [{log_id}] {status:&lt;5} | rows={rows} | {sql[:45]}&quot;)
+
+conn.close()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 4 — SMART SCHEMA AGENT: STAGE 2
+══════════════════════════════════════════════════════════════
+ Build the SmartSchemaAgent with the audit log using the starting data below.
+ Add one method that does not appear in the example:
+
+   get_query_summary(self) -&gt; dict
+     Reads audit_log and returns:
+       &quot;total_queries&quot;      : count of all entries
+       &quot;successful_queries&quot; : count with status &quot;OK&quot;
+       &quot;failed_queries&quot;     : count where status starts with &quot;ERROR&quot;
+       &quot;most_recent&quot;        : timestamp of the latest entry (or None)
+
+ Using agent.execute_query(), run these 4 queries in order:
+   1. SELECT * FROM orders
+   2. SELECT region, SUM(amount) FROM orders GROUP BY region
+   3. INSERT INTO orders VALUES (5, &#x27;Tablet&#x27;, 1200.0, &#x27;West&#x27;)
+   4. SELECT COUNT(*) FROM orders
+
+ Then print:
+   - The full audit history (oldest first)
+   - The summary dict
+
+ Expected output:
+     Audit history:
+       [1] OK | rows=4 | SELECT * FROM orders
+       [2] OK | rows=2 | SELECT region, SUM(amount) FROM orders GROUP BY region
+       [3] OK | rows=0 | INSERT INTO orders VALUES (5, &#x27;Tablet&#x27;, 1200.0...
+       [4] OK | rows=1 | SELECT COUNT(*) FROM orders
+     Summary: {&#x27;total_queries&#x27;: 4, &#x27;successful_queries&#x27;: 4, &#x27;failed_queries&#x27;: 0, &#x27;most_recent&#x27;: &#x27;...&#x27;}
+
+ --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D4_Data_Loading.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import sqlite3
+from datetime import datetime
+
+conn = sqlite3.connect(&quot;:memory:&quot;)
+cur = conn.cursor()
+cur.execute(&quot;CREATE TABLE orders (order_id INTEGER PRIMARY KEY, product TEXT, amount REAL, region TEXT)&quot;)
+cur.executemany(&quot;INSERT INTO orders VALUES (?,?,?,?)&quot;, [
+    (1, &quot;Laptop&quot;,   4500.0, &quot;North&quot;),
+    (2, &quot;Monitor&quot;,  350.0,  &quot;South&quot;),
+    (3, &quot;Keyboard&quot;, 89.0,   &quot;North&quot;),
+    (4, &quot;Tablet&quot;,   2100.0, &quot;East&quot;),
+])
+conn.commit()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 5 — SECURITY GATE: PIPELINE INTEGRITY  (CIA: I)
+══════════════════════════════════════════════════════════════
+
+ Analogy: the courier&#x27;s tamper-evident seal — if the package was opened
+ in transit, the seal breaks and the recipient knows before signing for it.
+
+ Problem: a DataFrame travels through multiple pipeline stages (extract →
+ transform → load). Any stage could corrupt, truncate, or silently alter rows.
+ Without a fingerprint, a 1-row change is invisible until a downstream report
+ shows wrong numbers two weeks later.
+
+ Pattern:
+   1. At extraction time: compute sha256 hash of df.to_csv(index=False)
+   2. Store the hash in the audit_log alongside the batch metadata
+   3. At load time: recompute hash of the DataFrame about to be written
+   4. Compare: if they differ, raise TamperDetectedError and halt the load
+
+ What changes the hash:
+   - Any cell value changed (even by 1 cent in a salary column)
+   - Any row added or deleted
+   - Column order change (to_csv is order-sensitive)
+
+ What does NOT trigger the hash:
+   - Re-running the same transformation with the same input
+
+ Libraries: hashlib.sha256 (stdlib, no install)
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D4_Data_Loading.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+import pandas as pd
+
+
+class TamperDetectedError(Exception):
+    pass
+
+
+def compute_fingerprint(df: pd.DataFrame) -&gt; str:
+    payload = df.to_csv(index=False).encode(&quot;utf-8&quot;)
+    return hashlib.sha256(payload).hexdigest()
+
+
+def verify_pipeline_integrity(df_at_extract: pd.DataFrame, df_at_load: pd.DataFrame) -&gt; None:
+    expected = compute_fingerprint(df_at_extract)
+    actual   = compute_fingerprint(df_at_load)
+    if expected != actual:
+        raise TamperDetectedError(
+            f&quot;Fingerprint mismatch\n  expected: {expected}\n  actual:   {actual}&quot;
+        )
+    print(f&quot;Integrity OK  sha256={expected[:16]}...&quot;)
+
+
+employees = pd.DataFrame({
+    &quot;employee_id&quot;: [1, 2, 3],
+    &quot;name&quot;:        [&quot;Alice&quot;, &quot;Bob&quot;, &quot;Carol&quot;],
+    &quot;salary&quot;:      [95000, 72000, 81000],
+})
+
+fp = compute_fingerprint(employees)
+print(f&quot;Fingerprint at extract: {fp[:16]}...&quot;)
+
+# Clean pass
+verify_pipeline_integrity(employees, employees.copy())
+
+# Tampered load
+tampered = employees.copy()
+tampered.loc[1, &quot;salary&quot;] = 9999
+try:
+    verify_pipeline_integrity(employees, tampered)
+except TamperDetectedError as e:
+    print(f&quot;TamperDetectedError: {e}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 5
+══════════════════════════════════════════════════════════════
+
+ Use compute_fingerprint() and verify_pipeline_integrity() from the example above.
+
+ 1. Compute the fingerprint of extract_df and print it.
+
+ 2. Simulate a clean pipeline: load_df = extract_df.copy()
+    Call verify_pipeline_integrity(extract_df, load_df).
+    Expected: no exception, prints &quot;Integrity OK&quot;.
+
+ 3. Simulate a tamper: make a copy of extract_df, change one salary value,
+    then call verify_pipeline_integrity(extract_df, tampered_df).
+    Expected: TamperDetectedError is raised; print the expected and actual hashes.</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D4_Data_Loading.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+
+extract_df = pd.DataFrame({
+    &quot;employee_id&quot;: [1, 2, 3, 4],
+    &quot;name&quot;:        [&quot;Alice&quot;, &quot;Bob&quot;, &quot;Carol&quot;, &quot;Dave&quot;],
+    &quot;department&quot;:  [&quot;Engineering&quot;, &quot;Sales&quot;, &quot;Finance&quot;, &quot;Engineering&quot;],
+    &quot;salary&quot;:      [95000, 72000, 81000, 88000],
+})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-5">Day 5 — Pipeline Automation</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-5"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 7  |  DAY 5  |  PIPELINE AUTOMATION</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Set up Python&#x27;s logging module for structured pipeline logs
+ 2. Schedule a pipeline to run at intervals using the schedule library
+ 3. Wrap pipeline steps in try/except for error recovery and alerting
+
+ TIME:  ~30-35 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;Python logging module tutorial data engineering&quot;
+ Video: &quot;Python logging tutorial: loggers, handlers, and formatters&quot; -- teclado
+       https://www.youtube.com/watch?v=b4Ms4wxJuPg
+       (verified live; kept alongside the search string in case it rots)
+ Search: &quot;Python schedule library automate tasks&quot;
+ Video: &quot;How to Schedule Tasks in Python using schedule library&quot; -- Michael Kitas
+       https://www.youtube.com/watch?v=Q9hbbB9rMfM
+       (verified live; kept alongside the search string in case it rots)</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+Install if needed:  pip install schedule</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D5_Pipeline_Automation.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import logging
+import os
+import time
+from datetime import datetime
+import pandas as pd
+import io
+
+this_dir = os.path.dirname(__file__)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — LOGGING WITH PYTHON&#x27;S logging MODULE</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+print() is fine for quick debugging, but for production pipelines you need:
+  - Timestamps on every message
+  - Severity levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+  - Log output to both the console AND a file simultaneously
+  - Ability to filter by level (suppress DEBUG in production)
+
+LOGGING LEVELS (from lowest to highest severity):
+  DEBUG    -- detailed diagnostic information (development only)
+  INFO     -- general operational messages (job started, rows read)
+  WARNING  -- something unexpected but not a failure
+  ERROR    -- a step failed but the pipeline can continue
+  CRITICAL -- the pipeline cannot continue
+
+SETUP PATTERN:
+  logging.basicConfig(...)  -- one-time configuration
+  logger = logging.getLogger(&quot;pipeline_name&quot;)
+  logger.info(&quot;message&quot;)
+  logger.error(&quot;message&quot;, exc_info=True)  -- includes stack trace
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D5_Pipeline_Automation.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def setup_logger(pipeline_name, log_dir=None, level=logging.INFO):
+    &quot;&quot;&quot;
+    Create a logger with console and optional file handlers.
+    Returns a configured logger.
+    &quot;&quot;&quot;
+    logger = logging.getLogger(pipeline_name)
+    logger.setLevel(level)
+
+    # Prevent adding duplicate handlers if function is called multiple times
+    if logger.handlers:
+        logger.handlers.clear()
+
+    # Formatter: include timestamp, level, logger name, and message
+    formatter = logging.Formatter(
+        fmt=&quot;%(asctime)s | %(levelname)-8s | %(name)s | %(message)s&quot;,
+        datefmt=&quot;%Y-%m-%d %H:%M:%S&quot;,
+    )
+
+    # Console handler — always add this
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # File handler — add only if log_dir is specified
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, f&quot;{pipeline_name}.log&quot;)
+        file_handler = logging.FileHandler(log_file, encoding=&quot;utf-8&quot;)
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        logger.info(f&quot;Logging to file: {log_file}&quot;)
+
+    return logger
+
+# Create a logger for the daily sales pipeline
+log_dir = os.path.join(this_dir, &quot;logs&quot;)
+logger = setup_logger(&quot;daily_sales_etl&quot;, log_dir=log_dir)
+
+# Use the logger in pipeline steps
+logger.info(&quot;Pipeline starting&quot;)
+logger.info(&quot;Reading source file: sales_feed.csv&quot;)
+logger.debug(&quot;Debug message — only visible in DEBUG mode&quot;)
+logger.warning(&quot;Null values found in &#x27;region&#x27; column — filling with &#x27;Unknown&#x27;&quot;)
+logger.info(&quot;Transformed 10 rows successfully&quot;)
+logger.info(&quot;Loaded 10 rows to database&quot;)
+logger.info(&quot;Pipeline complete&quot;)
+
+# Simulate an error log
+try:
+    result = 1 / 0
+except ZeroDivisionError as e:
+    logger.error(f&quot;Calculation failed: {e}&quot;, exc_info=True)
+
+print(&quot;\nCheck the logs/ folder for daily_sales_etl.log&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1 — Logged Pipeline Steps</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+Create a new logger called &quot;inventory_sync&quot; that writes to the logs/ folder.
+Write a function called run_logged_pipeline(logger) that:
+  1. Logs INFO: &quot;Starting inventory sync&quot;
+  2. Logs INFO: &quot;Connecting to source database&quot;
+  3. Logs WARNING: &quot;Source has 3 rows with null SKU — skipping them&quot;
+  4. Logs INFO: &quot;Processing 497 valid rows&quot;
+  5. Logs INFO: &quot;Loading to warehouse...&quot;
+  6. Logs INFO: &quot;Sync complete. Rows loaded: 497&quot;
+  7. Returns True
+
+Call run_logged_pipeline with your new logger.
+Print: &quot;Pipeline returned:&quot;, result
+
+Expected output (with timestamps):
+    2024-01-15 12:00:00 | INFO     | inventory_sync | Starting inventory sync
+    ...
+    Pipeline returned: True</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — SCHEDULING WITH THE schedule LIBRARY</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+The schedule library lets you define when a function should run:
+  every 5 minutes, every hour, every day at 6:00 AM, etc.
+
+INSTALLATION: pip install schedule
+
+PATTERN:
+  import schedule
+  import time
+
+  def my_job():
+      print(&quot;Running job...&quot;)
+
+  schedule.every(5).minutes.do(my_job)
+  schedule.every().hour.do(my_job)
+  schedule.every().day.at(&quot;06:00&quot;).do(my_job)
+  schedule.every().monday.at(&quot;08:30&quot;).do(my_job)
+
+  while True:
+      schedule.run_pending()
+      time.sleep(1)
+
+The while True loop keeps the script running and checks for pending jobs.
+NOTE: schedule does NOT run in the background — it needs a dedicated process.
+For production automation, use cron (Linux), Task Scheduler (Windows),
+or Airflow/Prefect (see Week 8).
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D5_Pipeline_Automation.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>try:
+    import schedule
+
+    # Define the pipeline job
+    def run_sales_etl_job():
+        logger.info(&quot;Scheduled run starting...&quot;)
+        # In production this would call your actual pipeline function
+        logger.info(&quot;Extracting data...&quot;)
+        logger.info(&quot;Transforming data...&quot;)
+        logger.info(&quot;Loading data...&quot;)
+        logger.info(&quot;Scheduled run complete.&quot;)
+        return schedule.CancelJob   # return this to cancel after running once
+
+    # Set up the schedule
+    schedule.every(1).seconds.do(run_sales_etl_job)  # every second for demo
+
+    print(&quot;\n=== SCHEDULE DEMO ===&quot;)
+    print(&quot;Scheduled: run_sales_etl_job every 1 second&quot;)
+    print(&quot;Running for 3 seconds then stopping...&quot;)
+
+    # Run the loop for a short demo (time.sleep(1) then break avoids blocking forever)
+    start_time = time.time()
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+        if time.time() - start_time &gt; 3:   # run for 3 seconds max for demo
+            break
+
+    print(&quot;Schedule demo complete.&quot;)
+    schedule.clear()   # clear all scheduled jobs
+
+except ImportError:
+    print(&quot;\nschedule not installed. Run: pip install schedule&quot;)
+    print(&quot;Example schedule patterns:&quot;)
+    print(&quot;  schedule.every(5).minutes.do(job)&quot;)
+    print(&quot;  schedule.every().day.at(&#x27;06:00&#x27;).do(job)&quot;)
+    print(&quot;  schedule.every().monday.do(job)&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2 — Scheduled Job Simulator</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+Without actually blocking execution, write a function called
+simulate_scheduled_runs(job_function, run_count) that:
+  1. Calls job_function run_count times with a 0.1 second pause between calls
+  2. Prints &quot;Run X of Y: &lt;datetime_now&gt;&quot; before each call
+  3. Catches any exception from job_function and logs it as a warning
+  4. Returns a dict: {&quot;total_runs&quot;: n, &quot;successful&quot;: n, &quot;failed&quot;: n}
+
+Write a job function called sample_job() that:
+  - Prints &quot;Job executed&quot;
+  - Returns True
+
+Call simulate_scheduled_runs(sample_job, 3) and print the summary.
+
+Expected output:
+    Run 1 of 3: 2024-01-15 12:00:00
+    Job executed
+    Run 2 of 3: 2024-01-15 12:00:00
+    Job executed
+    Run 3 of 3: 2024-01-15 12:00:00
+    Job executed
+    {&#x27;total_runs&#x27;: 3, &#x27;successful&#x27;: 3, &#x27;failed&#x27;: 0}</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — ERROR RECOVERY: try/except AROUND PIPELINE STEPS</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+A production pipeline must:
+  1. Catch errors at each step and log them (not crash silently)
+  2. Decide whether to continue or abort when a step fails
+  3. Send an alert (email, Slack, etc.) on critical failures
+  4. Record the failure in a log for post-mortem analysis
+
+PATTERNS:
+  - Wrap each stage in try/except
+  - Use a &quot;pipeline_status&quot; variable to track state
+  - Use finally to run cleanup code (close connections, write final log entry)
+  - Use raise to re-raise critical errors that must stop everything
+
+EXAMPLE ──────────────────────────────────────────────────────
+
+Simulated data source</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D5_Pipeline_Automation.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>SALES_CSV = &quot;&quot;&quot;sale_id,sale_date,rep,product,qty,price
+1,2024-01-10,Alice,Laptop,1,1299.99
+2,2024-01-11,Bob,Monitor,2,399.99
+3,CORRUPT_ROW
+4,2024-01-13,Carol,Keyboard,3,149.99
+&quot;&quot;&quot;
+
+def extract_step(csv_data, pipeline_logger):
+    &quot;&quot;&quot;Extract step with error handling.&quot;&quot;&quot;
+    pipeline_logger.info(&quot;[EXTRACT] Starting extraction&quot;)
+    try:
+        df = pd.read_csv(io.StringIO(csv_data))
+        pipeline_logger.info(f&quot;[EXTRACT] Read {len(df)} rows&quot;)
+        return df
+    except Exception as e:
+        pipeline_logger.error(f&quot;[EXTRACT] Failed: {e}&quot;)
+        raise   # re-raise to signal abort to the caller
+
+def transform_step(df, pipeline_logger):
+    &quot;&quot;&quot;Transform step with error handling.&quot;&quot;&quot;
+    pipeline_logger.info(&quot;[TRANSFORM] Starting transformation&quot;)
+    errors = []
+    try:
+        df[&quot;qty&quot;]   = pd.to_numeric(df[&quot;qty&quot;],   errors=&quot;coerce&quot;)
+        df[&quot;price&quot;] = pd.to_numeric(df[&quot;price&quot;], errors=&quot;coerce&quot;)
+        before = len(df)
+        df = df.dropna(subset=[&quot;qty&quot;, &quot;price&quot;])
+        dropped = before - len(df)
+        if dropped &gt; 0:
+            pipeline_logger.warning(f&quot;[TRANSFORM] Dropped {dropped} invalid rows&quot;)
+            errors.append(f&quot;{dropped} rows dropped&quot;)
+        df[&quot;revenue&quot;] = (df[&quot;qty&quot;] * df[&quot;price&quot;]).round(2)
+        pipeline_logger.info(f&quot;[TRANSFORM] Output: {len(df)} clean rows&quot;)
+        return df
+    except Exception as e:
+        pipeline_logger.error(f&quot;[TRANSFORM] Failed: {e}&quot;)
+        raise
+
+def load_step(df, output_path, pipeline_logger):
+    &quot;&quot;&quot;Load step with error handling.&quot;&quot;&quot;
+    pipeline_logger.info(f&quot;[LOAD] Writing {len(df)} rows to {os.path.basename(output_path)}&quot;)
+    try:
+        df.to_csv(output_path, index=False)
+        pipeline_logger.info(&quot;[LOAD] Complete&quot;)
+        return len(df)
+    except Exception as e:
+        pipeline_logger.error(f&quot;[LOAD] Failed: {e}&quot;)
+        raise
+
+def run_pipeline_with_recovery(csv_data, output_path, pipeline_logger):
+    &quot;&quot;&quot;
+    Run the full ETL pipeline with error recovery at each step.
+    Returns a run report dict.
+    &quot;&quot;&quot;
+    run_report = {
+        &quot;pipeline&quot;: &quot;daily_sales_etl&quot;,
+        &quot;start_time&quot;: datetime.now().isoformat(),
+        &quot;status&quot;: &quot;started&quot;,
+        &quot;rows_extracted&quot;: 0,
+        &quot;rows_loaded&quot;: 0,
+        &quot;errors&quot;: [],
+    }
+
+    pipeline_logger.info(&quot;=&quot;*50)
+    pipeline_logger.info(&quot;PIPELINE RUN STARTING&quot;)
+
+    try:
+        # Extract
+        raw_df = extract_step(csv_data, pipeline_logger)
+        run_report[&quot;rows_extracted&quot;] = len(raw_df)
+
+        # Transform
+        clean_df = transform_step(raw_df, pipeline_logger)
+
+        # Load
+        rows_loaded = load_step(clean_df, output_path, pipeline_logger)
+        run_report[&quot;rows_loaded&quot;] = rows_loaded
+        run_report[&quot;status&quot;] = &quot;success&quot;
+
+    except Exception as e:
+        run_report[&quot;status&quot;] = &quot;failed&quot;
+        run_report[&quot;errors&quot;].append(str(e))
+        pipeline_logger.critical(f&quot;PIPELINE FAILED: {e}&quot;)
+        # In production: send_alert(email=&quot;data-team@corp.com&quot;, message=str(e))
+
+    finally:
+        run_report[&quot;end_time&quot;] = datetime.now().isoformat()
+        pipeline_logger.info(f&quot;PIPELINE {run_report[&#x27;status&#x27;].upper()}&quot;)
+        pipeline_logger.info(&quot;=&quot;*50)
+
+    return run_report
+
+# Run the pipeline
+output = os.path.join(this_dir, &quot;recovered_output.csv&quot;)
+report = run_pipeline_with_recovery(SALES_CSV, output, logger)
+
+print(&quot;\n=== RUN REPORT ===&quot;)
+for key, value in report.items():
+    print(f&quot;  {key:&lt;20}: {value}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3 — Retry Logic</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+A common pattern in production is to retry a step if it fails (e.g. network error).
+
+Write a function called run_with_retry(func, max_attempts=3, delay_sec=0.5, **kwargs)
+that:
+  1. Tries to call func(**kwargs) up to max_attempts times
+  2. If the call succeeds (no exception), returns the result
+  3. If it fails, logs a WARNING with the attempt number and error
+  4. Waits delay_sec seconds between attempts (use time.sleep)
+  5. If all attempts fail, logs an ERROR and returns None
+
+To test: write a function called flaky_extract(fail_count) that uses a
+mutable list or global to track how many times it has been called,
+raising an Exception on the first fail_count calls, then succeeding.
+
+Test: flaky_extract should fail twice then succeed on attempt 3.
+
+Expected output:
+    WARNING: Attempt 1 failed: Simulated failure
+    WARNING: Attempt 2 failed: Simulated failure
+    INFO: Attempt 3 succeeded.
+    Result: &#x27;success&#x27;</pre><h2 id="day-6">Day 6 — Weekly Project — Tested Etl Pipeline</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-6"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 7  |  DAY 6  |  WEEKLY PROJECT — TESTED ETL PIPELINE
+══════════════════════════════════════════════════════════════
+
+ PROJECT GOAL
+ ────────────
+ Build a production-quality ETL pipeline that extracts employee
+ data from CSV, cleans and transforms it, loads it into SQLite,
+ and verifies correctness with a suite of test functions.
+
+ SKILLS PRACTICED
+ ─────────────────
+ - Writing ETL functions (extract, transform, load)
+ - Logging with the logging module (console + file)
+ - Data cleaning: nulls, duplicates, type conversion
+ - Writing test functions with assertions
+ - Running and reporting a full pipeline
+
+ TIME:  ~45-60 minutes
+
+══════════════════════════════════════════════════════════════</pre><pre class="box">── SETUP — provided by teacher, do not change ────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D6_Project_Tested_ETL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+import logging
+import sqlite3
+import pandas as pd
+import io
+import os
+from datetime import datetime</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">── Logging configuration ──────────────────────────────────────
+Writes to both the console and a log file in the same folder.</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D6_Project_Tested_ETL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+this_dir = os.path.dirname(os.path.abspath(__file__))
+log_path  = os.path.join(this_dir, &quot;etl_pipeline.log&quot;)
+
+logger = logging.getLogger(&quot;etl_pipeline&quot;)
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    _fmt = logging.Formatter(
+        fmt=&quot;%(asctime)s | %(levelname)-8s | %(message)s&quot;,
+        datefmt=&quot;%Y-%m-%d %H:%M:%S&quot;,
+    )
+    _console = logging.StreamHandler()
+    _console.setFormatter(_fmt)
+    logger.addHandler(_console)
+
+    _file = logging.FileHandler(log_path, encoding=&quot;utf-8&quot;)
+    _file.setFormatter(_fmt)
+    logger.addHandler(_file)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">── Sample CSV data ───────────────────────────────────────────
+Contains nulls in rows 6 and 9, and a duplicate of row 1.</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D6_Project_Tested_ETL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+EMPLOYEE_CSV = &quot;&quot;&quot;employee_id,name,department,salary,hire_date
+1,Alice Cohen,Engineering,85000,2021-03-15
+2,Bob Levi,Marketing,72000,2020-07-22
+3,Charlie Mizrahi,Engineering,91000,2019-11-01
+4,Diana Shapiro,HR,68000,2022-01-10
+5,Eve Goldstein,Marketing,75000,2021-09-30
+6,Frank Alon,Engineering,,2020-04-18
+7,Gal Peretz,HR,64000,2023-02-28
+8,Hadas Katz,Marketing,71000,2021-06-14
+9,,Engineering,88000,2020-08-05
+10,Iris Ben-David,HR,66000,2022-11-20
+1,Alice Cohen,Engineering,85000,2021-03-15
+&quot;&quot;&quot;</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">── Helper: path for the SQLite database ─────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D6_Project_Tested_ETL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>DB_PATH = os.path.join(this_dir, &quot;employees.db&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 1 — EXTRACT
+══════════════════════════════════════════════════════════════
+ Write a function called extract(csv_string) that:
+   - Reads the CSV string into a pandas DataFrame using io.StringIO
+   - Logs: &quot;Extracted N rows from source&quot;  (where N is the row count)
+   - Returns the DataFrame
+
+ After defining the function, call it with EMPLOYEE_CSV and
+ store the result in a variable called raw_df.
+ Print the shape of raw_df.
+
+ Expected output:
+     2025-01-01 00:00:00 | INFO     | Extracted 11 rows from source
+     Raw shape: (11, 5)</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D6_Project_Tested_ETL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+
+
+
+def extract(csv_string):
+    pass   # replace with your code</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 2 — TRANSFORM
+══════════════════════════════════════════════════════════════
+ Write a function called transform(df) that:
+   - Works on a copy of df (use df.copy())
+   - Drops rows where name is null — log: &quot;Dropped N rows with null name&quot;
+   - Fills null salary values with the median salary — log: &quot;Filled N null salaries with median&quot;
+   - Removes duplicate rows — log: &quot;Removed N duplicate rows&quot;
+   - Converts hire_date column to datetime (pd.to_datetime)
+   - Adds a column &quot;years_employed&quot;: integer years from hire_date to today
+     (use datetime.now().year minus hire_date.dt.year)
+   - Logs: &quot;Transform complete. Output: N rows&quot;
+   - Returns the cleaned DataFrame
+
+ After defining the function, call it with raw_df and store
+ the result in a variable called clean_df.
+ Print clean_df[[&quot;name&quot;,&quot;salary&quot;,&quot;years_employed&quot;]].
+
+ Expected output (values approximate — years depend on run date):
+     2025-01-01 00:00:00 | INFO     | Dropped 1 rows with null name
+     2025-01-01 00:00:00 | INFO     | Filled 1 null salaries with median
+     2025-01-01 00:00:00 | INFO     | Removed 1 duplicate rows
+     2025-01-01 00:00:00 | INFO     | Transform complete. Output: 9 rows
+               name  salary  years_employed
+     0   Alice Cohen   85000               4
+     ...</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D6_Project_Tested_ETL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+
+
+
+def transform(df):
+    pass   # replace with your code</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 3 — LOAD
+══════════════════════════════════════════════════════════════
+ Write a function called load(df, db_path) that:
+   - Opens a sqlite3 connection to db_path
+   - Writes df to a SQLite table named &quot;employees&quot;
+     (use df.to_sql with if_exists=&quot;replace&quot;, index=False)
+   - Logs: &quot;Loaded N rows to employees table&quot;
+   - Closes the connection
+   - Returns the number of rows loaded
+
+ After defining the function, call it with clean_df and DB_PATH.
+ Store the return value in rows_loaded.
+ Print: &quot;Rows in database:&quot;, rows_loaded
+
+ Expected output:
+     2025-01-01 00:00:00 | INFO     | Loaded 9 rows to employees table
+     Rows in database: 9</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D6_Project_Tested_ETL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+
+
+
+def load(df, db_path):
+    pass   # replace with your code</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 4 — WRITE TESTS
+══════════════════════════════════════════════════════════════
+ Write three test functions. Each function should run its own
+ logic, assert the condition, and print &quot;PASS: &lt;test name&gt;&quot;
+ or &quot;FAIL: &lt;test name&gt; — &lt;reason&gt;&quot; using try/except AssertionError.
+
+ test_extract():
+   - Calls extract(EMPLOYEE_CSV)
+   - Asserts the returned DataFrame has exactly these columns:
+     [&quot;employee_id&quot;,&quot;name&quot;,&quot;department&quot;,&quot;salary&quot;,&quot;hire_date&quot;]
+   - Asserts the row count is 11
+
+ test_transform():
+   - Calls extract(EMPLOYEE_CSV) then transform(result)
+   - Asserts no nulls exist in any column (df.isnull().sum().sum() == 0)
+   - Asserts &quot;years_employed&quot; is in the columns
+   - Asserts all values in years_employed are positive integers
+
+ test_load():
+   - Calls load(clean_df, DB_PATH)   (use the clean_df from Task 2)
+   - Opens a sqlite3 connection and queries: SELECT COUNT(*) FROM employees
+   - Asserts the count equals len(clean_df)
+
+ Do NOT call the test functions yet — that is Task 5.
+
+ Expected output when called: (see Task 5)</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D6_Project_Tested_ETL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+
+
+
+def test_extract():
+    pass   # replace with your code
+
+
+def test_transform():
+    pass   # replace with your code
+
+
+def test_load():
+    pass   # replace with your code</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 5 — RUN THE PIPELINE AND ALL TESTS
+══════════════════════════════════════════════════════════════
+ Write a function called run_pipeline() that:
+   - Calls extract(EMPLOYEE_CSV)  → raw_df
+   - Calls transform(raw_df)      → clean_df
+   - Calls load(clean_df, DB_PATH)
+   - Returns a dict:
+       {&quot;rows_extracted&quot;: N, &quot;rows_after_clean&quot;: N, &quot;rows_loaded&quot;: N}
+
+ After defining run_pipeline, call it and store the result.
+ Then call test_extract(), test_transform(), and test_load()
+ in sequence. Store whether all three printed PASS (you can
+ count manually or track with a list).
+
+ Expected output:
+     2025-01-01 00:00:00 | INFO     | Extracted 11 rows from source
+     2025-01-01 00:00:00 | INFO     | Dropped 1 rows with null name
+     2025-01-01 00:00:00 | INFO     | Filled 1 null salaries with median
+     2025-01-01 00:00:00 | INFO     | Removed 1 duplicate rows
+     2025-01-01 00:00:00 | INFO     | Transform complete. Output: 9 rows
+     2025-01-01 00:00:00 | INFO     | Loaded 9 rows to employees table
+     PASS: test_extract
+     PASS: test_transform
+     PASS: test_load</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D6_Project_Tested_ETL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>
+
+
+
+def run_pipeline():
+    pass   # replace with your code</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 6 — PIPELINE RUN REPORT
+══════════════════════════════════════════════════════════════
+ Using the results from Task 5, print a formatted run report.
+ The report must include:
+   - Rows extracted from source
+   - Rows after cleaning
+   - Rows loaded to database
+   - Number of tests passed (e.g. &quot;3 / 3&quot;)
+   - Pipeline status: &quot;SUCCESS&quot; if all 3 tests passed, else &quot;NEEDS REVIEW&quot;
+
+ Expected output:
+     ══════════════════════════════════
+      ETL PIPELINE RUN REPORT
+     ══════════════════════════════════
+      Rows extracted   : 11
+      Rows after clean : 9
+      Rows loaded      : 9
+      Tests passed     : 3 / 3
+      Status           : SUCCESS
+     ══════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 6 — PYTEST: THE PRODUCTION TEST RUNNER
+══════════════════════════════════════════════════════════════
+ ROYAL ROAD STANDARD — W7
+ The test functions in Task 4 used manual try/except — a good start.
+ pytest is the industry standard: it discovers test_ functions automatically,
+ runs them in isolation, and reports which passed or failed with a clear diff.
+
+ In production, test files are saved as test_pipeline.py and run with:
+   pytest test_pipeline.py -v
+
+ pytest rules:
+   - Function names must start with test_
+   - Use plain assert — no try/except needed
+   - pytest catches AssertionError and formats the failure for you
+   - One test = one behaviour; keep tests small and focused
+
+ Since we are in a notebook, we use a run_tests() helper to simulate pytest.
+ The pattern is identical — only the runner is different.
+
+ EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D6_Project_Tested_ETL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># pytest pattern demonstrated inline
+# In production this lives in test_pipeline.py and you run: pytest test_pipeline.py -v
+
+def add(a, b):
+    return a + b
+
+def multiply(a, b):
+    return a * b
+
+
+# Test functions: start with test_, use assert directly
+def test_add_basic():
+    assert add(2, 3) == 5
+
+def test_add_zero():
+    assert add(0, 0) == 0
+
+def test_multiply():
+    assert multiply(3, 4) == 12
+
+def test_multiply_negative():
+    assert multiply(-2, 5) == -10
+
+
+# Notebook runner that mimics pytest -v output
+def run_tests(*fns):
+    passed, failed = 0, 0
+    for fn in fns:
+        try:
+            fn()
+            print(f&quot;PASS  {fn.__name__}&quot;)
+            passed += 1
+        except AssertionError as e:
+            print(f&quot;FAIL  {fn.__name__}: {e}&quot;)
+            failed += 1
+    print(f&quot;\n{passed} passed, {failed} failed&quot;)
+
+
+run_tests(test_add_basic, test_add_zero, test_multiply, test_multiply_negative)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 7 — PYTEST-STYLE TEST SUITE
+══════════════════════════════════════════════════════════════
+ ROYAL ROAD STANDARD — W7
+ Rewrite your 3 test functions from Task 4 as proper pytest-style functions.
+ Rules:
+   - Function name starts with test_
+   - Use plain assert — no try/except, no print inside the function
+   - Each function tests exactly one behaviour
+
+ Also write a 4th test:
+   test_no_duplicate_employee_ids()
+   Connects to DB_PATH, reads the employees table into a DataFrame,
+   and asserts that the employee_id column has no duplicate values.
+
+ Run all 4 with run_tests() provided below.
+
+ Expected output:
+     PASS  test_extract
+     PASS  test_transform
+     PASS  test_load
+     PASS  test_no_duplicate_employee_ids
+
+     4 passed, 0 failed
+
+ --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D6_Project_Tested_ETL.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import sqlite3
+import pandas as pd
+
+
+def run_tests(*fns):
+    passed, failed = 0, 0
+    for fn in fns:
+        try:
+            fn()
+            print(f&quot;PASS  {fn.__name__}&quot;)
+            passed += 1
+        except AssertionError as e:
+            print(f&quot;FAIL  {fn.__name__}: {e}&quot;)
+            failed += 1
+    print(f&quot;\n{passed} passed, {failed} failed&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-7">Day 7 — Advanced Testing</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-7"> Mark this day done</label><div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=wZ_WXhwVRG0" target="_blank" rel="noopener"><b>Python Mocking Tutorial: Unit Testing with unittest.mock for Beginners</b><small>CodeLucky</small></a></li><li><a href="https://www.youtube.com/watch?v=dnru6nSnwHU" target="_blank" rel="noopener"><b>pytest parametrize: Test One Function with Multiple Test Cases</b><small>Data Science Simplified</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Python%20unittest%20mock%20tutorial" target="_blank" rel="noopener">Python unittest mock tutorial</a></p></div><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 7  |  DAY 7  |  ADVANCED TESTING
+══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Mock external dependencies with unittest.mock so tests never hit real APIs
+ 2. Write integration tests that run the full pipeline against a real database
+ 3. Validate DataFrames for schema, nulls, and row counts
+ 4. Use pytest.mark.parametrize to test one function against many inputs
+
+ TIME:  ~30 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;Python unittest mock tutorial&quot;
+ Video: &quot;Python Mocking Tutorial: Unit Testing with unittest.mock for Beginners&quot; -- CodeLucky
+       https://www.youtube.com/watch?v=wZ_WXhwVRG0
+       (verified live; kept alongside the search string in case it rots)
+ Search: &quot;pytest parametrize integration tests&quot;
+ Video: &quot;pytest parametrize: Test One Function with Multiple Test Cases&quot; -- Data Science Simplified
+       https://www.youtube.com/watch?v=dnru6nSnwHU
+       (verified live; kept alongside the search string in case it rots)
+
+══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — MOCKING EXTERNAL DEPENDENCIES
+══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ A mock replaces a real object with a fake one that you control.
+ Use mocks to isolate the code under test from external systems:
+ APIs, databases, file systems, clocks.
+
+ unittest.mock key tools:
+   patch(&#x27;module.name&#x27;)       — temporarily replace an object
+   MagicMock()                — a flexible fake object
+   mock.return_value = x      — control what the fake returns
+   mock.side_effect = [a,b]   — return different values on successive calls
+   mock.assert_called_once_with(arg) — verify it was called correctly
+
+ Rule: mock at the boundary where your code calls out to the world.
+ Never mock internal functions — test those directly.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D7_Advanced_Testing.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from unittest.mock import patch, MagicMock
+
+def fetch_exchange_rate(base, target):
+    &quot;&quot;&quot;Calls an external FX API. Returns the exchange rate as a float.&quot;&quot;&quot;
+    import requests
+    response = requests.get(f&#x27;https://api.example.com/rates/{base}/{target}&#x27;)
+    response.raise_for_status()
+    return response.json()[&#x27;rate&#x27;]
+
+def convert_amount(amount_usd, target_currency):
+    &quot;&quot;&quot;Convert a USD amount using the live exchange rate.&quot;&quot;&quot;
+    rate = fetch_exchange_rate(&#x27;USD&#x27;, target_currency)
+    return round(amount_usd * rate, 2)
+
+
+# Mock requests.get so no real HTTP call is made
+with patch(&#x27;requests.get&#x27;) as mock_get:
+    mock_response = MagicMock()
+    mock_response.json.return_value = {&#x27;rate&#x27;: 0.92}
+    mock_get.return_value = mock_response
+
+    result = convert_amount(1000, &#x27;EUR&#x27;)
+    print(f&#x27;Converted: {result} EUR&#x27;)        # 920.0 EUR
+    mock_get.assert_called_once()             # verify the call was made
+    print(&#x27;requests.get called:&#x27;, mock_get.call_count, &#x27;time(s)&#x27;)
+
+# Simulate a 500 error
+with patch(&#x27;requests.get&#x27;) as mock_get:
+    import requests
+    mock_get.side_effect = requests.exceptions.HTTPError(&#x27;500 Server Error&#x27;)
+    try:
+        convert_amount(500, &#x27;GBP&#x27;)
+    except requests.exceptions.HTTPError as e:
+        print(f&#x27;Caught expected error: {e}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1
+══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ The load_pipeline_config function below calls requests.get to fetch
+ a remote JSON config. Write two tests using patch:
+
+ test_load_config_success():
+   - Mock requests.get to return {&#x27;db_host&#x27;: &#x27;prod-db&#x27;, &#x27;batch_size&#x27;: 500}
+   - Call load_pipeline_config(&#x27;https://config.example.com/prod&#x27;)
+   - Assert the returned dict has db_host = &#x27;prod-db&#x27;
+   - Assert requests.get was called exactly once
+
+ test_load_config_404():
+   - Mock requests.get to raise requests.exceptions.HTTPError(&#x27;404&#x27;)
+   - Call load_pipeline_config and assert it raises HTTPError
+
+ Run both with run_tests() provided below.
+
+ Expected output:
+     PASS  test_load_config_success
+     PASS  test_load_config_404
+     2 passed, 0 failed
+
+ --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D7_Advanced_Testing.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import requests
+from unittest.mock import patch, MagicMock
+
+def load_pipeline_config(url):
+    response = requests.get(url)
+    response.raise_for_status()
+    return response.json()
+
+def run_tests(*fns):
+    passed, failed = 0, 0
+    for fn in fns:
+        try:
+            fn()
+            print(f&#x27;PASS  {fn.__name__}&#x27;)
+            passed += 1
+        except AssertionError as e:
+            print(f&#x27;FAIL  {fn.__name__}: {e}&#x27;)
+            failed += 1
+    print(f&#x27;{passed} passed, {failed} failed&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — INTEGRATION TESTS
+══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ A unit test isolates one function and mocks everything else.
+ An integration test runs multiple components together against
+ a real (or realistic) version of the external system.
+
+ For data pipelines, a good integration test:
+   1. Seeds a real SQLite (or test) database with known data
+   2. Runs the full pipeline function (extract → transform → load)
+   3. Queries the output table and asserts the result is correct
+   4. Tears down (cleans up) the database after the test
+
+ Pattern:
+   def test_full_pipeline():
+       conn = setup_test_db(seed_data)
+       run_pipeline(conn)
+       result = conn.execute(&#x27;SELECT ...&#x27;)
+       assert result == expected
+       conn.close()
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D7_Advanced_Testing.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import sqlite3, pandas as pd
+
+# ── System under test ─────────────────────────────────────────
+def extract(conn):
+    return pd.read_sql(&#x27;SELECT * FROM raw_orders&#x27;, conn)
+
+def transform(df):
+    df = df.copy()
+    df = df.dropna(subset=[&#x27;amount&#x27;])
+    df[&#x27;amount&#x27;] = df[&#x27;amount&#x27;].astype(float)
+    df[&#x27;revenue&#x27;] = df[&#x27;amount&#x27;] * df[&#x27;quantity&#x27;]
+    return df
+
+def load(df, conn):
+    df.to_sql(&#x27;clean_orders&#x27;, conn, if_exists=&#x27;replace&#x27;, index=False)
+
+# ── Integration test ──────────────────────────────────────────
+def test_etl_pipeline():
+    conn = sqlite3.connect(&#x27;:memory:&#x27;)
+    # Seed with known data (2 good rows, 1 null amount)
+    conn.execute(&#x27;CREATE TABLE raw_orders (order_id INT, amount REAL, quantity INT)&#x27;)
+    conn.executemany(&#x27;INSERT INTO raw_orders VALUES (?,?,?)&#x27;,
+                     [(1, 100.0, 2), (2, None, 1), (3, 50.0, 4)])
+    conn.commit()
+
+    raw  = extract(conn)
+    clean = transform(raw)
+    load(clean, conn)
+
+    result = conn.execute(&#x27;SELECT COUNT(*) FROM clean_orders&#x27;).fetchone()[0]
+    assert result == 2, f&#x27;Expected 2 rows, got {result}&#x27;
+
+    total = conn.execute(&#x27;SELECT SUM(revenue) FROM clean_orders&#x27;).fetchone()[0]
+    assert total == 400.0, f&#x27;Expected revenue 400.0, got {total}&#x27;
+    conn.close()
+    print(&#x27;PASS  test_etl_pipeline&#x27;)
+
+test_etl_pipeline()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2
+══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ Write an integration test called test_dedup_pipeline() that verifies
+ the dedup_pipeline function below removes duplicates correctly.
+
+ The test must:
+   1. Create an in-memory SQLite DB with a raw_sales table
+   2. Insert 5 rows where rows 1 and 5 are duplicates (same sale_id)
+   3. Call dedup_pipeline(conn)
+   4. Assert the output table &#x27;clean_sales&#x27; has exactly 4 rows
+   5. Assert there are no duplicate sale_ids in clean_sales
+   6. Print &#x27;PASS  test_dedup_pipeline&#x27; on success
+
+ Expected output:
+     PASS  test_dedup_pipeline
+
+ --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D7_Advanced_Testing.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import sqlite3, pandas as pd
+
+def dedup_pipeline(conn):
+    df = pd.read_sql(&#x27;SELECT * FROM raw_sales&#x27;, conn)
+    df = df.drop_duplicates(subset=[&#x27;sale_id&#x27;], keep=&#x27;first&#x27;)
+    df.to_sql(&#x27;clean_sales&#x27;, conn, if_exists=&#x27;replace&#x27;, index=False)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — DATA TESTS
+══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ Data tests validate the data itself, not just the code.
+ They run after every pipeline load to catch silent data quality issues.
+
+ Common data test assertions:
+   assert len(df) &gt; 0                         not empty
+   assert df[&#x27;id&#x27;].nunique() == len(df)       no duplicate primary keys
+   assert df[&#x27;amount&#x27;].notnull().all()        no nulls in required column
+   assert df[&#x27;status&#x27;].isin(VALID).all()      values in allowed set
+   assert (df[&#x27;amount&#x27;] &gt;= 0).all()           no negative amounts
+   assert list(df.columns) == EXPECTED_COLS   schema unchanged
+
+ Wrap them in a validate_dataframe(df, rules) function so you can
+ run the same checks on every table by passing different rule configs.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D7_Advanced_Testing.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+
+def validate_dataframe(df, name, rules):
+    &quot;&quot;&quot;
+    rules: list of (description, assertion_func) tuples.
+    Raises AssertionError on the first failing rule.
+    &quot;&quot;&quot;
+    for description, check in rules:
+        assert check(df), f&#x27;[{name}] FAILED: {description}&#x27;
+    print(f&#x27;[{name}] All {len(rules)} data tests passed.&#x27;)
+
+
+EXPECTED_COLUMNS = [&#x27;order_id&#x27;, &#x27;customer&#x27;, &#x27;amount&#x27;, &#x27;status&#x27;]
+VALID_STATUSES   = {&#x27;open&#x27;, &#x27;closed&#x27;, &#x27;pending&#x27;}
+
+ORDER_RULES = [
+    (&#x27;not empty&#x27;,              lambda df: len(df) &gt; 0),
+    (&#x27;schema correct&#x27;,         lambda df: list(df.columns) == EXPECTED_COLUMNS),
+    (&#x27;no null order_id&#x27;,       lambda df: df[&#x27;order_id&#x27;].notnull().all()),
+    (&#x27;no null amount&#x27;,         lambda df: df[&#x27;amount&#x27;].notnull().all()),
+    (&#x27;amount non-negative&#x27;,    lambda df: (df[&#x27;amount&#x27;] &gt;= 0).all()),
+    (&#x27;unique order_id&#x27;,        lambda df: df[&#x27;order_id&#x27;].nunique() == len(df)),
+    (&#x27;valid status values&#x27;,    lambda df: df[&#x27;status&#x27;].isin(VALID_STATUSES).all()),
+]
+
+good_df = pd.DataFrame({
+    &#x27;order_id&#x27;: [1, 2, 3],
+    &#x27;customer&#x27;: [&#x27;Alice&#x27;, &#x27;Bob&#x27;, &#x27;Carla&#x27;],
+    &#x27;amount&#x27;:   [100.0, 250.0, 75.0],
+    &#x27;status&#x27;:   [&#x27;open&#x27;, &#x27;closed&#x27;, &#x27;pending&#x27;],
+})
+validate_dataframe(good_df, &#x27;orders&#x27;, ORDER_RULES)
+
+# Bad data: negative amount
+bad_df = good_df.copy()
+bad_df.loc[1, &#x27;amount&#x27;] = -50.0
+try:
+    validate_dataframe(bad_df, &#x27;orders&#x27;, ORDER_RULES)
+except AssertionError as e:
+    print(e)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3
+══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ Define a list called EMPLOYEE_RULES containing 5 data rules for
+ an employees DataFrame with columns:
+   employee_id, name, department, salary, hire_date
+
+ Rules to implement:
+   1. Not empty
+   2. Unique employee_id
+   3. No nulls in name or department
+   4. Salary &gt;= 20000 for all rows
+   5. Department in VALID_DEPTS
+
+ Validate GOOD_DF (should pass) and BAD_DF (should fail on rule 4).
+ Print the failure message for BAD_DF.
+
+ Expected output:
+     [employees] All 5 data tests passed.
+     [employees] FAILED: salary &gt;= 20000 for all rows
+
+ --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D7_Advanced_Testing.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+
+VALID_DEPTS = {&#x27;Engineering&#x27;, &#x27;Marketing&#x27;, &#x27;HR&#x27;, &#x27;Finance&#x27;, &#x27;Sales&#x27;}
+
+def validate_dataframe(df, name, rules):
+    for description, check in rules:
+        assert check(df), f&#x27;[{name}] FAILED: {description}&#x27;
+    print(f&#x27;[{name}] All {len(rules)} data tests passed.&#x27;)
+
+GOOD_DF = pd.DataFrame({
+    &#x27;employee_id&#x27;: [1, 2, 3, 4],
+    &#x27;name&#x27;:        [&#x27;Alice&#x27;, &#x27;Bob&#x27;, &#x27;Carla&#x27;, &#x27;Dan&#x27;],
+    &#x27;department&#x27;:  [&#x27;Engineering&#x27;, &#x27;HR&#x27;, &#x27;Finance&#x27;, &#x27;Marketing&#x27;],
+    &#x27;salary&#x27;:      [85000, 62000, 71000, 68000],
+    &#x27;hire_date&#x27;:   [&#x27;2021-01-15&#x27;, &#x27;2020-06-01&#x27;, &#x27;2022-03-10&#x27;, &#x27;2019-11-20&#x27;],
+})
+BAD_DF = GOOD_DF.copy()
+BAD_DF.loc[2, &#x27;salary&#x27;] = 15000   # below minimum</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — pytest.mark.parametrize
+══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ pytest.mark.parametrize runs the same test function with multiple
+ sets of inputs and expected outputs. This eliminates copy-paste tests.
+
+ Syntax:
+   @pytest.mark.parametrize(&#x27;input, expected&#x27;, [
+       (value1, result1),
+       (value2, result2),
+   ])
+   def test_something(input, expected):
+       assert func(input) == expected
+
+ In a notebook we simulate this with a helper that loops over cases.
+ The production version runs identically in pytest.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D7_Advanced_Testing.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Notebook-friendly parametrize runner — identical logic to pytest
+def parametrize(test_fn, cases):
+    &quot;&quot;&quot;Run test_fn(input, expected) for each (input, expected) in cases.&quot;&quot;&quot;
+    passed, failed = 0, 0
+    for args in cases:
+        label = &#x27;, &#x27;.join(repr(a) for a in args)
+        try:
+            test_fn(*args)
+            print(f&#x27;  PASS  ({label})&#x27;)
+            passed += 1
+        except AssertionError as e:
+            print(f&#x27;  FAIL  ({label}): {e}&#x27;)
+            failed += 1
+    print(f&#x27;{passed} passed, {failed} failed&#x27;)
+
+
+def classify_lead_time(days):
+    &quot;&quot;&quot;Classify a hotel booking lead time into a tier.&quot;&quot;&quot;
+    if days &lt; 7:   return &#x27;last_minute&#x27;
+    if days &lt; 30:  return &#x27;short&#x27;
+    if days &lt; 90:  return &#x27;medium&#x27;
+    return &#x27;long&#x27;
+
+
+def test_classify_lead_time(days, expected):
+    assert classify_lead_time(days) == expected
+
+
+parametrize(test_classify_lead_time, [
+    (0,   &#x27;last_minute&#x27;),
+    (6,   &#x27;last_minute&#x27;),
+    (7,   &#x27;short&#x27;),
+    (29,  &#x27;short&#x27;),
+    (30,  &#x27;medium&#x27;),
+    (89,  &#x27;medium&#x27;),
+    (90,  &#x27;long&#x27;),
+    (365, &#x27;long&#x27;),
+])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 4
+══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ Write a function called calculate_bonus(salary, rating) that returns
+ the bonus amount based on this policy:
+   rating 5   : 20% of salary
+   rating 4   : 10% of salary
+   rating 3   : 5% of salary
+   rating 1-2 : 0
+   invalid rating (not 1-5): raise ValueError
+
+ Write test_calculate_bonus(salary, rating, expected) and use
+ parametrize() to run it against the CASES list below.
+
+ Expected output:
+     PASS  (80000, 5, 16000.0)
+     PASS  (80000, 4, 8000.0)
+     PASS  (80000, 3, 4000.0)
+     PASS  (80000, 2, 0)
+     PASS  (80000, 1, 0)
+     5 passed, 0 failed
+
+ --- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D7_Advanced_Testing.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def parametrize(test_fn, cases):
+    passed, failed = 0, 0
+    for args in cases:
+        label = &#x27;, &#x27;.join(repr(a) for a in args)
+        try:
+            test_fn(*args)
+            print(f&#x27;  PASS  ({label})&#x27;)
+            passed += 1
+        except AssertionError as e:
+            print(f&#x27;  FAIL  ({label}): {e}&#x27;)
+            failed += 1
+    print(f&#x27;{passed} passed, {failed} failed&#x27;)
+
+CASES = [
+    (80000, 5, 16000.0),
+    (80000, 4,  8000.0),
+    (80000, 3,  4000.0),
+    (80000, 2,  0),
+    (80000, 1,  0),
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-8">Day 8 — Kafka Streaming</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-8"> Mark this day done</label><div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=qWwZRvjlDEw" target="_blank" rel="noopener"><b>Video from the lesson</b><small></small></a></li><li><a href="https://www.youtube.com/watch?v=yAgJvN8aLfE" target="_blank" rel="noopener"><b>Video from the lesson</b><small></small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Apache%20Kafka%20explained%20in%2010%20minutes" target="_blank" rel="noopener">Apache Kafka explained in 10 minutes</a></p></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  WEEK 7  |  DAY 8  |  KAFKA STREAMING
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Understand Kafka&#x27;s model: topics, producers, consumers, offsets
+#  2. Produce ETL events to a topic using a local broker simulation
+#  3. Consume and process events with offset tracking and consumer groups
+#  4. Build a full stream processing pipeline: extract → topic → transform → load
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;Apache Kafka explained in 10 minutes&quot;
+#  Video: &quot;Kafka Explained in 10 Minutes – What Every Engineer Must Know&quot; -- Rocky Bhatia
+#        https://www.youtube.com/watch?v=qWwZRvjlDEw
+#        (verified live; kept alongside the search string in case it rots)
+#  Search: &quot;confluent kafka python tutorial&quot;
+#  Video: &quot;Kafka # 008 # Python Consumer Code (Using Confluent-Kafka Library)&quot; -- Sumanshu Nankana
+#        https://www.youtube.com/watch?v=yAgJvN8aLfE
+#        (verified live; kept alongside the search string in case it rots)
+#
+#  SIMULATION MODE (default — no Docker needed)
+#  ─────────────────────────────────────────────
+#  KafkaBroker / KafkaProducer / KafkaConsumer classes below
+#  mirror the real confluent-kafka API exactly.
+#  REAL MODE lines are commented — swap in when you have a local broker:
+#    docker run -p 9092:9092 apache/kafka:3.7.0
+#
+# ══════════════════════════════════════════════════════════════</pre><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — KAFKA FUNDAMENTALS: TOPICS, PRODUCERS, CONSUMERS
+# ══════════════════════════════════════════════════════════════
+#
+#  Kafka is a distributed event log, not a message queue.
+#  Key difference: messages are NOT deleted after being read —
+#  they persist and any consumer can re-read from any offset.
+#
+#  Core concepts
+#  ─────────────
+#  TOPIC      a named stream of events  (e.g. &quot;orders&quot;, &quot;pageviews&quot;)
+#  PARTITION  a topic is split into N partitions for parallelism
+#  OFFSET     position of a message inside a partition (0, 1, 2 ...)
+#  PRODUCER   writes events to a topic
+#  CONSUMER   reads events from a topic, tracks its own offset
+#  CONSUMER GROUP  multiple consumers share work across partitions
+#                  each partition is read by exactly one member
+#
+#  Event anatomy
+#  ─────────────
+#  key    (optional) determines which partition the event goes to
+#  value  the payload — typically JSON
+#  timestamp  set automatically by the broker
+#
+#  Why use Kafka?
+#  ──────────────
+#  ETL pipelines decouple producers from consumers:
+#    API → [Kafka topic] → ETL consumer → database
+#  If the database is down, events pile up safely in Kafka.
+#  When it recovers, the consumer replays from its last offset.
+#
+# EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D8_Kafka_Streaming.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Any
+
+
+# ── Simulation layer (mirrors confluent-kafka API) ────────────
+
+class KafkaBroker:
+    &quot;&quot;&quot;In-memory broker. Replace with a real broker for REAL MODE.&quot;&quot;&quot;
+    def __init__(self):
+        self._topics: dict[str, list[dict]] = defaultdict(list)
+        self._offsets: dict[tuple, int] = {}   # (group_id, topic) -&gt; next offset
+
+    def _produce(self, topic: str, key: str, value: str):
+        self._topics[topic].append({&quot;key&quot;: key, &quot;value&quot;: value,
+                                    &quot;offset&quot;: len(self._topics[topic])})
+
+    def _poll(self, group_id: str, topic: str) -&gt; dict | None:
+        key = (group_id, topic)
+        offset = self._offsets.get(key, 0)
+        messages = self._topics.get(topic, [])
+        if offset &lt; len(messages):
+            msg = messages[offset]
+            self._offsets[key] = offset + 1
+            return msg
+        return None
+
+
+class KafkaProducer:
+    def __init__(self, broker: KafkaBroker, config: dict = None):
+        self._broker = broker
+
+    def produce(self, topic: str, key: str, value: str):
+        self._broker._produce(topic, key, value)
+
+    def flush(self):
+        pass   # no-op in simulation; real confluent-kafka flushes the buffer
+
+
+class KafkaConsumer:
+    def __init__(self, broker: KafkaBroker, group_id: str):
+        self._broker = broker
+        self._group_id = group_id
+        self._topics: list[str] = []
+
+    def subscribe(self, topics: list[str]):
+        self._topics = topics
+
+    def poll(self, timeout: float = 1.0) -&gt; dict | None:
+        for topic in self._topics:
+            msg = self._broker._poll(self._group_id, topic)
+            if msg:
+                return msg
+        return None
+
+
+# ── Demo ──────────────────────────────────────────────────────
+broker = KafkaBroker()
+producer = KafkaProducer(broker)
+
+# Produce 3 order events
+orders = [
+    {&quot;order_id&quot;: &quot;O-001&quot;, &quot;customer&quot;: &quot;Alice&quot;, &quot;amount&quot;: 129.99},
+    {&quot;order_id&quot;: &quot;O-002&quot;, &quot;customer&quot;: &quot;Bob&quot;,   &quot;amount&quot;:  49.50},
+    {&quot;order_id&quot;: &quot;O-003&quot;, &quot;customer&quot;: &quot;Carol&quot;, &quot;amount&quot;: 220.00},
+]
+for order in orders:
+    producer.produce(topic=&quot;orders&quot;, key=order[&quot;order_id&quot;],
+                     value=json.dumps(order))
+producer.flush()
+print(f&quot;Produced {len(orders)} events to topic &#x27;orders&#x27;&quot;)
+
+# Consume them back
+consumer = KafkaConsumer(broker, group_id=&quot;etl-consumer&quot;)
+consumer.subscribe([&quot;orders&quot;])
+
+print(&quot;\nConsuming:&quot;)
+while True:
+    msg = consumer.poll(timeout=1.0)
+    if msg is None:
+        break
+    event = json.loads(msg[&quot;value&quot;])
+    print(f&quot;  offset={msg[&#x27;offset&#x27;]}  key={msg[&#x27;key&#x27;]}  amount={event[&#x27;amount&#x27;]}&quot;)
+
+# REAL MODE ───────────────────────────────────────────────────
+# pip install confluent-kafka
+# from confluent_kafka import Producer, Consumer
+#
+# producer = Producer({&quot;bootstrap.servers&quot;: &quot;localhost:9092&quot;})
+# for order in orders:
+#     producer.produce(&quot;orders&quot;, key=order[&quot;order_id&quot;],
+#                      value=json.dumps(order).encode())
+# producer.flush()
+#
+# consumer = Consumer({&quot;bootstrap.servers&quot;: &quot;localhost:9092&quot;,
+#                      &quot;group.id&quot;: &quot;etl-consumer&quot;,
+#                      &quot;auto.offset.reset&quot;: &quot;earliest&quot;})
+# consumer.subscribe([&quot;orders&quot;])
+# while True:
+#     msg = consumer.poll(1.0)
+#     if msg is None: break
+#     print(json.loads(msg.value()))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+#  A sensor pipeline produces temperature readings every second.
+#
+#  1. Create a KafkaBroker and a KafkaProducer.
+#  2. Produce 5 events to topic &quot;sensors&quot; using the data below.
+#     key = sensor_id,  value = JSON with sensor_id, temp_c, ts
+#  3. Create a KafkaConsumer (group &quot;monitor&quot;), subscribe to &quot;sensors&quot;.
+#  4. Consume all events and print any where temp_c &gt; 75.
+#
+#  Expected output:
+#     Produced 5 sensor events
+#     ALERT offset=2  sensor=S-003  temp=81.2
+#     ALERT offset=4  sensor=S-005  temp=78.9
+# ──────────────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D8_Kafka_Streaming.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+
+READINGS = [
+    {&quot;sensor_id&quot;: &quot;S-001&quot;, &quot;temp_c&quot;: 65.3, &quot;ts&quot;: &quot;2025-01-01T10:00:00&quot;},
+    {&quot;sensor_id&quot;: &quot;S-002&quot;, &quot;temp_c&quot;: 70.1, &quot;ts&quot;: &quot;2025-01-01T10:00:01&quot;},
+    {&quot;sensor_id&quot;: &quot;S-003&quot;, &quot;temp_c&quot;: 81.2, &quot;ts&quot;: &quot;2025-01-01T10:00:02&quot;},
+    {&quot;sensor_id&quot;: &quot;S-004&quot;, &quot;temp_c&quot;: 68.8, &quot;ts&quot;: &quot;2025-01-01T10:00:03&quot;},
+    {&quot;sensor_id&quot;: &quot;S-005&quot;, &quot;temp_c&quot;: 78.9, &quot;ts&quot;: &quot;2025-01-01T10:00:04&quot;},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — PRODUCING ETL EVENTS: EXTRACT → TOPIC
+# ══════════════════════════════════════════════════════════════
+#
+#  In an ETL pipeline the producer is the extraction layer.
+#  Instead of writing directly to a database, the extractor
+#  writes events to a Kafka topic. This decouples extraction
+#  from transformation and loading.
+#
+#  Pattern
+#  ───────
+#    for record in source:              read from CSV / API / DB
+#        producer.produce(topic,        write to Kafka
+#                         key=record[pk],
+#                         value=json.dumps(record))
+#    producer.flush()                   wait for all acks
+#
+#  Why a key?
+#  ──────────
+#  The key determines which partition the event lands in.
+#  Use the primary key of the entity (order_id, user_id).
+#  All events for the same key land in the same partition →
+#  guaranteed ordering per entity.
+#
+#  Schema discipline
+#  ─────────────────
+#  Always include a schema_version field in the event payload.
+#  When you change the schema, bump the version — consumers
+#  can detect and handle both old and new formats.
+#
+# EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D8_Kafka_Streaming.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+import csv
+import io
+
+# Simulated CSV source (replace with open(&quot;sales.csv&quot;) in production)
+RAW_CSV = &quot;&quot;&quot;sale_id,product,qty,unit_price,region
+S-001,Widget A,3,29.99,North
+S-002,Widget B,1,49.99,South
+S-003,Widget A,5,29.99,East
+S-004,Widget C,2,89.99,North
+S-005,Widget B,4,49.99,West
+&quot;&quot;&quot;
+
+def extract_sales_to_kafka(csv_text: str, broker: KafkaBroker) -&gt; int:
+    &quot;&quot;&quot;Extract sales from CSV and produce each row as a Kafka event.&quot;&quot;&quot;
+    producer = KafkaProducer(broker)
+    reader = csv.DictReader(io.StringIO(csv_text))
+    count = 0
+    for row in reader:
+        event = {
+            &quot;schema_version&quot;: 1,
+            &quot;sale_id&quot;:    row[&quot;sale_id&quot;],
+            &quot;product&quot;:    row[&quot;product&quot;],
+            &quot;qty&quot;:        int(row[&quot;qty&quot;]),
+            &quot;unit_price&quot;: float(row[&quot;unit_price&quot;]),
+            &quot;region&quot;:     row[&quot;region&quot;],
+            &quot;revenue&quot;:    round(int(row[&quot;qty&quot;]) * float(row[&quot;unit_price&quot;]), 2),
+        }
+        producer.produce(&quot;sales&quot;, key=row[&quot;sale_id&quot;], value=json.dumps(event))
+        count += 1
+    producer.flush()
+    return count
+
+broker = KafkaBroker()
+n = extract_sales_to_kafka(RAW_CSV, broker)
+print(f&quot;Extracted {n} sale events → topic &#x27;sales&#x27;&quot;)
+
+# Peek at the topic
+for msg in broker._topics[&quot;sales&quot;]:
+    ev = json.loads(msg[&quot;value&quot;])
+    print(f&quot;  {msg[&#x27;key&#x27;]}  {ev[&#x27;product&#x27;]}  revenue={ev[&#x27;revenue&#x27;]}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+#  Write a function called extract_employees_to_kafka(records, broker)
+#  that produces each employee record to topic &quot;employees&quot;.
+#
+#  Requirements:
+#    - key = employee_id
+#    - value = JSON with schema_version=1, employee_id, name,
+#              department, salary, annual_bonus (salary * 0.10)
+#    - return the count of events produced
+#
+#  Then consume topic &quot;employees&quot; and print records where
+#  salary &gt; 60000, showing name and annual_bonus.
+#
+#  Expected output:
+#     Produced 4 employee events
+#     Alice Engineering  bonus=7500.0
+#     Carol Finance      bonus=6800.0
+# ──────────────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D8_Kafka_Streaming.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+
+EMPLOYEES = [
+    {&quot;employee_id&quot;: &quot;E-001&quot;, &quot;name&quot;: &quot;Alice&quot;,   &quot;department&quot;: &quot;Engineering&quot;, &quot;salary&quot;: 75000},
+    {&quot;employee_id&quot;: &quot;E-002&quot;, &quot;name&quot;: &quot;Bob&quot;,     &quot;department&quot;: &quot;Marketing&quot;,   &quot;salary&quot;: 52000},
+    {&quot;employee_id&quot;: &quot;E-003&quot;, &quot;name&quot;: &quot;Carol&quot;,   &quot;department&quot;: &quot;Finance&quot;,     &quot;salary&quot;: 68000},
+    {&quot;employee_id&quot;: &quot;E-004&quot;, &quot;name&quot;: &quot;David&quot;,   &quot;department&quot;: &quot;Engineering&quot;, &quot;salary&quot;: 45000},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — CONSUMING EVENTS: OFFSETS AND CONSUMER GROUPS
+# ══════════════════════════════════════════════════════════════
+#
+#  Offset management
+#  ─────────────────
+#  Each consumer group tracks its own offset per topic.
+#  auto.offset.reset = &quot;earliest&quot;  start from the beginning
+#  auto.offset.reset = &quot;latest&quot;    only new events (default)
+#
+#  enable.auto.commit = True    Kafka commits offset automatically
+#                               after poll() returns the message.
+#                               Risk: message processed but crash
+#                               before next commit = re-processed.
+#  enable.auto.commit = False   You commit manually after processing.
+#                               Guarantees at-least-once delivery.
+#
+#  Consumer groups
+#  ───────────────
+#  Multiple consumers with the SAME group_id share a topic:
+#    - partition 0 → consumer A
+#    - partition 1 → consumer B
+#  Multiple consumers with DIFFERENT group_ids each read ALL events:
+#    - &quot;etl-consumer&quot; reads everything
+#    - &quot;audit-consumer&quot; also reads everything independently
+#
+#  Dead letter topic
+#  ─────────────────
+#  If processing fails (bad JSON, schema mismatch), produce the
+#  raw message to a &quot;orders.dlq&quot; (dead letter queue) topic.
+#  Ops team inspects and replays manually.
+#
+# EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D8_Kafka_Streaming.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+
+def transform_and_load(msg: dict, db: list, dlq: list):
+    &quot;&quot;&quot;Process one event: transform, validate, load or send to DLQ.&quot;&quot;&quot;
+    try:
+        event = json.loads(msg[&quot;value&quot;])
+        if event.get(&quot;schema_version&quot;) != 1:
+            raise ValueError(f&quot;Unknown schema version: {event.get(&#x27;schema_version&#x27;)}&quot;)
+        # Transform: add derived field
+        event[&quot;revenue_band&quot;] = (
+            &quot;high&quot; if event[&quot;revenue&quot;] &gt;= 100 else
+            &quot;mid&quot;  if event[&quot;revenue&quot;] &gt;= 50  else &quot;low&quot;
+        )
+        db.append(event)
+    except Exception as e:
+        dlq.append({&quot;raw&quot;: msg[&quot;value&quot;], &quot;error&quot;: str(e)})
+
+# Produce some events (one intentionally malformed)
+broker = KafkaBroker()
+producer = KafkaProducer(broker)
+good_events = [
+    {&quot;schema_version&quot;: 1, &quot;sale_id&quot;: &quot;S-001&quot;, &quot;product&quot;: &quot;Widget A&quot;, &quot;revenue&quot;: 89.97},
+    {&quot;schema_version&quot;: 1, &quot;sale_id&quot;: &quot;S-002&quot;, &quot;product&quot;: &quot;Widget B&quot;, &quot;revenue&quot;: 49.99},
+    {&quot;schema_version&quot;: 2, &quot;sale_id&quot;: &quot;S-003&quot;, &quot;product&quot;: &quot;Widget C&quot;, &quot;revenue&quot;: 179.98},  # bad version
+]
+for ev in good_events:
+    producer.produce(&quot;sales&quot;, key=ev[&quot;sale_id&quot;], value=json.dumps(ev))
+producer.flush()
+
+# Two independent consumer groups reading the same topic
+etl_consumer   = KafkaConsumer(broker, group_id=&quot;etl-transform&quot;)
+audit_consumer = KafkaConsumer(broker, group_id=&quot;audit-log&quot;)
+for c in [etl_consumer, audit_consumer]:
+    c.subscribe([&quot;sales&quot;])
+
+db, dlq = [], []
+while True:
+    msg = etl_consumer.poll()
+    if msg is None: break
+    transform_and_load(msg, db, dlq)
+
+print(f&quot;Loaded to DB: {len(db)} records&quot;)
+for r in db:
+    print(f&quot;  {r[&#x27;sale_id&#x27;]}  band={r[&#x27;revenue_band&#x27;]}&quot;)
+print(f&quot;Dead letter queue: {len(dlq)} records&quot;)
+for r in dlq:
+    print(f&quot;  ERROR: {r[&#x27;error&#x27;]}&quot;)
+
+# Audit consumer reads independently
+print(&quot;\nAudit consumer sees all events:&quot;)
+while True:
+    msg = audit_consumer.poll()
+    if msg is None: break
+    print(f&quot;  audit offset={msg[&#x27;offset&#x27;]}  key={msg[&#x27;key&#x27;]}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+#  Build a consumer that reads from topic &quot;orders&quot; and routes
+#  events to two lists: fulfilled and pending.
+#
+#  Write process_orders(broker, group_id) that:
+#    - Consumes all events from &quot;orders&quot;
+#    - If status == &quot;fulfilled&quot;  → append to fulfilled list
+#    - If status == &quot;pending&quot;    → append to pending list
+#    - If status is anything else → append to dlq list
+#    - Returns (fulfilled, pending, dlq)
+#
+#  Expected output:
+#     fulfilled=2  pending=2  dlq=1
+# ──────────────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D8_Kafka_Streaming.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+
+broker = KafkaBroker()
+producer = KafkaProducer(broker)
+ORDER_EVENTS = [
+    {&quot;order_id&quot;: &quot;O-001&quot;, &quot;status&quot;: &quot;fulfilled&quot;, &quot;amount&quot;: 99.99},
+    {&quot;order_id&quot;: &quot;O-002&quot;, &quot;status&quot;: &quot;pending&quot;,   &quot;amount&quot;: 49.50},
+    {&quot;order_id&quot;: &quot;O-003&quot;, &quot;status&quot;: &quot;fulfilled&quot;, &quot;amount&quot;: 220.00},
+    {&quot;order_id&quot;: &quot;O-004&quot;, &quot;status&quot;: &quot;pending&quot;,   &quot;amount&quot;: 15.00},
+    {&quot;order_id&quot;: &quot;O-005&quot;, &quot;status&quot;: &quot;unknown&quot;,   &quot;amount&quot;: 5.00},
+]
+for ev in ORDER_EVENTS:
+    producer.produce(&quot;orders&quot;, key=ev[&quot;order_id&quot;], value=json.dumps(ev))
+producer.flush()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  CONCEPT 4 — FULL STREAM PIPELINE: EXTRACT → TOPIC → TRANSFORM → LOAD
+# ══════════════════════════════════════════════════════════════
+#
+#  This is the pattern you used at Naya with Spark + Kafka:
+#
+#    Source (CSV / API / DB)
+#        │
+#        ▼
+#    KafkaProducer  → topic &quot;raw_events&quot;
+#        │
+#        ▼
+#    KafkaConsumer  (ETL group)
+#        │  transform + validate
+#        ▼
+#    SQLite / PostgreSQL (Silver layer)
+#        │
+#        ▼
+#    KafkaProducer  → topic &quot;processed_events&quot;  (for downstream consumers)
+#
+#  Key engineering decisions
+#  ─────────────────────────
+#  Batch vs stream: Kafka consumers can process one event at a time
+#  (true streaming) or accumulate a micro-batch (e.g. every 100 events)
+#  before writing to the database (reduces write amplification).
+#
+#  Idempotency: if a consumer crashes after loading but before
+#  committing offset, it re-processes on restart. Use INSERT OR IGNORE
+#  or ON CONFLICT DO NOTHING with the event key as the primary key.
+#
+#  Back-pressure: if the consumer is slow, events pile up in the topic.
+#  Monitor consumer lag = latest_offset - consumer_offset.
+#
+# EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D8_Kafka_Streaming.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+import sqlite3
+
+# ── Full pipeline in simulation ───────────────────────────────
+
+def run_pipeline(raw_data: list[dict]) -&gt; dict:
+    &quot;&quot;&quot;
+    Stage 1: Produce raw events to Kafka.
+    Stage 2: Consume, transform, load to SQLite (idempotent).
+    Stage 3: Produce processed events for downstream consumers.
+    Returns pipeline run stats.
+    &quot;&quot;&quot;
+    broker = KafkaBroker()
+    db = sqlite3.connect(&quot;:memory:&quot;)
+    db.execute(&quot;&quot;&quot;
+        CREATE TABLE sales (
+            sale_id    TEXT PRIMARY KEY,
+            product    TEXT,
+            revenue    REAL,
+            region     TEXT,
+            band       TEXT
+        )
+    &quot;&quot;&quot;)
+
+    # Stage 1 — Extract → topic
+    producer = KafkaProducer(broker)
+    for row in raw_data:
+        producer.produce(&quot;raw_sales&quot;, key=row[&quot;sale_id&quot;], value=json.dumps(row))
+    producer.flush()
+    print(f&quot;Stage 1: produced {len(raw_data)} events → &#x27;raw_sales&#x27;&quot;)
+
+    # Stage 2 — Consume → transform → load
+    consumer = KafkaConsumer(broker, group_id=&quot;etl&quot;)
+    consumer.subscribe([&quot;raw_sales&quot;])
+    loaded, skipped = 0, 0
+    processed_producer = KafkaProducer(broker)
+
+    while True:
+        msg = consumer.poll()
+        if msg is None:
+            break
+        try:
+            ev = json.loads(msg[&quot;value&quot;])
+            band = &quot;high&quot; if ev[&quot;revenue&quot;] &gt;= 100 else &quot;mid&quot; if ev[&quot;revenue&quot;] &gt;= 50 else &quot;low&quot;
+            db.execute(
+                &quot;INSERT OR IGNORE INTO sales VALUES (?,?,?,?,?)&quot;,
+                (ev[&quot;sale_id&quot;], ev[&quot;product&quot;], ev[&quot;revenue&quot;], ev[&quot;region&quot;], band)
+            )
+            processed_producer.produce(
+                &quot;processed_sales&quot;, key=ev[&quot;sale_id&quot;],
+                value=json.dumps({**ev, &quot;band&quot;: band})
+            )
+            loaded += 1
+        except Exception as e:
+            skipped += 1
+    db.commit()
+    processed_producer.flush()
+    print(f&quot;Stage 2: loaded={loaded}  skipped={skipped}&quot;)
+
+    # Stage 3 — Show downstream consumer
+    downstream = KafkaConsumer(broker, group_id=&quot;dashboard&quot;)
+    downstream.subscribe([&quot;processed_sales&quot;])
+    rows = []
+    while True:
+        msg = downstream.poll()
+        if msg is None: break
+        rows.append(json.loads(msg[&quot;value&quot;]))
+    print(f&quot;Stage 3: downstream consumer received {len(rows)} processed events&quot;)
+
+    # Verify DB
+    cursor = db.execute(&quot;SELECT band, COUNT(*), SUM(revenue) FROM sales GROUP BY band&quot;)
+    print(&quot;\nDB summary:&quot;)
+    for band, cnt, rev in cursor:
+        print(f&quot;  {band:4s}  count={cnt}  total_revenue={rev:.2f}&quot;)
+
+    return {&quot;produced&quot;: len(raw_data), &quot;loaded&quot;: loaded, &quot;skipped&quot;: skipped}
+
+
+SALES = [
+    {&quot;sale_id&quot;: &quot;S-001&quot;, &quot;product&quot;: &quot;Widget A&quot;, &quot;revenue&quot;:  89.97, &quot;region&quot;: &quot;North&quot;},
+    {&quot;sale_id&quot;: &quot;S-002&quot;, &quot;product&quot;: &quot;Widget B&quot;, &quot;revenue&quot;:  49.99, &quot;region&quot;: &quot;South&quot;},
+    {&quot;sale_id&quot;: &quot;S-003&quot;, &quot;product&quot;: &quot;Widget C&quot;, &quot;revenue&quot;: 179.98, &quot;region&quot;: &quot;East&quot;},
+    {&quot;sale_id&quot;: &quot;S-004&quot;, &quot;product&quot;: &quot;Widget A&quot;, &quot;revenue&quot;:  29.99, &quot;region&quot;: &quot;West&quot;},
+    {&quot;sale_id&quot;: &quot;S-005&quot;, &quot;product&quot;: &quot;Widget B&quot;, &quot;revenue&quot;: 199.96, &quot;region&quot;: &quot;North&quot;},
+]
+
+stats = run_pipeline(SALES)
+print(f&quot;\nPipeline stats: {stats}&quot;</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box"># ══════════════════════════════════════════════════════════════
+#  EXERCISE 4
+# ══════════════════════════════════════════════════════════════
+#  Extend the pipeline with consumer lag monitoring.
+#
+#  Write a function called consumer_lag(broker, topic, group_id)
+#  that returns:
+#    lag = total events in topic - events consumed by group
+#
+#  Then:
+#  1. Produce 6 employee events to topic &quot;employees&quot;
+#  2. Consume only 4 of them (stop after 4)
+#  3. Call consumer_lag() and assert lag == 2
+#  4. Print: &quot;Consumer lag: 2 events behind&quot;
+#
+#  Expected output:
+#     Produced 6 events
+#     Consumed 4 events
+#     Consumer lag: 2 events behind
+# ──────────────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_7_Data_Engineering/W7_D8_Kafka_Streaming.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+
+EMPLOYEES = [
+    {&quot;employee_id&quot;: f&quot;E-{i:03d}&quot;, &quot;name&quot;: f&quot;Employee {i}&quot;, &quot;salary&quot;: 50000 + i * 1000}
+    for i in range(1, 7)
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="pager"><a class="btn ghost" href="week-06.html">&larr; Week 06</a><a class="btn ghost" href="week-08.html">Week 08 &rarr;</a></div>
+</main></body></html>
