@@ -1,0 +1,722 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 05 — MITRE ATT&amp;CK Framework</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 05 — MITRE ATT&amp;CK Framework</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="05" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 05 — MITRE ATT&amp;CK Framework</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>2 — Attacker Mindset</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: MITRE ATT&amp;CK mapping / SC-200: Threat intelligence / GCIA: Intrusion detection</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>ATT&amp;CK coverage matrix → Navigator layer JSON</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W01–W04 — Foundations</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — ATT&amp;CK Fundamentals: Tactics and Techniques</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="05-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=16ZvTnAlKeI" target="_blank" rel="noopener"><b>MITRE ATT&amp;CK Framework Explained | Cyber Attack Lifecycle, Tactics &amp; Techniques (Complete Guide)</b><small>Protech Future</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=MITRE%20ATT%26CK%20framework%20explained%20tactics%20techniques" target="_blank" rel="noopener">MITRE ATT&amp;CK framework explained tactics techniques</a></p></div>
+<hr />
+<h3>Concept 1 — What ATT&amp;CK Is and Why It Matters</h3>
+<p>MITRE ATT&amp;CK (Adversarial Tactics, Techniques, and Common Knowledge) is a publicly maintained knowledge base of real-world attacker behavior. It organizes over 600 techniques into 14 tactics — the &quot;why&quot; behind each action. Every technique is documented with: how it works, which threat actors use it, how to detect it, and how to mitigate it.</p>
+<p>Before ATT&amp;CK, detection teams wrote rules based on isolated indicators (block this IP, block this hash). ATT&amp;CK shifted the field to behavior-based detection: instead of blocking a specific tool, detect the behavior (e.g., &quot;process injecting into another process&quot;) that works against any tool implementing that technique.</p>
+<p>Data engineering analogy: ATT&amp;CK is like a data quality rule catalog. Instead of writing a one-off check for each dataset, you categorize quality issues (completeness, accuracy, timeliness) and apply a systematic framework. ATT&amp;CK does the same for attacker behavior — categorize the technique, then build detection coverage systematically.</p>
+<p>The 14 tactics in order (roughly matching the attack lifecycle):</p>
+<ol>
+<li>Reconnaissance, 2. Resource Development, 3. Initial Access, 4. Execution,</li>
+<li>Persistence, 6. Privilege Escalation, 7. Defense Evasion, 8. Credential Access,</li>
+<li>Discovery, 10. Lateral Movement, 11. Collection, 12. Command and Control,</li>
+<li>Exfiltration, 14. Impact</li>
+</ol>
+<p><strong>Example:</strong></p>
+<pre><code>Tactic:    Execution (TA0002)
+Technique: Command and Scripting Interpreter (T1059)
+Sub-technique: PowerShell (T1059.001)
+
+What it means:
+  Attacker runs PowerShell to execute their payload.
+
+Real-world example:
+  PowerShell used to download and run Cobalt Strike beacon:
+  powershell.exe -nop -w hidden -enc &lt;base64_payload&gt;
+
+Detection idea:
+  Sysmon Event ID 1 (Process Create):
+    Image contains powershell.exe
+    CommandLine contains -EncodedCommand or -enc
+    ParentImage is NOT a known management tool (mmc.exe, etc.)
+</code></pre><p><strong>Exercise:</strong>
+Go to attack.mitre.org and look up technique T1078 (Valid Accounts).
+Read the description and find answers to:</p>
+<ol>
+<li>Which sub-techniques exist?</li>
+<li>Which data sources can be used to detect this technique?</li>
+<li>Name one mitigation listed.</li>
+</ol>
+<p>Expected output: a written summary with three bullet points — sub-techniques, data sources, and one mitigation.</p>
+<hr />
+<h3>Concept 2 — Tactics vs Techniques vs Sub-Techniques</h3>
+<p>The ATT&amp;CK hierarchy has three levels:</p>
+<ul>
+<li><strong>Tactic</strong> — the goal (WHY). Example: Credential Access. The attacker wants to obtain usernames and passwords.</li>
+<li><strong>Technique</strong> — the method (HOW). Example: T1003 OS Credential Dumping. The attacker dumps credentials from the operating system.</li>
+<li><strong>Sub-technique</strong> — the specific implementation. Example: T1003.001 LSASS Memory. The attacker specifically reads from the lsass.exe process.</li>
+</ul>
+<p>This hierarchy matters for detection design. A detection rule targeting a sub-technique is highly specific (low false positives, but misses variants). A detection rule targeting the technique or tactic is broader (more coverage, potentially higher false positives).</p>
+<p>Data engineering analogy: tactics are like data quality dimensions (accuracy, completeness, timeliness). Techniques are like specific quality categories (duplicate records, null values, stale data). Sub-techniques are like specific checks (null in column X, duplicate on key Y). You need rules at multiple levels — specific rules for high-confidence alerts, broad rules for hypothesis generation.</p>
+<p><strong>Example:</strong></p>
+<pre><code>Tactic:         Credential Access (TA0006)
+  Technique:    OS Credential Dumping (T1003)
+    Sub-tech:   LSASS Memory (T1003.001)  ← Mimikatz sekurlsa
+    Sub-tech:   Security Account Manager (T1003.002)  ← reg save / VSS
+    Sub-tech:   NTDS (T1003.003)  ← ntdsutil, VSS on DC
+    Sub-tech:   LSA Secrets (T1003.004)  ← reg query HKLM\SECURITY
+    Sub-tech:   DCSync (T1003.006)  ← fake DC replication via drsuapi
+
+  Technique:    Brute Force (T1110)
+    Sub-tech:   Password Spraying (T1110.003)  ← W04 Day 1 Concept 3
+    Sub-tech:   Credential Stuffing (T1110.004)
+
+# Detection at technique level: any of these triggers &quot;Credential Access&quot;
+# Detection at sub-technique level: only the specific behavior triggers the alert
+</code></pre><p><strong>Exercise:</strong>
+Map the following attacker actions to their correct ATT&amp;CK technique and sub-technique IDs.
+Use attack.mitre.org to verify:</p>
+<ol>
+<li>Attacker adds a new user to the Administrators group</li>
+<li>Attacker uses scheduled task to run their payload every hour</li>
+<li>Attacker disables Windows Defender via PowerShell</li>
+<li>Attacker reads <code>/etc/shadow</code> on a Linux host</li>
+</ol>
+<p>Expected output: a table with Action, Tactic, Technique ID, Sub-technique ID (if applicable).</p>
+<hr />
+<h3>Concept 3 — Detection Coverage: What You Can and Cannot See</h3>
+<p>Not every ATT&amp;CK technique is detectable from every log source. A technique like T1140 (Deobfuscate/Decode Files) leaves traces in PowerShell Script Block Logging (if enabled) but not in network logs. T1071.001 (HTTP C2) is visible in web proxy logs but not in Windows Security logs.</p>
+<p>Coverage mapping is the practice of: for each ATT&amp;CK technique you care about, documenting which data sources you have, which log sources those map to, and whether your current rules cover the technique. The gaps are your detection backlog.</p>
+<p><strong>Example:</strong></p>
+<pre><code>Technique            | Data Source           | Log Available? | Rule Exists? | Gap?
+---------------------|----------------------|---------------|-------------|------
+T1059.001 PowerShell | PowerShell/Oper.      | Yes (if enabled)| Yes        | No
+T1059.001 PowerShell | Sysmon EID 1          | Yes            | Yes         | No
+T1003.001 LSASS Dump | Sysmon EID 10         | Yes            | Yes         | No
+T1003.001 LSASS Dump | Windows Memory Forensic| Only on-demand | No         | Yes ← gap
+T1071.001 HTTP C2    | Web Proxy Logs        | No proxy deployed| No        | Yes ← gap
+T1071.004 DNS C2     | DNS Server Logs       | Yes            | No          | Yes ← gap
+T1078 Valid Accounts | Azure AD Sign-In Logs | Yes            | Partial     | Partial
+</code></pre><p><strong>Exercise:</strong>
+For your own environment (or a hypothetical small enterprise), fill in a coverage table for 5 techniques:</p>
+<ul>
+<li>T1059.001 (PowerShell)</li>
+<li>T1003.001 (LSASS Dump)</li>
+<li>T1078 (Valid Accounts)</li>
+<li>T1566.001 (Spearphishing Attachment)</li>
+<li>T1071.001 (HTTP C2)</li>
+</ul>
+<p>For each: list which log sources you have, whether you have a detection rule, and whether there is a gap.
+Expected output: a 5-row coverage table with the columns: Technique, Log Source, Available (Y/N), Rule (Y/N), Gap (Y/N).</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs and ATT&amp;CK technique mapping
+<strong>Threat:</strong> An attacker uses an LLM to automatically map their planned attack steps to ATT&amp;CK, then deliberately uses sub-techniques that are not commonly detected (based on public threat intelligence reports showing low detection rates for certain techniques).
+<strong>Opportunity:</strong> Paste a natural language description of suspicious activity into an LLM and ask it to map the behavior to ATT&amp;CK techniques. The LLM can identify the likely technique even from imprecise descriptions, accelerating alert triage.
+<strong>Prompt to try:</strong> <code>&quot;A Windows endpoint process alert shows: cmd.exe spawned from winword.exe, which then ran net.exe with arguments 'group &quot;Domain Admins&quot;'. Map each action to its MITRE ATT&amp;CK technique and sub-technique. Explain what the attacker is likely trying to accomplish.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — ATT&amp;CK Navigator and Coverage Visualization</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="05-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=DOqKKyEmEgU" target="_blank" rel="noopener"><b>How to Use MITRE ATT&amp;CK Navigator Step-by-Step (SOC Lab Explained)</b><small>IT Pro Academy</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=MITRE%20ATT%26CK%20Navigator%20tutorial%20detection%20coverage" target="_blank" rel="noopener">MITRE ATT&amp;CK Navigator tutorial detection coverage</a></p></div>
+<hr />
+<h3>Concept 1 — ATT&amp;CK Navigator: The Coverage Map Tool</h3>
+<p>ATT&amp;CK Navigator (mitre-attack.github.io/attack-navigator) is a web app that lets you create color-coded heat maps over the ATT&amp;CK matrix. You use it to:</p>
+<ul>
+<li>Visualize which techniques your detection rules cover</li>
+<li>Map a threat actor's known techniques to see your coverage against that specific adversary</li>
+<li>Share coverage maps with stakeholders as a prioritized improvement plan</li>
+</ul>
+<p>You interact with Navigator by uploading a &quot;layer&quot; — a JSON file that assigns scores and colors to techniques. A score of 1 (green) means you have a detection. A score of 0 (red) means no coverage. You can layer multiple views: one for your detections, one for a threat actor, and compare.</p>
+<p>Data engineering analogy: ATT&amp;CK Navigator is like a dbt docs coverage report or a Great Expectations validation report — a visual dashboard showing which parts of the system are tested (covered) and which are not. The layer JSON file is the data behind the visualization, exactly like a test results JSON that feeds a CI/CD dashboard.</p>
+<p><strong>Example:</strong></p>
+<pre><code>{
+    &quot;name&quot;: &quot;W05 Detection Coverage&quot;,
+    &quot;versions&quot;: {&quot;attack&quot;: &quot;14&quot;, &quot;navigator&quot;: &quot;4.9.1&quot;, &quot;layer&quot;: &quot;4.5&quot;},
+    &quot;domain&quot;: &quot;enterprise-attack&quot;,
+    &quot;description&quot;: &quot;Coverage map for Phase 1-2 detections&quot;,
+    &quot;techniques&quot;: [
+        {
+            &quot;techniqueID&quot;: &quot;T1059.001&quot;,
+            &quot;score&quot;: 1,
+            &quot;color&quot;: &quot;#4caf50&quot;,
+            &quot;comment&quot;: &quot;Covered by Sysmon EID 1 + PowerShell EID 4104&quot;
+        },
+        {
+            &quot;techniqueID&quot;: &quot;T1003.001&quot;,
+            &quot;score&quot;: 1,
+            &quot;color&quot;: &quot;#4caf50&quot;,
+            &quot;comment&quot;: &quot;Covered by Sysmon EID 10 (lsass access)&quot;
+        },
+        {
+            &quot;techniqueID&quot;: &quot;T1071.001&quot;,
+            &quot;score&quot;: 0,
+            &quot;color&quot;: &quot;#f44336&quot;,
+            &quot;comment&quot;: &quot;Gap: no web proxy deployed&quot;
+        }
+    ],
+    &quot;gradient&quot;: {&quot;colors&quot;: [&quot;#f44336&quot;, &quot;#4caf50&quot;], &quot;minValue&quot;: 0, &quot;maxValue&quot;: 1}
+}
+</code></pre><p><strong>Exercise:</strong>
+Write a Python function <code>build_navigator_layer(coverage: list[dict], name: str) -&gt; dict</code> that takes a list of coverage records and returns a valid Navigator layer JSON dict.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>coverage = [
+    {&quot;technique_id&quot;: &quot;T1059.001&quot;, &quot;covered&quot;: True,  &quot;note&quot;: &quot;Sysmon EID 1&quot;},
+    {&quot;technique_id&quot;: &quot;T1003.001&quot;, &quot;covered&quot;: True,  &quot;note&quot;: &quot;Sysmon EID 10&quot;},
+    {&quot;technique_id&quot;: &quot;T1071.001&quot;, &quot;covered&quot;: False, &quot;note&quot;: &quot;No proxy logs&quot;},
+    {&quot;technique_id&quot;: &quot;T1078&quot;,     &quot;covered&quot;: False, &quot;note&quot;: &quot;Partial — no Azure AD&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: a dict matching the Navigator layer JSON format above, with green for covered and red for uncovered techniques.</p>
+<hr />
+<h3>Concept 2 — Threat Actor Profiles and Their Technique Sets</h3>
+<p>ATT&amp;CK groups are tracked threat actors — each with a profile listing their known techniques, targeted sectors, and affiliated tools. Using these profiles, you can prioritize your detection backlog against the most relevant adversaries for your sector.</p>
+<p>For Israeli technology and financial organizations, relevant threat actors include:</p>
+<ul>
+<li><strong>APT33 (Elfin)</strong> — Iranian, targets energy, aerospace, petrochemicals</li>
+<li><strong>APT34 (OilRig)</strong> — Iranian, targets finance, telco, government across Middle East</li>
+<li><strong>Molerats</strong> — Hamas-affiliated, targets government and media in MENA region</li>
+<li><strong>Scattered Spider</strong> — financially motivated, uses social engineering and SIM swapping</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json, urllib.request
+
+# ATT&amp;CK STIX data (enterprise-attack JSON) is available at:
+# https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json
+# It is ~30MB — for this exercise, use the pre-filtered data below
+
+# Simulated APT34 technique list (subset):
+apt34_techniques = [
+    &quot;T1566.001&quot;,  # Spearphishing Attachment
+    &quot;T1059.001&quot;,  # PowerShell
+    &quot;T1078&quot;,      # Valid Accounts
+    &quot;T1071.001&quot;,  # Web Protocols (C2)
+    &quot;T1105&quot;,      # Ingress Tool Transfer
+    &quot;T1003.001&quot;,  # LSASS Memory
+    &quot;T1070.004&quot;,  # File Deletion
+    &quot;T1041&quot;,      # Exfiltration Over C2
+]
+
+your_coverage = {&quot;T1566.001&quot;, &quot;T1059.001&quot;, &quot;T1003.001&quot;}  # techniques you detect
+
+gap = set(apt34_techniques) - your_coverage
+print(f&quot;Coverage against APT34: {len(your_coverage)}/{len(apt34_techniques)}&quot;)
+print(f&quot;Gaps: {gap}&quot;)
+# → Coverage against APT34: 3/8
+# → Gaps: {&#x27;T1078&#x27;, &#x27;T1071.001&#x27;, &#x27;T1105&#x27;, &#x27;T1070.004&#x27;, &#x27;T1041&#x27;}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the apt34_techniques list and your_coverage dict above, write a function <code>prioritize_gaps(threat_techniques: list[str], covered: set[str], all_techniques_data: dict) -&gt; list[dict]</code> that:</p>
+<ol>
+<li>Identifies uncovered techniques</li>
+<li>Returns them sorted by tactic order (Execution before Persistence before Defense Evasion, etc.)</li>
+<li>Includes the tactic name and a one-line description for each</li>
+</ol>
+<p>Use a hardcoded <code>TACTIC_ORDER</code> list for sorting since we do not have the full STIX download.</p>
+<p>Expected output: sorted list of gap techniques with technique_id, tactic, and brief description.</p>
+<hr />
+<h3>Concept 3 — Building the Navigator Layer JSON (Royal Road)</h3>
+<p>The W05 Royal Road is a Python script that reads a coverage CSV and outputs a valid ATT&amp;CK Navigator layer JSON file. This is the foundation of the coverage dashboard built in W12.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># coverage.csv format:
+# technique_id,covered,data_source,notes
+# T1059.001,1,Sysmon EID 1,PowerShell detection via process creation
+# T1003.001,1,Sysmon EID 10,lsass access detection
+# T1071.001,0,,No proxy deployed
+
+import csv
+import json
+from pathlib import Path
+
+LAYER_TEMPLATE = {
+    &quot;name&quot;: &quot;&quot;,
+    &quot;versions&quot;: {&quot;attack&quot;: &quot;14&quot;, &quot;navigator&quot;: &quot;4.9.1&quot;, &quot;layer&quot;: &quot;4.5&quot;},
+    &quot;domain&quot;: &quot;enterprise-attack&quot;,
+    &quot;description&quot;: &quot;&quot;,
+    &quot;techniques&quot;: [],
+    &quot;gradient&quot;: {&quot;colors&quot;: [&quot;#f44336&quot;, &quot;#ff9800&quot;, &quot;#4caf50&quot;], &quot;minValue&quot;: 0, &quot;maxValue&quot;: 1},
+    &quot;legendItems&quot;: [
+        {&quot;label&quot;: &quot;Covered&quot;,     &quot;color&quot;: &quot;#4caf50&quot;},
+        {&quot;label&quot;: &quot;Partial&quot;,     &quot;color&quot;: &quot;#ff9800&quot;},
+        {&quot;label&quot;: &quot;No coverage&quot;, &quot;color&quot;: &quot;#f44336&quot;},
+    ]
+}
+
+def csv_to_navigator(csv_path: str, layer_name: str, out_path: str) -&gt; dict:
+    layer = {**LAYER_TEMPLATE, &quot;name&quot;: layer_name}
+    techniques = []
+    with open(csv_path) as f:
+        for row in csv.DictReader(f):
+            score = int(row.get(&quot;covered&quot;, 0))
+            color = &quot;#4caf50&quot; if score == 1 else &quot;#f44336&quot;
+            techniques.append({
+                &quot;techniqueID&quot;: row[&quot;technique_id&quot;],
+                &quot;score&quot;: score,
+                &quot;color&quot;: color,
+                &quot;comment&quot;: row.get(&quot;notes&quot;, &quot;&quot;),
+            })
+    layer[&quot;techniques&quot;] = techniques
+    Path(out_path).write_text(json.dumps(layer, indent=2))
+    return layer
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Create a <code>coverage.csv</code> file with at least 8 technique entries (mix of covered and uncovered).
+Run <code>csv_to_navigator()</code> to generate the Navigator layer JSON.
+Upload the JSON at mitre-attack.github.io/attack-navigator (Open Existing Layer → from local file).
+Take note of what the coverage heat map looks like.</p>
+<p>Expected output: a valid <code>coverage_layer.json</code> file and a description of what you see in the Navigator visualization (how many techniques are green vs red, which tactics have the most gaps).</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs for threat actor TTP mapping
+<strong>Threat:</strong> LLMs trained on public threat intelligence can be queried by attackers to find TTPs used by advanced threat actors, allowing less-skilled attackers to adopt nation-state techniques without deep knowledge of how they work.
+<strong>Opportunity:</strong> Describe an incident to an LLM and ask it to generate an ATT&amp;CK layer JSON marking all techniques that appear to have been used. The LLM can produce a Navigator-compatible file from a natural language incident report, accelerating post-incident documentation.
+<strong>Prompt to try:</strong> <code>&quot;Based on this incident summary: [paste incident report], identify all MITRE ATT&amp;CK techniques used. Output a JSON list of objects with fields: technique_id, technique_name, tactic, evidence_from_report. I will use this to generate an ATT&amp;CK Navigator layer.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — Detection Mapping and Rule Prioritization</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="05-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=CfOl_yZDRnE" target="_blank" rel="noopener"><b>12 Days of Defense - Day 11: Prioritizing Detection with MITRE ATT&amp;CK Navigator</b><small>John Hubbard</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=detection%20engineering%20ATT%26CK%20mapping%20rule%20prioritization" target="_blank" rel="noopener">detection engineering ATT&amp;CK mapping rule prioritization</a></p></div>
+<hr />
+<h3>Concept 1 — Mapping Existing Rules to ATT&amp;CK</h3>
+<p>The first step in building a detection program is understanding what you already have. Every existing alert or SIEM rule should be tagged with the ATT&amp;CK technique it detects. This creates an inventory: &quot;we have 47 rules, covering 23 unique techniques across 8 tactics.&quot;</p>
+<p>Most SIEM rules are written without ATT&amp;CK tags. Retroactively tagging them reveals: duplication (3 rules for the same technique), coverage gaps, and tactic-level blind spots.</p>
+<p>Data engineering analogy: this is like a data lineage audit. You trace every dashboard metric back to its source table. Some metrics come from three different tables (duplication). Some business questions have no source table at all (gaps). The audit map drives prioritization.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Existing SIEM rules inventory (before ATT&amp;CK tagging):
+rules = [
+    {&quot;rule_id&quot;: &quot;R001&quot;, &quot;name&quot;: &quot;PowerShell encoded command&quot;,    &quot;tags&quot;: []},
+    {&quot;rule_id&quot;: &quot;R002&quot;, &quot;name&quot;: &quot;LSASS access by non-system&quot;,    &quot;tags&quot;: []},
+    {&quot;rule_id&quot;: &quot;R003&quot;, &quot;name&quot;: &quot;Net.exe domain group query&quot;,     &quot;tags&quot;: []},
+    {&quot;rule_id&quot;: &quot;R004&quot;, &quot;name&quot;: &quot;Failed logon spike&quot;,             &quot;tags&quot;: []},
+    {&quot;rule_id&quot;: &quot;R005&quot;, &quot;name&quot;: &quot;Scheduled task created via schtasks&quot;, &quot;tags&quot;: []},
+]
+
+# After tagging:
+tagged_rules = [
+    {&quot;rule_id&quot;: &quot;R001&quot;, &quot;name&quot;: &quot;PowerShell encoded command&quot;,    &quot;tags&quot;: [&quot;T1059.001&quot;]},
+    {&quot;rule_id&quot;: &quot;R002&quot;, &quot;name&quot;: &quot;LSASS access by non-system&quot;,    &quot;tags&quot;: [&quot;T1003.001&quot;]},
+    {&quot;rule_id&quot;: &quot;R003&quot;, &quot;name&quot;: &quot;Net.exe domain group query&quot;,     &quot;tags&quot;: [&quot;T1069.002&quot;]},
+    {&quot;rule_id&quot;: &quot;R004&quot;, &quot;name&quot;: &quot;Failed logon spike&quot;,             &quot;tags&quot;: [&quot;T1110.003&quot;, &quot;T1110.001&quot;]},
+    {&quot;rule_id&quot;: &quot;R005&quot;, &quot;name&quot;: &quot;Scheduled task created&quot;,         &quot;tags&quot;: [&quot;T1053.005&quot;]},
+]
+
+# Compute coverage:
+all_covered = {t for r in tagged_rules for t in r[&quot;tags&quot;]}
+print(f&quot;Unique techniques covered: {len(all_covered)}&quot;)
+# → Unique techniques covered: 5
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Given the tagged_rules list above, write a function that:</p>
+<ol>
+<li>Groups rules by tactic (you need to map technique IDs to tactics — hardcode a small mapping)</li>
+<li>Prints a table showing: Tactic, Techniques Covered, Rule Count</li>
+<li>Identifies the tactic with the fewest rules</li>
+</ol>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>TECHNIQUE_TO_TACTIC = {
+    &quot;T1059.001&quot;: &quot;Execution&quot;,
+    &quot;T1003.001&quot;: &quot;Credential Access&quot;,
+    &quot;T1069.002&quot;: &quot;Discovery&quot;,
+    &quot;T1110.003&quot;: &quot;Credential Access&quot;,
+    &quot;T1110.001&quot;: &quot;Credential Access&quot;,
+    &quot;T1053.005&quot;: &quot;Persistence&quot;,
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: a table of tactics with rule counts and the identified lowest-coverage tactic.</p>
+<hr />
+<h3>Concept 2 — Prioritizing the Detection Backlog</h3>
+<p>You cannot build detections for all 600+ ATT&amp;CK techniques simultaneously. Prioritization uses three inputs:</p>
+<ol>
+<li><strong>Threat intelligence</strong> — which techniques are used by adversaries targeting your sector?</li>
+<li><strong>Data availability</strong> — which techniques can you detect with your current log sources?</li>
+<li><strong>Risk</strong> — what is the business impact if the technique succeeds without detection?</li>
+</ol>
+<p>A simple scoring formula: <code>priority_score = (threat_relevance × data_availability × impact) / effort</code></p>
+<p>Data engineering analogy: this is the same prioritization framework used for data quality fixes. You focus first on quality issues that affect high-value datasets (impact), that you actually have data to detect (availability), and where you have had incidents before (threat relevance).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Detection backlog prioritization:
+backlog = [
+    {
+        &quot;technique_id&quot;: &quot;T1078&quot;,
+        &quot;name&quot;: &quot;Valid Accounts&quot;,
+        &quot;threat_relevance&quot;: 9,   # APT34 uses this heavily
+        &quot;data_available&quot;: 8,     # Azure AD logs available
+        &quot;impact&quot;: 9,             # Full account takeover
+        &quot;effort&quot;: 3,             # Moderate to build
+    },
+    {
+        &quot;technique_id&quot;: &quot;T1071.004&quot;,
+        &quot;name&quot;: &quot;DNS C2&quot;,
+        &quot;threat_relevance&quot;: 7,
+        &quot;data_available&quot;: 4,     # DNS logs not centralized
+        &quot;impact&quot;: 8,
+        &quot;effort&quot;: 7,             # Hard — need DNS parser
+    },
+]
+
+for item in backlog:
+    score = (item[&quot;threat_relevance&quot;] * item[&quot;data_available&quot;] * item[&quot;impact&quot;]) / item[&quot;effort&quot;]
+    item[&quot;priority_score&quot;] = round(score, 1)
+
+# Sort by priority:
+backlog.sort(key=lambda x: x[&quot;priority_score&quot;], reverse=True)
+for item in backlog:
+    print(f&quot;{item[&#x27;technique_id&#x27;]}: {item[&#x27;priority_score&#x27;]} — {item[&#x27;name&#x27;]}&quot;)
+# → T1078: 216.0 — Valid Accounts  (high priority)
+# → T1071.004: 32.0 — DNS C2       (low priority until DNS logs available)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add three more techniques to the backlog (your choice) and run the prioritization. Ensure at least one technique has low data_available (you do not have the logs). The function should also flag any technique where data_available &lt; 5 with a note: &quot;LOG SOURCE MISSING — resolve before building rule.&quot;</p>
+<p>Expected output: sorted backlog with priority scores and a flag on any technique with insufficient data.</p>
+<hr />
+<h3>Concept 3 — Sigma Rules as ATT&amp;CK-Tagged Detections</h3>
+<p>A Sigma rule is a vendor-neutral detection rule format. It describes what to detect in YAML, independent of any specific SIEM. The sigma-cli tool compiles Sigma rules into KQL (for Sentinel), SPL (for Splunk), or Elasticsearch queries. Every Sigma rule includes ATT&amp;CK technique IDs in its tags — this is how Sigma and ATT&amp;CK connect.</p>
+<p>Data engineering analogy: Sigma rules are like dbt tests written in a portable format. Just as dbt tests can be compiled to run against multiple SQL engines (Snowflake, BigQuery, DuckDB), Sigma rules compile to multiple SIEM query languages. The rule logic is written once; the target engine is specified at compile time.</p>
+<p><strong>Example:</strong></p>
+<pre><code># sigma/rules/windows/process_creation/proc_creation_powershell_encoded.yml
+title: PowerShell Encoded Command Execution
+status: stable
+description: Detects PowerShell execution with -EncodedCommand parameter — commonly used to hide payload content
+author: Detection Team
+date: 2024/01/15
+tags:
+    - attack.execution
+    - attack.t1059.001
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        Image|endswith: &#x27;\powershell.exe&#x27;
+        CommandLine|contains:
+            - &#x27;-EncodedCommand&#x27;
+            - &#x27;-enc &#x27;
+            - &#x27;-ec &#x27;
+    condition: selection
+falsepositives:
+    - Legitimate administrative scripts using encoding for special characters
+level: medium
+</code></pre><p><strong>Exercise:</strong>
+Write a Sigma rule in YAML for the following detection:
+&quot;A new user account was added to the local Administrators group via net.exe or net1.exe&quot;</p>
+<p>Include: title, status, description, tags (ATT&amp;CK ID for local group membership modification), logsource (process_creation, windows), detection with Image matching net.exe or net1.exe and CommandLine containing &quot;localgroup&quot; and &quot;administrators&quot; and &quot;/add&quot;.</p>
+<p>Expected output: a valid Sigma YAML block with all required fields populated.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs for detection backlog prioritization
+<strong>Threat:</strong> An attacker monitors public threat intelligence feeds and adjusts their TTPs to avoid the most commonly detected techniques, knowing that most organizations prioritize their detection backlog based on public reporting about what techniques are &quot;trending.&quot;
+<strong>Opportunity:</strong> Describe your organization's sector, critical assets, and current log sources to an LLM and ask it to generate a prioritized ATT&amp;CK detection backlog with technique IDs, priority scores, and required data sources. The LLM can factor in sector-specific threat actors and Israeli threat landscape context.
+<strong>Prompt to try:</strong> <code>&quot;We are an Israeli fintech company. We have: Windows endpoint Sysmon logs, Azure AD sign-in logs, and firewall flow logs. We do not have proxy logs or DNS logs. Generate a prioritized detection backlog of 10 ATT&amp;CK techniques, ranked by risk to a company like ours. For each, include: technique ID, name, why it matters for fintech in Israel, required data source (mark if we have it), and estimated implementation effort (Low/Medium/High).&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Applying ATT&amp;CK to Real Incident Scenarios</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="05-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=bGjRH4wAW-A" target="_blank" rel="noopener"><b>Episode 40 -- Map TTPs Using MITRE ATT&amp;CK Within Adversary Analysis and Threat Frameworks</b><small>Bare Metal Cyber</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=ATT%26CK%20mapping%20incident%20response%20real%20world%20example" target="_blank" rel="noopener">ATT&amp;CK mapping incident response real world example</a></p></div>
+<hr />
+<h3>Concept 1 — The Attack Chain: Mapping an Intrusion to ATT&amp;CK</h3>
+<p>Real attacks use multiple techniques in sequence. Mapping an intrusion to ATT&amp;CK after the fact turns a confusing series of events into a structured narrative. Each event in the timeline corresponds to one ATT&amp;CK technique — a detective process that reveals both what happened and what you missed.</p>
+<p>Data engineering analogy: mapping an incident to ATT&amp;CK is like root-cause analysis on a failed pipeline run. You start with the symptom (data quality issue) and trace backwards through the execution graph until you find the root cause (broken transformation, missing source data). ATT&amp;CK gives you the vocabulary to describe each step in the attack &quot;pipeline&quot; precisely.</p>
+<p><strong>Example:</strong></p>
+<pre><code>Incident Timeline → ATT&amp;CK Mapping:
+
+2024-01-15 08:45  User bob receives phishing email with malicious attachment
+  → T1566.001 (Spearphishing Attachment)
+
+2024-01-15 08:51  bob opens attachment → macro runs PowerShell
+  → T1204.002 (Malicious File) + T1059.001 (PowerShell)
+
+2024-01-15 08:52  PowerShell downloads and runs beacon from C2 server
+  → T1105 (Ingress Tool Transfer) + T1071.001 (HTTP C2)
+
+2024-01-15 09:03  Beacon runs whoami, net group, arp -a, systeminfo
+  → T1033 (System Owner/User Discovery)
+  → T1069.002 (Domain Groups Discovery)
+  → T1016 (System Network Configuration Discovery)
+
+2024-01-15 09:15  Lateral movement to finance server via Pass-the-Hash
+  → T1550.002 (Pass the Hash)
+
+2024-01-15 10:30  Attacker archives financial data to encrypted ZIP
+  → T1560.001 (Archive via Utility)
+
+2024-01-15 10:45  ZIP exfiltrated via HTTPS to cloud storage provider
+  → T1567.002 (Exfiltration to Cloud Storage)
+</code></pre><p><strong>Exercise:</strong>
+Given the incident timeline above, identify which steps would have been detected by the following rules you built in W01-W04:</p>
+<ul>
+<li>W02 Day 3: EVTX parser with Event ID 4688 (process creation)</li>
+<li>W02 Day 1: Parent-child process anomaly (word.exe → powershell.exe)</li>
+<li>W04 Day 5: Kerberoasting detector (4769 with RC4)</li>
+<li>W03 Day 3: Netcat/wget execution via auditd</li>
+</ul>
+<p>Which steps would NOT have been detected by any rule you have built so far?
+Expected output: table with incident step, detected by (rule name or &quot;NOT DETECTED&quot;), and the ATT&amp;CK technique ID.</p>
+<hr />
+<h3>Concept 2 — Emulation Plans: Testing Your Detections</h3>
+<p>ATT&amp;CK Evaluations and MITRE's Center for Threat-Informed Defense publish attacker emulation plans — step-by-step scripts that simulate a specific threat actor's behavior on a test system. Running an emulation plan against your environment tells you whether your detections fire correctly before a real attacker tests them for you.</p>
+<p>Free tools for emulation:</p>
+<ul>
+<li><strong>Atomic Red Team</strong> (atomicredteam.io) — one YAML file per ATT&amp;CK technique, each with a safe test command</li>
+<li><strong>Caldera</strong> (caldera.mitre.org) — automated multi-step emulation engine</li>
+</ul>
+<p>Data engineering analogy: emulation plans are integration tests for your detection pipeline. Just as you run a test ETL job with synthetic data to verify your pipeline produces the correct output, you run an emulation test to verify your detection rules fire when the technique occurs.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Atomic Red Team — running test for T1059.001 PowerShell:
+# (on a test Windows machine — never on production)
+
+# Install:
+Install-Module -Name invoke-atomicredteam
+Import-Module invoke-atomicredteam
+
+# List available tests for T1059.001:
+Invoke-AtomicTest T1059.001 -ShowDetailsBrief
+
+# Run test 1 (PowerShell encoded command):
+Invoke-AtomicTest T1059.001 -TestNumbers 1
+
+# Check if your Sysmon + SIEM rule fired:
+# Event Viewer → Windows PowerShell → Operational → look for EID 4104
+# Sentinel/SIEM: did the PowerShell encoded command alert trigger?
+
+# Cleanup:
+Invoke-AtomicTest T1059.001 -TestNumbers 1 -Cleanup
+</code></pre><p><strong>Exercise:</strong>
+On a test Windows VM (or describe the steps you would take):</p>
+<ol>
+<li>Download Atomic Red Team</li>
+<li>Run the test for T1003.001 (LSASS Memory — test #1: Task Manager memory dump)</li>
+<li>Check whether your Sysmon EID 10 (process access to lsass) rule would have fired</li>
+<li>Document the test result: Expected behavior, Observed behavior, Detection fired (Y/N)</li>
+</ol>
+<p>Expected output: a structured test report with: Technique, Test ID, Expected log event, Observed result, Detection result.</p>
+<hr />
+<h3>Concept 3 — Purple Teaming: Offense and Defense Working Together</h3>
+<p>Purple teaming is the practice of running attacker simulations (red team) while the defense (blue team) watches in real time to tune detections. The red team executes a technique; the blue team watches the logs; if the detection does not fire, they tune the rule together.</p>
+<p>Unlike traditional red team (attacker vs. defender, no collaboration), purple team exercises maximize detection coverage improvement per hour of effort.</p>
+<p><strong>Example:</strong></p>
+<pre><code>Purple Team Exercise Structure:
+
+Step 1: Select technique
+  → T1547.001 (Registry Run Keys / Startup Folder — persistence)
+
+Step 2: Red team executes (on a test VM):
+  reg add &quot;HKCU\Software\Microsoft\Windows\CurrentVersion\Run&quot; /v &quot;Test&quot; /d &quot;C:\Temp\test.exe&quot; /f
+
+Step 3: Blue team observes:
+  → Sysmon EID 13 (Registry Value Set) fires?
+  → If yes: alert details correct? (TargetObject, Details, Image all accurate?)
+  → If no: why not? Is the Sysmon config missing registry monitoring? Is the rule wrong?
+
+Step 4: Tune:
+  → Add missing Sysmon filter
+  → Update Sigma rule to catch this variant
+  → Re-run the test — does it fire now?
+
+Step 5: Document:
+  → Technique covered, data source, rule version, test date
+  → Add to coverage CSV (feeds Navigator layer)
+</code></pre><p><strong>Exercise:</strong>
+Design a 4-step purple team exercise for T1110.003 (Password Spraying) in your lab environment:</p>
+<ol>
+<li>Write the exact test command the red team would run (PowerShell or Python to simulate password spray against localhost or a test AD)</li>
+<li>Write the detection rule (Sigma YAML) the blue team expects to fire</li>
+<li>List the event IDs and fields that would appear in the logs</li>
+<li>Define the pass/fail criteria for the exercise</li>
+</ol>
+<p>Expected output: a structured 4-section document covering command, detection rule, expected logs, and pass criteria.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs as red team assistants
+<strong>Threat:</strong> An attacker uses an LLM to enumerate the full set of ATT&amp;CK techniques for a specific target sector, then selects the ones least likely to be detected based on available threat intelligence about typical security coverage in that sector — enabling a &quot;detection gap first&quot; attack strategy.
+<strong>Opportunity:</strong> After a purple team exercise, feed the exercise log to an LLM and ask it to identify: which rules fired correctly, which produced false positives, which missed the technique, and what specific rule logic changes would improve accuracy. The LLM can analyze Sigma YAML and suggest precise edits.
+<strong>Prompt to try:</strong> <code>&quot;Here is the Sysmon log output from our purple team test of T1003.001 (LSASS dump via task manager) and our current Sigma rule: [paste logs and rule]. Did our rule fire? If not, what specific change to the detection logic would have caught this test case? Show the corrected Sigma YAML.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Building the W05 Royal Road Artifact</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="05-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=-ma0FZPNcYk" target="_blank" rel="noopener"><b>Automating MITRE ATT&amp;CK Mapping | Python for Security Analysts</b><small>VikCyberWatch</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=ATT%26CK%20coverage%20matrix%20automation%20Python" target="_blank" rel="noopener">ATT&amp;CK coverage matrix automation Python</a></p></div>
+<hr />
+<h3>Concept 1 — Reading ATT&amp;CK STIX Data Programmatically</h3>
+<p>ATT&amp;CK publishes its data as STIX 2.0 JSON at github.com/mitre/cti. The enterprise-attack.json file contains all techniques, tactics, groups, and software. Parsing it lets you build tools that automatically look up technique metadata without manual lookups.</p>
+<p>Data engineering analogy: the ATT&amp;CK STIX file is like a dimension table dump from a reference data API. You download it once, parse it into a local lookup dict, and JOIN it against your operational data (coverage CSV, incident logs) to enrich with metadata.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+from pathlib import Path
+
+def load_attack_stix(path: str) -&gt; dict[str, dict]:
+    with open(path) as f:
+        bundle = json.load(f)
+    techniques = {}
+    for obj in bundle.get(&quot;objects&quot;, []):
+        if obj.get(&quot;type&quot;) != &quot;attack-pattern&quot;:
+            continue
+        ext_refs = obj.get(&quot;external_references&quot;, [])
+        tech_id = next(
+            (r[&quot;external_id&quot;] for r in ext_refs if r.get(&quot;source_name&quot;) == &quot;mitre-attack&quot;),
+            None
+        )
+        if not tech_id:
+            continue
+        kill_chain = obj.get(&quot;kill_chain_phases&quot;, [])
+        tactic = kill_chain[0][&quot;phase_name&quot;] if kill_chain else &quot;unknown&quot;
+        techniques[tech_id] = {
+            &quot;id&quot;:          tech_id,
+            &quot;name&quot;:        obj.get(&quot;name&quot;, &quot;&quot;),
+            &quot;tactic&quot;:      tactic,
+            &quot;description&quot;: obj.get(&quot;description&quot;, &quot;&quot;)[:200],
+            &quot;deprecated&quot;:  obj.get(&quot;x_mitre_deprecated&quot;, False),
+        }
+    return techniques
+
+# Usage (requires enterprise-attack.json downloaded locally):
+# attack_db = load_attack_stix(&quot;enterprise-attack.json&quot;)
+# print(attack_db[&quot;T1059.001&quot;])
+# → {&#x27;id&#x27;: &#x27;T1059.001&#x27;, &#x27;name&#x27;: &#x27;PowerShell&#x27;, &#x27;tactic&#x27;: &#x27;execution&#x27;, ...}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the loader above (or a simplified hardcoded dict if you do not want to download the full STIX file), write a function <code>coverage_report(coverage_csv: str, attack_db: dict) -&gt; dict</code> that:</p>
+<ol>
+<li>Loads the coverage CSV from Day 2</li>
+<li>Enriches each row with technique name and tactic from attack_db</li>
+<li>Returns a dict with: total_techniques_in_coverage, covered_count, uncovered_count, coverage_pct, gaps_by_tactic</li>
+</ol>
+<p>Expected output: a summary dict and a printed table showing: Tactic, Total, Covered, Coverage %.</p>
+<hr />
+<h3>Concept 2 — Generating the Navigator Layer from Coverage Data</h3>
+<p>Combining the coverage CSV, the ATT&amp;CK STIX metadata, and the Navigator layer format from Day 2 Concept 3 into a single CLI script produces the W05 Royal Road artifact.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># pipeline/w05_coverage_map.py
+
+import csv
+import json
+import argparse
+from pathlib import Path
+
+def load_coverage(csv_path: str) -&gt; list[dict]:
+    with open(csv_path) as f:
+        return list(csv.DictReader(f))
+
+def build_layer(coverage: list[dict], name: str) -&gt; dict:
+    techniques = []
+    for row in coverage:
+        score = int(row.get(&quot;covered&quot;, 0))
+        techniques.append({
+            &quot;techniqueID&quot;: row[&quot;technique_id&quot;],
+            &quot;score&quot;:   score,
+            &quot;color&quot;:   &quot;#4caf50&quot; if score == 1 else &quot;#f44336&quot;,
+            &quot;comment&quot;: row.get(&quot;notes&quot;, &quot;&quot;),
+        })
+    return {
+        &quot;name&quot;:       name,
+        &quot;versions&quot;:   {&quot;attack&quot;: &quot;14&quot;, &quot;navigator&quot;: &quot;4.9.1&quot;, &quot;layer&quot;: &quot;4.5&quot;},
+        &quot;domain&quot;:     &quot;enterprise-attack&quot;,
+        &quot;techniques&quot;: techniques,
+        &quot;gradient&quot;:   {&quot;colors&quot;: [&quot;#f44336&quot;, &quot;#4caf50&quot;], &quot;minValue&quot;: 0, &quot;maxValue&quot;: 1},
+    }
+
+if __name__ == &quot;__main__&quot;:
+    ap = argparse.ArgumentParser()
+    ap.add_argument(&quot;--coverage&quot;, required=True)
+    ap.add_argument(&quot;--name&quot;,     default=&quot;My Coverage&quot;)
+    ap.add_argument(&quot;--output&quot;,   default=&quot;coverage_layer.json&quot;)
+    args = ap.parse_args()
+
+    cov = load_coverage(args.coverage)
+    layer = build_layer(cov, args.name)
+    Path(args.output).write_text(json.dumps(layer, indent=2))
+    covered = sum(1 for r in cov if int(r.get(&quot;covered&quot;, 0)) == 1)
+    print(f&quot;Coverage: {covered}/{len(cov)} techniques → {args.output}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Create a <code>coverage.csv</code> with at least 10 rows — covering a mix of tactics: at least 2 Execution techniques, 2 Persistence techniques, 2 Credential Access techniques, and 4 others of your choice.
+Run <code>w05_coverage_map.py</code> and generate the Navigator layer.
+Print the coverage summary: total techniques, covered count, coverage percentage.</p>
+<p>Expected output: <code>Coverage: 6/10 techniques → coverage_layer.json</code> (numbers match your CSV).</p>
+<hr />
+<h3>Concept 3 — Threat Actor Coverage: How Well Do You Cover APT34?</h3>
+<p>The final piece of the Royal Road: compare your coverage layer against a threat actor's known technique list. This generates a &quot;readiness score&quot; against a specific adversary — a metric that maps directly to security program maturity.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>APT34_TECHNIQUES = [
+    &quot;T1566.001&quot;, &quot;T1059.001&quot;, &quot;T1078&quot;, &quot;T1071.001&quot;,
+    &quot;T1105&quot;, &quot;T1003.001&quot;, &quot;T1070.004&quot;, &quot;T1041&quot;,
+    &quot;T1053.005&quot;, &quot;T1082&quot;, &quot;T1016&quot;, &quot;T1033&quot;,
+]
+
+def apt_coverage(coverage_csv: str, apt_techniques: list[str]) -&gt; dict:
+    with open(coverage_csv) as f:
+        rows = {r[&quot;technique_id&quot;]: int(r.get(&quot;covered&quot;, 0))
+                for r in csv.DictReader(f)}
+    covered   = [t for t in apt_techniques if rows.get(t, 0) == 1]
+    uncovered = [t for t in apt_techniques if rows.get(t, 0) == 0]
+    return {
+        &quot;actor&quot;:        &quot;APT34&quot;,
+        &quot;total&quot;:        len(apt_techniques),
+        &quot;covered&quot;:      len(covered),
+        &quot;uncovered&quot;:    uncovered,
+        &quot;coverage_pct&quot;: round(len(covered) / len(apt_techniques) * 100, 1),
+    }
+
+result = apt_coverage(&quot;coverage.csv&quot;, APT34_TECHNIQUES)
+print(f&quot;APT34 readiness: {result[&#x27;coverage_pct&#x27;]}% ({result[&#x27;covered&#x27;]}/{result[&#x27;total&#x27;]})&quot;)
+print(f&quot;Gaps: {result[&#x27;uncovered&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Run <code>apt_coverage()</code> against your coverage CSV from Concept 2. Then update the Navigator layer to show:</p>
+<ul>
+<li>Green: techniques you cover that APT34 uses</li>
+<li>Orange: APT34 techniques you partially cover (define &quot;partial&quot; as coverage score = 0 in your CSV but you have the data source)</li>
+<li>Red: APT34 techniques you do not cover at all</li>
+</ul>
+<p>Output a second Navigator layer file: <code>apt34_readiness.json</code></p>
+<p>Expected output: the APT34 readiness percentage printed to console and a valid <code>apt34_readiness.json</code> file.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs for automated coverage reporting
+<strong>Threat:</strong> An attacker reverse-engineers your organization's ATT&amp;CK coverage layer (if accidentally made public or accessible) to identify the exact techniques that will not trigger an alert, building an attack plan specifically around your gaps.
+<strong>Opportunity:</strong> Use an LLM to generate an executive summary of your ATT&amp;CK coverage — written for a non-technical CISO audience. Feed the coverage statistics and gap list to the LLM and ask it to produce a 2-paragraph summary explaining current state, top risks, and recommended next three investments.
+<strong>Prompt to try:</strong> <code>&quot;Here is our ATT&amp;CK coverage summary: [paste stats]. Write a 2-paragraph executive summary for a CISO. Paragraph 1: current detection posture. Paragraph 2: top 3 recommended investments to close the most critical gaps, with business risk justification for each.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 05</h2>
+<p><strong>Task:</strong> Build <code>pipeline/w05_coverage_map.py</code> — reads a <code>coverage.csv</code> and outputs a Navigator-compatible layer JSON showing detection coverage across ATT&amp;CK techniques.</p>
+<p><strong>Builds on:</strong> W01–W04 pipeline outputs — the coverage CSV documents which techniques are detected by rules built on the W01-W04 data sources (PCAP, EVTX, syslog, identity).</p>
+<p><strong>Deliverable:</strong> <code>pipeline/w05_coverage_map.py</code> that:</p>
+<ul>
+<li>Accepts <code>--coverage coverage.csv</code> and <code>--name &quot;My Coverage&quot;</code> and <code>--output coverage_layer.json</code></li>
+<li>Generates a valid ATT&amp;CK Navigator layer JSON (uploadable to mitre-attack.github.io/attack-navigator)</li>
+<li>Supports a second mode: <code>--actor APT34</code> — computes and prints coverage percentage against a hardcoded threat actor technique list</li>
+<li>Prints: <code>Coverage: N/M techniques (X%). APT34 readiness: Y%.</code></li>
+</ul>
+<p>Also create <code>coverage.csv</code> in the <code>pipeline/</code> folder with at least 10 technique entries.</p>
+<pre><code># pipeline/coverage.csv
+technique_id,covered,data_source,notes
+T1059.001,1,Sysmon EID 1 + PowerShell EID 4104,PowerShell execution detection
+T1003.001,1,Sysmon EID 10,LSASS access detection
+T1110.003,1,Windows Security EID 4625,Password spray detection
+T1053.005,1,Windows Security EID 4698,Scheduled task creation
+T1547.001,1,Sysmon EID 13,Registry Run key persistence
+T1078,0,,No Azure AD sign-in log ingestion yet
+T1071.001,0,,No proxy logs
+T1071.004,0,,No DNS logs
+T1041,0,,No egress monitoring
+T1566.001,0,,No email gateway logs
+</code></pre><p><strong>Stretch goal:</strong> Add a <code>--compare actor1.csv actor2.csv</code> mode that generates a side-by-side comparison Navigator layer — one layer per actor, showing which actor's techniques you cover better. Output a single JSON with two named layers.</p>
+<div class="pager"><a class="btn ghost" href="week-04.html">&larr; Week 04</a><a class="btn ghost" href="week-06.html">Week 06 &rarr;</a></div>
+</main></body></html>

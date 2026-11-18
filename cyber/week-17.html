@@ -1,0 +1,1600 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 17 — Digital Forensics</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 17 — Digital Forensics</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="17" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 17 — Digital Forensics</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 5 — IR &amp; Forensics</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Digital Forensics domain / SC-200: Evidence collection / GCIA: Memory + disk forensics</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>Volatility PSList vs. Sysmon correlation → hollow process hunt</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W16 Incident Response, W08 Log Sources, W13 Endpoint EDR</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Memory Forensics Fundamentals</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="17-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=R1X8V9yy_Y4" target="_blank" rel="noopener"><b>Volatility 3 Will Change How You Hunt Malware (Full Tutorial)</b><small>Taylor Walton</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=memory%20forensics%20volatility%203%20tutorial%20malware%20analysis" target="_blank" rel="noopener">memory forensics volatility 3 tutorial malware analysis</a></p></div>
+<hr />
+<h3>Concept 1 — Why Memory?</h3>
+<p>Disk forensics finds what was stored. Memory forensics finds what was running — including fileless malware, injected code, and secrets that never touched disk. RAM is the most volatile artifact (powered off = gone), which is why evidence collection orders RAM capture first.</p>
+<p>A process in memory has: a virtual address space, a PEB (Process Environment Block) describing it, thread stacks, mapped DLLs, and handles. Malware that injects into a legitimate process (process hollowing, DLL injection) lives only in these structures — no file on disk to scan.</p>
+<p><strong>Analogy to data engineering:</strong> A running Spark job has in-memory state (shuffle buffers, accumulators, broadcast variables) that disappears the instant the job ends. Memory forensics is like attaching a debugger to that job before it terminates to extract the live state.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import subprocess
+import json
+from dataclasses import dataclass, field
+from typing import Optional
+
+@dataclass
+class MemoryArtifact:
+    image_path: str       # path to .raw / .vmem / .dmp file
+    os_profile: str       # e.g. &quot;Win10x64_19041&quot;
+    acquired_at: str      # ISO timestamp
+    sha256: str
+    size_bytes: int
+
+@dataclass
+class VolatilityResult:
+    plugin: str
+    image_path: str
+    rows: list[dict]
+    error: Optional[str] = None
+    duration_seconds: float = 0.0
+
+def run_volatility(image_path: str, plugin: str, profile: str,
+                   extra_args: list[str] | None = None,
+                   vol_path: str = &quot;vol.py&quot;) -&gt; VolatilityResult:
+    &quot;&quot;&quot;Run a Volatility 3 plugin and return structured output.&quot;&quot;&quot;
+    cmd = [
+        &quot;python&quot;, vol_path,
+        &quot;-f&quot;, image_path,
+        &quot;--renderer&quot;, &quot;json&quot;,
+        plugin,
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+
+    import time
+    start = time.monotonic()
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        duration = time.monotonic() - start
+        if result.returncode != 0:
+            return VolatilityResult(plugin, image_path, [], error=result.stderr, duration_seconds=duration)
+        data = json.loads(result.stdout)
+        # Volatility 3 JSON: {&quot;columns&quot;: [...], &quot;rows&quot;: [...]}
+        columns = data.get(&quot;columns&quot;, [])
+        rows = [dict(zip(columns, row)) for row in data.get(&quot;rows&quot;, [])]
+        return VolatilityResult(plugin, image_path, rows, duration_seconds=duration)
+    except subprocess.TimeoutExpired:
+        return VolatilityResult(plugin, image_path, [], error=&quot;timeout after 300s&quot;)
+    except json.JSONDecodeError as exc:
+        return VolatilityResult(plugin, image_path, [], error=f&quot;JSON parse error: {exc}&quot;)
+
+# Simulated output (no actual memory image required for exercises)
+SIMULATED_PSLIST = [
+    {&quot;PID&quot;: 4,    &quot;PPID&quot;: 0,    &quot;ImageFileName&quot;: &quot;System&quot;,           &quot;CreateTime&quot;: &quot;2024-01-15 08:00:01&quot;},
+    {&quot;PID&quot;: 388,  &quot;PPID&quot;: 4,    &quot;ImageFileName&quot;: &quot;smss.exe&quot;,         &quot;CreateTime&quot;: &quot;2024-01-15 08:00:02&quot;},
+    {&quot;PID&quot;: 492,  &quot;PPID&quot;: 388,  &quot;ImageFileName&quot;: &quot;csrss.exe&quot;,        &quot;CreateTime&quot;: &quot;2024-01-15 08:00:05&quot;},
+    {&quot;PID&quot;: 568,  &quot;PPID&quot;: 388,  &quot;ImageFileName&quot;: &quot;wininit.exe&quot;,      &quot;CreateTime&quot;: &quot;2024-01-15 08:00:06&quot;},
+    {&quot;PID&quot;: 600,  &quot;PPID&quot;: 492,  &quot;ImageFileName&quot;: &quot;csrss.exe&quot;,        &quot;CreateTime&quot;: &quot;2024-01-15 08:00:06&quot;},
+    {&quot;PID&quot;: 660,  &quot;PPID&quot;: 568,  &quot;ImageFileName&quot;: &quot;services.exe&quot;,     &quot;CreateTime&quot;: &quot;2024-01-15 08:00:07&quot;},
+    {&quot;PID&quot;: 668,  &quot;PPID&quot;: 568,  &quot;ImageFileName&quot;: &quot;lsass.exe&quot;,        &quot;CreateTime&quot;: &quot;2024-01-15 08:00:07&quot;},
+    {&quot;PID&quot;: 760,  &quot;PPID&quot;: 660,  &quot;ImageFileName&quot;: &quot;svchost.exe&quot;,      &quot;CreateTime&quot;: &quot;2024-01-15 08:00:10&quot;},
+    {&quot;PID&quot;: 912,  &quot;PPID&quot;: 660,  &quot;ImageFileName&quot;: &quot;svchost.exe&quot;,      &quot;CreateTime&quot;: &quot;2024-01-15 08:00:11&quot;},
+    {&quot;PID&quot;: 1024, &quot;PPID&quot;: 660,  &quot;ImageFileName&quot;: &quot;svchost.exe&quot;,      &quot;CreateTime&quot;: &quot;2024-01-15 08:00:12&quot;},
+    {&quot;PID&quot;: 1200, &quot;PPID&quot;: 660,  &quot;ImageFileName&quot;: &quot;spoolsv.exe&quot;,      &quot;CreateTime&quot;: &quot;2024-01-15 08:00:15&quot;},
+    {&quot;PID&quot;: 1840, &quot;PPID&quot;: 660,  &quot;ImageFileName&quot;: &quot;svchost.exe&quot;,      &quot;CreateTime&quot;: &quot;2024-01-15 08:00:20&quot;},
+    {&quot;PID&quot;: 2400, &quot;PPID&quot;: 1024, &quot;ImageFileName&quot;: &quot;explorer.exe&quot;,     &quot;CreateTime&quot;: &quot;2024-01-15 08:05:00&quot;},
+    {&quot;PID&quot;: 3100, &quot;PPID&quot;: 2400, &quot;ImageFileName&quot;: &quot;powershell.exe&quot;,   &quot;CreateTime&quot;: &quot;2024-01-15 09:10:00&quot;},
+    {&quot;PID&quot;: 3200, &quot;PPID&quot;: 3100, &quot;ImageFileName&quot;: &quot;svchost.exe&quot;,      &quot;CreateTime&quot;: &quot;2024-01-15 09:10:05&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Build a function <code>build_process_tree(pslist: list[dict]) -&gt; dict[int, list[int]]</code> that returns a parent→children mapping. Then write <code>find_suspicious_parents(tree, pslist)</code> that flags any process whose parent is unexpected (e.g., <code>svchost.exe</code> spawned by <code>explorer.exe</code>, or <code>powershell.exe</code> spawned by <code>svchost.exe</code>).</p>
+<p>Expected output:</p>
+<pre><code>Suspicious: PID 3100 (powershell.exe) parent PID 2400 (explorer.exe) — expected parent: services.exe
+Suspicious: PID 3200 (svchost.exe) parent PID 3100 (powershell.exe) — expected parent: services.exe
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>NORMAL_PARENTS = {
+    &quot;smss.exe&quot;:       {&quot;System&quot;},
+    &quot;csrss.exe&quot;:      {&quot;smss.exe&quot;},
+    &quot;wininit.exe&quot;:    {&quot;smss.exe&quot;},
+    &quot;services.exe&quot;:   {&quot;wininit.exe&quot;},
+    &quot;lsass.exe&quot;:      {&quot;wininit.exe&quot;},
+    &quot;svchost.exe&quot;:    {&quot;services.exe&quot;},
+    &quot;spoolsv.exe&quot;:    {&quot;services.exe&quot;},
+    &quot;explorer.exe&quot;:   {&quot;userinit.exe&quot;},
+    &quot;powershell.exe&quot;: {&quot;explorer.exe&quot;, &quot;cmd.exe&quot;, &quot;powershell.exe&quot;},
+    &quot;cmd.exe&quot;:        {&quot;explorer.exe&quot;, &quot;powershell.exe&quot;, &quot;cmd.exe&quot;},
+}
+
+pslist_data = SIMULATED_PSLIST
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — Volatility Core Plugins</h3>
+<p>Volatility 3 ships with plugins for every major memory structure. The four most important for detection:</p>
+<ul>
+<li><code>windows.pslist</code> — process list from the EPROCESS doubly-linked list</li>
+<li><code>windows.pstree</code> — same data formatted as a tree</li>
+<li><code>windows.cmdline</code> — command-line arguments for each process (read from PEB)</li>
+<li><code>windows.dlllist</code> — all loaded DLLs for a process (mapped in virtual address space)</li>
+<li><code>windows.malfind</code> — scans for VAD regions with PAGE_EXECUTE_READWRITE that don't map to a file on disk (classic injection indicator)</li>
+<li><code>windows.netscan</code> — active and recently closed network connections (from TcpE/UdpA structures)</li>
+</ul>
+<p><strong>Analogy:</strong> <code>pslist</code> is a <code>SELECT * FROM processes</code> — straightforward read of a known structure. <code>malfind</code> is more like <code>SELECT * FROM memory_pages WHERE permissions='rwx' AND backing_file IS NULL</code> — it scans a large structure looking for anomalies.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import Optional
+import re
+
+@dataclass
+class ProcessInfo:
+    pid: int
+    ppid: int
+    name: str
+    create_time: str
+    cmdline: Optional[str] = None
+    dlls: list[str] = None
+    network_connections: list[dict] = None
+    malfind_hits: list[dict] = None
+
+    def __post_init__(self):
+        if self.dlls is None:
+            self.dlls = []
+        if self.network_connections is None:
+            self.network_connections = []
+        if self.malfind_hits is None:
+            self.malfind_hits = []
+
+    def has_suspicious_cmdline(self) -&gt; bool:
+        if not self.cmdline:
+            return False
+        indicators = [
+            r&quot;-[Ee][Nn][Cc]&quot;,          # encoded command
+            r&quot;-[Ww]indowstyle\s+[Hh]idden&quot;,
+            r&quot;bypass&quot;,
+            r&quot;IEX\s*\(&quot;,
+            r&quot;downloadstring&quot;,
+            r&quot;invoke-expression&quot;,
+        ]
+        cl = self.cmdline.lower()
+        return any(re.search(pat, self.cmdline, re.IGNORECASE) for pat in indicators)
+
+    def has_unsigned_dll(self, signed_prefixes: list[str] | None = None) -&gt; bool:
+        if signed_prefixes is None:
+            signed_prefixes = [
+                r&quot;c:\windows\system32\\&quot;,
+                r&quot;c:\windows\syswow64\\&quot;,
+                r&quot;c:\program files\\&quot;,
+            ]
+        for dll in self.dlls:
+            dll_lower = dll.lower()
+            if not any(dll_lower.startswith(p) for p in signed_prefixes):
+                return True
+        return False
+
+SIMULATED_CMDLINES = {
+    3100: r&quot;powershell.exe -WindowStyle Hidden -EncodedCommand JABjAD0ATgBlAHcA...&quot;,
+    3200: r&quot;C:\Windows\System32\svchost.exe&quot;,
+}
+
+SIMULATED_DLLS = {
+    3100: [
+        r&quot;C:\Windows\System32\ntdll.dll&quot;,
+        r&quot;C:\Windows\System32\kernel32.dll&quot;,
+        r&quot;C:\Users\user\AppData\Local\Temp\tmprefl.dll&quot;,
+    ],
+    3200: [
+        r&quot;C:\Windows\System32\ntdll.dll&quot;,
+        r&quot;C:\Windows\System32\kernel32.dll&quot;,
+    ],
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Given <code>SIMULATED_CMDLINES</code> and <code>SIMULATED_DLLS</code>, build <code>enrich_processes(pslist, cmdlines, dlls)</code> that returns <code>list[ProcessInfo]</code>. Then call <code>has_suspicious_cmdline()</code> and <code>has_unsigned_dll()</code> for each process and print findings.</p>
+<p>Expected output:</p>
+<pre><code>PID 3100 (powershell.exe): suspicious cmdline=True, unsigned_dll=True
+  cmdline: powershell.exe -WindowStyle Hidden -EncodedCommand ...
+  unsigned DLL: C:\Users\user\AppData\Local\Temp\tmprefl.dll
+PID 3200 (svchost.exe): suspicious cmdline=False, unsigned_dll=False
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>pslist_input = SIMULATED_PSLIST
+cmdlines_input = SIMULATED_CMDLINES
+dlls_input = SIMULATED_DLLS
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — Process Hollowing Detection</h3>
+<p>Process hollowing: attacker creates a legitimate process in SUSPENDED state, unmaps its memory, writes malicious code, then resumes. The process table shows <code>svchost.exe</code> but its memory contains shellcode.</p>
+<p>Detection signatures:</p>
+<ol>
+<li>Process has no mapped image in VAD (virtual address descriptor tree) — the executable section has no backing file</li>
+<li><code>malfind</code> finds a PAGE_EXECUTE_READWRITE VAD that starts with MZ header (PE file)</li>
+<li>Process path in memory does not match disk path (image path spoofing)</li>
+<li>Thread start address points outside any loaded module</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from enum import Enum
+
+class HollowingIndicator(Enum):
+    NO_DISK_BACKING    = &quot;executable_vad_has_no_disk_file&quot;
+    RWX_WITH_MZ        = &quot;rwx_region_starts_with_mz_header&quot;
+    PATH_MISMATCH      = &quot;image_path_does_not_match_disk&quot;
+    ORPHAN_THREAD      = &quot;thread_start_outside_loaded_modules&quot;
+
+@dataclass
+class MalfindHit:
+    pid: int
+    process_name: str
+    vad_start: int     # hex address
+    vad_end: int
+    protection: str    # e.g. &quot;PAGE_EXECUTE_READWRITE&quot;
+    file_output: str   # first bytes — MZ header = PE, 0x90 = nop sled
+    disk_path: Optional[str] = None  # None means no backing file
+
+@dataclass
+class HollowingFinding:
+    pid: int
+    process_name: str
+    indicators: list[HollowingIndicator]
+    confidence: str    # &quot;HIGH&quot; / &quot;MEDIUM&quot; / &quot;LOW&quot;
+    details: str
+
+def assess_hollowing(hit: MalfindHit, pslist_entry: dict) -&gt; HollowingFinding:
+    indicators = []
+
+    if hit.disk_path is None:
+        indicators.append(HollowingIndicator.NO_DISK_BACKING)
+
+    if hit.file_output.startswith(&quot;4d5a&quot;) or hit.file_output.lower().startswith(&quot;mz&quot;):
+        indicators.append(HollowingIndicator.RWX_WITH_MZ)
+
+    if hit.protection == &quot;PAGE_EXECUTE_READWRITE&quot;:
+        pass  # already captured by malfind selection
+
+    confidence = &quot;LOW&quot;
+    if len(indicators) &gt;= 2:
+        confidence = &quot;HIGH&quot;
+    elif len(indicators) == 1:
+        confidence = &quot;MEDIUM&quot;
+
+    details = f&quot;VAD {hex(hit.vad_start)}-{hex(hit.vad_end)}, protection={hit.protection}&quot;
+    return HollowingFinding(hit.pid, hit.process_name, indicators, confidence, details)
+
+SIMULATED_MALFIND = [
+    MalfindHit(
+        pid=3200, process_name=&quot;svchost.exe&quot;,
+        vad_start=0x00400000, vad_end=0x00410000,
+        protection=&quot;PAGE_EXECUTE_READWRITE&quot;,
+        file_output=&quot;4d5a90000300000004000000ffff&quot;,
+        disk_path=None,
+    ),
+    MalfindHit(
+        pid=3100, process_name=&quot;powershell.exe&quot;,
+        vad_start=0x7ffe0000, vad_end=0x7ffe1000,
+        protection=&quot;PAGE_EXECUTE_READ&quot;,
+        file_output=&quot;4d5a90000300000004000000ffff&quot;,
+        disk_path=r&quot;C:\Windows\System32\ntdll.dll&quot;,
+    ),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Run <code>assess_hollowing()</code> against each entry in <code>SIMULATED_MALFIND</code>, using the matching <code>SIMULATED_PSLIST</code> entry. Print only findings with confidence HIGH or MEDIUM.</p>
+<p>Expected output:</p>
+<pre><code>HIGH: PID 3200 (svchost.exe)
+  indicators: NO_DISK_BACKING, RWX_WITH_MZ
+  VAD 0x400000-0x410000, protection=PAGE_EXECUTE_READWRITE
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>malfind_hits = SIMULATED_MALFIND
+pslist_lookup = {p[&quot;PID&quot;]: p for p in SIMULATED_PSLIST}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can decode encoded PowerShell commands and explain shellcode patterns in plain English.
+<strong>Threat:</strong> Attackers prompt LLMs for obfuscation recipes — polymorphic shellcode, environment-keyed decoders.
+<strong>Opportunity:</strong> Feed a <code>MalfindHit.file_output</code> hex string to an LLM and ask it to identify the payload type (PE header, shellcode stub, reflective DLL loader). Cuts first-pass triage time from hours to minutes.
+<strong>Prompt to try:</strong> <code>&quot;The following hex bytes are from a PAGE_EXECUTE_READWRITE memory region with no disk backing file in a svchost.exe process. Identify the payload type, explain what the first 16 bytes indicate, and list the most likely injection technique: [hex bytes here]&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Disk and File System Forensics</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="17-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=2LqfojEu5zQ" target="_blank" rel="noopener"><b>Forensic Investigation With FTK Imager &amp; Autopsy GUI</b><small>Cyber Secrets</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=disk%20forensics%20autopsy%20FTK%20imager%20windows%20artifacts%20investigation" target="_blank" rel="noopener">disk forensics autopsy FTK imager windows artifacts investigation</a></p></div>
+<hr />
+<h3>Concept 1 — Windows Forensic Artifacts</h3>
+<p>Key artifacts on disk, where they live, and what they prove:</p>
+<table>
+<thead>
+<tr>
+<th>Artifact</th>
+<th>Path</th>
+<th>Forensic Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Prefetch</td>
+<td><code>C:\Windows\Prefetch\*.pf</code></td>
+<td>Evidence of execution (file name + timestamp + run count)</td>
+</tr>
+<tr>
+<td>Shimcache (AppCompatCache)</td>
+<td>Registry: <code>SYSTEM\CurrentControlSet\Control\Session Manager\AppCompatCache</code></td>
+<td>Execution of any file, even deleted ones</td>
+</tr>
+<tr>
+<td>Amcache</td>
+<td><code>C:\Windows\AppCompat\Programs\Amcache.hve</code></td>
+<td>SHA-1 of executed binaries</td>
+</tr>
+<tr>
+<td>MFT ($MFT)</td>
+<td>Root of NTFS volume</td>
+<td>File creation, modification, access timestamps</td>
+</tr>
+<tr>
+<td>USN Journal ($J)</td>
+<td><code>$Extend\$UsnJrnl</code></td>
+<td>File create/delete/rename operations with timestamps</td>
+</tr>
+<tr>
+<td>LNK files</td>
+<td><code>%APPDATA%\Microsoft\Windows\Recent\</code></td>
+<td>File access by user (full path, timestamps)</td>
+</tr>
+<tr>
+<td>Jumplists</td>
+<td><code>%APPDATA%\Microsoft\Windows\Recent\AutomaticDestinations\</code></td>
+<td>Application + file accessed</td>
+</tr>
+<tr>
+<td>SRUM</td>
+<td><code>C:\Windows\System32\sru\SRUDB.dat</code></td>
+<td>Network bytes sent/received per process, energy usage</td>
+</tr>
+<tr>
+<td>Event logs</td>
+<td><code>C:\Windows\System32\winevt\Logs\</code></td>
+<td>Security (4624/4625/4648), System, PowerShell operational</td>
+</tr>
+<tr>
+<td>Browser history</td>
+<td>Profile folders</td>
+<td>URLs, downloads, form data, cookies</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Analogy:</strong> These artifacts are like audit log tables in a data warehouse — they record operations at different granularities. Prefetch is like an access log. USN Journal is like a change data capture (CDC) stream. MFT timestamps are like row-level created_at/updated_at columns.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+import os
+import struct
+
+@dataclass
+class PrefetchEntry:
+    filename: str         # e.g. &quot;POWERSHELL.EXE-ABC12345.pf&quot;
+    executable_name: str  # e.g. &quot;POWERSHELL.EXE&quot;
+    run_count: int
+    last_run_times: list[datetime]
+    volume_paths: list[str]
+    files_referenced: list[str]
+    hash_value: str
+
+@dataclass
+class LNKTarget:
+    target_path: str
+    creation_time: datetime
+    modified_time: datetime
+    access_time: datetime
+    file_size: int
+    drive_type: str
+    drive_serial: str
+    machine_id: str
+
+@dataclass
+class ShimcacheEntry:
+    entry_index: int
+    file_path: str
+    last_modified: Optional[datetime]
+    # Note: shimcache does NOT record execution timestamp — only file modification time
+    # Presence proves the file existed and was enumerated by AppCompat
+
+def parse_prefetch_filename(pf_name: str) -&gt; tuple[str, str]:
+    &quot;&quot;&quot;Extract (executable_name, hash) from PF filename.&quot;&quot;&quot;
+    base = pf_name.replace(&quot;.pf&quot;, &quot;&quot;).replace(&quot;.PF&quot;, &quot;&quot;)
+    parts = base.rsplit(&quot;-&quot;, 1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return base, &quot;&quot;
+
+def correlate_prefetch_with_timeline(
+    prefetch_entries: list[PrefetchEntry],
+    timeline_start: datetime,
+    timeline_end: datetime,
+) -&gt; list[PrefetchEntry]:
+    &quot;&quot;&quot;Return prefetch entries with execution times overlapping the incident window.&quot;&quot;&quot;
+    results = []
+    for entry in prefetch_entries:
+        for run_time in entry.last_run_times:
+            if timeline_start &lt;= run_time &lt;= timeline_end:
+                results.append(entry)
+                break
+    return results
+
+SIMULATED_PREFETCH = [
+    PrefetchEntry(
+        filename=&quot;POWERSHELL.EXE-ABC12345.pf&quot;,
+        executable_name=&quot;POWERSHELL.EXE&quot;,
+        run_count=3,
+        last_run_times=[
+            datetime(2024, 1, 15, 9, 10, 0),
+            datetime(2024, 1, 15, 9, 15, 0),
+            datetime(2024, 1, 15, 9, 22, 0),
+        ],
+        volume_paths=[r&quot;C:\&quot;],
+        files_referenced=[
+            r&quot;C:\Windows\System32\ntdll.dll&quot;,
+            r&quot;C:\Users\user\AppData\Local\Temp\tmprefl.dll&quot;,
+        ],
+        hash_value=&quot;ABC12345&quot;,
+    ),
+    PrefetchEntry(
+        filename=&quot;CMD.EXE-DEF67890.pf&quot;,
+        executable_name=&quot;CMD.EXE&quot;,
+        run_count=1,
+        last_run_times=[datetime(2024, 1, 15, 8, 50, 0)],
+        volume_paths=[r&quot;C:\&quot;],
+        files_referenced=[r&quot;C:\Windows\System32\cmd.exe&quot;],
+        hash_value=&quot;DEF67890&quot;,
+    ),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using <code>SIMULATED_PREFETCH</code>, call <code>correlate_prefetch_with_timeline()</code> with the incident window <code>2024-01-15 09:00:00</code> to <code>2024-01-15 09:30:00</code>. For each matching entry, print the executable name, run count, matching execution times, and any suspicious files referenced (files not in <code>C:\Windows\System32\</code> or <code>C:\Program Files\</code>).</p>
+<p>Expected output:</p>
+<pre><code>POWERSHELL.EXE (3 total runs, 2 in window)
+  Execution times: 09:10:00, 09:15:00
+  Suspicious files referenced:
+    C:\Users\user\AppData\Local\Temp\tmprefl.dll
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>prefetch_data = SIMULATED_PREFETCH
+window_start = datetime(2024, 1, 15, 9, 0, 0)
+window_end = datetime(2024, 1, 15, 9, 30, 0)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — Timeline Analysis and Super-timeline</h3>
+<p>A super-timeline merges timestamps from all artifact sources into one chronological view. The MACB notation describes which timestamp type fired: M=modified, A=accessed, C=changed ($MFT metadata), B=birth (created).</p>
+<p>Tool: <code>log2timeline.py</code> / Plaso generates Plaso storage files → <code>psort.py</code> exports to CSV/JSON/Excel.</p>
+<p>Manual approach in Python: normalize each artifact's timestamps to a common schema and sort.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+import json
+
+class ArtifactSource(Enum):
+    PREFETCH     = &quot;prefetch&quot;
+    EVENT_LOG    = &quot;event_log&quot;
+    SYSMON       = &quot;sysmon&quot;
+    MFT          = &quot;mft&quot;
+    USN_JOURNAL  = &quot;usn_journal&quot;
+    LNK_FILE     = &quot;lnk_file&quot;
+    SHIMCACHE    = &quot;shimcache&quot;
+    NETWORK_LOG  = &quot;network_log&quot;
+    REGISTRY     = &quot;registry&quot;
+
+@dataclass
+class SuperTimelineEntry:
+    timestamp: datetime
+    source: ArtifactSource
+    macb: str              # e.g. &quot;M..B&quot;, &quot;...B&quot;, &quot;MACB&quot;
+    hostname: str
+    short_description: str
+    long_description: str
+    artifact_path: str
+    technique_id: Optional[str] = None
+    confidence: str = &quot;MEDIUM&quot;
+
+    def to_csv_row(self) -&gt; str:
+        return &quot;,&quot;.join([
+            self.timestamp.isoformat(),
+            self.source.value,
+            self.macb,
+            self.hostname,
+            f&#x27;&quot;{self.short_description}&quot;&#x27;,
+            f&#x27;&quot;{self.long_description}&quot;&#x27;,
+        ])
+
+@dataclass
+class SuperTimeline:
+    case_name: str
+    hostname: str
+    entries: list[SuperTimelineEntry] = field(default_factory=list)
+
+    def add(self, entry: SuperTimelineEntry) -&gt; None:
+        self.entries.append(entry)
+        self.entries.sort(key=lambda e: e.timestamp)
+
+    def filter_by_technique(self, technique_id: str) -&gt; list[SuperTimelineEntry]:
+        return [e for e in self.entries if e.technique_id == technique_id]
+
+    def pivot_by_hour(self) -&gt; dict[str, int]:
+        counts: dict[str, int] = {}
+        for e in self.entries:
+            hour_key = e.timestamp.strftime(&quot;%Y-%m-%d %H:00&quot;)
+            counts[hour_key] = counts.get(hour_key, 0) + 1
+        return dict(sorted(counts.items()))
+
+    def export_json(self) -&gt; str:
+        return json.dumps({
+            &quot;case&quot;: self.case_name,
+            &quot;hostname&quot;: self.hostname,
+            &quot;entry_count&quot;: len(self.entries),
+            &quot;entries&quot;: [
+                {
+                    &quot;timestamp&quot;: e.timestamp.isoformat(),
+                    &quot;source&quot;: e.source.value,
+                    &quot;macb&quot;: e.macb,
+                    &quot;short&quot;: e.short_description,
+                    &quot;technique&quot;: e.technique_id,
+                }
+                for e in self.entries
+            ],
+        }, indent=2)
+
+SAMPLE_ENTRIES = [
+    SuperTimelineEntry(
+        timestamp=datetime(2024, 1, 15, 9, 10, 0),
+        source=ArtifactSource.PREFETCH,
+        macb=&quot;M...&quot;,
+        hostname=&quot;WORKSTATION01&quot;,
+        short_description=&quot;POWERSHELL.EXE executed&quot;,
+        long_description=&quot;Prefetch: POWERSHELL.EXE-ABC12345.pf, run_count=3&quot;,
+        artifact_path=r&quot;C:\Windows\Prefetch\POWERSHELL.EXE-ABC12345.pf&quot;,
+        technique_id=&quot;T1059.001&quot;,
+    ),
+    SuperTimelineEntry(
+        timestamp=datetime(2024, 1, 15, 9, 10, 5),
+        source=ArtifactSource.SYSMON,
+        macb=&quot;....&quot;,
+        hostname=&quot;WORKSTATION01&quot;,
+        short_description=&quot;Process create: powershell.exe (EID 1)&quot;,
+        long_description=&quot;CommandLine: powershell.exe -WindowStyle Hidden -EncodedCommand JABj...&quot;,
+        artifact_path=&quot;Security.evtx&quot;,
+        technique_id=&quot;T1059.001&quot;,
+    ),
+    SuperTimelineEntry(
+        timestamp=datetime(2024, 1, 15, 9, 10, 8),
+        source=ArtifactSource.MFT,
+        macb=&quot;...B&quot;,
+        hostname=&quot;WORKSTATION01&quot;,
+        short_description=&quot;File created: tmprefl.dll&quot;,
+        long_description=r&quot;C:\Users\user\AppData\Local\Temp\tmprefl.dll created&quot;,
+        artifact_path=r&quot;C:\$MFT&quot;,
+        technique_id=&quot;T1055&quot;,
+    ),
+    SuperTimelineEntry(
+        timestamp=datetime(2024, 1, 15, 9, 10, 12),
+        source=ArtifactSource.SYSMON,
+        macb=&quot;....&quot;,
+        hostname=&quot;WORKSTATION01&quot;,
+        short_description=&quot;Image load: tmprefl.dll (EID 7)&quot;,
+        long_description=r&quot;svchost.exe (PID 3200) loaded C:\Users\user\AppData\Local\Temp\tmprefl.dll&quot;,
+        artifact_path=&quot;Sysmon.evtx&quot;,
+        technique_id=&quot;T1055&quot;,
+    ),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Build a <code>SuperTimeline</code>, add all <code>SAMPLE_ENTRIES</code>, then: (1) print a header showing total entries; (2) print all T1055 entries in order; (3) call <code>pivot_by_hour()</code> and print the count per hour.</p>
+<p>Expected output:</p>
+<pre><code>SuperTimeline: 4 entries (2024-01-15 09:10:00 → 2024-01-15 09:10:12)
+
+T1055 entries:
+  09:10:08 [mft] File created: tmprefl.dll
+  09:10:12 [sysmon] Image load: tmprefl.dll (EID 7)
+
+Hourly pivot:
+  2024-01-15 09:00: 4 events
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>timeline_data = SAMPLE_ENTRIES
+case = &quot;INC-2024-0115&quot;
+host = &quot;WORKSTATION01&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — Filesystem Forensics with Python</h3>
+<p>Without Autopsy/FTK, Python can parse key artifacts directly: Prefetch (libprefetch), Windows event logs (python-evtx), Registry (python-registry), LNK files (LnkParse3). For MFT: <code>analyzeMFT.py</code> or <code>mft-parser</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+import re
+
+@dataclass
+class ParsedEvent:
+    event_id: int
+    timestamp: datetime
+    computer: str
+    channel: str
+    provider: str
+    data: dict[str, str]
+
+def parse_evtx_xml(xml_string: str) -&gt; Optional[ParsedEvent]:
+    &quot;&quot;&quot;Parse a single EVTX event serialized as XML (as returned by python-evtx).&quot;&quot;&quot;
+    try:
+        ns = {&quot;e&quot;: &quot;http://schemas.microsoft.com/win/2004/08/events/event&quot;}
+        root = ET.fromstring(xml_string)
+        system = root.find(&quot;e:System&quot;, ns)
+        if system is None:
+            return None
+
+        event_id = int(system.findtext(&quot;e:EventID&quot;, &quot;0&quot;, ns))
+        time_created = system.find(&quot;e:TimeCreated&quot;, ns)
+        timestamp_str = time_created.attrib.get(&quot;SystemTime&quot;, &quot;&quot;) if time_created is not None else &quot;&quot;
+        timestamp = datetime.fromisoformat(timestamp_str.replace(&quot;Z&quot;, &quot;+00:00&quot;)) if timestamp_str else datetime.min
+        computer = system.findtext(&quot;e:Computer&quot;, &quot;&quot;, ns)
+        channel = system.findtext(&quot;e:Channel&quot;, &quot;&quot;, ns)
+        provider_el = system.find(&quot;e:Provider&quot;, ns)
+        provider = provider_el.attrib.get(&quot;Name&quot;, &quot;&quot;) if provider_el is not None else &quot;&quot;
+
+        event_data = root.find(&quot;e:EventData&quot;, ns)
+        data: dict[str, str] = {}
+        if event_data is not None:
+            for data_el in event_data.findall(&quot;e:Data&quot;, ns):
+                name = data_el.attrib.get(&quot;Name&quot;, &quot;&quot;)
+                value = data_el.text or &quot;&quot;
+                if name:
+                    data[name] = value
+
+        return ParsedEvent(event_id, timestamp, computer, channel, provider, data)
+    except Exception:
+        return None
+
+def extract_security_events(events: list[ParsedEvent], event_ids: list[int]) -&gt; list[ParsedEvent]:
+    return [e for e in events if e.event_id in event_ids]
+
+def find_logon_logoff_pairs(events: list[ParsedEvent]) -&gt; list[dict]:
+    &quot;&quot;&quot;Match 4624 logon events with 4634/4647 logoff events by LogonId.&quot;&quot;&quot;
+    logons: dict[str, ParsedEvent] = {}
+    sessions = []
+
+    for event in sorted(events, key=lambda e: e.timestamp):
+        if event.event_id == 4624:
+            logon_id = event.data.get(&quot;TargetLogonId&quot;, &quot;&quot;)
+            if logon_id:
+                logons[logon_id] = event
+        elif event.event_id in (4634, 4647):
+            logon_id = event.data.get(&quot;TargetLogonId&quot;, &quot;&quot;)
+            if logon_id in logons:
+                logon_event = logons.pop(logon_id)
+                duration_s = (event.timestamp - logon_event.timestamp).total_seconds()
+                sessions.append({
+                    &quot;logon_id&quot;: logon_id,
+                    &quot;user&quot;: logon_event.data.get(&quot;TargetUserName&quot;, &quot;&quot;),
+                    &quot;logon_type&quot;: logon_event.data.get(&quot;LogonType&quot;, &quot;&quot;),
+                    &quot;logon_time&quot;: logon_event.timestamp.isoformat(),
+                    &quot;logoff_time&quot;: event.timestamp.isoformat(),
+                    &quot;duration_seconds&quot;: duration_s,
+                    &quot;source_ip&quot;: logon_event.data.get(&quot;IpAddress&quot;, &quot;&quot;),
+                })
+    return sessions
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Given the list <code>SAMPLE_EVENTS_DATA</code> below, call <code>extract_security_events()</code> for EIDs [4624, 4634], then call <code>find_logon_logoff_pairs()</code>. Print each session with user, logon type, and duration.</p>
+<p>Expected output:</p>
+<pre><code>Session: jsmith | Type 3 (Network) | 2024-01-15 09:05:00 → 09:22:00 | 1020s | src: 10.10.5.100
+Session: SYSTEM | Type 5 (Service) | 2024-01-15 08:00:10 → 08:00:15 | 5s | src: -
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>SAMPLE_EVENTS_DATA = [
+    ParsedEvent(4624, datetime(2024,1,15,9,5,0),  &quot;WORKSTATION01&quot;, &quot;Security&quot;, &quot;Microsoft-Windows-Security-Auditing&quot;,
+                {&quot;TargetLogonId&quot;: &quot;0x1A2B&quot;, &quot;TargetUserName&quot;: &quot;jsmith&quot;, &quot;LogonType&quot;: &quot;3&quot;, &quot;IpAddress&quot;: &quot;10.10.5.100&quot;}),
+    ParsedEvent(4624, datetime(2024,1,15,8,0,10), &quot;WORKSTATION01&quot;, &quot;Security&quot;, &quot;Microsoft-Windows-Security-Auditing&quot;,
+                {&quot;TargetLogonId&quot;: &quot;0x0010&quot;, &quot;TargetUserName&quot;: &quot;SYSTEM&quot;, &quot;LogonType&quot;: &quot;5&quot;, &quot;IpAddress&quot;: &quot;-&quot;}),
+    ParsedEvent(4634, datetime(2024,1,15,9,22,0),  &quot;WORKSTATION01&quot;, &quot;Security&quot;, &quot;Microsoft-Windows-Security-Auditing&quot;,
+                {&quot;TargetLogonId&quot;: &quot;0x1A2B&quot;}),
+    ParsedEvent(4634, datetime(2024,1,15,8,0,15), &quot;WORKSTATION01&quot;, &quot;Security&quot;, &quot;Microsoft-Windows-Security-Auditing&quot;,
+                {&quot;TargetLogonId&quot;: &quot;0x0010&quot;}),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can generate Plaso timeline filters, write Python artifact parsers from documentation, and explain MACB timestamp interpretations.
+<strong>Threat:</strong> Attackers use LLMs to identify which artifacts to clear and in what order to minimize forensic evidence.
+<strong>Opportunity:</strong> Feed a super-timeline JSON excerpt to an LLM and ask: &quot;What is the most likely attacker action sequence? Which ATT&amp;CK techniques apply? What evidence gaps exist?&quot;
+<strong>Prompt to try:</strong> <code>&quot;Given this super-timeline excerpt [JSON], reconstruct the attacker's step-by-step actions in plain English, map each step to a MITRE ATT&amp;CK technique, and identify the earliest possible detection point we missed.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — Memory and Sysmon Correlation</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="17-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=T8_f_iweGaE" target="_blank" rel="noopener"><b>Hunting Process Injection - Memory Analysis - Process Hollowing</b><small>Cyberskills99</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=process%20hollowing%20detection%20sysmon%20volatility%20memory%20forensics%20correlation" target="_blank" rel="noopener">process hollowing detection sysmon volatility memory forensics correlation</a></p></div>
+<hr />
+<h3>Concept 1 — The Correlation Problem</h3>
+<p>Memory forensics and Sysmon/EDR telemetry capture the same attacker activity from different angles. Memory sees the current state; Sysmon logs the events as they happened. Cross-correlating them:</p>
+<ol>
+<li>A process in memory (PSList) should have a matching Sysmon EID 1 (process create) with the same PID</li>
+<li>DLLs loaded in memory (DLLList) should have matching Sysmon EID 7 (image loaded) entries</li>
+<li>Network connections in memory (NetScan) should have matching Sysmon EID 3 (network connect)</li>
+<li>Malfind hits indicate code injection — look back in Sysmon for EID 8 (CreateRemoteThread)</li>
+</ol>
+<p>Gaps — a process in memory with no Sysmon EID 1 — indicate either: Sysmon wasn't running when it started, or the process was created via a technique Sysmon doesn't capture (kernel exploit).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+from enum import Enum
+
+@dataclass
+class SysmonEvent:
+    event_id: int
+    timestamp: datetime
+    hostname: str
+    pid: int
+    process_name: str
+    data: dict[str, str]
+
+class CorrelationStatus(Enum):
+    MATCHED      = &quot;matched&quot;
+    MEMORY_ONLY  = &quot;memory_only_no_sysmon&quot;
+    SYSMON_ONLY  = &quot;sysmon_only_not_in_memory&quot;
+    CONFLICT     = &quot;conflict_data_mismatch&quot;
+
+@dataclass
+class ProcessCorrelation:
+    pid: int
+    process_name: str
+    memory_entry: Optional[dict]
+    sysmon_create: Optional[SysmonEvent]
+    status: CorrelationStatus
+    anomalies: list[str] = field(default_factory=list)
+
+    def severity(self) -&gt; str:
+        if self.status == CorrelationStatus.MEMORY_ONLY:
+            return &quot;HIGH&quot;
+        if self.status == CorrelationStatus.CONFLICT:
+            return &quot;HIGH&quot;
+        if self.anomalies:
+            return &quot;MEDIUM&quot;
+        return &quot;LOW&quot;
+
+def correlate_pslist_with_sysmon(
+    pslist: list[dict],
+    sysmon_events: list[SysmonEvent],
+    event_id_filter: int = 1,
+) -&gt; list[ProcessCorrelation]:
+    sysmon_by_pid: dict[int, SysmonEvent] = {
+        e.pid: e for e in sysmon_events if e.event_id == event_id_filter
+    }
+    correlations = []
+    for proc in pslist:
+        pid = proc[&quot;PID&quot;]
+        name = proc[&quot;ImageFileName&quot;]
+        sysmon_event = sysmon_by_pid.get(pid)
+
+        if sysmon_event is None:
+            status = CorrelationStatus.MEMORY_ONLY
+            anomalies = [&quot;No Sysmon EID 1 for this PID&quot;]
+        elif sysmon_event.process_name.lower() != name.lower():
+            status = CorrelationStatus.CONFLICT
+            anomalies = [f&quot;Name mismatch: memory={name}, sysmon={sysmon_event.process_name}&quot;]
+        else:
+            status = CorrelationStatus.MATCHED
+            anomalies = []
+
+        correlations.append(ProcessCorrelation(pid, name, proc, sysmon_event, status, anomalies))
+
+    seen_pids = {p[&quot;PID&quot;] for p in pslist}
+    for ev in sysmon_events:
+        if ev.event_id == event_id_filter and ev.pid not in seen_pids:
+            correlations.append(ProcessCorrelation(
+                ev.pid, ev.process_name, None, ev,
+                CorrelationStatus.SYSMON_ONLY,
+                [&quot;Process no longer in memory — may have exited&quot;],
+            ))
+    return correlations
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Call <code>correlate_pslist_with_sysmon()</code> using <code>SIMULATED_PSLIST</code> and <code>SIMULATED_SYSMON</code> below. Print only entries with severity HIGH or MEDIUM.</p>
+<p>Expected output:</p>
+<pre><code>HIGH: PID 3200 (svchost.exe) — MEMORY_ONLY
+  No Sysmon EID 1 for this PID
+HIGH: PID 9999 (mimikatz.exe) — CONFLICT
+  Name mismatch: memory=mimikatz.exe, sysmon=lsass.exe
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>SIMULATED_SYSMON = [
+    SysmonEvent(1, datetime(2024,1,15,8,0,1),  &quot;WORKSTATION01&quot;, 4,    &quot;System&quot;,       {}),
+    SysmonEvent(1, datetime(2024,1,15,9,10,5), &quot;WORKSTATION01&quot;, 3100, &quot;powershell.exe&quot;, {&quot;CommandLine&quot;: &quot;powershell.exe -WindowStyle Hidden&quot;}),
+    SysmonEvent(1, datetime(2024,1,15,9,10,0), &quot;WORKSTATION01&quot;, 9999, &quot;lsass.exe&quot;,    {&quot;CommandLine&quot;: r&quot;C:\Windows\System32\lsass.exe&quot;}),
+]
+PSLIST_WITH_HOLLOW = SIMULATED_PSLIST + [
+    {&quot;PID&quot;: 9999, &quot;PPID&quot;: 660, &quot;ImageFileName&quot;: &quot;mimikatz.exe&quot;, &quot;CreateTime&quot;: &quot;2024-01-15 09:10:00&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — Detecting Process Hollowing via Correlation</h3>
+<p>The definitive hollow process signature requires ALL of:</p>
+<ol>
+<li>Process in PSList with a name that matches a legitimate binary</li>
+<li>Malfind shows PAGE_EXECUTE_READWRITE VAD with no disk backing (or MZ header)</li>
+<li>Sysmon EID 1 CreateTime and process name match memory — but EID 8 (CreateRemoteThread) or EID 10 (ProcessAccess) occurred before the process was &quot;fully started&quot;</li>
+<li>DLLList shows a DLL loaded from a temp path or user profile</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>@dataclass
+class HollowProcessHunt:
+    pid: int
+    process_name: str
+    pslist_match: bool
+    malfind_hit: Optional[MalfindHit]
+    sysmon_create: Optional[SysmonEvent]
+    sysmon_remote_thread: Optional[SysmonEvent]   # EID 8
+    suspicious_dlls: list[str]
+    verdict: str = &quot;&quot;
+    confidence: str = &quot;&quot;
+
+    def assess(self) -&gt; &quot;HollowProcessHunt&quot;:
+        score = 0
+        reasons = []
+
+        if self.malfind_hit and self.malfind_hit.disk_path is None:
+            score += 3
+            reasons.append(&quot;RWX VAD no disk backing&quot;)
+
+        if self.malfind_hit and self.malfind_hit.file_output.startswith(&quot;4d5a&quot;):
+            score += 2
+            reasons.append(&quot;MZ header in injected region&quot;)
+
+        if self.sysmon_remote_thread:
+            score += 3
+            reasons.append(&quot;CreateRemoteThread EID 8 observed&quot;)
+
+        if self.suspicious_dlls:
+            score += 1
+            reasons.append(f&quot;{len(self.suspicious_dlls)} suspicious DLLs&quot;)
+
+        if score &gt;= 6:
+            self.confidence = &quot;HIGH&quot;
+            self.verdict = &quot;HOLLOW_PROCESS: &quot; + &quot;; &quot;.join(reasons)
+        elif score &gt;= 3:
+            self.confidence = &quot;MEDIUM&quot;
+            self.verdict = &quot;SUSPICIOUS: &quot; + &quot;; &quot;.join(reasons)
+        else:
+            self.confidence = &quot;LOW&quot;
+            self.verdict = &quot;BENIGN&quot;
+
+        return self
+
+def hunt_hollow_processes(
+    pslist: list[dict],
+    malfind_results: list[MalfindHit],
+    sysmon_events: list[SysmonEvent],
+    dll_map: dict[int, list[str]],
+) -&gt; list[HollowProcessHunt]:
+    malfind_by_pid = {m.pid: m for m in malfind_results}
+    sysmon_create  = {e.pid: e for e in sysmon_events if e.event_id == 1}
+    sysmon_rthread = {e.pid: e for e in sysmon_events if e.event_id == 8}
+
+    suspicious_prefixes = (
+        r&quot;c:\users&quot;,
+        r&quot;c:\programdata&quot;,
+        r&quot;c:\windows\temp&quot;,
+        r&quot;c:\temp&quot;,
+    )
+
+    results = []
+    for proc in pslist:
+        pid = proc[&quot;PID&quot;]
+        dlls = dll_map.get(pid, [])
+        susp_dlls = [d for d in dlls if d.lower().startswith(suspicious_prefixes)]
+        hunt = HollowProcessHunt(
+            pid=pid,
+            process_name=proc[&quot;ImageFileName&quot;],
+            pslist_match=True,
+            malfind_hit=malfind_by_pid.get(pid),
+            sysmon_create=sysmon_create.get(pid),
+            sysmon_remote_thread=sysmon_rthread.get(pid),
+            suspicious_dlls=susp_dlls,
+        )
+        results.append(hunt.assess())
+
+    return [r for r in results if r.confidence in (&quot;HIGH&quot;, &quot;MEDIUM&quot;)]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Call <code>hunt_hollow_processes()</code> using <code>SIMULATED_PSLIST</code>, <code>SIMULATED_MALFIND</code>, <code>SIMULATED_SYSMON + [SIMULATED_EID8]</code>, and <code>SIMULATED_DLLS</code>. Print all HIGH/MEDIUM findings.</p>
+<p>Expected output:</p>
+<pre><code>HIGH: PID 3200 (svchost.exe)
+  HOLLOW_PROCESS: RWX VAD no disk backing; MZ header in injected region; CreateRemoteThread EID 8 observed
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>SIMULATED_EID8 = SysmonEvent(
+    event_id=8,
+    timestamp=datetime(2024,1,15,9,10,6),
+    hostname=&quot;WORKSTATION01&quot;,
+    pid=3200,
+    process_name=&quot;svchost.exe&quot;,
+    data={&quot;SourceProcessId&quot;: &quot;3100&quot;, &quot;TargetProcessId&quot;: &quot;3200&quot;},
+)
+sysmon_with_eid8 = SIMULATED_SYSMON + [SIMULATED_EID8]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — Sigma Rules for Memory Forensics Artifacts</h3>
+<p>Sigma rules can be written against Sysmon telemetry to proxy for memory-forensic findings without needing a full memory acquisition. The proxy indicators are the Sysmon events that accompany hollowing.</p>
+<p><strong>Example:</strong></p>
+<pre><code>title: Suspected Process Hollowing via Sysmon Correlation
+id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+status: test
+description: Detects process hollowing by correlating EID 1 process create with EID 8 CreateRemoteThread targeting a system process
+author: Detection Engineer
+date: 2024/01/15
+tags:
+    - attack.defense_evasion
+    - attack.t1055.012
+logsource:
+    product: windows
+    service: sysmon
+detection:
+    remote_thread_to_system_proc:
+        EventID: 8
+        TargetImage|endswith:
+            - &#x27;\svchost.exe&#x27;
+            - &#x27;\lsass.exe&#x27;
+            - &#x27;\csrss.exe&#x27;
+            - &#x27;\winlogon.exe&#x27;
+            - &#x27;\services.exe&#x27;
+    filter_known_injectors:
+        SourceImage|endswith:
+            - &#x27;\msiexec.exe&#x27;
+            - &#x27;\TiWorker.exe&#x27;
+    condition: remote_thread_to_system_proc and not filter_known_injectors
+falsepositives:
+    - Legitimate security products that inject monitoring threads
+level: high
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import yaml
+from dataclasses import dataclass
+
+@dataclass
+class SigmaProcessHollowRule:
+    raw_yaml: str
+
+    def target_processes(self) -&gt; list[str]:
+        parsed = yaml.safe_load(self.raw_yaml)
+        detection = parsed.get(&quot;detection&quot;, {})
+        for key, val in detection.items():
+            if isinstance(val, dict) and &quot;TargetImage|endswith&quot; in val:
+                return val[&quot;TargetImage|endswith&quot;]
+        return []
+
+    def to_sysmon_filter(self) -&gt; str:
+        targets = self.target_processes()
+        target_str = &quot; or &quot;.join(f&#x27;TargetImage contains &quot;{t}&quot;&#x27; for t in targets)
+        return f&quot;EventID=8 and ({target_str})&quot;
+
+HOLLOW_SIGMA_YAML = &quot;&quot;&quot;
+title: Suspected Process Hollowing via Sysmon Correlation
+id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+status: test
+description: Detects process hollowing by correlating EID 8 CreateRemoteThread targeting a system process
+author: Detection Engineer
+date: 2024/01/15
+tags:
+    - attack.defense_evasion
+    - attack.t1055.012
+logsource:
+    product: windows
+    service: sysmon
+detection:
+    remote_thread_to_system_proc:
+        EventID: 8
+        TargetImage|endswith:
+            - &#x27;\\\\svchost.exe&#x27;
+            - &#x27;\\\\lsass.exe&#x27;
+            - &#x27;\\\\csrss.exe&#x27;
+    filter_known_injectors:
+        SourceImage|endswith:
+            - &#x27;\\\\msiexec.exe&#x27;
+    condition: remote_thread_to_system_proc and not filter_known_injectors
+falsepositives:
+    - Legitimate security products
+level: high
+&quot;&quot;&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Instantiate <code>SigmaProcessHollowRule(HOLLOW_SIGMA_YAML)</code>. Print <code>target_processes()</code> and <code>to_sysmon_filter()</code>. Then write a <code>match_sysmon_events(rule, events)</code> function that returns matching events from <code>SIMULATED_SYSMON + [SIMULATED_EID8]</code>.</p>
+<p>Expected output:</p>
+<pre><code>Target processes: [&#x27;\\svchost.exe&#x27;, &#x27;\\lsass.exe&#x27;, &#x27;\\csrss.exe&#x27;]
+Sysmon filter: EventID=8 and (TargetImage contains &quot;\\svchost.exe&quot; or ...)
+Matching events: 1
+  EID 8 at 09:10:06 — svchost.exe (PID 3200)
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>rule_input = HOLLOW_SIGMA_YAML
+events_input = SIMULATED_SYSMON + [SIMULATED_EID8]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can propose cross-artifact correlation rules given two artifact schemas as input.
+<strong>Threat:</strong> Attackers use LLMs to design injection techniques that evade Sysmon EID 8 (e.g., APC injection, atom bombing, which don't fire EID 8).
+<strong>Opportunity:</strong> Describe a hollowing scenario to an LLM and ask it to generate the Sigma rule for every Sysmon event ID that should fire, identify which IDs an attacker could avoid, and suggest compensating controls.
+<strong>Prompt to try:</strong> <code>&quot;I'm investigating process hollowing of svchost.exe. The attacker used CreateRemoteThread (EID 8). Write a Sigma rule that correlates EID 8 with an EID 1 from a non-services.exe parent. Then list 3 alternative injection methods that bypass EID 8 and which Sysmon EIDs would still fire for each.&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Network Forensics</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="17-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=EZbmksv9pTA" target="_blank" rel="noopener"><b>Threat Hunting (2021): PCAP Analysis With TShark (WireShark)</b><small>InfoSecAddicts</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=network%20forensics%20wireshark%20pcap%20analysis%20threat%20hunting%20evidence" target="_blank" rel="noopener">network forensics wireshark pcap analysis threat hunting evidence</a></p></div>
+<hr />
+<h3>Concept 1 — PCAP Analysis for Forensics</h3>
+<p>A packet capture is ground truth for network activity. Where logs may be incomplete, altered, or absent, a PCAP records every byte. For forensic purposes:</p>
+<ul>
+<li>Full packet capture (FPC): captures headers + payload — richest evidence, large storage</li>
+<li>NetFlow/IPFIX: metadata only (src/dst IP, port, bytes, duration) — smaller, no payload</li>
+<li>Zeek logs: protocol-parsed metadata in structured logs — middle ground</li>
+</ul>
+<p>The forensic workflow:</p>
+<ol>
+<li>Extract all unique connections (5-tuple: src_ip, src_port, dst_ip, dst_port, proto)</li>
+<li>Identify HTTP/HTTPS flows and extract hostnames (from TLS SNI)</li>
+<li>Flag connections to known-bad IPs/domains (IOC matching)</li>
+<li>Identify data exfiltration patterns (large outbound transfers, unusual ports)</li>
+<li>Reconstruct TCP streams for interesting flows</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+import ipaddress
+
+@dataclass
+class NetworkFlow:
+    flow_id: str
+    start_time: datetime
+    end_time: Optional[datetime]
+    src_ip: str
+    src_port: int
+    dst_ip: str
+    dst_port: int
+    protocol: str       # &quot;TCP&quot; / &quot;UDP&quot; / &quot;ICMP&quot;
+    bytes_sent: int
+    bytes_received: int
+    packets_sent: int
+    packets_received: int
+    tls_sni: Optional[str] = None
+    dns_query: Optional[str] = None
+    http_host: Optional[str] = None
+    http_uri: Optional[str] = None
+    conn_state: str = &quot;SF&quot;   # Zeek conn_state: SF=normal finish, S0=no response, RSTO=rst
+
+    def duration_seconds(self) -&gt; float:
+        if self.end_time is None:
+            return 0.0
+        return (self.end_time - self.start_time).total_seconds()
+
+    def is_internal_dst(self, internal_cidrs: list[str] | None = None) -&gt; bool:
+        if internal_cidrs is None:
+            internal_cidrs = [&quot;10.0.0.0/8&quot;, &quot;172.16.0.0/12&quot;, &quot;192.168.0.0/16&quot;]
+        try:
+            dst = ipaddress.ip_address(self.dst_ip)
+            return any(dst in ipaddress.ip_network(cidr) for cidr in internal_cidrs)
+        except ValueError:
+            return False
+
+    def exfil_ratio(self) -&gt; float:
+        &quot;&quot;&quot;Ratio of bytes sent vs received. &gt;10 suggests outbound data transfer.&quot;&quot;&quot;
+        if self.bytes_received == 0:
+            return float(&quot;inf&quot;)
+        return self.bytes_sent / self.bytes_received
+
+def flag_suspicious_flows(
+    flows: list[NetworkFlow],
+    ioc_ips: set[str],
+    ioc_domains: set[str],
+    exfil_threshold_bytes: int = 1_000_000,
+) -&gt; list[tuple[NetworkFlow, list[str]]]:
+    results = []
+    for flow in flows:
+        reasons = []
+        if flow.dst_ip in ioc_ips:
+            reasons.append(f&quot;dst_ip {flow.dst_ip} in IOC list&quot;)
+        hostname = flow.tls_sni or flow.http_host or flow.dns_query or &quot;&quot;
+        if hostname and any(ioc in hostname for ioc in ioc_domains):
+            reasons.append(f&quot;hostname {hostname} matches IOC domain&quot;)
+        if not flow.is_internal_dst() and flow.bytes_sent &gt; exfil_threshold_bytes:
+            reasons.append(f&quot;large outbound transfer: {flow.bytes_sent:,} bytes&quot;)
+        if flow.dst_port in (4444, 1234, 31337, 8080) and not flow.is_internal_dst():
+            reasons.append(f&quot;suspicious outbound port {flow.dst_port}&quot;)
+        if reasons:
+            results.append((flow, reasons))
+    return results
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Given <code>SAMPLE_FLOWS</code> below, call <code>flag_suspicious_flows()</code> with <code>IOC_IPS</code> and <code>IOC_DOMAINS</code>. Print each flagged flow's 5-tuple, duration, and reasons.</p>
+<p>Expected output:</p>
+<pre><code>SUSPICIOUS: 10.10.5.50:52341 → 185.220.101.5:443 (TCP, 45.0s)
+  Reasons: dst_ip 185.220.101.5 in IOC list; large outbound transfer: 2,500,000 bytes
+SUSPICIOUS: 10.10.5.50:53001 → 203.0.113.99:4444 (TCP, 120.0s)
+  Reasons: suspicious outbound port 4444
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>SAMPLE_FLOWS = [
+    NetworkFlow(&quot;f1&quot;, datetime(2024,1,15,9,12,0), datetime(2024,1,15,9,12,45),
+                &quot;10.10.5.50&quot;, 52341, &quot;185.220.101.5&quot;, 443, &quot;TCP&quot;,
+                2_500_000, 1200, 1800, 900, tls_sni=&quot;update.legit-looking.com&quot;),
+    NetworkFlow(&quot;f2&quot;, datetime(2024,1,15,9,14,0), datetime(2024,1,15,9,16,0),
+                &quot;10.10.5.50&quot;, 53001, &quot;203.0.113.99&quot;, 4444, &quot;TCP&quot;,
+                50000, 2000, 40, 20),
+    NetworkFlow(&quot;f3&quot;, datetime(2024,1,15,8,0,0), datetime(2024,1,15,8,0,1),
+                &quot;10.10.5.50&quot;, 60001, &quot;8.8.8.8&quot;, 53, &quot;UDP&quot;,
+                100, 200, 1, 1),
+]
+IOC_IPS = {&quot;185.220.101.5&quot;, &quot;1.2.3.4&quot;}
+IOC_DOMAINS = {&quot;legit-looking.com&quot;, &quot;evil.net&quot;}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — DNS Forensics</h3>
+<p>DNS is the most reliable network forensic artifact. Every C2 channel that uses domain names must query DNS. Key patterns:</p>
+<ul>
+<li><strong>High-entropy domains:</strong> DGA (domain generation algorithm) domains look random — <code>xkqjfbz.com</code></li>
+<li><strong>DNS tunneling:</strong> encoded data in subdomain labels — queries are very long, high TXT record usage</li>
+<li><strong>Fast flux:</strong> same domain resolves to many different IPs rapidly</li>
+<li><strong>Beaconing via DNS:</strong> regular-interval queries to the same domain, even if HTTP is blocked</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import math
+import re
+from dataclasses import dataclass
+from collections import Counter
+from datetime import datetime
+
+@dataclass
+class DNSQuery:
+    timestamp: datetime
+    client_ip: str
+    query_name: str
+    query_type: str   # &quot;A&quot;, &quot;AAAA&quot;, &quot;TXT&quot;, &quot;MX&quot;, &quot;CNAME&quot;
+    response_code: str  # &quot;NOERROR&quot;, &quot;NXDOMAIN&quot;, &quot;SERVFAIL&quot;
+    response_ips: list[str]
+    ttl: Optional[int] = None
+
+def shannon_entropy(string: str) -&gt; float:
+    if not string:
+        return 0.0
+    freq = Counter(string.lower())
+    total = len(string)
+    return -sum((c / total) * math.log2(c / total) for c in freq.values())
+
+def classify_dga(domain: str, entropy_threshold: float = 3.5, min_length: int = 12) -&gt; tuple[bool, str]:
+    &quot;&quot;&quot;Return (is_dga, reason).&quot;&quot;&quot;
+    labels = domain.split(&quot;.&quot;)
+    hostname = labels[0] if labels else domain
+    tld = &quot;.&quot; + &quot;.&quot;.join(labels[-2:]) if len(labels) &gt;= 2 else &quot;&quot;
+
+    if len(hostname) &lt; min_length:
+        return False, &quot;too short for DGA&quot;
+
+    entropy = shannon_entropy(hostname)
+    digit_ratio = sum(c.isdigit() for c in hostname) / len(hostname)
+    vowel_ratio = sum(c in &quot;aeiou&quot; for c in hostname.lower()) / len(hostname)
+
+    reasons = []
+    if entropy &gt;= entropy_threshold:
+        reasons.append(f&quot;high entropy={entropy:.2f}&quot;)
+    if digit_ratio &gt; 0.3:
+        reasons.append(f&quot;high digit ratio={digit_ratio:.2f}&quot;)
+    if vowel_ratio &lt; 0.1:
+        reasons.append(f&quot;low vowel ratio={vowel_ratio:.2f}&quot;)
+
+    is_dga = len(reasons) &gt;= 2
+    return is_dga, &quot;; &quot;.join(reasons) if reasons else &quot;normal&quot;
+
+def detect_dns_tunneling(queries: list[DNSQuery], min_label_length: int = 40) -&gt; list[DNSQuery]:
+    &quot;&quot;&quot;Flag queries with very long subdomain labels (common in DNS tunneling).&quot;&quot;&quot;
+    suspicious = []
+    for q in queries:
+        labels = q.query_name.split(&quot;.&quot;)
+        if labels and len(labels[0]) &gt;= min_label_length:
+            suspicious.append(q)
+        if q.query_type == &quot;TXT&quot; and q.response_code == &quot;NOERROR&quot;:
+            suspicious.append(q)
+    return suspicious
+
+SAMPLE_DNS = [
+    DNSQuery(datetime(2024,1,15,9,10,1), &quot;10.10.5.50&quot;, &quot;update.microsoft.com&quot;, &quot;A&quot;, &quot;NOERROR&quot;, [&quot;20.80.1.1&quot;]),
+    DNSQuery(datetime(2024,1,15,9,10,5), &quot;10.10.5.50&quot;, &quot;xkqjfbzmndprt.xyz&quot;,   &quot;A&quot;, &quot;NOERROR&quot;, [&quot;185.220.101.5&quot;]),
+    DNSQuery(datetime(2024,1,15,9,10,6), &quot;10.10.5.50&quot;, &quot;aGVsbG8gd29ybGQgdGhpcyBpcyBkbnMgdHVubmVsaW5n.evil.net&quot;, &quot;A&quot;, &quot;NOERROR&quot;, []),
+    DNSQuery(datetime(2024,1,15,9,10,8), &quot;10.10.5.50&quot;, &quot;google.com&quot;,           &quot;A&quot;, &quot;NOERROR&quot;, [&quot;142.250.1.1&quot;]),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Iterate <code>SAMPLE_DNS</code>. For each query: (1) run <code>classify_dga()</code> on the hostname; (2) check if it matches <code>detect_dns_tunneling()</code>; (3) print findings for any flagged queries.</p>
+<p>Expected output:</p>
+<pre><code>DGA: xkqjfbzmndprt.xyz — high entropy=3.89; low vowel ratio=0.07
+DNS Tunnel: aGVsbG8gd29ybGQgdGhpcyBpcyBkbnMgdHVubmVsaW5n.evil.net — label length 48
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>dns_samples = SAMPLE_DNS
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — Evidence Packaging and Chain of Custody</h3>
+<p>Digital evidence must be collected, hashed, and documented in a chain of custody to be admissible. The chain of custody answers: who collected it, when, how, and who has handled it since.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+import hashlib
+import json
+
+@dataclass
+class CustodyTransfer:
+    timestamp: datetime
+    from_person: str
+    to_person: str
+    method: str           # &quot;hand delivery&quot; / &quot;encrypted email&quot; / &quot;secure upload&quot;
+    notes: str
+
+@dataclass
+class EvidencePackage:
+    evidence_id: str
+    description: str
+    collected_by: str
+    collected_at: datetime
+    collection_method: str
+    original_location: str
+    sha256: str
+    md5: str
+    size_bytes: int
+    storage_location: str
+    custody_chain: list[CustodyTransfer] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    def add_transfer(self, transfer: CustodyTransfer) -&gt; None:
+        self.custody_chain.append(transfer)
+
+    def current_custodian(self) -&gt; str:
+        if not self.custody_chain:
+            return self.collected_by
+        return self.custody_chain[-1].to_person
+
+    def to_report(self) -&gt; str:
+        lines = [
+            f&quot;Evidence ID   : {self.evidence_id}&quot;,
+            f&quot;Description   : {self.description}&quot;,
+            f&quot;Collected by  : {self.collected_by} at {self.collected_at.isoformat()}&quot;,
+            f&quot;Method        : {self.collection_method}&quot;,
+            f&quot;Original path : {self.original_location}&quot;,
+            f&quot;SHA-256       : {self.sha256}&quot;,
+            f&quot;MD5           : {self.md5}&quot;,
+            f&quot;Size          : {self.size_bytes:,} bytes&quot;,
+            f&quot;Storage       : {self.storage_location}&quot;,
+            f&quot;Custodian     : {self.current_custodian()}&quot;,
+            &quot;&quot;,
+            &quot;Chain of custody:&quot;,
+        ]
+        for i, t in enumerate(self.custody_chain, 1):
+            lines.append(f&quot;  {i}. {t.timestamp.isoformat()} — {t.from_person} → {t.to_person} ({t.method})&quot;)
+        return &quot;\n&quot;.join(lines)
+
+def hash_file_content(content: bytes) -&gt; tuple[str, str]:
+    return (
+        hashlib.sha256(content).hexdigest(),
+        hashlib.md5(content).hexdigest(),
+    )
+
+SAMPLE_CONTENT = b&quot;Simulated memory image content for chain of custody demo&quot;
+SHA256, MD5 = hash_file_content(SAMPLE_CONTENT)
+
+SAMPLE_PACKAGE = EvidencePackage(
+    evidence_id=&quot;EVD-2024-001&quot;,
+    description=&quot;RAM image from WORKSTATION01&quot;,
+    collected_by=&quot;analyst_alice&quot;,
+    collected_at=datetime(2024, 1, 15, 9, 30, 0),
+    collection_method=&quot;WinPmem live acquisition&quot;,
+    original_location=r&quot;\\WORKSTATION01\C$\memdump.raw&quot;,
+    sha256=SHA256,
+    md5=MD5,
+    size_bytes=len(SAMPLE_CONTENT),
+    storage_location=&quot;IR-NAS-01:/cases/INC-2024-0115/&quot;,
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add two custody transfers to <code>SAMPLE_PACKAGE</code>: first to &quot;analyst_bob&quot; by &quot;secure_upload&quot;, then to &quot;lead_investigator&quot; by &quot;hand_delivery&quot;. Print the full <code>to_report()</code> output.</p>
+<p>Expected output:</p>
+<pre><code>Evidence ID   : EVD-2024-001
+Description   : RAM image from WORKSTATION01
+Collected by  : analyst_alice at 2024-01-15T09:30:00
+...
+Chain of custody:
+  1. ... — analyst_alice → analyst_bob (secure_upload)
+  2. ... — analyst_bob → lead_investigator (hand_delivery)
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>package = SAMPLE_PACKAGE
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can automate PCAP annotation — given a Zeek conn.log, identify unusual protocols, classify flows by business purpose, and generate an executive summary.
+<strong>Threat:</strong> Attackers use AI to auto-generate DGA wordlists that mimic legitimate domain naming patterns, defeating entropy-based detection.
+<strong>Opportunity:</strong> Feed a set of DNS queries to an LLM and ask it to classify each as &quot;DGA candidate&quot;, &quot;DNS tunneling&quot;, &quot;legitimate&quot;, or &quot;unknown&quot; — then compare with your algorithmic classifier to find mismatches worth investigating.
+<strong>Prompt to try:</strong> <code>&quot;Classify these DNS queries as DGA/tunneling/legitimate/unknown. For each DGA candidate, describe what family it might belong to and how you'd validate it using passive DNS. Queries: [list]&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Forensics Pipeline and Royal Road</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="17-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=digital%20forensics%20automation%20python%20pipeline%20evidence%20collection%20incident%20response" target="_blank" rel="noopener">digital forensics automation python pipeline evidence collection incident response</a></p></div>
+<hr />
+<h3>Concept 1 — Automating the Forensics Pipeline</h3>
+<p>A forensics pipeline runs the same steps every time: acquire, hash, parse, correlate, output a findings report. Automating it with Python ensures repeatability, eliminates manual errors, and creates an audit trail.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional, Callable
+import time
+import json
+
+@dataclass
+class ForensicStepResult:
+    step_name: str
+    success: bool
+    output: dict
+    error: Optional[str]
+    duration_seconds: float
+
+ForensicStep = Callable[[dict], ForensicStepResult]
+
+@dataclass
+class ForensicsRun:
+    case_id: str
+    hostname: str
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    steps: list[ForensicStepResult] = field(default_factory=list)
+    hollow_findings: list[HollowProcessHunt] = field(default_factory=list)
+    super_timeline: Optional[SuperTimeline] = None
+    suspicious_flows: list[tuple[NetworkFlow, list[str]]] = field(default_factory=list)
+    evidence_packages: list[EvidencePackage] = field(default_factory=list)
+
+    def add_step(self, result: ForensicStepResult) -&gt; None:
+        self.steps.append(result)
+
+    def success_rate(self) -&gt; float:
+        if not self.steps:
+            return 0.0
+        return sum(1 for s in self.steps if s.success) / len(self.steps)
+
+    def to_report_json(self) -&gt; str:
+        return json.dumps({
+            &quot;case_id&quot;: self.case_id,
+            &quot;hostname&quot;: self.hostname,
+            &quot;started_at&quot;: self.started_at.isoformat(),
+            &quot;completed_at&quot;: self.completed_at.isoformat() if self.completed_at else None,
+            &quot;steps_total&quot;: len(self.steps),
+            &quot;steps_success&quot;: sum(1 for s in self.steps if s.success),
+            &quot;hollow_findings&quot;: len(self.hollow_findings),
+            &quot;suspicious_flows&quot;: len(self.suspicious_flows),
+            &quot;evidence_items&quot;: len(self.evidence_packages),
+        }, indent=2)
+
+def run_forensics_pipeline(
+    case_id: str,
+    hostname: str,
+    pslist: list[dict],
+    malfind_results: list[MalfindHit],
+    sysmon_events: list[SysmonEvent],
+    dll_map: dict[int, list[str]],
+    network_flows: list[NetworkFlow],
+    dns_queries: list[DNSQuery],
+    ioc_ips: set[str],
+    ioc_domains: set[str],
+    output_path: Optional[str] = None,
+) -&gt; ForensicsRun:
+    run = ForensicsRun(case_id=case_id, hostname=hostname, started_at=datetime.utcnow())
+
+    # Step 1: hollow process hunt
+    t0 = time.monotonic()
+    try:
+        hollow = hunt_hollow_processes(pslist, malfind_results, sysmon_events, dll_map)
+        run.hollow_findings = hollow
+        run.add_step(ForensicStepResult(&quot;hollow_hunt&quot;, True, {&quot;findings&quot;: len(hollow)}, None, time.monotonic()-t0))
+    except Exception as exc:
+        run.add_step(ForensicStepResult(&quot;hollow_hunt&quot;, False, {}, str(exc), time.monotonic()-t0))
+
+    # Step 2: build super-timeline
+    t0 = time.monotonic()
+    try:
+        tl = SuperTimeline(case_id, hostname)
+        for ev in sysmon_events:
+            tl.add(SuperTimelineEntry(
+                timestamp=ev.timestamp,
+                source=ArtifactSource.SYSMON,
+                macb=&quot;....&quot;,
+                hostname=hostname,
+                short_description=f&quot;Sysmon EID {ev.event_id}: {ev.process_name}&quot;,
+                long_description=str(ev.data),
+                artifact_path=&quot;Sysmon.evtx&quot;,
+            ))
+        run.super_timeline = tl
+        run.add_step(ForensicStepResult(&quot;super_timeline&quot;, True, {&quot;entries&quot;: len(tl.entries)}, None, time.monotonic()-t0))
+    except Exception as exc:
+        run.add_step(ForensicStepResult(&quot;super_timeline&quot;, False, {}, str(exc), time.monotonic()-t0))
+
+    # Step 3: network flag
+    t0 = time.monotonic()
+    try:
+        flagged = flag_suspicious_flows(network_flows, ioc_ips, ioc_domains)
+        run.suspicious_flows = flagged
+        run.add_step(ForensicStepResult(&quot;network_flag&quot;, True, {&quot;flagged&quot;: len(flagged)}, None, time.monotonic()-t0))
+    except Exception as exc:
+        run.add_step(ForensicStepResult(&quot;network_flag&quot;, False, {}, str(exc), time.monotonic()-t0))
+
+    run.completed_at = datetime.utcnow()
+
+    if output_path:
+        with open(output_path, &quot;w&quot;) as f:
+            f.write(run.to_report_json())
+
+    return run
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Call <code>run_forensics_pipeline()</code> using all the simulated data from previous exercises. Print the JSON report, then print any HIGH-confidence hollow findings and any suspicious network flows.</p>
+<p>Expected output:</p>
+<pre><code>{
+  &quot;case_id&quot;: &quot;INC-2024-0115&quot;,
+  &quot;hostname&quot;: &quot;WORKSTATION01&quot;,
+  &quot;steps_total&quot;: 3,
+  &quot;steps_success&quot;: 3,
+  &quot;hollow_findings&quot;: 1,
+  &quot;suspicious_flows&quot;: 2,
+  ...
+}
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>pipeline_case = &quot;INC-2024-0115&quot;
+pipeline_host = &quot;WORKSTATION01&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — Reporting: Forensic Findings to Stakeholders</h3>
+<p>A forensics report has two audiences: (1) the IR team / legal — full technical detail; (2) management — executive summary with business impact. Python can auto-generate both from the same data structure.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+
+@dataclass
+class ForensicReport:
+    case_id: str
+    hostname: str
+    analyst: str
+    generated_at: datetime
+    run: ForensicsRun
+    executive_summary: str
+    key_findings: list[str]
+    recommendations: list[str]
+    evidence_list: list[EvidencePackage]
+
+    def render_executive_md(self) -&gt; str:
+        lines = [
+            f&quot;# Forensic Investigation Report — {self.case_id}&quot;,
+            &quot;&quot;,
+            f&quot;**Host:** {self.hostname}  &quot;,
+            f&quot;**Analyst:** {self.analyst}  &quot;,
+            f&quot;**Generated:** {self.generated_at.isoformat()}  &quot;,
+            &quot;&quot;,
+            &quot;## Executive Summary&quot;,
+            self.executive_summary,
+            &quot;&quot;,
+            &quot;## Key Findings&quot;,
+        ]
+        for i, f in enumerate(self.key_findings, 1):
+            lines.append(f&quot;{i}. {f}&quot;)
+        lines.extend([&quot;&quot;, &quot;## Recommendations&quot;])
+        for i, r in enumerate(self.recommendations, 1):
+            lines.append(f&quot;{i}. {r}&quot;)
+        lines.extend([&quot;&quot;, &quot;## Evidence Items&quot;])
+        for ev in self.evidence_list:
+            lines.append(f&quot;- {ev.evidence_id}: {ev.description} (SHA256: {ev.sha256[:16]}...)&quot;)
+        return &quot;\n&quot;.join(lines)
+
+    def render_technical_md(self) -&gt; str:
+        sections = [self.render_executive_md(), &quot;&quot;, &quot;## Technical Detail&quot;, &quot;&quot;]
+        if self.run.hollow_findings:
+            sections.append(&quot;### Hollow Process Findings&quot;)
+            for h in self.run.hollow_findings:
+                sections.append(f&quot;- PID {h.pid} ({h.process_name}): {h.verdict}&quot;)
+        if self.run.suspicious_flows:
+            sections.append(&quot;### Suspicious Network Flows&quot;)
+            for flow, reasons in self.run.suspicious_flows:
+                sections.append(f&quot;- {flow.src_ip}:{flow.src_port} → {flow.dst_ip}:{flow.dst_port}: {&#x27;; &#x27;.join(reasons)}&quot;)
+        return &quot;\n&quot;.join(sections)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Build a <code>ForensicReport</code> using the <code>run</code> from the pipeline exercise. Use <code>render_executive_md()</code> to generate the executive view and print the first 20 lines. Then add 2 recommendations based on the hollow process finding and suspicious network flows.</p>
+<p>Expected output:</p>
+<pre><code># Forensic Investigation Report — INC-2024-0115
+
+**Host:** WORKSTATION01
+**Analyst:** analyst_alice
+...
+## Key Findings
+1. Process hollowing detected in svchost.exe (PID 3200): HIGH confidence
+2. C2 communication to 185.220.101.5:443 — IOC match + 2.5MB outbound transfer
+...
+## Recommendations
+1. Isolate WORKSTATION01 immediately and re-image
+2. Add 185.220.101.5 to firewall block list and review all outbound HTTPS to non-corporate IPs
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>report_input_run = None  # replace with your run from previous exercise
+analyst = &quot;analyst_alice&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — Integrating Volatility Output into the Pipeline</h3>
+<p>In production, the pipeline calls <code>run_volatility()</code> and feeds the output into the correlation and hollowing hunt steps. This ties the memory image (offline forensics) into the same pipeline as Sysmon (live telemetry).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pathlib import Path
+
+def load_volatility_pslist(image_path: str, vol_path: str = &quot;vol.py&quot;) -&gt; list[dict]:
+    result = run_volatility(image_path, &quot;windows.pslist&quot;, &quot;&quot;, vol_path=vol_path)
+    if result.error:
+        print(f&quot;[WARN] pslist failed: {result.error}&quot;)
+        return []
+    return result.rows
+
+def load_volatility_malfind(image_path: str, vol_path: str = &quot;vol.py&quot;) -&gt; list[MalfindHit]:
+    result = run_volatility(image_path, &quot;windows.malfind&quot;, &quot;&quot;, vol_path=vol_path)
+    if result.error:
+        print(f&quot;[WARN] malfind failed: {result.error}&quot;)
+        return []
+    hits = []
+    for row in result.rows:
+        hits.append(MalfindHit(
+            pid=int(row.get(&quot;PID&quot;, 0)),
+            process_name=row.get(&quot;Process&quot;, &quot;&quot;),
+            vad_start=int(row.get(&quot;Start VPN&quot;, &quot;0x0&quot;), 16),
+            vad_end=int(row.get(&quot;End VPN&quot;, &quot;0x0&quot;), 16),
+            protection=row.get(&quot;Tag&quot;, &quot;&quot;),
+            file_output=row.get(&quot;Hexdump&quot;, &quot;&quot;),
+            disk_path=row.get(&quot;File output&quot;) or None,
+        ))
+    return hits
+
+def full_memory_forensics_run(
+    image_path: str,
+    sysmon_log_path: str,
+    case_id: str,
+    output_dir: str,
+    vol_path: str = &quot;vol.py&quot;,
+) -&gt; dict:
+    &quot;&quot;&quot;
+    Full pipeline: memory image + Sysmon log → hollow process report JSON.
+    Returns summary dict.
+    &quot;&quot;&quot;
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+
+    pslist   = load_volatility_pslist(image_path, vol_path)
+    malfind  = load_volatility_malfind(image_path, vol_path)
+    # sysmon parsing would use parse_evtx_xml() from Day 2
+    # dll_map would come from windows.dlllist plugin
+
+    summary = {
+        &quot;case_id&quot;: case_id,
+        &quot;image&quot;: image_path,
+        &quot;pslist_count&quot;: len(pslist),
+        &quot;malfind_count&quot;: len(malfind),
+        &quot;output_dir&quot;: output_dir,
+    }
+
+    output_file = Path(output_dir) / f&quot;{case_id}_memory_forensics.json&quot;
+    with open(output_file, &quot;w&quot;) as f:
+        import json
+        json.dump(summary, f, indent=2)
+
+    return summary
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using <code>SIMULATED_PSLIST</code> and <code>SIMULATED_MALFIND</code> (simulating Volatility output), write <code>simulate_memory_forensics_run(case_id, output_dir)</code> that calls <code>hunt_hollow_processes()</code> with the simulated data and writes the findings as JSON to <code>output_dir/case_id_hollow.json</code>. Print the output path and finding count.</p>
+<p>Expected output:</p>
+<pre><code>Output: forensics_output/INC-2024-0115_hollow.json
+Hollow process findings: 1
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os
+os.makedirs(&quot;forensics_output&quot;, exist_ok=True)
+sim_case = &quot;INC-2024-0115&quot;
+sim_output = &quot;forensics_output&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can turn raw forensics pipeline JSON output into a narrative incident report in seconds, removing the hours analysts spend writing.
+<strong>Threat:</strong> Attackers use LLMs to generate forensically plausible but fake evidence (timestomped artifacts, synthetic event logs) to confuse investigation.
+<strong>Opportunity:</strong> Pass the <code>ForensicReport.to_report_json()</code> output to an LLM and ask for: (1) a 3-paragraph executive summary; (2) a list of ATT&amp;CK techniques confirmed by the evidence; (3) a recommended remediation sequence in priority order.
+<strong>Prompt to try:</strong> <code>&quot;You are a senior DFIR analyst. Given this forensics pipeline output [JSON], write a 3-paragraph executive summary suitable for CISO briefing. Paragraph 1: what happened. Paragraph 2: confirmed ATT&amp;CK techniques and evidence. Paragraph 3: business impact and recommended next steps.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 17</h2>
+<p><strong>Task:</strong> Extend the <code>forensics/</code> folder in your Royal Road pipeline.</p>
+<p><strong>Builds on:</strong> W16 <code>ir/triage.py</code> (produces <code>IncidentTimeline</code>), W13 Sysmon Sigma rules, W08 Sysmon dataset.</p>
+<p><strong>Deliverable:</strong></p>
+<pre><code>forensics/
+├── hollow_hunt.py     ← hunt_hollow_processes(), run_forensics_pipeline() with argparse CLI
+│                         accepts --pslist (JSON), --malfind (JSON), --sysmon (EVTX), --output (dir)
+├── super_timeline.py  ← SuperTimeline, SuperTimelineEntry, merge_timelines(ir_timeline, super_timeline)
+│                         ir_timeline comes from W16 IncidentTimeline.export_json()
+└── forensics_report/
+    └── INC-2024-0115_hollow.json   ← output: { &quot;case_id&quot;: ..., &quot;hollow_findings&quot;: [...], &quot;super_timeline&quot;: {...} }
+</code></pre><p><code>merge_timelines()</code> joins <code>IncidentTimeline</code> (IR events) with <code>SuperTimeline</code> (disk/memory/network) on timestamp window ±60 seconds, deduplicates, and returns a unified chronological view.</p>
+<p><strong>Stretch goal:</strong> Add <code>windows.netscan</code> plugin output to the pipeline — correlate Volatility network connections with Zeek conn.log from W14 to confirm the C2 channel in both memory and network artifacts simultaneously.</p>
+<div class="pager"><a class="btn ghost" href="week-16.html">&larr; Week 16</a><a class="btn ghost" href="week-18.html">Week 18 &rarr;</a></div>
+</main></body></html>

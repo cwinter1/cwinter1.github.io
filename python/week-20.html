@@ -1,0 +1,1680 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 20 — Spark Lakehouse</title>
+<link rel="stylesheet" href="style.css"><script>window.SITE_DATASETS = ["datasets/titanic_train.csv"];</script>
+<script src="app.js" defer></script></head>
+<body data-site="python">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Python Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 20 — Spark Lakehouse</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a><a class="btn ghost" href="#day-6">Day 6</a><a class="btn ghost" href="#day-7">Day 7</a></div><p class="note">Done this week: <span data-week-count="20" data-size="7"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><p class="note">Cells that need a file other than the Titanic table, a web connection, a database server or a package that is not available in the browser will show an error when run. Read those instead.</p><h2 id="day-1">Day 1 — Pyspark Local (Real, Running Code)</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="20-1"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 20  |  DAY 1  |  PYSPARK LOCAL (REAL, RUNNING CODE)</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Start a real local SparkSession and run DataFrame code
+ 2. Tell transformations (lazy) from actions (run now)
+ 3. Read a physical plan and spot the shuffle (Exchange)
+
+ TIME:  ~35 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;PySpark DataFrame tutorial local mode&quot;
+ Search: &quot;Spark lazy evaluation transformations vs actions&quot;
+ Search: &quot;Spark explain physical plan shuffle Exchange&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: pandas vs DuckDB vs Spark (PySpark).
+ Rule of thumb: use pandas under 1 GB. Use DuckDB for analytical SQL on larger local files. Move to Spark only when data exceeds one machine, or when the team already runs a Spark platform (Databricks, EMR, Dataproc).
+ This lesson replaces the commented-out PySpark code in W8_D4 with code that really runs.
+
+ REQUIREMENTS
+ ────────────
+ pip install pyspark   (needs Java 17+ on the PATH)
+ Everything below runs in local mode. No cluster, no cloud cost.</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ SETUP — A LOCAL SPARKSESSION</pre><pre class="box">══════════════════════════════════════════════════════════════
+A SparkSession is the entry point. In local mode it runs the driver and the
+executors inside one process on your machine. master(&quot;local[2]&quot;) means
+&quot;use 2 CPU threads&quot;. We also turn off the web UI and the progress bar so the
+notebook output stays clean, and lower the shuffle partitions (default 200)
+because 200 tiny tasks are slow on a laptop.</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D1_PySpark_Local_Real.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import shutil
+
+if shutil.which(&quot;java&quot;) is None:
+    raise RuntimeError(&quot;Java not found. Install Java 17+ and restart the kernel (PySpark needs a JVM).&quot;)
+
+from pyspark.sql import SparkSession, functions as F
+
+
+def get_spark(app_name=&quot;w20&quot;):
+    spark = (
+        SparkSession.builder.master(&quot;local[2]&quot;)
+        .appName(app_name)
+        .config(&quot;spark.ui.enabled&quot;, &quot;false&quot;)
+        .config(&quot;spark.ui.showConsoleProgress&quot;, &quot;false&quot;)
+        .config(&quot;spark.sql.shuffle.partitions&quot;, &quot;4&quot;)
+        .getOrCreate()
+    )
+    spark.sparkContext.setLogLevel(&quot;ERROR&quot;)
+    return spark
+
+
+spark = get_spark()
+print(&quot;Spark version:&quot;, spark.version)
+print(&quot;Master       :&quot;, spark.sparkContext.master)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — TRANSFORMATIONS ARE LAZY, ACTIONS RUN</pre><pre class="box">══════════════════════════════════════════════════════════════
+Spark does not run anything when you call filter(), select() or withColumn().
+It only records a plan. Work starts when you call an ACTION: show(), count(),
+collect(), write(). This lets Spark look at the whole plan and optimize it
+before touching any data.
+
+  Transformations (lazy): select, filter, withColumn, groupBy, join, orderBy
+  Actions (run now)     : show, count, collect, take, write
+
+Why it matters: if a cell &quot;finishes instantly&quot; it probably only built a plan.
+If a later cell is slow, that cell paid for all the earlier lazy steps.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D1_PySpark_Local_Real.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+
+rows = [(&quot;C%04d&quot; % i, [&quot;West&quot;, &quot;East&quot;, &quot;Central&quot;][i % 3], float(100 + (i * 37) % 900)) for i in range(60000)]
+claims_big = spark.createDataFrame(rows, [&quot;claim_id&quot;, &quot;region&quot;, &quot;amount&quot;])
+
+t0 = time.time()
+lazy = claims_big.filter(F.col(&quot;amount&quot;) &gt; 500).withColumn(&quot;amount_k&quot;, F.col(&quot;amount&quot;) / 1000)
+t_lazy = time.time() - t0
+
+t0 = time.time()
+n = lazy.count()
+t_action = time.time() - t0
+
+print(&quot;Transformations only returned in under 1 second:&quot;, t_lazy &lt; 1.0)
+print(&quot;Rows after the filter (action ran the plan)   :&quot;, n)
+print(&quot;Type of &#x27;lazy&#x27;                                :&quot;, type(lazy).__name__)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+Keep only OPEN claims with amount above 1000. Add a column amount_with_vat
+equal to amount * 1.18 rounded to 2 decimals. Show claim_id and
+amount_with_vat ordered by claim_id.
+
+Expected output:
+    +--------+---------------+
+    |claim_id|amount_with_vat|
+    +--------+---------------+
+    |    C001|         1416.0|
+    |    C003|         3540.0|
+    |    C005|         2596.0|
+    +--------+---------------+
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D1_PySpark_Local_Real.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>claims = [
+    (&quot;C001&quot;, &quot;West&quot;, 1200.0, &quot;OPEN&quot;),
+    (&quot;C002&quot;, &quot;East&quot;, 450.5, &quot;CLOSED&quot;),
+    (&quot;C003&quot;, &quot;West&quot;, 3000.0, &quot;OPEN&quot;),
+    (&quot;C004&quot;, &quot;Central&quot;, 980.0, &quot;OPEN&quot;),
+    (&quot;C005&quot;, &quot;East&quot;, 2200.0, &quot;OPEN&quot;),
+]
+df = spark.createDataFrame(claims, [&quot;claim_id&quot;, &quot;region&quot;, &quot;amount&quot;, &quot;status&quot;])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — THE DATAFRAME API: SELECT, FILTER, GROUPBY, AGG</pre><pre class="box">══════════════════════════════════════════════════════════════
+A Spark DataFrame looks like a pandas DataFrame, but it is a description of a
+computation over partitioned data, not a table in memory. Columns are
+expressions: F.col(&quot;amount&quot;) &gt; 500 is an object, not a boolean.
+
+Common pieces:
+  F.col(&quot;x&quot;), F.lit(5)             column and constant expressions
+  df.groupBy(&quot;k&quot;).agg(F.sum(...))  aggregation with named results
+  .alias(&quot;name&quot;)                   name a computed column
+  .orderBy(&quot;k&quot;)                    sort (a wide operation, see Concept 3)
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D1_PySpark_Local_Real.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>summary = (
+    claims_big.groupBy(&quot;region&quot;)
+    .agg(
+        F.count(&quot;*&quot;).alias(&quot;claims&quot;),
+        F.round(F.avg(&quot;amount&quot;), 1).alias(&quot;avg_amount&quot;),
+        F.max(&quot;amount&quot;).alias(&quot;max_amount&quot;),
+    )
+    .orderBy(&quot;region&quot;)
+)
+summary.show()
+
+# Same answer from pandas, to prove the two APIs agree on small data
+import pandas as pd
+
+pdf = pd.DataFrame(rows, columns=[&quot;claim_id&quot;, &quot;region&quot;, &quot;amount&quot;])
+check = pdf.groupby(&quot;region&quot;)[&quot;amount&quot;].agg([&quot;count&quot;, &quot;mean&quot;, &quot;max&quot;]).round(1).reset_index().sort_values(&quot;region&quot;)
+print(check.to_string(index=False))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+Group the claims DataFrame by region. For each region show the total amount
+(total), the number of claims (n), and the average amount rounded to 1
+decimal (avg_amount). Order by region.
+
+Expected output:
+    +-------+------+---+----------+
+    | region| total|  n|avg_amount|
+    +-------+------+---+----------+
+    |Central| 980.0|  1|     980.0|
+    |   East|2650.5|  2|    1325.3|
+    |   West|4200.0|  2|    2100.0|
+    +-------+------+---+----------+
+
+--- starting data ---
+(reuse the df DataFrame from Exercise 1)</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — PARTITIONS AND THE SHUFFLE (EXCHANGE)</pre><pre class="box">══════════════════════════════════════════════════════════════
+Spark splits data into partitions and runs one task per partition.
+
+  Narrow transformation: each output partition needs ONE input partition
+      (filter, select, withColumn). Cheap, no data moves.
+  Wide transformation: output partitions need data from MANY input partitions
+      (groupBy, join, orderBy, distinct). Data is moved across the network.
+      This movement is called a SHUFFLE and shows up as &quot;Exchange&quot; in the plan.
+
+Shuffles are the main cost in Spark jobs. Reading a plan for Exchange nodes is
+the first skill of Spark tuning.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D1_PySpark_Local_Real.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import io
+import re
+import contextlib
+
+
+def plan_text(dataframe):
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        dataframe.explain()
+    return buffer.getvalue()
+
+
+narrow_plan = plan_text(claims_big.filter(F.col(&quot;amount&quot;) &gt; 500).select(&quot;claim_id&quot;))
+wide_plan = plan_text(claims_big.groupBy(&quot;region&quot;).count())
+
+print(&quot;Partitions of claims_big:&quot;, claims_big.rdd.getNumPartitions())
+print(&quot;Narrow plan has Exchange:&quot;, &quot;Exchange&quot; in narrow_plan)
+print(&quot;Wide plan has Exchange  :&quot;, &quot;Exchange&quot; in wide_plan)
+
+for line in wide_plan.splitlines():
+    if &quot;Exchange&quot; in line:
+        print(&quot;Shuffle node:&quot;, re.sub(r&quot;#\d+|,?\s*ENSURE_REQUIREMENTS|,?\s*\[plan_id=\d+\]&quot;, &quot;&quot;, line.strip().lstrip(&quot;+- &quot;)))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+Using the plan_text helper above and the small df from Exercise 1:
+  a) build a narrow query: filter amount &gt; 1000, select claim_id
+  b) build a wide query: count claims per region
+Print whether each plan contains the word Exchange.
+
+Expected output:
+    narrow query has Exchange: False
+    wide query has Exchange: True
+
+--- starting data ---
+(reuse df and plan_text)</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — WHEN TO STOP: CLEAN UP THE SESSION</pre><pre class="box">══════════════════════════════════════════════════════════════
+A SparkSession holds a JVM. In notebooks, stop it when you are done with a
+lesson, otherwise the next notebook may reuse a stale session with different
+settings. getOrCreate() returns the existing session if one is alive.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D1_PySpark_Local_Real.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>spark.stop()
+print(&quot;Session stopped. Start a new one with get_spark() when needed.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-2">Day 2 — Spark Sql, Window Functions, Joins And Skew</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="20-2"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 20  |  DAY 2  |  SPARK SQL, WINDOW FUNCTIONS, JOINS AND SKEW</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Run the same query through Spark SQL and the DataFrame API
+ 2. Use window functions (row_number, running totals) on claims data
+ 3. Read a plan to see which join strategy Spark chose
+ 4. Fix a skewed key with salting
+
+ TIME:  ~40 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;Spark SQL window functions row_number tutorial&quot;
+ Search: &quot;Spark broadcast join vs sort merge join&quot;
+ Search: &quot;Spark data skew salting technique&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: Spark SQL strings vs the DataFrame API vs dbt models.
+ Rule of thumb: use SQL for analyst-readable logic and anything dbt can own. Use the DataFrame API when you build queries in loops or need unit-testable Python functions. Both compile to the same optimized plan.</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ SETUP</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D2_Spark_SQL_Window_Join.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import io
+import re
+import shutil
+import contextlib
+
+if shutil.which(&quot;java&quot;) is None:
+    raise RuntimeError(&quot;Java not found. Install Java 17+ and restart the kernel (PySpark needs a JVM).&quot;)
+
+from pyspark.sql import SparkSession, Window, functions as F
+
+
+def get_spark(app_name=&quot;w20&quot;):
+    spark = (
+        SparkSession.builder.master(&quot;local[2]&quot;)
+        .appName(app_name)
+        .config(&quot;spark.ui.enabled&quot;, &quot;false&quot;)
+        .config(&quot;spark.ui.showConsoleProgress&quot;, &quot;false&quot;)
+        .config(&quot;spark.sql.shuffle.partitions&quot;, &quot;4&quot;)
+        .getOrCreate()
+    )
+    spark.sparkContext.setLogLevel(&quot;ERROR&quot;)
+    return spark
+
+
+def plan_text(dataframe):
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        dataframe.explain()
+    return buffer.getvalue()
+
+
+spark = get_spark()
+print(&quot;Spark version:&quot;, spark.version)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — SPARK SQL AND TEMP VIEWS</pre><pre class="box">══════════════════════════════════════════════════════════════
+Register a DataFrame as a temporary view and you can query it with plain SQL.
+Spark parses the SQL and the DataFrame code into the same logical plan, so
+there is no speed difference. Pick whichever is clearer to read.
+
+  df.createOrReplaceTempView(&quot;claims&quot;)
+  spark.sql(&quot;SELECT ... FROM claims&quot;)
+
+The view lives only in this session. It is a name for a plan, not a copy of
+the data.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D2_Spark_SQL_Window_Join.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>policy_types = [&quot;auto&quot;, &quot;home&quot;, &quot;life&quot;]
+raw = [(i, policy_types[i % 3], float(200 + (i * 53) % 1800), &quot;PAID&quot; if i % 4 else &quot;DENIED&quot;) for i in range(30000)]
+claims_big = spark.createDataFrame(raw, [&quot;claim_id&quot;, &quot;policy_type&quot;, &quot;amount&quot;, &quot;status&quot;])
+claims_big.createOrReplaceTempView(&quot;claims_big&quot;)
+
+sql_result = spark.sql(
+    &quot;SELECT policy_type, COUNT(*) AS n, ROUND(AVG(amount), 1) AS avg_amount &quot;
+    &quot;FROM claims_big WHERE status = &#x27;PAID&#x27; GROUP BY policy_type ORDER BY policy_type&quot;
+)
+api_result = (
+    claims_big.filter(F.col(&quot;status&quot;) == &quot;PAID&quot;)
+    .groupBy(&quot;policy_type&quot;)
+    .agg(F.count(&quot;*&quot;).alias(&quot;n&quot;), F.round(F.avg(&quot;amount&quot;), 1).alias(&quot;avg_amount&quot;))
+    .orderBy(&quot;policy_type&quot;)
+)
+sql_result.show()
+print(&quot;SQL and DataFrame API give the same rows:&quot;, sql_result.collect() == api_result.collect())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+Register the claims DataFrame as a view named claims. With one SQL query,
+show the total amount of PAID claims per policy_type (column total_paid),
+largest total first.
+
+Expected output:
+    +-----------+----------+
+    |policy_type|total_paid|
+    +-----------+----------+
+    |       life|    9000.0|
+    |       home|    6200.0|
+    |       auto|    3500.0|
+    +-----------+----------+
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D2_Spark_SQL_Window_Join.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>claims = spark.createDataFrame(
+    [
+        (&quot;C1&quot;, &quot;auto&quot;, 1000.0, &quot;PAID&quot;),
+        (&quot;C2&quot;, &quot;home&quot;, 5000.0, &quot;PAID&quot;),
+        (&quot;C3&quot;, &quot;auto&quot;, 750.0, &quot;DENIED&quot;),
+        (&quot;C4&quot;, &quot;auto&quot;, 2500.0, &quot;PAID&quot;),
+        (&quot;C5&quot;, &quot;life&quot;, 9000.0, &quot;PAID&quot;),
+        (&quot;C6&quot;, &quot;home&quot;, 1200.0, &quot;PAID&quot;),
+    ],
+    [&quot;claim_id&quot;, &quot;policy_type&quot;, &quot;amount&quot;, &quot;status&quot;],
+)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — WINDOW FUNCTIONS</pre><pre class="box">══════════════════════════════════════════════════════════════
+A window function computes a value for each row using a group of related rows,
+without collapsing the rows like groupBy does.
+
+  Window.partitionBy(&quot;customer&quot;).orderBy(&quot;claim_date&quot;)
+
+  row_number()   1, 2, 3 within each partition (no ties)
+  lag(&quot;amount&quot;)  the previous row&#x27;s amount in the partition
+  sum(&quot;amount&quot;).over(window)  running total when the window is ordered
+
+Typical insurance uses: latest claim per customer, days since the previous
+claim, running paid total per policy. Windows need a shuffle: all rows of one
+partition key must meet on one task.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D2_Spark_SQL_Window_Join.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>history = spark.createDataFrame(
+    [
+        (&quot;alice&quot;, &quot;2026-01-05&quot;, 300.0),
+        (&quot;alice&quot;, &quot;2026-02-11&quot;, 150.0),
+        (&quot;alice&quot;, &quot;2026-03-20&quot;, 500.0),
+        (&quot;bob&quot;, &quot;2026-01-15&quot;, 100.0),
+        (&quot;bob&quot;, &quot;2026-02-01&quot;, 900.0),
+    ],
+    [&quot;customer&quot;, &quot;claim_date&quot;, &quot;amount&quot;],
+)
+
+w_asc = Window.partitionBy(&quot;customer&quot;).orderBy(&quot;claim_date&quot;)
+with_windows = (
+    history.withColumn(&quot;claim_no&quot;, F.row_number().over(w_asc))
+    .withColumn(&quot;prev_amount&quot;, F.lag(&quot;amount&quot;).over(w_asc))
+    .withColumn(&quot;running_total&quot;, F.sum(&quot;amount&quot;).over(w_asc))
+    .orderBy(&quot;customer&quot;, &quot;claim_date&quot;)
+)
+with_windows.show()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+Show only the latest claim of each customer (customer and claim_id),
+ordered by customer. Use a window function, not a groupBy-and-join.
+
+Expected output:
+    +--------+--------+
+    |customer|claim_id|
+    +--------+--------+
+    |   alice|      C2|
+    |     bob|      C4|
+    |   carol|      C6|
+    +--------+--------+
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D2_Spark_SQL_Window_Join.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>customer_claims = spark.createDataFrame(
+    [
+        (&quot;alice&quot;, &quot;C1&quot;, &quot;2026-01-05&quot;, 300),
+        (&quot;alice&quot;, &quot;C2&quot;, &quot;2026-03-10&quot;, 150),
+        (&quot;bob&quot;, &quot;C3&quot;, &quot;2026-02-01&quot;, 900),
+        (&quot;bob&quot;, &quot;C4&quot;, &quot;2026-02-20&quot;, 400),
+        (&quot;bob&quot;, &quot;C5&quot;, &quot;2026-01-15&quot;, 100),
+        (&quot;carol&quot;, &quot;C6&quot;, &quot;2026-04-01&quot;, 50),
+    ],
+    [&quot;customer&quot;, &quot;claim_id&quot;, &quot;claim_date&quot;, &quot;amount&quot;],
+)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — JOIN STRATEGIES: BROADCAST VS SORT-MERGE</pre><pre class="box">══════════════════════════════════════════════════════════════
+Spark picks a physical strategy for each join:
+
+  BroadcastHashJoin  copy the small table to every task; the big table is not
+                     shuffled. Fast. Use when one side is small (lookup tables).
+  SortMergeJoin      shuffle and sort BOTH sides by the join key. Scales to
+                     two big tables but costs two shuffles.
+
+You can force a broadcast with F.broadcast(small_df). Spark also broadcasts
+automatically below spark.sql.autoBroadcastJoinThreshold (default 10 MB, when
+it knows the table size). You confirm the choice by reading the plan.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D2_Spark_SQL_Window_Join.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>lines = spark.createDataFrame(
+    [(&quot;auto&quot;, &quot;Motor&quot;), (&quot;home&quot;, &quot;Property&quot;), (&quot;life&quot;, &quot;Life&quot;)],
+    [&quot;policy_type&quot;, &quot;business_line&quot;],
+)
+
+
+def join_strategy(dataframe):
+    match = re.search(r&quot;(BroadcastHashJoin|SortMergeJoin|ShuffledHashJoin)&quot;, plan_text(dataframe))
+    return match.group(1) if match else &quot;none&quot;
+
+
+forced = claims_big.join(F.broadcast(lines), &quot;policy_type&quot;)
+print(&quot;With F.broadcast hint:&quot;, join_strategy(forced))
+
+spark.conf.set(&quot;spark.sql.autoBroadcastJoinThreshold&quot;, &quot;-1&quot;)
+print(&quot;Broadcast switched off:&quot;, join_strategy(claims_big.join(lines, &quot;policy_type&quot;)))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+Using the claims and lines DataFrames below and the join_strategy helper
+above, print the strategy Spark uses
+  a) when lines is wrapped in F.broadcast
+  b) when auto-broadcast is off (threshold -1) and no hint is given
+
+Expected output:
+    with hint: BroadcastHashJoin
+    no hint, threshold off: SortMergeJoin
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D2_Spark_SQL_Window_Join.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>spark.conf.set(&quot;spark.sql.autoBroadcastJoinThreshold&quot;, &quot;10485760&quot;)
+lines_small = spark.createDataFrame(
+    [(&quot;auto&quot;, &quot;Motor&quot;), (&quot;home&quot;, &quot;Property&quot;), (&quot;life&quot;, &quot;Life&quot;)],
+    [&quot;policy_type&quot;, &quot;business_line&quot;],
+)
+# (claims from Exercise 1 is the big side)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — DATA SKEW AND SALTING</pre><pre class="box">══════════════════════════════════════════════════════════════
+A shuffle sends all rows with the same key to the same task. If one key owns
+most of the rows (a default customer id, a null replaced by &quot;UNKNOWN&quot;, one huge
+broker), one task does nearly all the work while the others sit idle.
+
+Salting spreads a hot key: add a small salt column, aggregate by (key, salt)
+first, then aggregate the partial results by key. Same final answer, more
+parallelism.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D2_Spark_SQL_Window_Join.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>skewed_rows = [(&quot;BIG&quot;, float(i % 100)) for i in range(40000)] + [(&quot;k%d&quot; % (i % 20), float(i % 100)) for i in range(2000)]
+skewed = spark.createDataFrame(skewed_rows, [&quot;customer&quot;, &quot;amount&quot;]).withColumn(&quot;rid&quot;, F.monotonically_increasing_id())
+
+by_key = skewed.repartition(4, &quot;customer&quot;).withColumn(&quot;pid&quot;, F.spark_partition_id())
+sizes_plain = sorted([r[&quot;count&quot;] for r in by_key.groupBy(&quot;pid&quot;).count().collect()], reverse=True)
+
+salted = skewed.withColumn(&quot;salt&quot;, F.pmod(F.hash(&quot;rid&quot;), F.lit(4)))
+by_salt = salted.repartition(4, &quot;customer&quot;, &quot;salt&quot;).withColumn(&quot;pid&quot;, F.spark_partition_id())
+sizes_salt = sorted([r[&quot;count&quot;] for r in by_salt.groupBy(&quot;pid&quot;).count().collect()], reverse=True)
+
+print(&quot;Rows per partition, plain key  :&quot;, sizes_plain)
+print(&quot;Rows per partition, salted key :&quot;, sizes_salt)
+
+two_stage = (
+    salted.groupBy(&quot;customer&quot;, &quot;salt&quot;).agg(F.sum(&quot;amount&quot;).alias(&quot;partial&quot;))
+    .groupBy(&quot;customer&quot;).agg(F.sum(&quot;partial&quot;).alias(&quot;total&quot;))
+)
+direct = skewed.groupBy(&quot;customer&quot;).agg(F.sum(&quot;amount&quot;).alias(&quot;total&quot;))
+print(&quot;Salted two-stage result equals direct result:&quot;, two_stage.orderBy(&quot;customer&quot;).collect() == direct.orderBy(&quot;customer&quot;).collect())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 4</pre><pre class="box">══════════════════════════════════════════════════════════════
+Compute the total amount per key with a two-stage salted aggregation:
+add a salt column of 2 buckets (use pmod of hash(amount) by 2), sum by
+(key, salt), then sum the partial sums by key. Show the result ordered by key.
+
+Expected output:
+    +---+-----+
+    |key|total|
+    +---+-----+
+    |  A|   10|
+    |  B|   20|
+    |BIG|   36|
+    +---+-----+
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D2_Spark_SQL_Window_Join.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>hot = spark.createDataFrame(
+    [(&quot;BIG&quot;, i) for i in range(1, 9)] + [(&quot;A&quot;, 10), (&quot;B&quot;, 20)],
+    [&quot;key&quot;, &quot;amount&quot;],
+)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CLEAN UP</pre><pre class="box">══════════════════════════════════════════════════════════════
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D2_Spark_SQL_Window_Join.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>spark.stop()
+print(&quot;Session stopped.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-3">Day 3 — Parquet Internals, Partitioning And Small Files</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="20-3"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 20  |  DAY 3  |  PARQUET INTERNALS, PARTITIONING AND SMALL FILES</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Explain why columnar Parquet beats CSV for analytics (row groups, column chunks, statistics)
+ 2. Write partitioned Parquet with Spark and confirm partition pruning in the plan
+ 3. Spot and fix the small-files problem
+ 4. Compare pandas, DuckDB and Spark on the same Parquet file
+
+ TIME:  ~40 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;Parquet file format explained row groups column chunks&quot;
+ Search: &quot;Spark partitionBy partition pruning explained&quot;
+ Search: &quot;Spark small files problem coalesce repartition&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: CSV vs Parquet vs a table format (Delta, Iceberg).
+ Rule of thumb: use Parquet for any analytical data on files. Add partitioning when queries filter on one low-cardinality column (date, region). Move to a table format (days 4-5) when you need updates, deletes, or safe concurrent writes.
+ Builds on W4_D3 CONCEPT 5 (Parquet basics with pyarrow). This lesson is about what happens inside the file and across many files.</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ SETUP</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D3_Parquet_Partitioning.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import io
+import os
+import re
+import shutil
+import tempfile
+import time
+import contextlib
+
+import numpy as np
+import pandas as pd
+import duckdb
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+if shutil.which(&quot;java&quot;) is None:
+    raise RuntimeError(&quot;Java not found. Install Java 17+ and restart the kernel (PySpark needs a JVM).&quot;)
+
+from pyspark.sql import SparkSession, functions as F
+
+
+def get_spark(app_name=&quot;w20&quot;):
+    spark = (
+        SparkSession.builder.master(&quot;local[2]&quot;)
+        .appName(app_name)
+        .config(&quot;spark.ui.enabled&quot;, &quot;false&quot;)
+        .config(&quot;spark.ui.showConsoleProgress&quot;, &quot;false&quot;)
+        .config(&quot;spark.sql.shuffle.partitions&quot;, &quot;4&quot;)
+        .getOrCreate()
+    )
+    spark.sparkContext.setLogLevel(&quot;ERROR&quot;)
+    return spark
+
+
+def plan_text(dataframe):
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        dataframe.explain()
+    return buffer.getvalue()
+
+
+spark = get_spark()
+workdir = tempfile.mkdtemp(prefix=&quot;w20_d3_&quot;)
+print(&quot;Scratch folder:&quot;, workdir)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — INSIDE A PARQUET FILE</pre><pre class="box">══════════════════════════════════════════════════════════════
+CSV stores row after row. To read one column you must read every byte.
+Parquet stores data by COLUMN:
+
+  file
+   +-- row group 1  (a block of rows, e.g. 100,000)
+   |     +-- column chunk: claim_id   (compressed, encoded)
+   |     +-- column chunk: amount     (compressed, encoded)
+   |     +-- statistics: min / max / null count per column chunk
+   +-- row group 2 ...
+   +-- footer (schema + all statistics)
+
+Three wins for analytics:
+  1. Column pruning     read only the columns the query uses
+  2. Row group skipping the min/max statistics let a reader skip whole blocks
+  3. Compression        similar values sit together, so they compress well
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D3_Parquet_Partitioning.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>rng = np.random.default_rng(42)
+n_rows = 100000
+claims_pdf = pd.DataFrame(
+    {
+        &quot;claim_id&quot;: np.arange(n_rows),
+        &quot;region&quot;: rng.choice([&quot;West&quot;, &quot;East&quot;, &quot;Central&quot;], n_rows),
+        &quot;amount&quot;: np.sort(rng.integers(100, 100000, n_rows)),
+    }
+)
+
+csv_path = os.path.join(workdir, &quot;claims.csv&quot;)
+pq_path = os.path.join(workdir, &quot;claims.parquet&quot;)
+claims_pdf.to_csv(csv_path, index=False)
+pq.write_table(pa.Table.from_pandas(claims_pdf), pq_path, row_group_size=25000)
+
+print(&quot;CSV size    (KB):&quot;, os.path.getsize(csv_path) // 1024)
+print(&quot;Parquet size (KB):&quot;, os.path.getsize(pq_path) // 1024)
+
+meta = pq.ParquetFile(pq_path).metadata
+print(&quot;Row groups:&quot;, meta.num_row_groups)
+amount_idx = [meta.row_group(0).column(i).path_in_schema for i in range(meta.num_columns)].index(&quot;amount&quot;)
+for rg in range(meta.num_row_groups):
+    stats = meta.row_group(rg).column(amount_idx).statistics
+    print(f&quot;  row group {rg}: amount min={stats.min} max={stats.max}&quot;)
+
+# A query for amount &gt; 90000 can skip every row group whose max is below 90000.
+skippable = sum(1 for rg in range(meta.num_row_groups) if meta.row_group(rg).column(amount_idx).statistics.max &lt;= 90000)
+print(&quot;Row groups a reader can skip for &#x27;amount &gt; 90000&#x27;:&quot;, skippable)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+The code below writes six rows to a Parquet file with 2 rows per row group.
+Read the file footer with pyarrow and print:
+  a) the number of row groups
+  b) the min and max of the amount column in the FIRST row group
+
+Expected output:
+    row groups: 3
+    first group amount min/max: 100 200
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D3_Parquet_Partitioning.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>small_table = pa.table(
+    {
+        &quot;claim_id&quot;: [&quot;C1&quot;, &quot;C2&quot;, &quot;C3&quot;, &quot;C4&quot;, &quot;C5&quot;, &quot;C6&quot;],
+        &quot;amount&quot;: [100, 200, 300, 400, 500, 600],
+    }
+)
+small_path = os.path.join(workdir, &quot;small.parquet&quot;)
+pq.write_table(small_table, small_path, row_group_size=2)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — PARTITIONED DATASETS AND PARTITION PRUNING</pre><pre class="box">══════════════════════════════════════════════════════════════
+Partitioning splits a dataset into folders by column values:
+
+  claims/region=West/yr=2025/part-0001.parquet
+  claims/region=West/yr=2026/part-0002.parquet
+  claims/region=East/...
+
+A query that filters on region lets Spark skip every other region folder
+without opening a single file. That is partition pruning. You can see it in
+the plan as PartitionFilters.
+
+Good partition columns: low cardinality (tens to a few thousand values) and
+used in filters (date, region). Bad: claim_id (millions of folders).
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D3_Parquet_Partitioning.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>big = (
+    spark.range(0, 20000)
+    .withColumn(&quot;region&quot;, F.expr(&quot;CASE WHEN id % 3 = 0 THEN &#x27;West&#x27; WHEN id % 3 = 1 THEN &#x27;East&#x27; ELSE &#x27;Central&#x27; END&quot;))
+    .withColumn(&quot;yr&quot;, (F.col(&quot;id&quot;) % 2 + 2025).cast(&quot;int&quot;))
+    .withColumn(&quot;amount&quot;, (F.col(&quot;id&quot;) % 900 + 100).cast(&quot;double&quot;))
+)
+part_path = os.path.join(workdir, &quot;claims_partitioned&quot;)
+big.write.partitionBy(&quot;region&quot;, &quot;yr&quot;).parquet(part_path)
+
+print(&quot;Top level:&quot;, sorted(n for n in os.listdir(part_path) if n.startswith(&quot;region=&quot;)))
+print(&quot;Inside region=West:&quot;, sorted(os.listdir(os.path.join(part_path, &quot;region=West&quot;))))
+
+pruned = spark.read.parquet(part_path).filter(F.col(&quot;region&quot;) == &quot;West&quot;)
+for line in plan_text(pruned).splitlines():
+    if &quot;PartitionFilters&quot; in line:
+        found = re.search(r&quot;PartitionFilters: \[(.*?)\], PushedFilters&quot;, line).group(1)
+        print(&quot;Plan says PartitionFilters:&quot;, re.sub(r&quot;#\d+&quot;, &quot;&quot;, found))
+print(&quot;Rows read for West only:&quot;, pruned.count())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write the DataFrame below as Parquet partitioned by region into the folder
+given by region_path. Then list the folders that start with &quot;region=&quot; in
+sorted order and print the list.
+
+Expected output:
+    [&#x27;region=Central&#x27;, &#x27;region=East&#x27;, &#x27;region=West&#x27;]
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D3_Parquet_Partitioning.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>region_df = spark.createDataFrame(
+    [
+        (&quot;C1&quot;, &quot;West&quot;, 100.0), (&quot;C2&quot;, &quot;East&quot;, 200.0), (&quot;C3&quot;, &quot;West&quot;, 300.0),
+        (&quot;C4&quot;, &quot;Central&quot;, 400.0), (&quot;C5&quot;, &quot;East&quot;, 500.0), (&quot;C6&quot;, &quot;West&quot;, 600.0),
+        (&quot;C7&quot;, &quot;East&quot;, 50.0), (&quot;C8&quot;, &quot;Central&quot;, 75.0), (&quot;C9&quot;, &quot;West&quot;, 10.0),
+        (&quot;C10&quot;, &quot;East&quot;, 20.0),
+    ],
+    [&quot;claim_id&quot;, &quot;region&quot;, &quot;amount&quot;],
+)
+region_path = os.path.join(workdir, &quot;by_region&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — THE SMALL FILES PROBLEM</pre><pre class="box">══════════════════════════════════════════════════════════════
+Spark writes one file per partition per task. A job with 200 shuffle
+partitions that writes 5 MB of data creates 200 tiny files. Every file costs:
+a listing call, an open call, a footer read, and a task to process it. Query
+time is then dominated by overhead, not by data.
+
+Target file size for analytics: roughly 128 MB to 512 MB per file.
+
+Fixes:
+  df.coalesce(n)      shrink partitions without a full shuffle (before write)
+  df.repartition(n)   even redistribution with a shuffle
+  compaction jobs     rewrite many small files into few big ones (Delta
+                      OPTIMIZE does this for you on day 4)
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D3_Parquet_Partitioning.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def count_parquet_files(folder):
+    return len([n for n in os.listdir(folder) if n.endswith(&quot;.parquet&quot;)])
+
+
+tiny = spark.range(0, 4000).withColumn(&quot;amount&quot;, (F.col(&quot;id&quot;) % 900 + 100).cast(&quot;double&quot;))
+
+many_path = os.path.join(workdir, &quot;many_small&quot;)
+tiny.repartition(16).write.parquet(many_path)
+
+few_path = os.path.join(workdir, &quot;few_big&quot;)
+tiny.repartition(16).coalesce(2).write.parquet(few_path)
+
+print(&quot;Files written with 16 partitions:&quot;, count_parquet_files(many_path))
+print(&quot;Files written after coalesce(2) :&quot;, count_parquet_files(few_path))
+print(&quot;Same rows either way:&quot;, spark.read.parquet(many_path).count() == spark.read.parquet(few_path).count())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+The DataFrame below has 8 partitions. Write it as Parquet to eight_path and
+print the number of .parquet files (use count_parquet_files). Then write the
+same data to two_path using only 2 output files and print that count.
+
+Expected output:
+    8 files
+    2 files
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D3_Parquet_Partitioning.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>eight_df = spark.range(0, 4000).repartition(8)
+eight_path = os.path.join(workdir, &quot;eight&quot;)
+two_path = os.path.join(workdir, &quot;two&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — PANDAS VS DUCKDB VS SPARK ON ONE FILE</pre><pre class="box">══════════════════════════════════════════════════════════════
+The same Parquet file can be read by all three engines. Which is faster
+depends on size and hardware. On one laptop-sized file, DuckDB and pandas
+usually win because Spark pays a startup and scheduling cost. Spark pulls
+ahead when data no longer fits on one machine, or when the cluster does the
+reading in parallel.
+
+Your timings will differ from anyone else&#x27;s. The point is the method: same
+input, same question, compare the answers first and the times second.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D3_Parquet_Partitioning.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>bench_rows = 1000000
+bench = pd.DataFrame(
+    {
+        &quot;region&quot;: rng.choice([&quot;West&quot;, &quot;East&quot;, &quot;Central&quot;], bench_rows),
+        &quot;amount&quot;: rng.integers(100, 100000, bench_rows),
+    }
+)
+bench_path = os.path.join(workdir, &quot;bench.parquet&quot;)
+bench.to_parquet(bench_path)
+
+t0 = time.time()
+pandas_result = pd.read_parquet(bench_path).groupby(&quot;region&quot;)[&quot;amount&quot;].sum().sort_index()
+t_pandas = time.time() - t0
+
+t0 = time.time()
+duck_result = duckdb.sql(f&quot;SELECT region, SUM(amount) AS s FROM &#x27;{bench_path}&#x27; GROUP BY region ORDER BY region&quot;).df().set_index(&quot;region&quot;)[&quot;s&quot;]
+t_duck = time.time() - t0
+
+t0 = time.time()
+spark_rows = spark.read.parquet(bench_path).groupBy(&quot;region&quot;).agg(F.sum(&quot;amount&quot;).alias(&quot;s&quot;)).orderBy(&quot;region&quot;).collect()
+t_spark = time.time() - t0
+spark_result = pd.Series({r[&quot;region&quot;]: r[&quot;s&quot;] for r in spark_rows}).sort_index()
+
+print(&quot;Same totals in all three:&quot;, bool((pandas_result.values == duck_result.values).all() and (pandas_result.values == spark_result.values).all()))
+print(f&quot;pandas {t_pandas:.2f}s | DuckDB {t_duck:.2f}s | Spark {t_spark:.2f}s   (yours will differ)&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CLEAN UP</pre><pre class="box">══════════════════════════════════════════════════════════════
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D3_Parquet_Partitioning.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>spark.stop()
+shutil.rmtree(workdir, ignore_errors=True)
+print(&quot;Session stopped and scratch folder removed.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-4">Day 4 — Delta Lake: Acid, Merge, Time Travel</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="20-4"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 20  |  DAY 4  |  DELTA LAKE: ACID, MERGE, TIME TRAVEL</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Explain how a transaction log gives plain Parquet files ACID guarantees
+ 2. Upsert rows with MERGE instead of rewriting a table
+ 3. Query old versions (time travel) and restore after a bad change
+ 4. See schema enforcement and schema evolution in action
+ 5. Compact small files with OPTIMIZE and know what VACUUM does
+
+ TIME:  ~45 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;Delta Lake explained transaction log&quot;
+ Search: &quot;Delta Lake MERGE upsert PySpark tutorial&quot;
+ Search: &quot;Delta Lake time travel restore vacuum&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: plain Parquet vs Delta Lake vs a warehouse table.
+ Rule of thumb: stay on plain Parquet for write-once data nobody updates. Use Delta when you need updates, deletes, safe concurrent writers, or an audit trail of versions. Use a warehouse table when analysts need governed SQL and you do not run Spark.
+ Insurance angle: time travel and the commit history are a ready-made audit trail for &quot;what did this table say on the day of the claim decision&quot;.
+
+ REQUIREMENTS
+ ────────────
+ pip install pyspark delta-spark   (Java 17+)
+ The first run downloads the Delta jars from Maven Central (about 90 MB, needs internet once).</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ SETUP — SPARK WITH DELTA ENABLED</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D4_Delta_Lake.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os
+import json
+import shutil
+import tempfile
+
+if shutil.which(&quot;java&quot;) is None:
+    raise RuntimeError(&quot;Java not found. Install Java 17+ and restart the kernel (PySpark needs a JVM).&quot;)
+
+from delta import configure_spark_with_delta_pip, DeltaTable
+from pyspark.sql import SparkSession, functions as F
+
+
+def get_delta_spark(app_name=&quot;w20-delta&quot;):
+    builder = (
+        SparkSession.builder.master(&quot;local[2]&quot;)
+        .appName(app_name)
+        .config(&quot;spark.ui.enabled&quot;, &quot;false&quot;)
+        .config(&quot;spark.ui.showConsoleProgress&quot;, &quot;false&quot;)
+        .config(&quot;spark.sql.shuffle.partitions&quot;, &quot;4&quot;)
+        .config(&quot;spark.sql.extensions&quot;, &quot;io.delta.sql.DeltaSparkSessionExtension&quot;)
+        .config(&quot;spark.sql.catalog.spark_catalog&quot;, &quot;org.apache.spark.sql.delta.catalog.DeltaCatalog&quot;)
+    )
+    spark = configure_spark_with_delta_pip(builder).getOrCreate()
+    spark.sparkContext.setLogLevel(&quot;ERROR&quot;)
+    return spark
+
+
+spark = get_delta_spark()
+workdir = tempfile.mkdtemp(prefix=&quot;w20_d4_&quot;)
+COLS = [&quot;claim_id&quot;, &quot;status&quot;, &quot;amount&quot;]
+
+
+def make_claims_table(path):
+    # version 0: three claims. version 1: two more claims appended.
+    first = spark.createDataFrame([(&quot;C1&quot;, &quot;OPEN&quot;, 100.0), (&quot;C2&quot;, &quot;OPEN&quot;, 200.0), (&quot;C3&quot;, &quot;CLOSED&quot;, 300.0)], COLS)
+    more = spark.createDataFrame([(&quot;C4&quot;, &quot;OPEN&quot;, 400.0), (&quot;C5&quot;, &quot;DENIED&quot;, 500.0)], COLS)
+    first.write.format(&quot;delta&quot;).save(path)
+    more.write.format(&quot;delta&quot;).mode(&quot;append&quot;).save(path)
+
+
+def load(path):
+    return spark.read.format(&quot;delta&quot;).load(path)
+
+
+print(&quot;Spark version:&quot;, spark.version)
+print(&quot;Scratch folder:&quot;, workdir)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — THE TRANSACTION LOG</pre><pre class="box">══════════════════════════════════════════════════════════════
+A Delta table is a folder of Parquet files PLUS a folder called _delta_log.
+Every write adds one numbered JSON file to the log. The log says which Parquet
+files belong to the table at each version:
+
+  add     this Parquet file is now part of the table
+  remove  this Parquet file is no longer part of the table
+
+A reader replays the log to learn the current file list. A write becomes
+visible only when its log file lands, in one atomic step. That is how Delta
+gives you:
+  Atomicity    a failed job leaves no half-written table
+  Consistency  readers always see a whole version
+  Isolation    readers keep a stable snapshot while writers work
+  Durability   the log file is the commit
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D4_Delta_Lake.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>demo_path = os.path.join(workdir, &quot;demo&quot;)
+make_claims_table(demo_path)
+
+log_files = sorted(n for n in os.listdir(os.path.join(demo_path, &quot;_delta_log&quot;)) if n.endswith(&quot;.json&quot;) and not n.startswith(&quot;.&quot;))
+print(&quot;Commit files:&quot;, log_files)
+
+with open(os.path.join(demo_path, &quot;_delta_log&quot;, log_files[1])) as handle:
+    actions = [json.loads(line) for line in handle if line.strip()]
+print(&quot;Actions in commit 1:&quot;, sorted({key for action in actions for key in action}))
+
+history = DeltaTable.forPath(spark, demo_path).history().select(&quot;version&quot;, &quot;operation&quot;).orderBy(&quot;version&quot;)
+print(&quot;History:&quot;, [(r[&quot;version&quot;], r[&quot;operation&quot;]) for r in history.collect()])
+print(&quot;Rows now:&quot;, load(demo_path).count())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+The helper below has created a Delta table at ex1_path with two versions.
+Print how many rows version 0 had and how many rows the latest version has.
+
+Expected output:
+    version 0 rows: 3
+    latest rows: 5
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D4_Delta_Lake.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ex1_path = os.path.join(workdir, &quot;ex1&quot;)
+make_claims_table(ex1_path)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — MERGE: UPDATE AND INSERT IN ONE STEP</pre><pre class="box">══════════════════════════════════════════════════════════════
+Plain Parquet cannot update a row. You rewrite the whole dataset. Delta gives
+you MERGE (an upsert):
+
+  when the key matches      -&gt; update the row
+  when the key is not found -&gt; insert the row
+  (optional) when matched and a condition holds -&gt; delete
+
+MERGE is the standard way to apply a daily batch of changed claims. Delta
+rewrites only the files that contain matching rows.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D4_Delta_Lake.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>merge_path = os.path.join(workdir, &quot;merge_demo&quot;)
+make_claims_table(merge_path)
+
+changes = spark.createDataFrame([(&quot;C1&quot;, &quot;PAID&quot;, 100.0), (&quot;C8&quot;, &quot;OPEN&quot;, 800.0)], COLS)
+(
+    DeltaTable.forPath(spark, merge_path).alias(&quot;t&quot;)
+    .merge(changes.alias(&quot;c&quot;), &quot;t.claim_id = c.claim_id&quot;)
+    .whenMatchedUpdateAll()
+    .whenNotMatchedInsertAll()
+    .execute()
+)
+load(merge_path).orderBy(&quot;claim_id&quot;).show()
+print(&quot;Versions now:&quot;, DeltaTable.forPath(spark, merge_path).history().count())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+Apply the updates DataFrame to the table at ex2_path with one MERGE:
+C2 becomes PAID, and C9 is a brand new claim. Show the table ordered by
+claim_id.
+
+Expected output:
+    +--------+------+------+
+    |claim_id|status|amount|
+    +--------+------+------+
+    |      C1|  OPEN| 100.0|
+    |      C2|  PAID| 200.0|
+    |      C3|CLOSED| 300.0|
+    |      C4|  OPEN| 400.0|
+    |      C5|DENIED| 500.0|
+    |      C9|  OPEN| 900.0|
+    +--------+------+------+
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D4_Delta_Lake.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ex2_path = os.path.join(workdir, &quot;ex2&quot;)
+make_claims_table(ex2_path)
+updates = spark.createDataFrame([(&quot;C2&quot;, &quot;PAID&quot;, 200.0), (&quot;C9&quot;, &quot;OPEN&quot;, 900.0)], COLS)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — TIME TRAVEL, DELETE AND RESTORE</pre><pre class="box">══════════════════════════════════════════════════════════════
+Because old Parquet files are kept (marked removed in the log, not erased),
+you can read any earlier version:
+
+  spark.read.format(&quot;delta&quot;).option(&quot;versionAsOf&quot;, 3).load(path)
+  spark.read.format(&quot;delta&quot;).option(&quot;timestampAsOf&quot;, &quot;2026-01-01&quot;).load(path)
+
+And you can undo a mistake:
+
+  DeltaTable.forPath(spark, path).restoreToVersion(1)
+
+Restore is itself a new commit, so the history keeps the mistake AND the fix.
+Time travel lasts only while the old files exist. VACUUM (Concept 5) deletes
+them after a retention period.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D4_Delta_Lake.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>travel_path = os.path.join(workdir, &quot;travel_demo&quot;)
+make_claims_table(travel_path)
+
+table = DeltaTable.forPath(spark, travel_path)
+table.delete(&quot;claim_id = &#x27;C1&#x27;&quot;)
+print(&quot;After DELETE rows:&quot;, load(travel_path).count())
+print(&quot;Version 1 still has:&quot;, spark.read.format(&quot;delta&quot;).option(&quot;versionAsOf&quot;, 1).load(travel_path).count())
+
+table.restoreToVersion(1)
+print(&quot;After RESTORE rows:&quot;, load(travel_path).count())
+print(&quot;History:&quot;, [(r[&quot;version&quot;], r[&quot;operation&quot;]) for r in table.history().select(&quot;version&quot;, &quot;operation&quot;).orderBy(&quot;version&quot;).collect()])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+On the table at ex3_path, delete every row with status DENIED and print the
+row count. Then restore the table to version 1 and print the row count again.
+
+Expected output:
+    after delete: 4
+    after restore: 5
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D4_Delta_Lake.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ex3_path = os.path.join(workdir, &quot;ex3&quot;)
+make_claims_table(ex3_path)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — SCHEMA ENFORCEMENT AND EVOLUTION</pre><pre class="box">══════════════════════════════════════════════════════════════
+By default Delta REFUSES a write whose columns do not match the table. That
+is schema enforcement, and it stops a bad upstream file from silently
+corrupting a silver table.
+
+When a new column is legitimate, opt in explicitly:
+
+  .option(&quot;mergeSchema&quot;, &quot;true&quot;)
+
+Old rows get NULL in the new column. Evolution is a conscious decision, not
+an accident.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D4_Delta_Lake.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>schema_path = os.path.join(workdir, &quot;schema_demo&quot;)
+make_claims_table(schema_path)
+
+wider = spark.createDataFrame([(&quot;C6&quot;, &quot;OPEN&quot;, 600.0, &quot;kim&quot;)], COLS + [&quot;adjuster&quot;])
+try:
+    wider.write.format(&quot;delta&quot;).mode(&quot;append&quot;).save(schema_path)
+    print(&quot;Append accepted&quot;)
+except Exception as error:
+    print(&quot;Append rejected by schema enforcement:&quot;, type(error).__name__)
+
+wider.write.format(&quot;delta&quot;).mode(&quot;append&quot;).option(&quot;mergeSchema&quot;, &quot;true&quot;).save(schema_path)
+print(&quot;Columns after mergeSchema:&quot;, load(schema_path).columns)
+print(&quot;Old rows have NULL adjuster:&quot;, load(schema_path).filter(&quot;claim_id = &#x27;C1&#x27;&quot;).first()[&quot;adjuster&quot;] is None)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 4</pre><pre class="box">══════════════════════════════════════════════════════════════
+Try to append the DataFrame below (it has an extra column, adjuster) to the
+table at ex4_path WITHOUT any option. Print &quot;append rejected: True&quot; if it
+fails and &quot;append rejected: False&quot; if it succeeds. Then append it again with
+schema evolution enabled and print the table&#x27;s columns.
+
+Expected output:
+    append rejected: True
+    columns: [&#x27;claim_id&#x27;, &#x27;status&#x27;, &#x27;amount&#x27;, &#x27;adjuster&#x27;]
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D4_Delta_Lake.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ex4_path = os.path.join(workdir, &quot;ex4&quot;)
+make_claims_table(ex4_path)
+extra = spark.createDataFrame([(&quot;C6&quot;, &quot;OPEN&quot;, 600.0, &quot;kim&quot;)], COLS + [&quot;adjuster&quot;])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 5 — OPTIMIZE AND VACUUM</pre><pre class="box">══════════════════════════════════════════════════════════════
+Day 3 showed the small-files problem. Every append here adds at least one
+file. OPTIMIZE rewrites many small files into fewer big ones, as a new commit
+(readers are not disturbed).
+
+VACUUM permanently deletes files that are no longer referenced by the log and
+are older than the retention period (default 7 days). After VACUUM you can
+NOT time travel to versions older than the retention window. Never set
+retention to zero on a production table.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D4_Delta_Lake.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>compact_path = os.path.join(workdir, &quot;compact_demo&quot;)
+for batch in range(6):
+    spark.createDataFrame([(&quot;N%d&quot; % batch, &quot;OPEN&quot;, float(batch))], COLS).write.format(&quot;delta&quot;).mode(&quot;append&quot;).save(compact_path)
+
+
+def num_files(path):
+    return spark.sql(f&quot;DESCRIBE DETAIL delta.`{path}`&quot;).select(&quot;numFiles&quot;).first()[&quot;numFiles&quot;]
+
+
+before = num_files(compact_path)
+DeltaTable.forPath(spark, compact_path).optimize().executeCompaction()
+after = num_files(compact_path)
+print(&quot;Files before OPTIMIZE:&quot;, before)
+print(&quot;Files after OPTIMIZE :&quot;, after)
+print(&quot;Rows unchanged       :&quot;, load(compact_path).count() == 6)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CLEAN UP</pre><pre class="box">══════════════════════════════════════════════════════════════
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D4_Delta_Lake.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>spark.stop()
+shutil.rmtree(workdir, ignore_errors=True)
+print(&quot;Session stopped and scratch folder removed.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-5">Day 5 — Apache Iceberg Vs Delta Lake</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="20-5"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 20  |  DAY 5  |  APACHE ICEBERG VS DELTA LAKE</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Describe Iceberg&#x27;s metadata tree (metadata file, manifest list, manifests)
+ 2. Use hidden partitioning and see file pruning without a derived column
+ 3. Use snapshots for time travel and rollback
+ 4. Evolve a schema by column id (add, rename) without rewriting data
+ 5. Choose between Delta, Iceberg and Hudi with a decision table
+
+ TIME:  ~40 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;Apache Iceberg explained metadata manifest snapshot&quot;
+ Search: &quot;Iceberg hidden partitioning partition evolution&quot;
+ Search: &quot;Delta Lake vs Iceberg vs Hudi comparison&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: Delta Lake vs Apache Iceberg vs Apache Hudi.
+ Rule of thumb: pick the format your platform and engines support best. Delta fits Spark and Databricks. Iceberg fits multi-engine setups (Spark, Trino, Flink, warehouses) and catalog-driven governance. Hudi fits heavy streaming upserts. Do not run two formats for the same table.
+ Feature support changes quickly. Treat the table in Concept 5 as a starting point and check current release notes before a real decision.
+
+ REQUIREMENTS
+ ────────────
+ pip install &quot;pyiceberg[pyiceberg-core,sql-sqlite]&quot; pyarrow
+ This lesson needs no Java and no Spark: PyIceberg writes Iceberg tables from Python with a local SQLite catalog.</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ SETUP — A LOCAL ICEBERG CATALOG</pre><pre class="box">══════════════════════════════════════════════════════════════
+An Iceberg catalog is the service that knows where each table&#x27;s current
+metadata file is. In production it is a REST catalog, AWS Glue, Hive, or a
+JDBC database. Here we use a SQLite file as the catalog and a local folder as
+the warehouse. Same table format, zero infrastructure.</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D5_Iceberg_vs_Delta.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os
+import shutil
+import tempfile
+import datetime as dt
+
+import pyarrow as pa
+from pyiceberg.catalog.sql import SqlCatalog
+from pyiceberg.partitioning import PartitionField, PartitionSpec
+from pyiceberg.schema import Schema
+from pyiceberg.transforms import DayTransform
+from pyiceberg.types import DateType, DoubleType, NestedField, StringType
+
+workdir = tempfile.mkdtemp(prefix=&quot;w20_d5_&quot;)
+catalog = SqlCatalog(&quot;local&quot;, uri=f&quot;sqlite:///{workdir}/catalog.db&quot;, warehouse=f&quot;file://{workdir}/warehouse&quot;)
+catalog.create_namespace(&quot;db&quot;)
+
+claims_schema = Schema(
+    NestedField(1, &quot;claim_id&quot;, StringType(), required=False),
+    NestedField(2, &quot;claim_date&quot;, DateType(), required=False),
+    NestedField(3, &quot;amount&quot;, DoubleType(), required=False),
+)
+arrow_schema = pa.schema([(&quot;claim_id&quot;, pa.string()), (&quot;claim_date&quot;, pa.date32()), (&quot;amount&quot;, pa.float64())])
+by_day = PartitionSpec(PartitionField(source_id=2, field_id=1000, transform=DayTransform(), name=&quot;claim_date_day&quot;))
+
+
+def batch(rows):
+    return pa.Table.from_pylist(
+        [{&quot;claim_id&quot;: a, &quot;claim_date&quot;: b, &quot;amount&quot;: c} for a, b, c in rows], schema=arrow_schema
+    )
+
+
+def make_table(name, partitioned=False):
+    # three commits: 2 rows on Jan 5, 1 row on Jan 6, 1 row on Jan 7
+    spec = by_day if partitioned else PartitionSpec()
+    table = catalog.create_table(f&quot;db.{name}&quot;, schema=claims_schema, partition_spec=spec)
+    table.append(batch([(&quot;C1&quot;, dt.date(2026, 1, 5), 100.0), (&quot;C2&quot;, dt.date(2026, 1, 5), 200.0)]))
+    table.append(batch([(&quot;C3&quot;, dt.date(2026, 1, 6), 300.0)]))
+    table.append(batch([(&quot;C4&quot;, dt.date(2026, 1, 7), 400.0)]))
+    return table
+
+
+print(&quot;Warehouse:&quot;, workdir)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — ICEBERG&#x27;S METADATA TREE</pre><pre class="box">══════════════════════════════════════════════════════════════
+Delta keeps a flat log of commits. Iceberg keeps a TREE of metadata:
+
+  catalog entry  -&gt;  current metadata.json
+                        |  schema, partition spec, list of snapshots
+                        +-&gt; snapshot -&gt; manifest list (snap-*.avro)
+                                           +-&gt; manifest (*-m0.avro)
+                                                 +-&gt; data file paths + per-file
+                                                     column min/max statistics
+
+Every commit writes a new metadata.json and swaps the catalog pointer
+atomically. A query planner walks the tree and uses the statistics in the
+manifests to pick data files WITHOUT listing folders. That is why Iceberg
+stays fast on huge tables and on object stores where listing is slow.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D5_Iceberg_vs_Delta.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>demo = make_table(&quot;demo&quot;)
+meta_dir = os.path.join(workdir, &quot;warehouse&quot;, &quot;db&quot;, &quot;demo&quot;, &quot;metadata&quot;)
+names = os.listdir(meta_dir)
+print(&quot;metadata.json files      :&quot;, len([n for n in names if n.endswith(&quot;.metadata.json&quot;)]))
+print(&quot;manifest lists (snap-*)  :&quot;, len([n for n in names if n.startswith(&quot;snap-&quot;)]))
+print(&quot;manifests (*-m0.avro)    :&quot;, len([n for n in names if n.endswith(&quot;-m0.avro&quot;)]))
+print(&quot;Snapshots in the table   :&quot;, len(demo.snapshots()))
+print(&quot;Current snapshot has manifest list:&quot;, demo.current_snapshot().manifest_list.endswith(&quot;.avro&quot;))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+Create a table named db.ex1 in the catalog using claims_schema (no partition
+spec). Append the two batches below, one commit each. Print the number of
+snapshots and the total number of rows.
+
+Expected output:
+    snapshots: 2
+    rows: 3
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D5_Iceberg_vs_Delta.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>first_batch = batch([(&quot;C1&quot;, dt.date(2026, 1, 5), 100.0), (&quot;C2&quot;, dt.date(2026, 1, 5), 200.0)])
+second_batch = batch([(&quot;C3&quot;, dt.date(2026, 1, 6), 300.0)])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — HIDDEN PARTITIONING</pre><pre class="box">══════════════════════════════════════════════════════════════
+With Hive-style partitioning (Day 3) you create an extra column, claim_day,
+partition by it, and every analyst must remember to filter on claim_day
+instead of claim_date. Forget it and you scan everything.
+
+Iceberg records a TRANSFORM: &quot;partition by day(claim_date)&quot;. Users filter on
+the real column; Iceberg applies the transform itself and prunes files. Other
+transforms: month, year, hour, bucket(N, col), truncate(W, col).
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D5_Iceberg_vs_Delta.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>partitioned = make_table(&quot;partitioned&quot;, partitioned=True)
+all_files = list(partitioned.scan().plan_files())
+jan6_files = list(partitioned.scan(row_filter=&quot;claim_date == &#x27;2026-01-06&#x27;&quot;).plan_files())
+print(f&quot;Files to read for claim_date = 2026-01-06: {len(jan6_files)} of {len(all_files)}&quot;)
+print(&quot;Partition folders:&quot;, sorted(os.listdir(os.path.join(workdir, &quot;warehouse&quot;, &quot;db&quot;, &quot;partitioned&quot;, &quot;data&quot;))))
+print(&quot;Schema has a derived column the user must know about:&quot;, &quot;claim_date_day&quot; in [f.name for f in partitioned.schema().fields])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+The table below is partitioned by day and has three commits. Print how many
+data files a scan must read for claim_date = 2026-01-07, out of the total.
+
+Expected output:
+    files for 2026-01-07: 1 of 3
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D5_Iceberg_vs_Delta.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ex2_table = make_table(&quot;ex2&quot;, partitioned=True)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — SNAPSHOTS: TIME TRAVEL AND ROLLBACK</pre><pre class="box">══════════════════════════════════════════════════════════════
+Each commit creates a snapshot: a full, consistent view of the table. You can
+scan an old snapshot by id, or move the table&#x27;s current pointer back:
+
+  table.scan(snapshot_id=old_id)
+  table.manage_snapshots().rollback_to_snapshot(old_id).commit()
+
+Rollback only moves the pointer. Data files are untouched until snapshots are
+expired (Iceberg&#x27;s equivalent of Delta VACUUM, run with expire_snapshots).
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D5_Iceberg_vs_Delta.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>snaps = demo.snapshots()
+print(&quot;Rows in snapshot 1 :&quot;, demo.scan(snapshot_id=snaps[0].snapshot_id).to_arrow().num_rows)
+print(&quot;Rows in snapshot 2 :&quot;, demo.scan(snapshot_id=snaps[1].snapshot_id).to_arrow().num_rows)
+print(&quot;Rows in current    :&quot;, demo.scan().to_arrow().num_rows)
+
+demo.manage_snapshots().rollback_to_snapshot(snaps[1].snapshot_id).commit()
+print(&quot;After rollback, current rows:&quot;, demo.scan().to_arrow().num_rows)
+print(&quot;Snapshots still listed      :&quot;, len(demo.snapshots()))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+For the table below (three commits), print the number of rows in the FIRST
+snapshot and the number of rows in the current state.
+
+Expected output:
+    first snapshot rows: 2
+    current rows: 4
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D5_Iceberg_vs_Delta.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ex3_table = make_table(&quot;ex3&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — SCHEMA EVOLUTION BY COLUMN ID</pre><pre class="box">══════════════════════════════════════════════════════════════
+Iceberg tracks columns by numeric id, not by name or position. So:
+
+  add column     old files simply have no value (read as NULL)
+  rename column  only metadata changes; old files are still read correctly
+  drop column    only metadata changes
+
+No data rewrite for any of these. Compare Day 4: Delta can add columns with
+mergeSchema, but renames and drops need column mapping mode switched on.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D5_Iceberg_vs_Delta.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>evolve = make_table(&quot;evolve&quot;)
+with evolve.update_schema() as change:
+    change.add_column(&quot;adjuster&quot;, StringType())
+    change.rename_column(&quot;amount&quot;, &quot;claim_amount&quot;)
+print(&quot;Columns:&quot;, [field.name for field in evolve.schema().fields])
+print(&quot;Rows still readable:&quot;, evolve.scan().to_arrow().num_rows)
+print(&quot;Old rows have NULL adjuster:&quot;, evolve.scan().to_pandas()[&quot;adjuster&quot;].isna().all())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 4</pre><pre class="box">══════════════════════════════════════════════════════════════
+On the table below: add a string column named adjuster, and rename the
+column amount to claim_amount. Print the column names and the row count.
+
+Expected output:
+    [&#x27;claim_id&#x27;, &#x27;claim_date&#x27;, &#x27;claim_amount&#x27;, &#x27;adjuster&#x27;]
+    rows: 4
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D5_Iceberg_vs_Delta.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ex4_table = make_table(&quot;ex4&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 5 — DELTA VS ICEBERG VS HUDI: A DECISION TABLE</pre><pre class="box">══════════════════════════════════════════════════════════════
+All three put a transaction layer on top of Parquet files and add ACID,
+time travel, and schema evolution. They differ in where they came from and
+what they are best at. General positioning (verify current features before
+you decide):
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D5_Iceberg_vs_Delta.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>comparison = [
+    (&quot;Metadata&quot;, &quot;JSON commit log + Parquet checkpoints&quot;, &quot;metadata.json -&gt; manifest lists -&gt; manifests&quot;, &quot;timeline of commits and instants&quot;),
+    (&quot;Origin&quot;, &quot;Databricks&quot;, &quot;Netflix, now Apache&quot;, &quot;Uber, now Apache&quot;),
+    (&quot;Strongest fit&quot;, &quot;Spark and Databricks lakehouse&quot;, &quot;multi-engine, catalog-driven lakehouse&quot;, &quot;streaming upserts and CDC&quot;),
+    (&quot;Partitioning&quot;, &quot;folders by column, or liquid clustering&quot;, &quot;hidden transforms, evolvable&quot;, &quot;folders by column, plus indexes&quot;),
+    (&quot;Engines&quot;, &quot;Spark first, wide connector support&quot;, &quot;Spark, Trino, Flink, many warehouses&quot;, &quot;Spark and Flink first&quot;),
+]
+print(f&quot;{&#x27;&#x27;:&lt;14}| {&#x27;Delta&#x27;:&lt;42}| {&#x27;Iceberg&#x27;:&lt;46}| Hudi&quot;)
+for row in comparison:
+    print(f&quot;{row[0]:&lt;14}| {row[1]:&lt;42}| {row[2]:&lt;46}| {row[3]}&quot;)
+
+print()
+print(&quot;Pick Delta   if your platform is Databricks or Spark-centric and you want the simplest path.&quot;)
+print(&quot;Pick Iceberg if several engines or teams must share the same tables through one catalog.&quot;)
+print(&quot;Pick Hudi    if the main job is high-frequency record-level upserts from streams.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CLEAN UP</pre><pre class="box">══════════════════════════════════════════════════════════════
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D5_Iceberg_vs_Delta.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>shutil.rmtree(workdir, ignore_errors=True)
+print(&quot;Scratch folder removed.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-6">Day 6 — Medallion Architecture On Delta</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="20-6"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 20  |  DAY 6  |  MEDALLION ARCHITECTURE ON DELTA</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ LEARNING OBJECTIVES
+ ───────────────────
+ 1. Build a bronze layer: raw, append-only, with ingest metadata
+ 2. Build a silver layer: typed, validated, deduplicated, with a quarantine table
+ 3. Build a gold layer: business marts, and see where dbt fits
+ 4. Reconcile row counts between layers so no row disappears silently
+ 5. Show that silver is idempotent: re-ingesting the same batch changes nothing downstream
+
+ TIME:  ~45 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;medallion architecture bronze silver gold explained&quot;
+ Search: &quot;Delta Lake medallion architecture PySpark tutorial&quot;
+ Search: &quot;data quarantine table bad records pipeline&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: medallion on a lakehouse vs a classic warehouse star schema vs a single curated table.
+ Rule of thumb: use medallion when sources are messy, change often, and you must keep the raw data for audit and replay. Use a star schema in the warehouse for the final governed marts. Skip layers only for tiny, trusted sources.
+ Insurance angle: bronze is the evidence of what was received. Silver is the cleaned version of record in the lake. MSSQL stays the system of record for regulated policy data.
+
+ REQUIREMENTS
+ ────────────
+ pip install pyspark delta-spark   (Java 17+, Delta jars download on first run)
+ Builds on W12_D3 (bronze/silver/gold naming) and W12_D4 (silver transformations).</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><pre class="box">══════════════════════════════════════════════════════════════
+ SETUP</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D6_Medallion_Architecture.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os
+import shutil
+import tempfile
+import datetime as dt
+
+if shutil.which(&quot;java&quot;) is None:
+    raise RuntimeError(&quot;Java not found. Install Java 17+ and restart the kernel (PySpark needs a JVM).&quot;)
+
+from delta import configure_spark_with_delta_pip
+from pyspark.sql import SparkSession, Window, functions as F
+
+
+def get_delta_spark(app_name=&quot;w20-medallion&quot;):
+    builder = (
+        SparkSession.builder.master(&quot;local[2]&quot;)
+        .appName(app_name)
+        .config(&quot;spark.ui.enabled&quot;, &quot;false&quot;)
+        .config(&quot;spark.ui.showConsoleProgress&quot;, &quot;false&quot;)
+        .config(&quot;spark.sql.shuffle.partitions&quot;, &quot;4&quot;)
+        .config(&quot;spark.sql.extensions&quot;, &quot;io.delta.sql.DeltaSparkSessionExtension&quot;)
+        .config(&quot;spark.sql.catalog.spark_catalog&quot;, &quot;org.apache.spark.sql.delta.catalog.DeltaCatalog&quot;)
+    )
+    spark = configure_spark_with_delta_pip(builder).getOrCreate()
+    spark.sparkContext.setLogLevel(&quot;ERROR&quot;)
+    return spark
+
+
+spark = get_delta_spark()
+workdir = tempfile.mkdtemp(prefix=&quot;w20_d6_&quot;)
+RAW_COLS = [&quot;claim_id&quot;, &quot;region&quot;, &quot;amount_raw&quot;, &quot;claim_date_raw&quot;, &quot;ingested_at&quot;]
+
+
+def load(path):
+    return spark.read.format(&quot;delta&quot;).load(path)
+
+
+print(&quot;Spark version:&quot;, spark.version)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 1 — THE THREE LAYERS AND THEIR CONTRACTS</pre><pre class="box">══════════════════════════════════════════════════════════════
+Each layer has one job and one promise:
+
+  BRONZE  raw as received, all columns kept as text, append-only, plus ingest
+          metadata (batch id, load time). Promise: nothing is lost or changed.
+          You can always rebuild silver from bronze.
+  SILVER  typed, validated, deduplicated. Bad rows go to a QUARANTINE table
+          with a reason instead of being dropped. Promise: trustworthy rows.
+  GOLD    business marts shaped for a question (claims by region and month).
+          Promise: ready for dashboards and finance. Built from silver only.
+
+The messy claims feed below has typical problems: thousands separators in
+amounts, an unparseable amount, a missing claim id, an impossible date, and
+the same claim sent twice (an updated version later).
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D6_Medallion_Architecture.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>raw_rows = []
+for i in range(2200):
+    claim_id = &quot;C%05d&quot; % (i % 2000)
+    amount = 100 + (i * 37) % 4900
+    amount_raw = &quot;{:,}&quot;.format(amount)
+    claim_date = (dt.date(2026, 1, 1) + dt.timedelta(days=i % 60)).isoformat()
+    if i % 50 == 7:
+        amount_raw = &quot;n/a&quot;
+    if i % 97 == 5:
+        claim_id = None
+    if i % 211 == 9:
+        claim_date = &quot;31/02/2026&quot;
+    raw_rows.append((claim_id, [&quot;West&quot;, &quot;East&quot;, &quot;Central&quot;][i % 3], amount_raw, claim_date, &quot;2026-03-%02dT08:00&quot; % (1 + i // 800)))
+
+raw_batch = spark.createDataFrame(raw_rows, RAW_COLS)
+
+
+def ingest_bronze(batch_df, path, batch_id):
+    stamped = batch_df.withColumn(&quot;_batch_id&quot;, F.lit(batch_id)).withColumn(&quot;_loaded_at&quot;, F.current_timestamp())
+    stamped.write.format(&quot;delta&quot;).mode(&quot;append&quot;).save(path)
+
+
+bronze_path = os.path.join(workdir, &quot;bronze_claims&quot;)
+ingest_bronze(raw_batch, bronze_path, &quot;batch-001&quot;)
+print(&quot;Bronze rows :&quot;, load(bronze_path).count())
+print(&quot;Bronze cols :&quot;, load(bronze_path).columns)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 1</pre><pre class="box">══════════════════════════════════════════════════════════════
+Classify every row of the small bronze_df below. Add a column reason with the
+FIRST failing rule, checked in this order:
+  missing_claim_id : claim_id is null
+  bad_amount       : amount_raw is not a number after removing commas, or is &lt;= 0
+  bad_date         : claim_date_raw is not a valid yyyy-MM-dd date
+  valid            : none of the above
+Then print the number of rows per reason, ordered by reason.
+(Spark 4 raises an error on a plain cast of bad text. Use the try_ functions.)
+
+Expected output:
+    +----------------+-----+
+    |          reason|count|
+    +----------------+-----+
+    |      bad_amount|    1|
+    |        bad_date|    1|
+    |missing_claim_id|    1|
+    |           valid|    4|
+    +----------------+-----+
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D6_Medallion_Architecture.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>bronze_df = spark.createDataFrame(
+    [
+        (&quot;C1&quot;, &quot;West&quot;, &quot;1,200&quot;, &quot;2026-01-05&quot;, &quot;2026-01-06T08:00&quot;),
+        (&quot;C2&quot;, &quot;East&quot;, &quot;450.5&quot;, &quot;2026-01-07&quot;, &quot;2026-01-07T08:00&quot;),
+        (&quot;C2&quot;, &quot;East&quot;, &quot;500.0&quot;, &quot;2026-01-07&quot;, &quot;2026-01-08T08:00&quot;),
+        (&quot;C3&quot;, &quot;West&quot;, &quot;abc&quot;, &quot;2026-01-09&quot;, &quot;2026-01-09T08:00&quot;),
+        (None, &quot;East&quot;, &quot;300&quot;, &quot;2026-01-10&quot;, &quot;2026-01-10T08:00&quot;),
+        (&quot;C5&quot;, &quot;Central&quot;, &quot;980&quot;, &quot;not-a-date&quot;, &quot;2026-01-11T08:00&quot;),
+        (&quot;C6&quot;, &quot;Central&quot;, &quot;75&quot;, &quot;2026-02-02&quot;, &quot;2026-02-03T08:00&quot;),
+    ],
+    RAW_COLS,
+)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 2 — SILVER: TYPE, VALIDATE, DEDUPLICATE, QUARANTINE</pre><pre class="box">══════════════════════════════════════════════════════════════
+Silver does four things:
+  1. Types   amount_raw -&gt; double, claim_date_raw -&gt; date
+  2. Rules   one reason per failing row (the order matters and is documented)
+  3. Dedupe  keep the LATEST version of each claim_id (window + row_number)
+  4. Quarantine  failing rows are written to their own table with the reason,
+                 so a data steward can fix the source and replay
+
+Never drop bad rows silently. A row that vanishes between layers is the
+hardest bug to find, because every later total is simply a little low.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D6_Medallion_Architecture.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def classify(bronze_frame):
+    return (
+        bronze_frame
+        .withColumn(&quot;amount&quot;, F.expr(&quot;try_cast(regexp_replace(amount_raw, &#x27;,&#x27;, &#x27;&#x27;) AS DOUBLE)&quot;))
+        .withColumn(&quot;claim_date&quot;, F.expr(&quot;try_to_date(claim_date_raw, &#x27;yyyy-MM-dd&#x27;)&quot;))
+        .withColumn(
+            &quot;reason&quot;,
+            F.when(F.col(&quot;claim_id&quot;).isNull(), &quot;missing_claim_id&quot;)
+            .when(F.col(&quot;amount&quot;).isNull() | (F.col(&quot;amount&quot;) &lt;= 0), &quot;bad_amount&quot;)
+            .when(F.col(&quot;claim_date&quot;).isNull(), &quot;bad_date&quot;)
+            .otherwise(&quot;valid&quot;),
+        )
+    )
+
+
+def build_silver(bronze_path, silver_path, quarantine_path):
+    classified = classify(load(bronze_path))
+    latest = Window.partitionBy(&quot;claim_id&quot;).orderBy(F.col(&quot;ingested_at&quot;).desc(), F.col(&quot;_loaded_at&quot;).desc())
+    silver = (
+        classified.filter(&quot;reason = &#x27;valid&#x27;&quot;)
+        .withColumn(&quot;rn&quot;, F.row_number().over(latest))
+        .filter(&quot;rn = 1&quot;)
+        .select(&quot;claim_id&quot;, &quot;region&quot;, &quot;amount&quot;, &quot;claim_date&quot;, &quot;ingested_at&quot;)
+    )
+    quarantine = classified.filter(&quot;reason != &#x27;valid&#x27;&quot;).select(*RAW_COLS, &quot;_batch_id&quot;, &quot;reason&quot;)
+    silver.write.format(&quot;delta&quot;).mode(&quot;overwrite&quot;).save(silver_path)
+    quarantine.write.format(&quot;delta&quot;).mode(&quot;overwrite&quot;).save(quarantine_path)
+
+
+silver_path = os.path.join(workdir, &quot;silver_claims&quot;)
+quarantine_path = os.path.join(workdir, &quot;quarantine_claims&quot;)
+build_silver(bronze_path, silver_path, quarantine_path)
+
+print(&quot;Silver rows     :&quot;, load(silver_path).count())
+print(&quot;Quarantine rows :&quot;, load(quarantine_path).count())
+load(quarantine_path).groupBy(&quot;reason&quot;).count().orderBy(&quot;reason&quot;).show()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 2</pre><pre class="box">══════════════════════════════════════════════════════════════
+From the classified rows of Exercise 1, keep only the valid ones and keep the
+LATEST version of each claim_id (latest ingested_at). Show claim_id and
+amount, ordered by claim_id.
+
+Expected output:
+    +--------+------+
+    |claim_id|amount|
+    +--------+------+
+    |      C1|1200.0|
+    |      C2| 500.0|
+    |      C6|  75.0|
+    +--------+------+
+
+--- starting data ---
+(reuse bronze_df, and the classify function from the example above)</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 3 — GOLD: BUSINESS MARTS (AND WHERE DBT FITS)</pre><pre class="box">══════════════════════════════════════════════════════════════
+Gold tables answer a business question. They read silver only, never bronze.
+This is the layer W13-W14 (dbt) is built for: each gold table is a dbt model
+that selects from the silver model with ref(). Spark builds and stores
+bronze and silver at scale. dbt owns the tested, documented SQL on top.
+
+Equivalent dbt model (shown as text, you built these in Week 13):
+
+  -- models/marts/claims_by_region_month.sql
+  select region, date_format(claim_date, &#x27;yyyy-MM&#x27;) as month,
+         sum(amount) as total, count(*) as claims
+  from {{ ref(&#x27;silver_claims&#x27;) }}
+  group by 1, 2
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D6_Medallion_Architecture.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def build_gold(silver_path, gold_path):
+    gold = (
+        load(silver_path)
+        .withColumn(&quot;month&quot;, F.date_format(&quot;claim_date&quot;, &quot;yyyy-MM&quot;))
+        .groupBy(&quot;month&quot;, &quot;region&quot;)
+        .agg(F.sum(&quot;amount&quot;).alias(&quot;total&quot;), F.count(&quot;*&quot;).alias(&quot;claims&quot;))
+        .orderBy(&quot;month&quot;, &quot;region&quot;)
+    )
+    gold.write.format(&quot;delta&quot;).mode(&quot;overwrite&quot;).save(gold_path)
+
+
+gold_path = os.path.join(workdir, &quot;gold_claims_by_region_month&quot;)
+build_gold(silver_path, gold_path)
+load(gold_path).orderBy(&quot;month&quot;, &quot;region&quot;).show(6)
+print(&quot;Gold claims equal silver rows:&quot;, load(gold_path).agg(F.sum(&quot;claims&quot;)).first()[0] == load(silver_path).count())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 3</pre><pre class="box">══════════════════════════════════════════════════════════════
+From the silver_df below build the gold table: for every month (format
+yyyy-MM) and region show total amount (total) and number of claims (claims).
+Order by month, then region.
+
+Expected output:
+    +-------+-------+------+------+
+    |  month| region| total|claims|
+    +-------+-------+------+------+
+    |2026-01|   East| 500.0|     1|
+    |2026-01|   West|1900.0|     2|
+    |2026-02|Central|  75.0|     1|
+    |2026-02|   East| 250.0|     1|
+    |2026-02|   West| 300.0|     1|
+    +-------+-------+------+------+
+
+--- starting data ---</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D6_Medallion_Architecture.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>silver_df = spark.createDataFrame(
+    [
+        (&quot;C1&quot;, &quot;West&quot;, 1200.0, &quot;2026-01-05&quot;),
+        (&quot;C2&quot;, &quot;East&quot;, 500.0, &quot;2026-01-07&quot;),
+        (&quot;C6&quot;, &quot;Central&quot;, 75.0, &quot;2026-02-02&quot;),
+        (&quot;C7&quot;, &quot;West&quot;, 300.0, &quot;2026-02-10&quot;),
+        (&quot;C8&quot;, &quot;West&quot;, 700.0, &quot;2026-01-20&quot;),
+        (&quot;C9&quot;, &quot;East&quot;, 250.0, &quot;2026-02-14&quot;),
+    ],
+    [&quot;claim_id&quot;, &quot;region&quot;, &quot;amount&quot;, &quot;claim_date&quot;],
+)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 4 — RECONCILIATION BETWEEN LAYERS</pre><pre class="box">══════════════════════════════════════════════════════════════
+Every bronze row must be accounted for:
+
+  bronze rows = silver rows + quarantined rows + duplicates dropped
+
+Check it after every run and FAIL the pipeline if it does not hold. A
+reconciliation check costs one small query and catches the silent-loss bugs
+that otherwise show up months later as &quot;the dashboard is a bit low&quot;.
+Reuse the idea from W8_D3 (data quality) and W14_D4 (expectations).
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D6_Medallion_Architecture.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def reconcile(bronze_path, silver_path, quarantine_path):
+    bronze_n = load(bronze_path).count()
+    silver_n = load(silver_path).count()
+    quarantine_n = load(quarantine_path).count()
+    valid_n = classify(load(bronze_path)).filter(&quot;reason = &#x27;valid&#x27;&quot;).count()
+    duplicates_n = valid_n - silver_n
+    ok = bronze_n == silver_n + quarantine_n + duplicates_n
+    return {&quot;bronze&quot;: bronze_n, &quot;silver&quot;: silver_n, &quot;quarantine&quot;: quarantine_n, &quot;duplicates&quot;: duplicates_n, &quot;ok&quot;: ok}
+
+
+report = reconcile(bronze_path, silver_path, quarantine_path)
+print(report)
+if not report[&quot;ok&quot;]:
+    raise RuntimeError(&quot;Reconciliation failed: rows were lost between layers&quot;)
+print(f&quot;bronze {report[&#x27;bronze&#x27;]} = silver {report[&#x27;silver&#x27;]} + quarantine {report[&#x27;quarantine&#x27;]} + duplicates {report[&#x27;duplicates&#x27;]}: {report[&#x27;ok&#x27;]}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ EXERCISE 4</pre><pre class="box">══════════════════════════════════════════════════════════════
+Using the bronze_df from Exercise 1, compute the four numbers by hand with
+DataFrame code: bronze rows, silver rows (valid, latest version only),
+quarantined rows, and duplicates dropped. Print one line in this exact shape.
+
+Expected output:
+    bronze 7 = silver 3 + quarantine 3 + duplicates 1: True
+
+--- starting data ---
+(reuse bronze_df and classify)</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CONCEPT 5 — IDEMPOTENT SILVER: SAFE TO RE-RUN</pre><pre class="box">══════════════════════════════════════════════════════════════
+Pipelines get retried. A source sends the same file twice. Bronze is
+append-only, so it WILL double. Silver must not. Because silver is rebuilt
+from bronze with a deterministic rule (latest version per claim_id) and an
+overwrite, running the same batch again changes bronze but not silver.
+This is the same idempotency idea you learned in W17_D1.
+
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D6_Medallion_Architecture.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>silver_before = load(silver_path).count()
+checksum_before = load(silver_path).agg(F.round(F.sum(&quot;amount&quot;), 2)).first()[0]
+
+ingest_bronze(raw_batch, bronze_path, &quot;batch-001-retry&quot;)
+build_silver(bronze_path, silver_path, quarantine_path)
+
+print(&quot;Bronze rows after the retry :&quot;, load(bronze_path).count())
+print(&quot;Silver rows unchanged       :&quot;, load(silver_path).count() == silver_before)
+print(&quot;Silver amount checksum same :&quot;, load(silver_path).agg(F.round(F.sum(&quot;amount&quot;), 2)).first()[0] == checksum_before)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ CLEAN UP</pre><pre class="box">══════════════════════════════════════════════════════════════
+EXAMPLE ──────────────────────────────────────────────────────</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D6_Medallion_Architecture.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>spark.stop()
+shutil.rmtree(workdir, ignore_errors=True)
+print(&quot;Session stopped and scratch folder removed.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-7">Day 7 — Project — Claims Lakehouse</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="20-7"> Mark this day done</label><pre class="box">══════════════════════════════════════════════════════════════
+ WEEK 20  |  DAY 7  |  PROJECT — CLAIMS LAKEHOUSE</pre><pre class="box">══════════════════════════════════════════════════════════════
+
+ PROJECT: Raw claims feed -&gt; bronze -&gt; silver (+ quarantine) -&gt; gold
+ Build the whole medallion pipeline on Delta Lake, with row-count
+ reconciliation between layers and a safe retry.
+ End result: a gold table finance can query, and proof that no row was lost.
+
+ Skills stacked:
+   W20 D1-D2 — PySpark DataFrame API, windows
+   W20 D4    — Delta Lake tables (append, overwrite, history)
+   W20 D6    — medallion layers, quarantine, reconciliation
+   W12       — bronze/silver/gold naming and the claims dataset
+
+ TIME:  ~60 minutes
+
+ YOUTUBE
+ ───────
+ Search: &quot;medallion architecture project PySpark Delta Lake end to end&quot;
+ Search: &quot;data pipeline reconciliation row counts between layers&quot;
+
+ ─────────────────────────────────────────────────────────────
+ ARCHITECTURE DECISION
+ ─────────────────────
+ Choosing between: rebuild silver from bronze each run vs incremental MERGE into silver.
+ Rule of thumb: rebuild while the data fits in minutes of compute. It is simple and idempotent by construction. Move to MERGE (W20_D4) when the rebuild gets too slow.
+
+ REQUIREMENTS
+ ────────────
+ pip install pyspark delta-spark   (Java 17+)</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D7_Project_Claims_Lakehouse.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os
+import shutil
+import tempfile
+
+if shutil.which(&quot;java&quot;) is None:
+    raise RuntimeError(&quot;Java not found. Install Java 17+ and restart the kernel (PySpark needs a JVM).&quot;)
+
+from delta import configure_spark_with_delta_pip
+from pyspark.sql import SparkSession, Window, functions as F
+
+builder = (
+    SparkSession.builder.master(&quot;local[2]&quot;)
+    .appName(&quot;w20-d7-project&quot;)
+    .config(&quot;spark.ui.enabled&quot;, &quot;false&quot;)
+    .config(&quot;spark.ui.showConsoleProgress&quot;, &quot;false&quot;)
+    .config(&quot;spark.sql.shuffle.partitions&quot;, &quot;4&quot;)
+    .config(&quot;spark.sql.extensions&quot;, &quot;io.delta.sql.DeltaSparkSessionExtension&quot;)
+    .config(&quot;spark.sql.catalog.spark_catalog&quot;, &quot;org.apache.spark.sql.delta.catalog.DeltaCatalog&quot;)
+)
+spark = configure_spark_with_delta_pip(builder).getOrCreate()
+spark.sparkContext.setLogLevel(&quot;ERROR&quot;)
+
+workdir = tempfile.mkdtemp(prefix=&quot;w20_d7_&quot;)
+bronze_path = os.path.join(workdir, &quot;bronze_claims&quot;)
+silver_path = os.path.join(workdir, &quot;silver_claims&quot;)
+quarantine_path = os.path.join(workdir, &quot;quarantine_claims&quot;)
+gold_path = os.path.join(workdir, &quot;gold_claims_by_region_month&quot;)
+
+RAW_COLS = [&quot;claim_id&quot;, &quot;region&quot;, &quot;amount_raw&quot;, &quot;claim_date_raw&quot;, &quot;ingested_at&quot;]
+raw_rows = [
+    (&quot;P1&quot;, &quot;West&quot;, &quot;2,500&quot;, &quot;2026-03-02&quot;, &quot;2026-04-20T08:00&quot;),
+    (&quot;P2&quot;, &quot;East&quot;, &quot;800&quot;, &quot;2026-03-03&quot;, &quot;2026-04-20T08:00&quot;),
+    (&quot;P2&quot;, &quot;East&quot;, &quot;850&quot;, &quot;2026-03-03&quot;, &quot;2026-04-21T08:00&quot;),
+    (&quot;P3&quot;, &quot;Central&quot;, &quot;x&quot;, &quot;2026-03-04&quot;, &quot;2026-04-20T08:00&quot;),
+    (None, &quot;East&quot;, &quot;100&quot;, &quot;2026-03-05&quot;, &quot;2026-04-20T08:00&quot;),
+    (&quot;P5&quot;, &quot;West&quot;, &quot;1,100&quot;, &quot;2026-03-31&quot;, &quot;2026-04-20T08:00&quot;),
+    (&quot;P6&quot;, &quot;East&quot;, &quot;400&quot;, &quot;2026-04-01&quot;, &quot;2026-04-20T08:00&quot;),
+    (&quot;P7&quot;, &quot;Central&quot;, &quot;0&quot;, &quot;2026-04-02&quot;, &quot;2026-04-20T08:00&quot;),
+    (&quot;P8&quot;, &quot;West&quot;, &quot;620&quot;, &quot;2026-13-40&quot;, &quot;2026-04-20T08:00&quot;),
+    (&quot;P9&quot;, &quot;Central&quot;, &quot;960&quot;, &quot;2026-04-10&quot;, &quot;2026-04-20T08:00&quot;),
+    (&quot;P10&quot;, &quot;East&quot;, &quot;1,300&quot;, &quot;2026-04-12&quot;, &quot;2026-04-20T08:00&quot;),
+    (&quot;P1&quot;, &quot;West&quot;, &quot;2,600&quot;, &quot;2026-03-02&quot;, &quot;2026-04-21T08:00&quot;),
+]
+raw_batch = spark.createDataFrame(raw_rows, RAW_COLS)
+
+
+def load(path):
+    return spark.read.format(&quot;delta&quot;).load(path)
+
+
+print(&quot;Raw batch rows:&quot;, raw_batch.count())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 1 — BRONZE: RAW, APPEND-ONLY, WITH INGEST METADATA</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write ingest_bronze(batch_df, batch_id) that appends batch_df to the Delta
+table at bronze_path and adds two columns:
+  _batch_id   the batch_id argument
+  _loaded_at  the current timestamp
+All raw columns stay untouched, as text. Call it once with &quot;batch-001&quot;.
+Print the bronze row count and its column names.
+
+Expected output:
+    Bronze rows: 12
+    Bronze columns: [&#x27;claim_id&#x27;, &#x27;region&#x27;, &#x27;amount_raw&#x27;, &#x27;claim_date_raw&#x27;, &#x27;ingested_at&#x27;, &#x27;_batch_id&#x27;, &#x27;_loaded_at&#x27;]</pre><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 2 — SILVER AND QUARANTINE</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write build_silver() that reads bronze and:
+  - converts amount_raw to a number (remove thousands commas first) as amount
+  - converts claim_date_raw (yyyy-MM-dd) to a date as claim_date
+  - gives every row ONE reason, first match wins, in this order:
+      missing_claim_id (claim_id is null), bad_amount (not a number or &lt;= 0),
+      bad_date (not a valid date), valid
+  - writes the valid rows to silver_path, keeping only the LATEST version of
+    each claim_id (by ingested_at), columns claim_id, region, amount, claim_date
+  - writes the other rows to quarantine_path with their raw columns and reason
+Both writes replace the previous contents. Run it.
+Print the quarantine claim_id and reason ordered by reason then claim_id,
+then the silver table ordered by claim_id.
+(Spark 4 raises an error on a plain cast of bad text. Use the try_ functions.)
+
+Expected output:
+    +--------+----------------+
+    |claim_id|          reason|
+    +--------+----------------+
+    |      P3|      bad_amount|
+    |      P7|      bad_amount|
+    |      P8|        bad_date|
+    |    NULL|missing_claim_id|
+    +--------+----------------+
+
+    +--------+-------+------+----------+
+    |claim_id| region|amount|claim_date|
+    +--------+-------+------+----------+
+    |      P1|   West|2600.0|2026-03-02|
+    |     P10|   East|1300.0|2026-04-12|
+    |      P2|   East| 850.0|2026-03-03|
+    |      P5|   West|1100.0|2026-03-31|
+    |      P6|   East| 400.0|2026-04-01|
+    |      P9|Central| 960.0|2026-04-10|
+    +--------+-------+------+----------+</pre><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 3 — GOLD MART</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write build_gold() that reads silver only and writes to gold_path (replace)
+the total amount (total) and number of claims (claims) per month
+(format yyyy-MM) and region. Run it and print the gold table ordered by
+month, then region.
+
+Expected output:
+    +-------+-------+------+------+
+    |  month| region| total|claims|
+    +-------+-------+------+------+
+    |2026-03|   East| 850.0|     1|
+    |2026-03|   West|3700.0|     2|
+    |2026-04|Central| 960.0|     1|
+    |2026-04|   East|1700.0|     2|
+    +-------+-------+------+------+</pre><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 4 — RECONCILIATION</pre><pre class="box">══════════════════════════════════════════════════════════════
+Write reconcile() that returns True when
+  bronze rows = silver rows + quarantine rows + duplicates dropped
+where duplicates dropped = valid bronze rows - silver rows.
+Print one line in the exact shape below. If the check fails, raise an error.
+
+Expected output:
+    bronze 12 = silver 6 + quarantine 4 + duplicates 2: True</pre><pre class="box">══════════════════════════════════════════════════════════════
+ TASK 5 — THE RETRY TEST</pre><pre class="box">══════════════════════════════════════════════════════════════
+The scheduler runs the same batch a second time. Call ingest_bronze again
+with &quot;batch-001-retry&quot;, rebuild silver and gold, and reconcile.
+Print the reconciliation line, then print whether the grand total of the
+gold table is the same as before the retry (7210.0).
+Bronze and quarantine double. Silver and gold must not.
+
+Expected output:
+    bronze 24 = silver 6 + quarantine 8 + duplicates 10: True
+    Gold grand total unchanged (7210.0): True</pre><pre class="box">══════════════════════════════════════════════════════════════
+ CLEAN UP</pre><pre class="box">══════════════════════════════════════════════════════════════</pre><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_20_Spark_Lakehouse/W20_D7_Project_Claims_Lakehouse.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>spark.stop()
+shutil.rmtree(workdir, ignore_errors=True)
+print(&quot;Session stopped and scratch folder removed.&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="pager"><a class="btn ghost" href="week-18.html">&larr; Week 18</a><a class="btn ghost" href="week-21.html">Week 21 &rarr;</a></div>
+</main></body></html>

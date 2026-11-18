@@ -1,7 +1,8 @@
 /* Shared behaviour for the FDE study site: day progress (this browser only) and an in-page Python runner. */
 (function () {
   var PYODIDE = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/";
-  var KEY = "fde-site-done";
+  // Each site lives on the same origin (cwinter1.github.io), so progress needs its own key per track.
+  var KEY = ((document.body && document.body.getAttribute("data-site")) || "fde") + "-site-done";
 
   function getDone() { try { return JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) { return {}; } }
   function setDone(d) { try { localStorage.setItem(KEY, JSON.stringify(d)); } catch (e) {} }
@@ -70,14 +71,53 @@
     }
     return pyPromise;
   }
-  function runCode(code, outEl, btn) {
+  // Optional data files for lessons that read them (Python track): fetched once, written into the
+  // runtime's virtual file system next to a fake __file__, so os.path.dirname(__file__) lessons work.
+  var EXCEL_SHIM = [
+    "import os, pandas as pd",
+    "if not getattr(pd.read_excel, '_csv_shim', False):",
+    "    _orig_read_excel = pd.read_excel",
+    "    def _read_excel(io, *a, **k):",
+    "        p = str(io)",
+    "        if p.endswith('.xlsx') and os.path.exists(p[:-5] + '.csv'):",
+    "            return pd.read_csv(p[:-5] + '.csv')",
+    "        return _orig_read_excel(io, *a, **k)",
+    "    _read_excel._csv_shim = True",
+    "    pd.read_excel = _read_excel"
+  ].join("\n");
+  var dataMounted = null;
+  function mountData(py) {
+    var list = window.SITE_DATASETS || [];
+    if (!list.length) return Promise.resolve();
+    if (!dataMounted) {
+      dataMounted = Promise.all(list.map(function (u) {
+        return fetch(u).then(function (r) { if (!r.ok) throw new Error(u); return r.arrayBuffer(); }).then(function (buf) {
+          var dest = "/home/pyodide/Curriculum/" + u.replace(/^.*?datasets\//, "datasets/");
+          py.FS.mkdirTree(dest.replace(/\/[^\/]*$/, ""));
+          py.FS.writeFile(dest, new Uint8Array(buf));
+        });
+      })).catch(function () { /* lessons that need the file will show their own error */ });
+    }
+    return dataMounted;
+  }
+  function runCode(code, outEl, btn, filePath) {
     outEl.hidden = false; outEl.className = "out"; outEl.textContent = "Running… (the first run downloads the Python runtime)";
     btn.disabled = true;
     return getPy().then(function (py) {
       var lines = [];
       py.setStdout({ batched: function (l) { lines.push(l); } });
       py.setStderr({ batched: function (l) { lines.push(l); } });
-      return py.loadPackagesFromImports(code).then(function () {
+      return mountData(py).then(function () {
+        if (filePath) {
+          py.FS.mkdirTree(filePath.replace(/\/[^\/]*$/, ""));
+          py.globals.set("__file__", filePath);
+        }
+        return py.loadPackagesFromImports(code);
+      }).then(function () {
+        // The Excel reader (openpyxl) is not part of this runtime, so a lesson that reads the shipped
+        // workbook gets the same table from a CSV copy placed next to it.
+        return /read_excel/.test(code) ? py.loadPackage("pandas").then(function () { return py.runPythonAsync(EXCEL_SHIM); }) : null;
+      }).then(function () {
         return py.runPythonAsync(code);
       }).then(function () {
         outEl.textContent = lines.join("\n") || "(finished, nothing printed)";
@@ -94,7 +134,7 @@
   function initCode() {
     document.querySelectorAll(".code[data-run]").forEach(function (box) {
       var pre = box.querySelector("pre"), out = box.querySelector(".out"), run = box.querySelector(".run");
-      run.addEventListener("click", function () { runCode(pre.textContent, out, run); });
+      run.addEventListener("click", function () { runCode(pre.textContent, out, run, box.getAttribute("data-file")); });
     });
     var reset = document.getElementById("resetpy");
     if (reset) reset.addEventListener("click", function () { location.reload(); });

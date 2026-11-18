@@ -1,0 +1,1394 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 14 — dbt Advanced</title>
+<link rel="stylesheet" href="style.css"><script>window.SITE_DATASETS = ["datasets/titanic_train.csv"];</script>
+<script src="app.js" defer></script></head>
+<body data-site="python">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Python Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 14 — dbt Advanced</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a><a class="btn ghost" href="#day-6">Day 6</a></div><p class="note">Done this week: <span data-week-count="14" data-size="6"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><p class="note">Cells that need a file other than the Titanic table, a web connection, a database server or a package that is not available in the browser will show an error when run. Read those instead.</p><h2 id="day-1">Day 1 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-1"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D1_dbt_Incremental.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 14  |  DAY 1  |  dbt INCREMENTAL MODELS
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Understand when and why to use incremental materialization
+#  2. Simulate the is_incremental() filter that processes only new rows
+#  3. Handle late-arriving data and idempotent MERGE patterns
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;dbt incremental models tutorial is_incremental&quot;
+#  Video: &quot;DBT Tutorial: Incremental Model | Updates, Appends, Merge&quot; -- Anirvan Decodes
+#        https://www.youtube.com/watch?v=QDcUpHj_mWw
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+from datetime import date, timedelta
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+def ref(m): return m
+def source(s, t): return f&#x27;{s}__{t}&#x27;
+
+print(&#x27;dbt Incremental Models lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D1_dbt_Incremental.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — WHY INCREMENTAL?
+# ══════════════════════════════════════════════════════════════
+# For a table with 100M rows, a full refresh (table materialization) re-reads
+# and re-writes all 100M rows on every dbt run. This is expensive.
+#
+# Incremental materialization:
+#   - On first run:  CREATE TABLE AS SELECT (full)
+#   - On later runs: only INSERT/UPDATE rows newer than the last run
+#
+# In dbt, the SQL model contains a Jinja block:
+#   {% if is_incremental() %}
+#       WHERE event_date &gt; (SELECT MAX(event_date) FROM {{ this }})
+#   {% endif %}
+#
+# {{ this }} refers to the existing target table.
+# is_incremental() returns True on all runs EXCEPT the very first one.
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+
+def run_incremental(con, target_table, source_table, watermark_col, select_sql):
+    &quot;&quot;&quot;Simulate a dbt incremental model run.&quot;&quot;&quot;
+    tables = [r[0] for r in con.execute(&quot;SHOW TABLES&quot;).fetchall()]
+    if target_table not in tables:
+        # First run: full load
+        con.execute(f&#x27;CREATE TABLE {target_table} AS {select_sql}&#x27;)
+        n = con.execute(f&#x27;SELECT COUNT(*) FROM {target_table}&#x27;).fetchone()[0]
+        print(f&#x27;  [FULL LOAD]  {target_table}: {n} rows loaded&#x27;)
+    else:
+        # Incremental run: only new rows
+        max_val = con.execute(f&#x27;SELECT MAX({watermark_col}) FROM {target_table}&#x27;).fetchone()[0]
+        inc_sql = f&#x27;{select_sql} WHERE {watermark_col} &gt; \&#x27;{max_val}\&#x27;&#x27;
+        con.execute(f&#x27;INSERT INTO {target_table} {inc_sql}&#x27;)
+        n = con.execute(f&#x27;SELECT COUNT(*) FROM {target_table}&#x27;).fetchone()[0]
+        print(f&#x27;  [INCREMENTAL] {target_table}: {n} total rows (watermark &gt; {max_val})&#x27;)
+
+# Simulate event source
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw__events AS SELECT * FROM (VALUES
+        (1, &#x27;2024-01-01&#x27;, &#x27;page_view&#x27;, &#x27;homepage&#x27;),
+        (2, &#x27;2024-01-01&#x27;, &#x27;click&#x27;,     &#x27;buy_button&#x27;),
+        (3, &#x27;2024-01-02&#x27;, &#x27;page_view&#x27;, &#x27;pricing&#x27;)
+    ) AS t(event_id, event_date, event_type, page)
+&#x27;&#x27;&#x27;)
+
+select_all = f&quot;SELECT event_id, event_date, event_type, page FROM {source(&#x27;raw&#x27;,&#x27;events&#x27;)}&quot;
+
+# Run 1: full load
+run_incremental(con, &#x27;fct_events&#x27;, &#x27;raw__events&#x27;, &#x27;event_date&#x27;, select_all)
+
+# Simulate new data arriving
+con.execute(&quot;INSERT INTO raw__events VALUES (4, &#x27;2024-01-03&#x27;, &#x27;purchase&#x27;, &#x27;checkout&#x27;)&quot;)
+con.execute(&quot;INSERT INTO raw__events VALUES (5, &#x27;2024-01-03&#x27;, &#x27;page_view&#x27;, &#x27;homepage&#x27;)&quot;)
+
+# Run 2: incremental — only new rows
+run_incremental(con, &#x27;fct_events&#x27;, &#x27;raw__events&#x27;, &#x27;event_date&#x27;, select_all)
+
+print(con.execute(&#x27;SELECT * FROM fct_events ORDER BY event_id&#x27;).fetchdf())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D1_dbt_Incremental.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Use run_incremental() to build an incremental pipeline for sales transactions.
+# Run 1: load all rows from raw__sales (3 rows).
+# Then add 2 new rows with a later sale_date.
+# Run 2: incremental — only the 2 new rows should be inserted.
+# Print the final table after both runs.
+#
+# Expected after Run 2 (5 total rows in fct_sales):
+#    sale_id  sale_date  product   amount
+#  0       1 2024-01-05   Widget    45.00
+#  1       2 2024-01-05   Gadget    89.99
+#  2       3 2024-01-06    Gizmo   120.00
+#  3       4 2024-01-07   Widget    67.50
+#  4       5 2024-01-07   Gadget    34.00
+#
+# --- starting data ---
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw__sales AS SELECT * FROM (VALUES
+        (1, &#x27;2024-01-05&#x27;, &#x27;Widget&#x27;,  45.00),
+        (2, &#x27;2024-01-05&#x27;, &#x27;Gadget&#x27;,  89.99),
+        (3, &#x27;2024-01-06&#x27;, &#x27;Gizmo&#x27;,  120.00)
+    ) AS t(sale_id, sale_date, product, amount)
+&#x27;&#x27;&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D1_dbt_Incremental.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — UNIQUE KEY AND MERGE
+# ══════════════════════════════════════════════════════════════
+# Pure INSERT fails when source data is updated (re-delivered with corrections).
+# Solution: unique_key = dbt will MERGE instead of INSERT.
+#
+# dbt config:
+#   {{ config(materialized=&#x27;incremental&#x27;, unique_key=&#x27;order_id&#x27;) }}
+#
+# With unique_key set:
+#   - If order_id already exists in target -&gt; UPDATE that row
+#   - If order_id is new                  -&gt; INSERT the row
+#
+# This makes the pipeline IDEMPOTENT: re-running it produces the same result.
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+def upsert(con, target, source, unique_key, cols):
+    &quot;&quot;&quot;Simulate dbt incremental with unique_key (MERGE behavior).&quot;&quot;&quot;
+    col_list = &#x27;, &#x27;.join(cols)
+    update_set = &#x27;, &#x27;.join(f&#x27;t.{c} = s.{c}&#x27; for c in cols if c != unique_key)
+    tables = [r[0] for r in con.execute(&#x27;SHOW TABLES&#x27;).fetchall()]
+    if target not in tables:
+        con.execute(f&#x27;CREATE TABLE {target} AS SELECT {col_list} FROM {source}&#x27;)
+        print(f&#x27;  [FULL LOAD]   {target}&#x27;)
+    else:
+        # DELETE existing matching rows then re-insert (DuckDB MERGE simulation)
+        con.execute(f&#x27;DELETE FROM {target} WHERE {unique_key} IN (SELECT {unique_key} FROM {source})&#x27;)
+        con.execute(f&#x27;INSERT INTO {target} SELECT {col_list} FROM {source}&#x27;)
+        print(f&#x27;  [UPSERT]      {target}&#x27;)
+
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw__orders AS SELECT * FROM (VALUES
+        (101, &#x27;pending&#x27;,   250.00),
+        (102, &#x27;pending&#x27;,    89.50)
+    ) AS t(order_id, status, amount)
+&#x27;&#x27;&#x27;)
+
+upsert(con, &#x27;fct_orders&#x27;, &#x27;raw__orders&#x27;, &#x27;order_id&#x27;, [&#x27;order_id&#x27;, &#x27;status&#x27;, &#x27;amount&#x27;])
+print(&#x27;After initial load:&#x27;, con.execute(&#x27;SELECT * FROM fct_orders&#x27;).fetchdf().to_string())
+
+# Simulate status update for order 101 + new order 103
+con.execute(&#x27;DELETE FROM raw__orders&#x27;)
+con.execute(&quot;INSERT INTO raw__orders VALUES (101, &#x27;completed&#x27;, 250.00), (103, &#x27;pending&#x27;, 175.00)&quot;)
+
+upsert(con, &#x27;fct_orders&#x27;, &#x27;raw__orders&#x27;, &#x27;order_id&#x27;, [&#x27;order_id&#x27;, &#x27;status&#x27;, &#x27;amount&#x27;])
+print(&#x27;After upsert:      &#x27;, con.execute(&#x27;SELECT * FROM fct_orders ORDER BY order_id&#x27;).fetchdf().to_string())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D1_dbt_Incremental.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Use upsert() to build an idempotent customer dimension.
+# Initial load: 3 customers.
+# Second run: customer_id 201 gets a new email, customer_id 204 is new.
+# Print the table after both runs.
+#
+# Expected after upsert (4 rows, 201 has updated email):
+#    customer_id                email       tier
+#  0         201  alice@newdomain.com       gold
+#  1         202       bob@example.com   silver
+#  2         203     carol@example.com   bronze
+#  3         204     david@example.com   silver
+#
+# --- starting data ---
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw__customers AS SELECT * FROM (VALUES
+        (201, &#x27;alice@example.com&#x27;,  &#x27;gold&#x27;),
+        (202, &#x27;bob@example.com&#x27;,    &#x27;silver&#x27;),
+        (203, &#x27;carol@example.com&#x27;,  &#x27;bronze&#x27;)
+    ) AS t(customer_id, email, tier)
+&#x27;&#x27;&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D1_dbt_Incremental.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — APPLIED PATTERN
+# ══════════════════════════════════════════════════════════════
+# Combine the patterns from Concepts 1 and 2 into a complete workflow.
+# The example below shows all components working together.
+#
+# EXAMPLE ───────────────────────────────────────────────────────
+# Run the complete pipeline with error handling:
+print(&#x27;All concepts combined — see exercises to apply this pattern.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D1_dbt_Incremental.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Write a function check_idempotency(con, target_table, run_fn)
+# that calls run_fn() twice and asserts the row count is the same both times.
+# If the counts differ, raise a RuntimeError with count info.
+# If equal, print: &#x27;[IDEMPOTENT] {table} row count stable at N rows&#x27;
+#
+# Use it to verify that upsert() on fct_orders is idempotent:
+# run the same upsert twice with the same data and check stability.
+#
+# Expected output:
+#   [UPSERT]      fct_orders
+#   [UPSERT]      fct_orders
+#   [IDEMPOTENT] fct_orders row count stable at 3 rows</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-2">Day 2 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-2"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D2_dbt_Snapshots.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 14  |  DAY 2  |  dbt SNAPSHOTS — SCD TYPE 2
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Understand SCD Type 2 and why it matters for historical analysis
+#  2. Simulate dbt snapshot behavior (dbt_valid_from / dbt_valid_to)
+#  3. Query a snapshot table to reconstruct state at a point in time
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;dbt snapshots SCD type 2 tutorial&quot;
+#  Video: &quot;dbt Snapshots Tutorial | Check vs Timestamp Strategy | SCD Type 2 Explained | dbt + Snowflake&quot; -- Datazard
+#        https://www.youtube.com/watch?v=pmWwnGr9_60
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+from datetime import date
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+print(&#x27;dbt Snapshots lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D2_dbt_Snapshots.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — SCD TYPE 2 AND dbt SNAPSHOTS
+# ══════════════════════════════════════════════════════════════
+# SCD = Slowly Changing Dimension. Type 2 = keep history of changes.
+#
+# Problem: a customer moves from &#x27;silver&#x27; tier to &#x27;gold&#x27; tier.
+# If you just UPDATE the row, you lose the history.
+# For historical analysis (&quot;what tier was this customer in Q1?&quot;) you need history.
+#
+# SCD Type 2 adds two columns:
+#   dbt_valid_from  -&gt; date/time this version became active
+#   dbt_valid_to    -&gt; date/time this version was superseded (NULL = still current)
+#
+# dbt snapshot config (in snapshots/snap_customers.sql):
+#   {% snapshot snap_customers %}
+#   {{ config(target_schema=&#x27;snapshots&#x27;, unique_key=&#x27;customer_id&#x27;,
+#             strategy=&#x27;check&#x27;, check_cols=[&#x27;tier&#x27;, &#x27;email&#x27;]) }}
+#   SELECT customer_id, email, tier FROM {{ source(&#x27;raw&#x27;, &#x27;customers&#x27;) }}
+#   {% endsnapshot %}
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+def take_snapshot(con, snap_table, source_table, unique_key, check_cols, as_of_date):
+    &quot;&quot;&quot;Simulate dbt snapshot behavior.&quot;&quot;&quot;
+    tables = [r[0] for r in con.execute(&#x27;SHOW TABLES&#x27;).fetchall()]
+    if snap_table not in tables:
+        cols = &#x27;, &#x27;.join([f&#x27;s.{c}&#x27; for c in [unique_key] + check_cols])
+        con.execute(f&#x27;&#x27;&#x27;
+            CREATE TABLE {snap_table} AS
+            SELECT {unique_key}, {&#x27;, &#x27;.join(check_cols)},
+                   CAST(&#x27;{as_of_date}&#x27; AS DATE) AS dbt_valid_from,
+                   CAST(NULL AS DATE)            AS dbt_valid_to
+            FROM {source_table}
+        &#x27;&#x27;&#x27;)
+        print(f&#x27;  [SNAPSHOT INIT]   {snap_table} — {as_of_date}&#x27;)
+    else:
+        # Close out changed rows, insert new versions
+        changed_keys = con.execute(f&#x27;&#x27;&#x27;
+            SELECT s.{unique_key}
+            FROM {source_table} s
+            JOIN {snap_table} t ON s.{unique_key} = t.{unique_key}
+            WHERE t.dbt_valid_to IS NULL
+              AND ({&#x27; OR &#x27;.join(f&#x27;s.{c} != t.{c}&#x27; for c in check_cols)})
+        &#x27;&#x27;&#x27;).fetchall()
+        for (key,) in changed_keys:
+            con.execute(f&quot;UPDATE {snap_table} SET dbt_valid_to = &#x27;{as_of_date}&#x27; WHERE {unique_key} = {key} AND dbt_valid_to IS NULL&quot;)
+            con.execute(f&#x27;&#x27;&#x27;
+                INSERT INTO {snap_table}
+                SELECT {unique_key}, {&#x27;, &#x27;.join(check_cols)},
+                       CAST(&#x27;{as_of_date}&#x27; AS DATE), CAST(NULL AS DATE)
+                FROM {source_table} WHERE {unique_key} = {key}
+            &#x27;&#x27;&#x27;)
+        print(f&#x27;  [SNAPSHOT UPDATE] {snap_table} — {as_of_date} ({len(changed_keys)} changes)&#x27;)
+
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw__customers AS SELECT * FROM (VALUES
+        (1, &#x27;alice@x.com&#x27;, &#x27;silver&#x27;),
+        (2, &#x27;bob@x.com&#x27;,   &#x27;bronze&#x27;)
+    ) AS t(customer_id, email, tier)
+&#x27;&#x27;&#x27;)
+
+take_snapshot(con, &#x27;snap_customers&#x27;, &#x27;raw__customers&#x27;, &#x27;customer_id&#x27;, [&#x27;email&#x27;,&#x27;tier&#x27;], &#x27;2024-01-01&#x27;)
+
+# Alice upgrades to gold
+con.execute(&quot;UPDATE raw__customers SET tier = &#x27;gold&#x27; WHERE customer_id = 1&quot;)
+take_snapshot(con, &#x27;snap_customers&#x27;, &#x27;raw__customers&#x27;, &#x27;customer_id&#x27;, [&#x27;email&#x27;,&#x27;tier&#x27;], &#x27;2024-04-01&#x27;)
+
+print(con.execute(&#x27;SELECT * FROM snap_customers ORDER BY customer_id, dbt_valid_from&#x27;).fetchdf())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D2_dbt_Snapshots.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Use take_snapshot() on an employee table to track tier changes.
+# Snapshot 1 (2024-01-01): 3 employees, each with a grade.
+# Snapshot 2 (2024-07-01): employee 301 gets promoted (grade A -&gt; grade S).
+# Snapshot 3 (2024-10-01): employee 302 changes department.
+# Print the final snap_employees table.
+#
+# Expected output (5 rows — 3 original + 1 new version for 301 + 1 new version for 302):
+#   employee_id  grade department  dbt_valid_from  dbt_valid_to
+#   301          A     Engineering 2024-01-01      2024-07-01
+#   301          S     Engineering 2024-07-01      None
+#   302          B     Sales       2024-01-01      2024-10-01
+#   302          B     Marketing   2024-10-01      None
+#   303          C     Finance     2024-01-01      None
+#
+# --- starting data ---
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw__employees AS SELECT * FROM (VALUES
+        (301, &#x27;A&#x27;, &#x27;Engineering&#x27;),
+        (302, &#x27;B&#x27;, &#x27;Sales&#x27;),
+        (303, &#x27;C&#x27;, &#x27;Finance&#x27;)
+    ) AS t(employee_id, grade, department)
+&#x27;&#x27;&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D2_dbt_Snapshots.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — POINT-IN-TIME QUERIES
+# ══════════════════════════════════════════════════════════════
+# To query &quot;what did the data look like on 2024-03-01?&quot;
+#   SELECT * FROM snap_customers
+#   WHERE dbt_valid_from &lt;= &#x27;2024-03-01&#x27;
+#     AND (dbt_valid_to &gt; &#x27;2024-03-01&#x27; OR dbt_valid_to IS NULL)
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+def query_as_of(con, snap_table, as_of_date):
+    return con.execute(f&#x27;&#x27;&#x27;
+        SELECT * FROM {snap_table}
+        WHERE dbt_valid_from &lt;= &#x27;{as_of_date}&#x27;
+          AND (dbt_valid_to &gt; &#x27;{as_of_date}&#x27; OR dbt_valid_to IS NULL)
+        ORDER BY customer_id
+    &#x27;&#x27;&#x27;).fetchdf()
+
+print(&#x27;State on 2024-02-01 (before upgrade):&#x27;)
+print(query_as_of(con, &#x27;snap_customers&#x27;, &#x27;2024-02-01&#x27;))
+
+print(&#x27;State on 2024-05-01 (after upgrade):&#x27;)
+print(query_as_of(con, &#x27;snap_customers&#x27;, &#x27;2024-05-01&#x27;))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D2_dbt_Snapshots.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Using snap_employees from Exercise 1, write query_employees_as_of(con, as_of_date)
+# that returns the employee state at that date.
+# Then answer these two business questions by printing the query results:
+#   Q1: What grade was employee 301 on 2024-06-01?
+#   Q2: Which employees were in Engineering on 2024-08-01?
+#
+# Expected answers:
+#   Q1: grade = A  (not yet promoted — promotion was 2024-07-01)
+#   Q2: employee 301 only (302 moved to Marketing on 2024-10-01 so still Sales on 2024-08-01)
+#      Wait — 302 was in Sales not Engineering. Only 301 in Engineering.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D2_dbt_Snapshots.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — APPLIED PATTERN
+# ══════════════════════════════════════════════════════════════
+# Combine the patterns from Concepts 1 and 2 into a complete workflow.
+# The example below shows all components working together.
+#
+# EXAMPLE ───────────────────────────────────────────────────────
+# Run the complete pipeline with error handling:
+print(&#x27;All concepts combined — see exercises to apply this pattern.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D2_dbt_Snapshots.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Extend your solution from Exercise 2:
+# Add an assertion to verify the output is correct.
+# Print a PASS/FAIL message.
+#</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D2_dbt_Snapshots.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 4 — SECURITY GATE: SCD2 INTEGRITY CHECK (CIA: I)
+# ══════════════════════════════════════════════════════════════
+# Analogy: the notarized legal archive — every historical version of a
+# record is sealed with a timestamp, and any gap or overlap in the
+# timeline is grounds to invalidate the record.
+#
+# CIA focus: Integrity — historical records in SCD2 must be tamper-evident;
+# overlapping date ranges are a data integrity failure.
+#
+# Checks per entity:
+#   1. valid_from must never be null
+#   2. For non-current rows (valid_to is not null), no two rows may overlap
+#      i.e. row_a.valid_to must not exceed row_b.valid_from
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+import pandas as pd
+from dataclasses import dataclass
+
+
+class OverlappingRangeError(Exception):
+    pass
+
+
+class NullDateError(Exception):
+    pass
+
+
+@dataclass
+class IntegrityReport:
+    passed: bool
+    entity_count: int
+    violation_count: int
+
+
+def scd2_integrity_check(df, id_col, valid_from_col, valid_to_col) -&gt; IntegrityReport:
+    for entity_id, group in df.groupby(id_col):
+        rows = group.sort_values(valid_from_col).reset_index(drop=True)
+        for i, row in rows.iterrows():
+            if pd.isna(row[valid_from_col]):
+                raise NullDateError(
+                    f&quot;entity {entity_id} row {i}: {valid_from_col} is null&quot;
+                )
+            if pd.notna(row[valid_to_col]):
+                for j, other in rows.iterrows():
+                    if j &lt;= i:
+                        continue
+                    if (pd.notna(other[valid_from_col])
+                            and row[valid_to_col] &gt; other[valid_from_col]):
+                        raise OverlappingRangeError(
+                            f&quot;entity {entity_id}: rows {i} and {j} overlap&quot;
+                        )
+    return IntegrityReport(
+        passed=True,
+        entity_count=df[id_col].nunique(),
+        violation_count=0,
+    )
+
+
+# Clean SCD2 — passes
+clean = pd.DataFrame([
+    {&quot;emp_id&quot;: 401, &quot;grade&quot;: &quot;A&quot;, &quot;valid_from&quot;: &quot;2024-01-01&quot;, &quot;valid_to&quot;: &quot;2024-06-01&quot;},
+    {&quot;emp_id&quot;: 401, &quot;grade&quot;: &quot;B&quot;, &quot;valid_from&quot;: &quot;2024-06-01&quot;, &quot;valid_to&quot;: None},
+    {&quot;emp_id&quot;: 402, &quot;grade&quot;: &quot;C&quot;, &quot;valid_from&quot;: &quot;2024-01-01&quot;, &quot;valid_to&quot;: None},
+])
+report = scd2_integrity_check(clean, &quot;emp_id&quot;, &quot;valid_from&quot;, &quot;valid_to&quot;)
+print(f&quot;Clean SCD2: passed={report.passed}  entities={report.entity_count}&quot;)
+
+# Overlapping ranges — blocked
+dirty = pd.DataFrame([
+    {&quot;emp_id&quot;: 401, &quot;grade&quot;: &quot;A&quot;, &quot;valid_from&quot;: &quot;2024-01-01&quot;, &quot;valid_to&quot;: &quot;2024-09-01&quot;},
+    {&quot;emp_id&quot;: 401, &quot;grade&quot;: &quot;B&quot;, &quot;valid_from&quot;: &quot;2024-06-01&quot;, &quot;valid_to&quot;: None},
+])
+try:
+    scd2_integrity_check(dirty, &quot;emp_id&quot;, &quot;valid_from&quot;, &quot;valid_to&quot;)
+except OverlappingRangeError as e:
+    print(f&quot;OverlappingRangeError: {e}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D2_dbt_Snapshots.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 4
+# ══════════════════════════════════════════════════════════════
+# scd2_dirty has a deliberate overlapping date range for employee 401:
+# the first row closes on 2024-09-01 but the second starts on 2024-06-01.
+# Call scd2_integrity_check(scd2_dirty, ...) and catch OverlappingRangeError.
+# Print the exception message.
+# Then fix the DataFrame (set valid_to of the first 401 row to &quot;2024-06-01&quot;)
+# and confirm the check passes on the corrected version.
+#
+# Expected output:
+#   entity 401: rows 0 and 1 overlap
+#   Fixed SCD2: passed=True  entities=2  violations=0
+#
+# --- starting data ---
+scd2_dirty = pd.DataFrame([
+    {&quot;emp_id&quot;: 401, &quot;grade&quot;: &quot;A&quot;, &quot;valid_from&quot;: &quot;2024-01-01&quot;, &quot;valid_to&quot;: &quot;2024-09-01&quot;},
+    {&quot;emp_id&quot;: 401, &quot;grade&quot;: &quot;B&quot;, &quot;valid_from&quot;: &quot;2024-06-01&quot;, &quot;valid_to&quot;: None},
+    {&quot;emp_id&quot;: 402, &quot;grade&quot;: &quot;C&quot;, &quot;valid_from&quot;: &quot;2024-01-01&quot;, &quot;valid_to&quot;: None},
+])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-3">Day 3 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-3"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D3_dbt_Macros.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 14  |  DAY 3  |  dbt JINJA MACROS
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Understand Jinja templating and how dbt uses it to generate SQL
+#  2. Write a Python function that mimics a dbt macro
+#  3. Reuse macros across multiple models to eliminate SQL duplication
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;dbt macros jinja templating tutorial&quot;
+#  Video: &quot;Macros in dbt | Data Build Tool | Jinja and macros tutorial&quot; -- SleekData
+#        https://www.youtube.com/watch?v=VRTx97llL-A
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+def ref(m): return m
+def source(s, t): return f&#x27;{s}__{t}&#x27;
+def run_model(con, name, sql, materialized=&#x27;view&#x27;):
+    if materialized == &#x27;table&#x27;:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {name} AS {sql}&#x27;)
+    else:
+        con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+    print(f&#x27;  [{materialized}]  {name}&#x27;)
+
+print(&#x27;dbt Jinja Macros lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D3_dbt_Macros.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — JINJA MACROS IN dbt
+# ══════════════════════════════════════════════════════════════
+# dbt models are Jinja-templated SQL files. A macro is a reusable Jinja function.
+#
+# A macro in macros/cents_to_dollars.sql:
+#   {% macro cents_to_dollars(column_name) %}
+#       ROUND({{ column_name }} / 100.0, 2)
+#   {% endmacro %}
+#
+# Used in a model:
+#   SELECT order_id, {{ cents_to_dollars(&#x27;amount_cents&#x27;) }} AS amount_usd
+#   FROM {{ ref(&#x27;stg_orders&#x27;) }}
+#
+# dbt compiles this to:
+#   SELECT order_id, ROUND(amount_cents / 100.0, 2) AS amount_usd
+#   FROM staging.stg_orders
+#
+# In Python, we simulate macros as functions that return SQL strings.
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+
+# Macro definitions (simulate macros/currency.sql)
+def cents_to_dollars(col):
+    return f&#x27;ROUND({col} / 100.0, 2)&#x27;
+
+def safe_divide(numerator, denominator):
+    return f&#x27;CASE WHEN {denominator} = 0 THEN NULL ELSE ROUND(CAST({numerator} AS DECIMAL) / {denominator}, 4) END&#x27;
+
+def fiscal_year(date_col):
+    # Fiscal year starts April 1
+    return f&quot;CASE WHEN MONTH({date_col}) &gt;= 4 THEN YEAR({date_col}) ELSE YEAR({date_col}) - 1 END&quot;
+
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw__transactions AS SELECT * FROM (VALUES
+        (1, &#x27;2024-01-15&#x27;, 25000, 500),
+        (2, &#x27;2024-04-10&#x27;, 89900, 1000),
+        (3, &#x27;2024-07-22&#x27;, 15000, 0),
+        (4, &#x27;2025-01-05&#x27;, 42000, 800)
+    ) AS t(tx_id, tx_date, amount_cents, refund_cents)
+&#x27;&#x27;&#x27;)
+
+model_sql = f&#x27;&#x27;&#x27;
+    SELECT
+        tx_id,
+        tx_date,
+        {cents_to_dollars(&#x27;amount_cents&#x27;)}                              AS amount_usd,
+        {cents_to_dollars(&#x27;refund_cents&#x27;)}                              AS refund_usd,
+        {safe_divide(&#x27;refund_cents&#x27;, &#x27;amount_cents&#x27;)}                   AS refund_rate,
+        {fiscal_year(&#x27;tx_date&#x27;)}                                        AS fiscal_year
+    FROM {source(&#x27;raw&#x27;, &#x27;transactions&#x27;)}
+&#x27;&#x27;&#x27;
+
+run_model(con, &#x27;fct_transactions&#x27;, model_sql)
+print(con.execute(&#x27;SELECT * FROM fct_transactions&#x27;).fetchdf())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D3_dbt_Macros.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Write two macro functions:
+#   slugify(col)     -&gt; LOWER(REPLACE(col, &#x27; &#x27;, &#x27;_&#x27;))     -- turns &#x27;Sales Rep&#x27; to &#x27;sales_rep&#x27;
+#   nullif_zero(col) -&gt; NULLIF(col, 0)                    -- replaces 0 with NULL
+# Then use both in a model stg_employees_clean that reads from raw__employees_dirty
+# and applies the macros to the relevant columns.
+# Print the result.
+#
+# Expected output:
+#    employee_id   department_slug   calls  calls_clean
+#  0         101         sales_rep     120          120
+#  1         102              it_eng       0         None
+#  2         103   finance_analyst      55           55
+#
+# --- starting data ---
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw__employees_dirty AS SELECT * FROM (VALUES
+        (101, &#x27;Sales Rep&#x27;,        120),
+        (102, &#x27;IT Eng&#x27;,             0),
+        (103, &#x27;Finance Analyst&#x27;,   55)
+    ) AS t(employee_id, department, calls)
+&#x27;&#x27;&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D3_dbt_Macros.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — LOOP MACROS
+# ══════════════════════════════════════════════════════════════
+# Jinja macros can loop over lists to generate repetitive SQL.
+# Example: generate one SUM() column per country from a list.
+#
+# In dbt (macros/pivot_countries.sql):
+#   {% macro pivot_sum(col, categories) %}
+#       {% for cat in categories %}
+#           SUM(CASE WHEN country = &#x27;{{ cat }}&#x27; THEN {{ col }} ELSE 0 END) AS {{ cat | lower }}_revenue
+#           {% if not loop.last %},{% endif %}
+#       {% endfor %}
+#   {% endmacro %}
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+def pivot_sum(col, categories, group_col):
+    &quot;&quot;&quot;Generate a PIVOT SELECT with one SUM column per category.&quot;&quot;&quot;
+    pivot_cols = &#x27;,\n        &#x27;.join(
+        f&quot;SUM(CASE WHEN {group_col} = &#x27;{cat}&#x27; THEN {col} ELSE 0 END) AS {cat.lower()}_total&quot;
+        for cat in categories
+    )
+    return pivot_cols
+
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw__sales AS SELECT * FROM (VALUES
+        (&#x27;2024-01&#x27;, &#x27;GB&#x27;, 1000.00),
+        (&#x27;2024-01&#x27;, &#x27;US&#x27;, 2500.00),
+        (&#x27;2024-01&#x27;, &#x27;DE&#x27;,  800.00),
+        (&#x27;2024-02&#x27;, &#x27;GB&#x27;, 1200.00),
+        (&#x27;2024-02&#x27;, &#x27;US&#x27;, 3100.00)
+    ) AS t(month, country, revenue)
+&#x27;&#x27;&#x27;)
+
+countries = [&#x27;GB&#x27;, &#x27;US&#x27;, &#x27;DE&#x27;]
+pivot_sql = f&#x27;&#x27;&#x27;
+    SELECT
+        month,
+        {pivot_sum(&#x27;revenue&#x27;, countries, &#x27;country&#x27;)}
+    FROM {source(&#x27;raw&#x27;, &#x27;sales&#x27;)}
+    GROUP BY month
+    ORDER BY month
+&#x27;&#x27;&#x27;
+
+run_model(con, &#x27;fct_sales_pivot&#x27;, pivot_sql)
+print(con.execute(&#x27;SELECT * FROM fct_sales_pivot&#x27;).fetchdf())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D3_dbt_Macros.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Part A: Write a macro tier_label(col) that returns a CASE expression:
+#   col &lt; 50000  -&gt; &#x27;junior&#x27;
+#   col &lt; 100000 -&gt; &#x27;mid&#x27;
+#   else         -&gt; &#x27;senior&#x27;
+#</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D3_dbt_Macros.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — APPLIED PATTERN
+# ══════════════════════════════════════════════════════════════
+# Combine the patterns from Concepts 1 and 2 into a complete workflow.
+# The example below shows all components working together.
+#
+# EXAMPLE ───────────────────────────────────────────────────────
+# Run the complete pipeline with error handling:
+print(&#x27;All concepts combined — see exercises to apply this pattern.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D3_dbt_Macros.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+Write a macro generate_totals(metrics) that takes a list of column names
+# and returns SUM(col) AS col_total for each, joined with commas.
+#
+# Part C: Use both macros in a mart model fct_payroll that reads from raw__payroll:
+#   columns: department, headcount, total_salary, total_bonus
+#   Use tier_label on avg_salary (compute as total_salary/headcount),
+#   use generate_totals on [&#x27;total_salary&#x27;, &#x27;total_bonus&#x27;].
+# Print the result.
+#
+# --- starting data ---
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw__payroll AS SELECT * FROM (VALUES
+        (&#x27;Engineering&#x27;, 12, 1560000, 240000),
+        (&#x27;Sales&#x27;,        8,  480000, 160000),
+        (&#x27;Finance&#x27;,      5,  350000,  70000)
+    ) AS t(department, headcount, total_salary, total_bonus)
+&#x27;&#x27;&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-4">Day 4 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-4"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D4_dbt_Expectations.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 14  |  DAY 4  |  dbt-EXPECTATIONS — ADVANCED DATA TESTS
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Understand what dbt-expectations adds beyond the 4 built-in tests
+#  2. Implement expect_column_values_to_be_between and row count checks in Python
+#  3. Build a reusable test suite that runs after every model build
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;dbt-expectations package data quality tests&quot;
+#  Video: &quot;Dbt Packages | What is a package in data build tool? | dbt-utils | dbt-expectations | dbt deps&quot; -- SleekData
+#        https://www.youtube.com/watch?v=9NbPM5VNeUc
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+def run_model(con, name, sql, materialized=&#x27;view&#x27;):
+    if materialized == &#x27;table&#x27;:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {name} AS {sql}&#x27;)
+    else:
+        con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+
+# dbt-expectations test implementations
+def expect_column_values_between(con, model, col, min_val, max_val, inclusive=True):
+    op1, op2 = (&#x27;&gt;=&#x27;, &#x27;&lt;=&#x27;) if inclusive else (&#x27;&gt;&#x27;, &#x27;&lt;&#x27;)
+    n = con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE NOT ({col} {op1} {min_val} AND {col} {op2} {max_val})&#x27;).fetchone()[0]
+    return &#x27;PASS&#x27; if n == 0 else f&#x27;FAIL ({n} out-of-range values)&#x27;
+
+def expect_table_row_count_between(con, model, min_rows, max_rows):
+    n = con.execute(f&#x27;SELECT COUNT(*) FROM {model}&#x27;).fetchone()[0]
+    return &#x27;PASS&#x27; if min_rows &lt;= n &lt;= max_rows else f&#x27;FAIL ({n} rows, expected {min_rows}-{max_rows})&#x27;
+
+def expect_column_mean_between(con, model, col, min_val, max_val):
+    mean = con.execute(f&#x27;SELECT AVG({col}) FROM {model}&#x27;).fetchone()[0]
+    return &#x27;PASS&#x27; if min_val &lt;= mean &lt;= max_val else f&#x27;FAIL (mean={mean:.2f}, expected {min_val}-{max_val})&#x27;
+
+def expect_no_duplicates(con, model, cols):
+    col_list = &#x27;, &#x27;.join(cols)
+    n = con.execute(f&#x27;SELECT COUNT(*) FROM (SELECT {col_list} FROM {model} GROUP BY {col_list} HAVING COUNT(*) &gt; 1)&#x27;).fetchone()[0]
+    return &#x27;PASS&#x27; if n == 0 else f&#x27;FAIL ({n} duplicate combinations)&#x27;
+
+print(&#x27;dbt-expectations lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D4_dbt_Expectations.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — dbt-expectations BEYOND BUILT-IN TESTS
+# ══════════════════════════════════════════════════════════════
+# Built-in dbt tests cover: not_null, unique, accepted_values, relationships.
+# dbt-expectations (open-source package) adds 50+ statistical tests.
+# Install in packages.yml: calogica/dbt_expectations.
+#
+# Most used:
+#   expect_column_values_to_be_between           -&gt; numeric range check
+#   expect_table_row_count_to_be_between         -&gt; row volume check
+#   expect_column_mean_to_be_between             -&gt; statistical check
+#   expect_compound_columns_to_be_unique         -&gt; composite key uniqueness
+#   expect_column_to_match_regex                 -&gt; format validation (email, phone)
+#   expect_column_pair_values_a_to_be_gt_b       -&gt; amount_refunded &lt; amount_paid
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+run_model(con, &#x27;fct_orders&#x27;, &#x27;&#x27;&#x27;
+    SELECT * FROM (VALUES
+        (1, &#x27;completed&#x27;, 250.00, 0.00),
+        (2, &#x27;completed&#x27;,  89.50, 10.00),
+        (3, &#x27;pending&#x27;,   412.00, 0.00),
+        (4, &#x27;shipped&#x27;,   175.00, 0.00),
+        (5, &#x27;completed&#x27;, 320.00, 25.00)
+    ) AS t(order_id, status, amount, refund)
+&#x27;&#x27;&#x27;)
+
+tests = [
+    (&#x27;row_count_between(3, 10)&#x27;,          expect_table_row_count_between(con, &#x27;fct_orders&#x27;, 3, 10)),
+    (&#x27;amount between(0, 1000)&#x27;,           expect_column_values_between(con, &#x27;fct_orders&#x27;, &#x27;amount&#x27;, 0, 1000)),
+    (&#x27;mean_amount between(100, 400)&#x27;,     expect_column_mean_between(con, &#x27;fct_orders&#x27;, &#x27;amount&#x27;, 100, 400)),
+    (&#x27;no duplicate order_id&#x27;,            expect_no_duplicates(con, &#x27;fct_orders&#x27;, [&#x27;order_id&#x27;])),
+]
+
+print(&#x27;dbt-expectations test results for fct_orders:&#x27;)
+for test_name, result in tests:
+    print(f&#x27;  {test_name:&lt;40} {result}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D4_dbt_Expectations.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# fct_bookings_dirty has intentional data quality problems.
+# Run these 4 tests and print PASS/FAIL for each.
+# The dirty data should surface exactly 2 failures.
+#
+# Expected output:
+#   row_count between(5, 20)              PASS
+#   avg_daily_rate between(50, 500)       FAIL (mean=... out of range)
+#   lead_time between(0, 365)             FAIL (N out-of-range values)
+#   no duplicate booking_id               PASS
+#
+# --- starting data ---
+run_model(con, &#x27;fct_bookings_dirty&#x27;, &#x27;&#x27;&#x27;
+    SELECT * FROM (VALUES
+        (1, 120.00, 14),
+        (2, 890.00, 7),
+        (3,  -5.00, 3),
+        (4, 210.00, 400),
+        (5, 175.00, 21)
+    ) AS t(booking_id, avg_daily_rate, lead_time)
+&#x27;&#x27;&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D4_dbt_Expectations.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — BUILDING A REUSABLE TEST SUITE
+# ══════════════════════════════════════════════════════════════
+# In production, you want to run all tests, collect results, and fail loudly.
+# A test runner collects results and summarizes: N passed, M failed.
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+def run_test_suite(tests):
+    &quot;&quot;&quot;Run a list of (name, result) tuples and print a summary.&quot;&quot;&quot;
+    passed = [t for t in tests if t[1] == &#x27;PASS&#x27;]
+    failed = [t for t in tests if t[1] != &#x27;PASS&#x27;]
+    print(f&#x27;\ndbt test suite results: {len(passed)} passed, {len(failed)} failed&#x27;)
+    for name, result in tests:
+        icon = &#x27;PASS&#x27; if result == &#x27;PASS&#x27; else &#x27;FAIL&#x27;
+        print(f&#x27;  [{icon}]  {name:&lt;45} {result}&#x27;)
+    if failed:
+        raise AssertionError(f&#x27;{len(failed)} test(s) failed — pipeline cannot proceed.&#x27;)
+
+suite = [
+    (&#x27;fct_orders: row count&#x27;,                expect_table_row_count_between(con, &#x27;fct_orders&#x27;, 1, 100)),
+    (&#x27;fct_orders: amount &gt; 0&#x27;,               expect_column_values_between(con, &#x27;fct_orders&#x27;, &#x27;amount&#x27;, 0.01, 9999)),
+    (&#x27;fct_orders: refund &lt;= amount&#x27;,         expect_column_values_between(con, &#x27;fct_orders&#x27;, &#x27;refund&#x27;, 0, 500)),
+    (&#x27;fct_orders: no duplicate order_id&#x27;,    expect_no_duplicates(con, &#x27;fct_orders&#x27;, [&#x27;order_id&#x27;])),
+    (&#x27;fct_orders: mean amount sensible&#x27;,     expect_column_mean_between(con, &#x27;fct_orders&#x27;, &#x27;amount&#x27;, 50, 1000)),
+]
+
+try:
+    run_test_suite(suite)
+except AssertionError as e:
+    print(f&#x27;  Pipeline halted: {e}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D4_dbt_Expectations.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Build a full test suite for fct_invoices using run_test_suite().
+# Write 5 tests:
+#   1. row count between 3 and 50
+#   2. invoice_amount between 100 and 50000
+#   3. mean invoice_amount between 1000 and 20000
+#   4. discount_rate between 0 and 1 (inclusive)
+#   5. no duplicate invoice_id
+# All 5 should PASS on the clean data. Print the summary.
+#
+# --- starting data ---
+run_model(con, &#x27;fct_invoices&#x27;, &#x27;&#x27;&#x27;
+    SELECT * FROM (VALUES
+        (1001, 5000.00, 0.10),
+        (1002, 12500.00, 0.05),
+        (1003, 8200.00, 0.00),
+        (1004, 3750.00, 0.15),
+        (1005, 9800.00, 0.08)
+    ) AS t(invoice_id, invoice_amount, discount_rate)
+&#x27;&#x27;&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D4_dbt_Expectations.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — DATA CONTRACTS
+# ══════════════════════════════════════════════════════════════
+# A data contract is a formal agreement between the team that
+# produces a dataset and the teams that consume it.
+# It defines three things:
+#
+#   schema        — expected column names and types
+#   quality_rules — assertions that must hold (not_null, range, uniqueness)
+#   sla           — operational guarantees (min rows, max freshness in hours)
+#
+# Tools like Soda Core and Great Expectations implement data contracts
+# at scale. Here we implement the same pattern with Pydantic (W2 Royal Road).
+#
+# Why contracts matter:
+#   Without a contract, a producer can rename a column and silently break
+#   every downstream dashboard and pipeline.
+#   With a contract, the violation is caught at the boundary before it
+#   propagates — the same principle as the Self-Healing Pipeline in W17_D7.
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+from dataclasses import dataclass, field
+from typing import Any
+
+class ContractViolationError(Exception):
+    pass
+
+@dataclass
+class QualityRule:
+    column:  str
+    check:   str          # &#x27;not_null&#x27; | &#x27;between&#x27; | &#x27;unique&#x27;
+    min_val: float = None
+    max_val: float = None
+
+@dataclass
+class DataContract:
+    model:         str
+    schema:        dict             # {col_name: expected_dtype_str}
+    quality_rules: list             # list of QualityRule
+    sla:           dict = field(default_factory=dict)  # {min_rows, max_freshness_hours}
+
+def validate_contract(df, contract: DataContract):
+    &quot;&quot;&quot;Validate a DataFrame against a DataContract. Raises ContractViolationError on breach.&quot;&quot;&quot;
+    import pandas as pd
+    violations = []
+
+    # Schema check
+    for col, expected_type in contract.schema.items():
+        if col not in df.columns:
+            violations.append(f&quot;Missing column: {col}&quot;)
+
+    # Quality rules
+    for rule in contract.quality_rules:
+        col = rule.column
+        if col not in df.columns:
+            continue
+        if rule.check == &#x27;not_null&#x27;:
+            nulls = df[col].isnull().sum()
+            if nulls &gt; 0:
+                violations.append(f&quot;{col}: not_null failed ({nulls} nulls)&quot;)
+        elif rule.check == &#x27;between&#x27;:
+            bad = df[(df[col] &lt; rule.min_val) | (df[col] &gt; rule.max_val)]
+            if len(bad) &gt; 0:
+                violations.append(f&quot;{col}: between({rule.min_val}, {rule.max_val}) failed ({len(bad)} violations)&quot;)
+        elif rule.check == &#x27;unique&#x27;:
+            dupes = df[col].duplicated().sum()
+            if dupes &gt; 0:
+                violations.append(f&quot;{col}: unique failed ({dupes} duplicates)&quot;)
+
+    # SLA: min rows
+    if &#x27;min_rows&#x27; in contract.sla and len(df) &lt; contract.sla[&#x27;min_rows&#x27;]:
+        violations.append(f&quot;SLA: min_rows={contract.sla[&#x27;min_rows&#x27;]} failed (got {len(df)})&quot;)
+
+    if violations:
+        raise ContractViolationError(&#x27;\n  &#x27;.join([&#x27;Contract violations:&#x27;] + violations))
+    print(f&quot;Contract PASS: {contract.model} ({len(df)} rows)&quot;)
+
+import pandas as pd
+
+# Define contract for fct_sales
+sales_contract = DataContract(
+    model=&#x27;fct_sales&#x27;,
+    schema={&#x27;sale_id&#x27;: &#x27;int&#x27;, &#x27;amount&#x27;: &#x27;float&#x27;, &#x27;status&#x27;: &#x27;str&#x27;},
+    quality_rules=[
+        QualityRule(column=&#x27;sale_id&#x27;, check=&#x27;not_null&#x27;),
+        QualityRule(column=&#x27;sale_id&#x27;, check=&#x27;unique&#x27;),
+        QualityRule(column=&#x27;amount&#x27;,  check=&#x27;between&#x27;, min_val=0.01, max_val=9999),
+    ],
+    sla={&#x27;min_rows&#x27;: 1},
+)
+
+fct_sales_clean = pd.DataFrame([
+    {&#x27;sale_id&#x27;: 1, &#x27;amount&#x27;: 250.00, &#x27;status&#x27;: &#x27;completed&#x27;},
+    {&#x27;sale_id&#x27;: 2, &#x27;amount&#x27;:  89.50, &#x27;status&#x27;: &#x27;pending&#x27;},
+    {&#x27;sale_id&#x27;: 3, &#x27;amount&#x27;: 412.00, &#x27;status&#x27;: &#x27;completed&#x27;},
+])
+
+validate_contract(fct_sales_clean, sales_contract)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D4_dbt_Expectations.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# stg_orders_dirty has two violations that should trigger ContractViolationError.
+# Define a DataContract for stg_orders and call validate_contract().
+# Catch the error and print the full violation message.
+#
+# Contract spec:
+#   schema:        order_id (int), amount (float), status (str)
+#   quality_rules: order_id not_null
+#                  order_id unique
+#                  amount between(0.01, 5000)
+#   sla:           min_rows=3
+#
+# Expected output:
+#   ContractViolationError:
+#     Contract violations:
+#     order_id: not_null failed (1 nulls)
+#     amount: between(0.01, 5000) failed (1 violations)
+#
+# --- starting data ---
+# DataContract, QualityRule, ContractViolationError, validate_contract
+# are defined in CONCEPT 3 above.
+stg_orders_dirty = pd.DataFrame([
+    {&#x27;order_id&#x27;: 1,    &#x27;amount&#x27;:  199.00, &#x27;status&#x27;: &#x27;completed&#x27;},
+    {&#x27;order_id&#x27;: None, &#x27;amount&#x27;:  450.00, &#x27;status&#x27;: &#x27;pending&#x27;},
+    {&#x27;order_id&#x27;: 3,    &#x27;amount&#x27;: -30.00,  &#x27;status&#x27;: &#x27;cancelled&#x27;},
+    {&#x27;order_id&#x27;: 4,    &#x27;amount&#x27;:  820.00, &#x27;status&#x27;: &#x27;completed&#x27;},
+])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-5">Day 5 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-5"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D5_dbt_Docs_Lineage.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 14  |  DAY 5  |  dbt DOCS AND LINEAGE
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Build a dbt documentation structure in Python and traverse it
+#  2. Construct and render a lineage DAG from model dependencies
+#  3. Identify upstream and downstream models for impact analysis
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;dbt docs generate lineage graph tutorial&quot;
+#  Video: &quot;DBT Tutorial: DBT Lineage&quot; -- Anirvan Decodes
+#        https://www.youtube.com/watch?v=iGHHM6h_qyA
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+print(&#x27;dbt Docs and Lineage lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D5_dbt_Docs_Lineage.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — dbt DOCUMENTATION STRUCTURE
+# ══════════════════════════════════════════════════════════════
+# &#x27;dbt docs generate&#x27; produces a JSON manifest with:
+#   - all models and their SQL
+#   - all column descriptions
+#   - all test definitions
+#   - the dependency graph
+#
+# &#x27;dbt docs serve&#x27; opens a web UI with the lineage graph.
+#
+# Good documentation practice:
+#   - every model has a description (what it represents)
+#   - every mart column has a description (what the metric means)
+#   - sources are documented with owner and freshness SLA
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+catalog = {
+    &#x27;stg_bookings&#x27;: {
+        &#x27;layer&#x27;: &#x27;staging&#x27;,
+        &#x27;description&#x27;: &#x27;Cleaned hotel booking records. Excludes cancelled bookings.&#x27;,
+        &#x27;owner&#x27;: &#x27;data-engineering&#x27;,
+        &#x27;columns&#x27;: {
+            &#x27;booking_id&#x27;:      &#x27;Unique booking identifier from source system.&#x27;,
+            &#x27;hotel_type&#x27;:      &#x27;Type of property: City Hotel or Resort Hotel.&#x27;,
+            &#x27;avg_daily_rate&#x27;:  &#x27;Average daily room rate in USD.&#x27;,
+            &#x27;arrival_month&#x27;:   &#x27;Month of arrival in YYYY-MM format.&#x27;,
+        }
+    },
+    &#x27;int_bookings_enriched&#x27;: {
+        &#x27;layer&#x27;: &#x27;intermediate&#x27;,
+        &#x27;description&#x27;: &#x27;Bookings with computed rate_tier and trip_type fields.&#x27;,
+        &#x27;owner&#x27;: &#x27;data-engineering&#x27;,
+        &#x27;columns&#x27;: {
+            &#x27;rate_tier&#x27;: &#x27;Budget / standard / premium based on avg_daily_rate bands.&#x27;,
+            &#x27;trip_type&#x27;: &#x27;Weekend / short / extended based on total_nights.&#x27;,
+        }
+    },
+    &#x27;fct_monthly_revenue&#x27;: {
+        &#x27;layer&#x27;: &#x27;mart&#x27;,
+        &#x27;description&#x27;: &#x27;Monthly hotel revenue aggregated by hotel_type. Used by Finance dashboard.&#x27;,
+        &#x27;owner&#x27;: &#x27;analytics&#x27;,
+        &#x27;columns&#x27;: {
+            &#x27;total_revenue&#x27;:   &#x27;Sum of avg_daily_rate for all non-cancelled bookings in the month.&#x27;,
+            &#x27;avg_rate&#x27;:        &#x27;Average nightly rate across all bookings in the month.&#x27;,
+            &#x27;bookings&#x27;:        &#x27;Count of confirmed bookings.&#x27;,
+        }
+    }
+}
+
+for model, meta in catalog.items():
+    print(f&#x27;  [{meta[&quot;layer&quot;]:&gt;12}]  {model}&#x27;)
+    print(f&#x27;               {meta[&quot;description&quot;][:70]}&#x27;)
+    print(f&#x27;               Columns: {list(meta[&quot;columns&quot;].keys())}&#x27;)
+    print()</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D5_dbt_Docs_Lineage.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Build a catalog dict for a 3-model HR pipeline:
+#   stg_employees:    staging, columns: employee_id, full_name, department, salary_usd
+#   int_emp_enriched: intermediate, columns: salary_band, years_at_company
+#   fct_headcount:    mart, columns: department, headcount, avg_salary, pct_senior
+# Then write a function print_undocumented_columns(catalog)
+# that prints any model where a column has an empty description.
+# Add at least one empty description to trigger the warning.
+#
+# Expected output includes:
+#   WARNING: stg_employees.salary_usd has no description</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D5_dbt_Docs_Lineage.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — LINEAGE AND IMPACT ANALYSIS
+# ══════════════════════════════════════════════════════════════
+# Impact analysis: if I change stg_bookings, which models break downstream?
+# dbt tracks this via the DAG. You can query: dbt ls -s stg_bookings+
+# The + means &quot;and all descendants&quot;.
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+dag = {
+    &#x27;raw__bookings&#x27;:        [],
+    &#x27;raw__hotels&#x27;:          [],
+    &#x27;stg_bookings&#x27;:         [&#x27;raw__bookings&#x27;],
+    &#x27;stg_hotels&#x27;:           [&#x27;raw__hotels&#x27;],
+    &#x27;int_bookings_hotels&#x27;:  [&#x27;stg_bookings&#x27;, &#x27;stg_hotels&#x27;],
+    &#x27;fct_monthly_revenue&#x27;:  [&#x27;int_bookings_hotels&#x27;],
+    &#x27;fct_hotel_summary&#x27;:    [&#x27;int_bookings_hotels&#x27;],
+    &#x27;dim_hotels&#x27;:           [&#x27;stg_hotels&#x27;],
+}
+
+def downstream(dag, node, visited=None):
+    &quot;&quot;&quot;Find all models that depend (directly or indirectly) on node.&quot;&quot;&quot;
+    if visited is None:
+        visited = set()
+    result = []
+    for model, deps in dag.items():
+        if node in deps and model not in visited:
+            visited.add(model)
+            result.append(model)
+            result.extend(downstream(dag, model, visited))
+    return result
+
+changed_model = &#x27;stg_bookings&#x27;
+impacted = downstream(dag, changed_model)
+print(f&#x27;Impact of changing {changed_model}:&#x27;)
+for m in impacted:
+    print(f&#x27;  -&gt; {m}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D5_dbt_Docs_Lineage.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Using the dag dict, write two functions:
+#   upstream(dag, node) -&gt; list of all ancestors (direct + transitive dependencies)
+#   critical_path(dag, node) -&gt; list showing the longest dependency chain to reach node
+#
+# Then answer:
+#   Q1: What are all upstream dependencies of fct_monthly_revenue?
+#   Q2: What is the critical path to reach fct_monthly_revenue?
+#
+# Expected:
+#   upstream(fct_monthly_revenue):
+#     int_bookings_hotels, stg_bookings, raw__bookings, stg_hotels, raw__hotels
+#   critical_path:
+#     raw__bookings -&gt; stg_bookings -&gt; int_bookings_hotels -&gt; fct_monthly_revenue
+#     (or raw__hotels path — both are equal length)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D5_dbt_Docs_Lineage.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — dbt SEMANTIC LAYER (MetricFlow)
+# ══════════════════════════════════════════════════════════════
+# The metric drift problem (why this matters):
+#
+#   Three BI dashboards, three definitions of &quot;MAU&quot;:
+#     - Product team counts any user who opened the app
+#     - Marketing counts users who clicked a campaign link
+#     - Finance counts users who generated revenue
+#
+#   Two executives walk into a Monday review. One says &quot;MAU is 240K.&quot;
+#   The other says &quot;MAU is 190K.&quot; Both are reading from the same company&#x27;s
+#   data. The meeting derails into a 45-minute argument about definitions
+#   instead of decisions. The finance deck used last quarter&#x27;s cohort filter;
+#   the product deck excluded inactive accounts.
+#
+#   This is metric drift: the same word means different things in different
+#   reports. It erodes trust in data and wastes senior time.
+#
+# The fix: centralise every metric definition in one registry.
+# Any query that asks for &quot;MAU&quot; reads from the same YAML config.
+# If the definition changes, it changes everywhere at once.
+#
+# Problem: the Finance team calculates &quot;revenue&quot; one way, the
+# Sales team calculates it another way — dashboards disagree.
+#
+# The dbt Semantic Layer (powered by MetricFlow) solves this by
+# defining every metric ONCE in YAML on top of your mart models.
+# Any BI tool, Python script, or API query reads from the same
+# definition — there is one version of truth.
+#
+# MetricFlow concepts:
+#   measure     — the raw aggregation (SUM amount, COUNT order_id)
+#   dimension   — the &quot;group by&quot; axis (region, product, month)
+#   metric      — a named measure + optional dimensions + filters
+#
+# In production: define in metrics.yml, query via &#x27;mf query&#x27;.
+# Here: simulated with a Python metric_registry + DuckDB.
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+import duckdb
+
+con_sem = duckdb.connect(&#x27;:memory:&#x27;)
+con_sem.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE fct_sales AS SELECT * FROM (VALUES
+        (1, &#x27;Widget&#x27;, &#x27;EMEA&#x27;, 250.00, &#x27;2024-01&#x27;),
+        (2, &#x27;Gadget&#x27;, &#x27;AMER&#x27;,  89.50, &#x27;2024-01&#x27;),
+        (3, &#x27;Widget&#x27;, &#x27;APAC&#x27;, 412.00, &#x27;2024-02&#x27;),
+        (4, &#x27;Gadget&#x27;, &#x27;EMEA&#x27;, 175.00, &#x27;2024-02&#x27;),
+        (5, &#x27;Widget&#x27;, &#x27;AMER&#x27;, 320.00, &#x27;2024-02&#x27;)
+    ) AS t(sale_id, product, region, amount, month)
+&#x27;&#x27;&#x27;)
+
+metric_registry = {}
+
+def define_metric(name, model, measure_col, agg, dimensions):
+    &quot;&quot;&quot;Register a metric definition.&quot;&quot;&quot;
+    metric_registry[name] = {
+        &#x27;model&#x27;:      model,
+        &#x27;measure&#x27;:    measure_col,
+        &#x27;agg&#x27;:        agg,           # &#x27;SUM&#x27; | &#x27;AVG&#x27; | &#x27;COUNT&#x27;
+        &#x27;dimensions&#x27;: dimensions,    # list of valid group-by columns
+    }
+    print(f&#x27;Metric registered: {name}  ({agg}({measure_col}) on {model})&#x27;)
+
+def query_metric(name, group_by=None, where=None):
+    &quot;&quot;&quot;Query a registered metric, optionally grouped and filtered.&quot;&quot;&quot;
+    m = metric_registry[name]
+    select  = f&quot;{m[&#x27;agg&#x27;]}({m[&#x27;measure&#x27;]}) AS {name}&quot;
+    groupby = &#x27;&#x27;
+    if group_by:
+        assert group_by in m[&#x27;dimensions&#x27;], f&quot;{group_by} not a declared dimension of {name}&quot;
+        select  = f&quot;{group_by}, {select}&quot;
+        groupby = f&quot;GROUP BY {group_by} ORDER BY {group_by}&quot;
+    where_clause = f&quot;WHERE {where}&quot; if where else &#x27;&#x27;
+    sql = f&quot;SELECT {select} FROM {m[&#x27;model&#x27;]} {where_clause} {groupby}&quot;
+    return con_sem.execute(sql).fetchdf()
+
+define_metric(
+    name=&#x27;total_revenue&#x27;,
+    model=&#x27;fct_sales&#x27;,
+    measure_col=&#x27;amount&#x27;,
+    agg=&#x27;SUM&#x27;,
+    dimensions=[&#x27;region&#x27;, &#x27;product&#x27;, &#x27;month&#x27;],
+)
+
+print()
+print(&#x27;total_revenue by region:&#x27;)
+print(query_metric(&#x27;total_revenue&#x27;, group_by=&#x27;region&#x27;).to_string(index=False))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D5_dbt_Docs_Lineage.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Register a second metric called avg_order_value and query it
+# two ways, then guard against an invalid dimension.
+#
+# Step 1 — define_metric for avg_order_value:
+#   model:      fct_sales
+#   measure:    amount
+#   agg:        AVG
+#   dimensions: [&#x27;region&#x27;, &#x27;product&#x27;]
+#
+# Step 2 — query avg_order_value grouped by product.
+#   Print the result table.
+#
+# Step 3 — query avg_order_value filtered to region=&#x27;EMEA&#x27; only
+#   (use where=&quot;region=&#x27;EMEA&#x27;&quot;), grouped by product.
+#   Print the result table.
+#
+# Step 4 — attempt to query avg_order_value grouped by &#x27;month&#x27;.
+#   month is NOT in its dimensions list.
+#   Catch the AssertionError and print: &#x27;Dimension error: &lt;message&gt;&#x27;
+#
+# Expected output:
+#   Metric registered: avg_order_value  (AVG(amount) on fct_sales)
+#
+#   avg_order_value by product:
+#    product  avg_order_value
+#    Gadget   132.25
+#    Widget   327.33
+#
+#   avg_order_value EMEA by product:
+#    product  avg_order_value
+#    Gadget   175.0
+#    Widget   250.0
+#
+#   Dimension error: month not a declared dimension of avg_order_value
+#
+# --- starting data ---
+# define_metric, query_metric, metric_registry, con_sem and fct_sales
+# are defined in CONCEPT 3 above.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-6">Day 6 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-6"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D6_Project_dbt_Advanced.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 14  |  DAY 6  |  PROJECT — ADVANCED dbt PIPELINE
+# ══════════════════════════════════════════════════════════════
+#
+#  PROJECT: Incremental Sales Pipeline with History
+#  Combines all Week 14 techniques into one production-style pipeline.
+#
+#  Skills stacked:
+#    W10 — Groq LLM API (structured output + test recommendations)
+#    W14 — incremental models, macros, expectations, lineage
+#
+#  TASK 5 uses LLM to explain what changed between incremental runs
+#  and recommend additional tests — connects W10_D1 + W10_D2.
+#
+#  SIMULATION MODE — runs without API keys.
+#  REAL MODE       — Groq API call shown in call_llm() docstring.
+#
+#  TIME:  ~70 minutes
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+def ref(m): return m
+def source(s, t): return f&#x27;{s}__{t}&#x27;
+
+def run_model(con, name, sql, materialized=&#x27;view&#x27;):
+    if materialized == &#x27;table&#x27;:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {name} AS {sql}&#x27;)
+    else:
+        con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+    rows = con.execute(f&#x27;SELECT COUNT(*) FROM {name}&#x27;).fetchone()[0]
+    print(f&#x27;  [{materialized:&gt;12}]  {name}  ({rows} rows)&#x27;)
+
+def upsert(con, target, source_tbl, unique_key, cols):
+    col_list = &#x27;, &#x27;.join(cols)
+    tables = [r[0] for r in con.execute(&#x27;SHOW TABLES&#x27;).fetchall()]
+    if target not in tables:
+        con.execute(f&#x27;CREATE TABLE {target} AS SELECT {col_list} FROM {source_tbl}&#x27;)
+        mode = &#x27;FULL LOAD&#x27;
+    else:
+        con.execute(f&#x27;DELETE FROM {target} WHERE {unique_key} IN (SELECT {unique_key} FROM {source_tbl})&#x27;)
+        con.execute(f&#x27;INSERT INTO {target} SELECT {col_list} FROM {source_tbl}&#x27;)
+        mode = &#x27;UPSERT&#x27;
+    n = con.execute(f&#x27;SELECT COUNT(*) FROM {target}&#x27;).fetchone()[0]
+    print(f&#x27;  [{mode:&gt;12}]  {target}  ({n} rows)&#x27;)
+
+def expect_between(con, model, col, lo, hi):
+    n = con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE NOT ({col} &gt;= {lo} AND {col} &lt;= {hi})&#x27;).fetchone()[0]
+    return &#x27;PASS&#x27; if n == 0 else f&#x27;FAIL ({n} out of range)&#x27;
+
+def expect_no_nulls(con, model, col):
+    n = con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {col} IS NULL&#x27;).fetchone()[0]
+    return &#x27;PASS&#x27; if n == 0 else f&#x27;FAIL ({n} nulls)&#x27;
+
+# ── LLM helper (SIMULATION MODE) ──────────────────────────────
+# Used in Task 5 to explain incremental run changes and
+# recommend additional dbt tests — connects W10_D1 + W10_D2.
+def call_llm(system_prompt: str, user_prompt: str) -&gt; str:
+    &quot;&quot;&quot;
+    SIMULATION MODE — returns a realistic hardcoded analysis.
+    REAL MODE (uncomment + set GROQ_API_KEY in .env):
+
+    from openai import OpenAI
+    client = OpenAI(
+        api_key=os.getenv(&#x27;GROQ_API_KEY&#x27;),
+        base_url=&#x27;https://api.groq.com/openai/v1&#x27;,
+    )
+    resp = client.chat.completions.create(
+        model=&#x27;llama3-8b-8192&#x27;,
+        messages=[
+            {&#x27;role&#x27;: &#x27;system&#x27;, &#x27;content&#x27;: system_prompt},
+            {&#x27;role&#x27;: &#x27;user&#x27;,   &#x27;content&#x27;: user_prompt},
+        ],
+        temperature=0.1,
+    )
+    return resp.choices[0].message.content
+    &quot;&quot;&quot;
+    if &#x27;incremental&#x27; in user_prompt.lower() or &#x27;run&#x27; in user_prompt.lower():
+        return (
+            &quot;INCREMENTAL RUN ANALYSIS\n&quot;
+            &quot;Run 1 (full load): 3 rows inserted into fct_sales.\n&quot;
+            &quot;Run 2 (upsert): sale_id 3 updated (status: pending -&gt; completed); &quot;
+            &quot;2 new rows (sale_id 4, 5) inserted. Net result: 5 rows, 0 duplicates.\n\n&quot;
+            &quot;RECOMMENDED ADDITIONAL TESTS\n&quot;
+            &quot;1. expect_between(amount, 0.01, 9999) — guards against refunds or data entry errors.\n&quot;
+            &quot;2. not_null(product_slug) — staging macro must never produce a null slug.\n&quot;
+            &quot;3. accepted_values(status, [&#x27;completed&#x27;, &#x27;pending&#x27;, &#x27;refunded&#x27;]) — &quot;
+            &quot;catches unexpected status strings before they reach the mart.\n&quot;
+            &quot;4. row_count &gt;= 3 — incremental run should never shrink the table.&quot;
+        )
+    return &quot;No analysis generated — include run summary in your prompt.&quot;
+
+# Load initial raw data
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw__sales AS SELECT * FROM (VALUES
+        (1, &#x27;2024-01-05&#x27;, &#x27;Widget&#x27;,  45.00, &#x27;completed&#x27;),
+        (2, &#x27;2024-01-05&#x27;, &#x27;Gadget&#x27;,  89.99, &#x27;completed&#x27;),
+        (3, &#x27;2024-01-06&#x27;, &#x27;Gizmo&#x27;,  120.00, &#x27;pending&#x27;)
+    ) AS t(sale_id, sale_date, product, amount, status)
+&#x27;&#x27;&#x27;)
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw__customers AS SELECT * FROM (VALUES
+        (101, &#x27;Alice&#x27;,  &#x27;gold&#x27;),
+        (102, &#x27;Bob&#x27;,    &#x27;silver&#x27;),
+        (103, &#x27;Carol&#x27;,  &#x27;bronze&#x27;)
+    ) AS t(customer_id, name, tier)
+&#x27;&#x27;&#x27;)
+print(&#x27;Raw data loaded.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D6_Project_dbt_Advanced.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 1 — STAGING MODELS WITH MACROS
+# ══════════════════════════════════════════════════════════════
+# Write macros: slugify(col), amount_tier(col).
+# slugify(col): LOWER(REPLACE(col, &#x27; &#x27;, &#x27;_&#x27;))
+# amount_tier(col): &#x27;low&#x27; if col &lt; 50, &#x27;mid&#x27; if &lt; 100, &#x27;high&#x27; otherwise
+#
+# Build stg_sales_sql using source() and both macros:
+#   sale_id, sale_date, product_slug (product slugified),
+#   amount, amount_tier, status
+# Run as view. Print first 5 rows.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D6_Project_dbt_Advanced.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 2 — INCREMENTAL MART
+# ══════════════════════════════════════════════════════════════
+# Use upsert() to build fct_sales incrementally.
+# Run 1: load initial 3 sales rows.
+# Then: add 2 new rows + update sale_id 3 status to &#x27;completed&#x27;.
+# Run 2: upsert — only new/changed rows processed.
+# Print the final fct_sales table (5 rows).</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D6_Project_dbt_Advanced.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 3 — TEST SUITE
+# ══════════════════════════════════════════════════════════════
+# Run a test suite on fct_sales with these 4 tests:
+#   1. amount between(0, 9999)
+#   2. no nulls on sale_id
+#   3. no nulls on status
+#   4. amount between(0.01, 999)
+# All 4 should PASS. Print results.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D6_Project_dbt_Advanced.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 4 — LINEAGE SUMMARY
+# ══════════════════════════════════════════════════════════════
+# Build a dag dict representing the full pipeline you built in this project.
+# Use the downstream() function from D5 to answer:
+#   Q: If raw__sales changes, which models are impacted?
+# Print the execution order using topological_sort().
+#
+# Expected pipeline order:
+#   1. raw__sales / raw__customers (sources — no deps)
+#   2. stg_sales
+#   3. fct_sales</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_14_dbt_Advanced/W14_D6_Project_dbt_Advanced.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 5 — LLM INCREMENTAL RUN ANALYST
+# ══════════════════════════════════════════════════════════════
+# After two incremental runs, a senior engineer wants to know:
+#   - what changed between Run 1 and Run 2
+#   - which additional dbt tests should be added
+# This task sends a run summary to the LLM and prints its analysis.
+# Same pattern as W10_D1 (Groq API) + W10_D2 (structured prompts).
+#
+# Step 1 — build a run_summary dict capturing both incremental runs.
+#   Include: model_name, run_1_rows, run_2_rows, rows_updated,
+#            rows_inserted, tests_passed, tests_failed.
+#   Print the dict.
+#
+# Step 2 — write a system_prompt telling the LLM it is a senior
+#   dbt engineer reviewing an incremental model run log.
+#
+# Step 3 — write a user_prompt that embeds run_summary as a
+#   formatted string and asks:
+#     a) What happened between Run 1 and Run 2?
+#     b) What 3 additional dbt tests would you recommend?
+#
+# Step 4 — call call_llm(system_prompt, user_prompt).
+#   Print &quot;LLM RUN ANALYSIS:&quot; followed by the response.
+#
+# Expected output (simulation):
+#   LLM RUN ANALYSIS:
+#   INCREMENTAL RUN ANALYSIS
+#   Run 1 (full load): 3 rows inserted into fct_sales.
+#   Run 2 (upsert): sale_id 3 updated (status: pending -&gt; completed) ...
+#   RECOMMENDED ADDITIONAL TESTS
+#   1. expect_between(amount, 0.01, 9999) ...
+#   2. not_null(product_slug) ...
+#   3. accepted_values(status, [...]) ...
+#
+# --- starting data ---
+# fct_sales is built by upsert() in Task 2.
+# call_llm(system_prompt, user_prompt) is defined in the setup cell.
+run_summary = {
+    &#x27;model&#x27;: &#x27;fct_sales&#x27;,
+    &#x27;run_1_rows&#x27;: 3,
+    &#x27;run_2_rows&#x27;: 5,
+}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="pager"><a class="btn ghost" href="week-13.html">&larr; Week 13</a><a class="btn ghost" href="week-15.html">Week 15 &rarr;</a></div>
+</main></body></html>

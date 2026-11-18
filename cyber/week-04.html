@@ -1,0 +1,767 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 04 — Authentication and Identity</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 04 — Authentication and Identity</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="04" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 04 — Authentication and Identity</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>1 — Foundations</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Credential attacks / SC-200: Identity protection / GCIA: Authentication analysis</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>Add identity enrichment JOIN layer to the unified log pipeline</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W01 — Networking Foundations, W02 — Windows OS Internals, W03 — Linux OS Security</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Password Hashing and Storage</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="04-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=XJYdPBD6PyU" target="_blank" rel="noopener"><b>bcrypt: Level Up Your Hashing</b><small>Purple Crown Training</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=password%20hashing%20salting%20explained%20security" target="_blank" rel="noopener">password hashing salting explained security</a></p></div>
+<hr />
+<h3>Concept 1 — How Passwords Are Stored: Hashing, Salting, and Why It Matters</h3>
+<p>Passwords are never stored as plaintext in any properly designed system. Instead, a one-way hash function transforms the password into a fixed-length string. You cannot reverse the hash to get the original password — you can only verify by hashing a candidate and comparing. A salt (random per-user string) is added before hashing to prevent precomputed dictionary attacks.</p>
+<p>Data engineering analogy: a password hash is like a deterministic aggregation — given the same input you always get the same output, but you cannot reconstruct the input from the output. A salt is like adding a unique surrogate key prefix before hashing a natural key — two rows with identical natural keys get different hashes, so you cannot build a reverse lookup table.</p>
+<p>Modern secure algorithms:</p>
+<ul>
+<li><strong>bcrypt</strong> — designed to be slow; configurable work factor; widely used</li>
+<li><strong>Argon2</strong> — winner of Password Hashing Competition; memory-hard; current best practice</li>
+<li><strong>PBKDF2</strong> — NIST-approved; used by Django, many enterprise systems</li>
+<li><strong>SHA-256 / MD5</strong> — fast hash functions. Fast = bad for passwords. MD5 is broken. SHA-256 alone (without iterations) is insecure for passwords.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+import os
+import bcrypt
+
+# BAD: MD5 without salt — precomputed rainbow tables break this instantly
+password = &quot;hunter2&quot;
+bad_hash = hashlib.md5(password.encode()).hexdigest()
+print(bad_hash)
+# → 2ab96390c7dbe3439de74d0c9b0b1767
+# Every &quot;hunter2&quot; in every database has this same hash → rainbow table attack
+
+# GOOD: bcrypt with auto-generated salt
+hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12))
+print(hashed)
+# → b&#x27;$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBPj0iy21mGqKC&#x27;
+# $2b$ = bcrypt, $12$ = 12 rounds (work factor), next 22 chars = salt, rest = hash
+
+# Verify:
+is_valid = bcrypt.checkpw(password.encode(), hashed)
+print(is_valid)  # True
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a Python function <code>check_password_strength(hash_string: str) -&gt; dict</code> that:</p>
+<ul>
+<li>Takes a hash string</li>
+<li>Returns a dict with: <code>algorithm</code> (detected from prefix), <code>is_weak</code> (True if MD5/SHA1/SHA256-unsalted), <code>recommendation</code> (string suggesting the secure alternative)</li>
+</ul>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Starting data:
+hashes = [
+    &quot;2ab96390c7dbe3439de74d0c9b0b1767&quot;,          # MD5
+    &quot;$2b$12$LQv3c1yqBWVHxkd0LHAkCO...&quot;,          # bcrypt
+    &quot;5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8&quot;,  # SHA1
+    &quot;$argon2id$v=19$m=65536,t=2,p=1$...&quot;,         # Argon2
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: four dicts, one per hash, with algorithm, is_weak, and recommendation fields.</p>
+<hr />
+<h3>Concept 2 — Credential Dumping: What Attackers Extract and From Where</h3>
+<p>Once an attacker has code execution on a Windows machine, their next goal is usually to collect credentials. They target three sources:</p>
+<ol>
+<li><strong>LSASS process memory</strong> — Windows caches credentials (NTLM hashes, Kerberos tickets) in lsass.exe for single sign-on. Mimikatz dumps this.</li>
+<li><strong>SAM database</strong> — local account hashes stored in <code>C:\Windows\System32\config\SAM</code> (locked while Windows runs — attackers use Volume Shadow Copies to read it)</li>
+<li><strong>NTDS.dit</strong> — the Active Directory database file on Domain Controllers. Contains every domain account's hash.</li>
+</ol>
+<p>Detection: Windows Event ID 4656 (object access to SAM), Event ID 4663 (NTDS.dit access), Sysmon Event ID 10 (process access to lsass.exe).</p>
+<p>Data engineering analogy: this is like an attacker who gains access to your dbt project and reads the <code>profiles.yml</code> file (which contains database credentials), then uses those credentials to dump your entire data warehouse. LSASS is your in-memory credential cache — equivalent to reading database connection objects from a running Python process's heap.</p>
+<p><strong>Example:</strong></p>
+<pre><code># What Mimikatz extracts from LSASS:
+sekurlsa::logonpasswords
+
+UserName: alice
+Domain:   CORP
+NTLM:     32ed87bdb5fdc5e9cba88547376818d4  ← can be used directly in Pass-the-Hash
+SHA1:     aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d
+Password: P@ssw0rd123  ← if WDigest is enabled (legacy — off by default in modern Windows)
+
+# Detection: Sysmon Event ID 10 (ProcessAccess) on lsass.exe
+{
+    &quot;EventID&quot;: 10,
+    &quot;SourceImage&quot;: &quot;C:\\Users\\bob\\AppData\\Local\\Temp\\m.exe&quot;,
+    &quot;TargetImage&quot;: &quot;C:\\Windows\\System32\\lsass.exe&quot;,
+    &quot;GrantedAccess&quot;: &quot;0x1010&quot;  ← PROCESS_VM_READ + PROCESS_QUERY_INFORMATION
+}
+</code></pre><p><strong>Exercise:</strong>
+Write a Python function that checks a list of Sysmon Event ID 10 records and flags any where:</p>
+<ul>
+<li><code>TargetImage</code> contains <code>lsass</code></li>
+<li><code>GrantedAccess</code> is one of the known Mimikatz access masks: <code>0x1010</code>, <code>0x1410</code>, <code>0x1fffff</code>, <code>0x143a</code></li>
+</ul>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>sysmon_events = [
+    {&quot;EventID&quot;: 10, &quot;SourceImage&quot;: &quot;C:\\Windows\\System32\\svchost.exe&quot;,
+     &quot;TargetImage&quot;: &quot;C:\\Windows\\System32\\lsass.exe&quot;, &quot;GrantedAccess&quot;: &quot;0x1000&quot;},
+    {&quot;EventID&quot;: 10, &quot;SourceImage&quot;: &quot;C:\\Users\\bob\\AppData\\Local\\Temp\\m.exe&quot;,
+     &quot;TargetImage&quot;: &quot;C:\\Windows\\System32\\lsass.exe&quot;, &quot;GrantedAccess&quot;: &quot;0x1410&quot;},
+    {&quot;EventID&quot;: 10, &quot;SourceImage&quot;: &quot;C:\\Windows\\System32\\taskhost.exe&quot;,
+     &quot;TargetImage&quot;: &quot;C:\\Windows\\System32\\spoolsv.exe&quot;, &quot;GrantedAccess&quot;: &quot;0x1000&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: one flagged event — the second record (m.exe accessing lsass with 0x1410).</p>
+<hr />
+<h3>Concept 3 — Password Attacks: Brute Force, Spraying, and Stuffing</h3>
+<p>Three distinct attack patterns, each with different detection signatures:</p>
+<ul>
+<li><strong>Brute force</strong> — try every password against one account. High volume against one username. Triggers account lockout. Detectable by: many 4625 events for the same TargetUserName.</li>
+<li><strong>Password spray</strong> — try one (or a few) common passwords against many accounts. Low volume per account — avoids lockout. Detectable by: 4625 events for many different TargetUserNames from the same source in a short window.</li>
+<li><strong>Credential stuffing</strong> — use username:password pairs leaked from other breaches. Medium volume. Detectable by: 4625 events where the TargetUserName matches a known leaked credential list.</li>
+</ul>
+<p>Data engineering analogy: brute force is like running a full table scan with no WHERE clause — high I/O, easily noticed. Password spray is like a carefully sampled query designed to stay under the cost threshold — low per-row cost but wide coverage. Credential stuffing is like a targeted lookup with a pre-built index — efficient and targeted.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+from datetime import timedelta
+
+# Sample of Event ID 4625 (failed logons):
+events = pd.DataFrame([
+    {&quot;time&quot;: &quot;2024-01-15 09:00:01&quot;, &quot;user&quot;: &quot;alice&quot;, &quot;src_ip&quot;: &quot;10.0.99.1&quot;},
+    {&quot;time&quot;: &quot;2024-01-15 09:00:03&quot;, &quot;user&quot;: &quot;bob&quot;,   &quot;src_ip&quot;: &quot;10.0.99.1&quot;},
+    {&quot;time&quot;: &quot;2024-01-15 09:00:05&quot;, &quot;user&quot;: &quot;carol&quot;, &quot;src_ip&quot;: &quot;10.0.99.1&quot;},
+    {&quot;time&quot;: &quot;2024-01-15 09:00:07&quot;, &quot;user&quot;: &quot;dave&quot;,  &quot;src_ip&quot;: &quot;10.0.99.1&quot;},
+    {&quot;time&quot;: &quot;2024-01-15 09:00:09&quot;, &quot;user&quot;: &quot;eve&quot;,   &quot;src_ip&quot;: &quot;10.0.99.1&quot;},
+    {&quot;time&quot;: &quot;2024-01-15 09:00:11&quot;, &quot;user&quot;: &quot;frank&quot;, &quot;src_ip&quot;: &quot;10.0.99.1&quot;},
+])
+events[&quot;time&quot;] = pd.to_datetime(events[&quot;time&quot;])
+
+# Password spray detection: 1 source IP, many usernames, short window
+spray = (events.groupby(&quot;src_ip&quot;)
+               .apply(lambda g: g.set_index(&quot;time&quot;)
+                                 .resample(&quot;1min&quot;)[&quot;user&quot;].nunique())
+               .reset_index())
+spray.columns = [&quot;src_ip&quot;, &quot;window&quot;, &quot;unique_users&quot;]
+print(spray[spray[&quot;unique_users&quot;] &gt;= 5])
+# → 10.0.99.1 sprayed 6 unique accounts in 1 minute
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Given the events DataFrame above, write a second detector for brute force:
+&quot;Same source IP attempting the same username more than 10 times in 60 seconds.&quot;
+Add two more rows to the events list to simulate a brute force attempt against user &quot;alice&quot; from &quot;10.0.99.2&quot;.</p>
+<p>Expected output: the brute force alert showing src_ip, user, and attempt_count.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs for credential attack detection
+<strong>Threat:</strong> An attacker uses an LLM to generate a list of culturally relevant password candidates for a specific target organization (e.g., company name + current year + common suffixes) making password spray more effective against Israeli organizations that use Hebrew words or local naming conventions.
+<strong>Opportunity:</strong> Feed a list of failed logon events (usernames, timestamps, source IPs) to an LLM and ask it to classify the attack pattern: brute force, spray, or stuffing. The LLM can explain the reasoning and suggest the most effective countermeasure for the specific pattern detected.
+<strong>Prompt to try:</strong> <code>&quot;Here are 20 failed Windows logon events (Event ID 4625) as a JSON list: [paste events]. Classify this as brute force, password spray, or credential stuffing. Explain the indicators that led to your classification and recommend the most effective mitigation.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Multi-Factor Authentication and OAuth2</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="04-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=iXSyxm9jmmo" target="_blank" rel="noopener"><b>How to use TOTP for MAXIMUM Security</b><small>Techlore</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=MFA%20multi-factor%20authentication%20how%20it%20works%20TOTP" target="_blank" rel="noopener">MFA multi-factor authentication how it works TOTP</a></p></div>
+<hr />
+<h3>Concept 1 — MFA Factors and TOTP</h3>
+<p>Multi-factor authentication requires proof of identity from at least two categories:</p>
+<ul>
+<li><strong>Something you know</strong> — password, PIN</li>
+<li><strong>Something you have</strong> — phone (TOTP app), hardware token (YubiKey)</li>
+<li><strong>Something you are</strong> — fingerprint, face scan</li>
+</ul>
+<p>TOTP (Time-based One-Time Password) is the standard behind Google Authenticator, Authy, and Microsoft Authenticator. It generates a 6-digit code that changes every 30 seconds. The code is <code>HOTP(secret, floor(current_time / 30))</code> — a HMAC-SHA1 of the shared secret and the current 30-second window.</p>
+<p>Data engineering analogy: TOTP is like a time-partitioned signing key. The key used to sign a request is only valid for the current 30-second partition. An attacker who intercepts the token cannot reuse it after 30 seconds — the equivalent of a signed S3 URL with a 30-second expiry.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hmac
+import hashlib
+import time
+import struct
+import base64
+
+def totp(secret_b32: str, digits: int = 6, window: int = 30) -&gt; str:
+    secret = base64.b32decode(secret_b32.upper())
+    counter = int(time.time()) // window
+    msg = struct.pack(&quot;&gt;Q&quot;, counter)
+    h = hmac.new(secret, msg, hashlib.sha1).digest()
+    offset = h[-1] &amp; 0x0F
+    code = struct.unpack(&quot;&gt;I&quot;, h[offset:offset+4])[0] &amp; 0x7FFFFFFF
+    return str(code % (10 ** digits)).zfill(digits)
+
+# TOTP shared secret (from QR code during enrollment):
+secret = &quot;JBSWY3DPEHPK3PXP&quot;
+print(totp(secret))
+# → &quot;123456&quot; (changes every 30 seconds)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend the <code>totp()</code> function to accept a <code>drift</code> parameter (±1 window) to handle clock skew between client and server — a common real-world problem. The function should accept a <code>drift</code> integer and return a list of valid codes for the range <code>[counter - drift, counter + drift]</code>.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def totp_with_drift(secret_b32: str, digits: int = 6, window: int = 30, drift: int = 1) -&gt; list[str]:
+    # Return valid codes for current window ± drift windows
+    ...
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: <code>totp_with_drift(&quot;JBSWY3DPEHPK3PXP&quot;, drift=1)</code> returns a list of 3 six-digit codes.</p>
+<hr />
+<h3>Concept 2 — OAuth2 and JWT: How Modern Apps Delegate Authentication</h3>
+<p>OAuth2 is the protocol that powers &quot;Sign in with Google&quot; and API authorization. A JWT (JSON Web Token) is the token format commonly used to carry identity and permissions. Understanding this is essential because JWT vulnerabilities and OAuth misconfigurations are top attack targets.</p>
+<p>OAuth2 authorization code flow:</p>
+<ol>
+<li>User clicks &quot;Sign in with Google&quot;</li>
+<li>App redirects user to Google with <code>client_id</code>, <code>redirect_uri</code>, <code>scope</code></li>
+<li>User authenticates with Google</li>
+<li>Google redirects back with an authorization <code>code</code></li>
+<li>App exchanges <code>code</code> for <code>access_token</code> (and optionally <code>id_token</code>) — server to server</li>
+<li>App uses <code>access_token</code> to call Google APIs</li>
+</ol>
+<p>JWT structure: <code>header.payload.signature</code> — all base64-encoded. The signature proves the token was issued by the trusted authority. The payload contains claims: <code>sub</code> (subject), <code>exp</code> (expiry), <code>iss</code> (issuer), <code>scope</code> (permissions).</p>
+<p>Data engineering analogy: an OAuth2 access token is like a time-limited, scope-restricted IAM token (AWS STS <code>AssumeRole</code> response). The token grants access to specific resources for a limited time without exposing the underlying credentials.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import base64
+import json
+
+def decode_jwt_payload(token: str) -&gt; dict:
+    parts = token.split(&quot;.&quot;)
+    if len(parts) != 3:
+        raise ValueError(&quot;Invalid JWT format&quot;)
+    # Add padding for base64 decode
+    payload_b64 = parts[1] + &quot;=&quot; * (-len(parts[1]) % 4)
+    payload_bytes = base64.urlsafe_b64decode(payload_b64)
+    return json.loads(payload_bytes)
+
+# Sample JWT (do NOT verify — just inspect the payload):
+token = (
+    &quot;eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9&quot;
+    &quot;.eyJzdWIiOiJ1c2VyQGV4YW1wbGUuY29tIiwic2NvcGUiOiJyZWFkOnJlcG9zIiwiZXhwIjoxNzA1MzE4MDAwfQ&quot;
+    &quot;.SIGNATURE_OMITTED&quot;
+)
+payload = decode_jwt_payload(token)
+print(payload)
+# → {&#x27;sub&#x27;: &#x27;user@example.com&#x27;, &#x27;scope&#x27;: &#x27;read:repos&#x27;, &#x27;exp&#x27;: 1705318000}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>audit_jwt_claims(token: str) -&gt; list[str]</code> that checks a JWT payload and returns a list of security warnings:</p>
+<ul>
+<li>Warn if <code>exp</code> is missing or already expired (compare to <code>time.time()</code>)</li>
+<li>Warn if <code>alg</code> in the header is <code>&quot;none&quot;</code> (unsigned token — critical vulnerability)</li>
+<li>Warn if <code>scope</code> is <code>&quot;*&quot;</code> or contains <code>&quot;admin&quot;</code></li>
+<li>Warn if <code>iss</code> is missing</li>
+</ul>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+
+sample_tokens = [
+    # Token with alg=none (critical):
+    &quot;eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZG1pbiIsInNjb3BlIjoiKiJ9.&quot;,
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: a list of warning strings for the sample token, including at minimum: alg=none warning, missing exp warning, wildcard scope warning.</p>
+<hr />
+<h3>Concept 3 — OAuth2 Attack Patterns: Token Theft and Open Redirects</h3>
+<p>Common OAuth2 attacks:</p>
+<ul>
+<li><strong>Token theft</strong> — steal the access_token from browser storage, network traffic, or logs. Tokens in application logs are a common leak.</li>
+<li><strong>Open redirect</strong> — the <code>redirect_uri</code> parameter is not strictly validated; attacker changes it to their server to receive the authorization code</li>
+<li><strong>CSRF on the callback</strong> — the <code>state</code> parameter prevents cross-site request forgery on the OAuth callback; if omitted, an attacker can inject a code</li>
+<li><strong>Refresh token abuse</strong> — refresh tokens are long-lived; stealing one gives persistent access</li>
+</ul>
+<p>Detection: look for access_token values appearing in HTTP access logs or proxy logs (tokens should never be in URLs — they belong in headers). Alert on OAuth flows where the <code>redirect_uri</code> does not match the registered value.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+# Tokens in URLs (a severe security mistake — they appear in web server access logs):
+log_lines = [
+    &#x27;10.0.1.5 - - [15/Jan/2024] &quot;GET /api/data HTTP/1.1&quot; 200 -&#x27;,
+    &#x27;10.0.1.5 - - [15/Jan/2024] &quot;GET /callback?code=auth_code_here&amp;state=abc HTTP/1.1&quot; 302 -&#x27;,
+    &#x27;10.0.1.5 - - [15/Jan/2024] &quot;GET /api/resource?access_token=eyJhbGciOi... HTTP/1.1&quot; 200 -&#x27;,
+    &#x27;10.0.99.1 - - [15/Jan/2024] &quot;GET /oauth/callback?redirect_uri=http://evil.com HTTP/1.1&quot; 302 -&#x27;,
+]
+
+def find_token_leaks(logs: list[str]) -&gt; list[str]:
+    token_pattern = re.compile(r&quot;access_token=([A-Za-z0-9._-]{20,})&quot;)
+    redirect_pattern = re.compile(r&quot;redirect_uri=([^\s&amp;]+)&quot;)
+    ALLOWED_REDIRECTS = {&quot;http://app.example.com/callback&quot;}
+    flagged = []
+    for line in logs:
+        if token_pattern.search(line):
+            flagged.append(f&quot;TOKEN IN URL: {line[:80]}&quot;)
+        m = redirect_pattern.search(line)
+        if m and m.group(1) not in ALLOWED_REDIRECTS:
+            flagged.append(f&quot;OPEN REDIRECT: {line[:80]}&quot;)
+    return flagged
+
+print(find_token_leaks(log_lines))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a third check to <code>find_token_leaks</code>: detect authorization codes appearing in Referer headers (another common leak vector). Add a sample log line that includes <code>Referer: http://app.example.com/callback?code=abc123</code> and verify it is flagged.</p>
+<p>Expected output: three flagged lines — the access_token URL leak, the open redirect, and the Referer code leak.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs and OAuth phishing
+<strong>Threat:</strong> Attackers use LLMs to generate convincing phishing pages that mimic OAuth consent screens. The fake page steals the authorization code or the user's credentials. LLM-generated content makes these phishing pages more natural-sounding and harder to detect with text classifiers.
+<strong>Opportunity:</strong> Parse OAuth2 audit logs (Azure AD sign-in logs) and feed unusual consent grants to an LLM for triage. Ask the LLM to flag applications that were granted unusually broad scopes, or consent grants that happened outside normal business hours.
+<strong>Prompt to try:</strong> <code>&quot;Here are 5 OAuth2 application consent grants from Azure AD logs as JSON: [paste logs]. Flag any grant that looks unusual — broad scopes, first-time apps, unusual geographic origin, or off-hours timing. Explain your reasoning for each flag.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — Azure Active Directory and Cloud Identity</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="04-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=vZqWWQbwpSg" target="_blank" rel="noopener"><b>Azure Active Directory (AAD) Basics | Complete Beginner Guide to Microsoft Entra ID</b><small>Digital IT Lab</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Azure%20Active%20Directory%20identity%20security%20explained" target="_blank" rel="noopener">Azure Active Directory identity security explained</a></p></div>
+<hr />
+<h3>Concept 1 — Azure AD vs On-Premise AD</h3>
+<p>Azure Active Directory (now Microsoft Entra ID) is the cloud-hosted identity provider for Microsoft 365, Azure, and thousands of SaaS applications. It differs from on-premise AD in ways that matter for detection:</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>On-Prem AD</th>
+<th>Azure AD</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Authentication protocol</td>
+<td>Kerberos / NTLM</td>
+<td>OAuth2 / OIDC / SAML</td>
+</tr>
+<tr>
+<td>Password spray detection</td>
+<td>Event ID 4771 on DC</td>
+<td>Azure AD Sign-In logs (riskySignIns)</td>
+</tr>
+<tr>
+<td>Credential dump target</td>
+<td>LSASS, NTDS.dit</td>
+<td>Tokens in browser storage / API tokens</td>
+</tr>
+<tr>
+<td>Lateral movement</td>
+<td>WMI, SMB, PsExec</td>
+<td>Azure RBAC roles, service principal abuse</td>
+</tr>
+<tr>
+<td>Key attack: credential theft</td>
+<td>Mimikatz, Pass-the-Hash</td>
+<td>Token theft, device code phishing</td>
+</tr>
+</tbody>
+</table>
+<p>Data engineering analogy: on-prem AD is like a self-hosted PostgreSQL database. Azure AD is like Google IAM for your data platform in GCP — the same concept (identity and access) but the telemetry, attack surface, and log format are completely different. If you only know how to monitor PostgreSQL auth logs, you are blind when the org migrates to GCP.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Azure AD Sign-In log fields (from portal.azure.com → Azure Active Directory → Sign-In logs):
+{
+    &quot;createdDateTime&quot;: &quot;2024-01-15T09:00:00Z&quot;,
+    &quot;userPrincipalName&quot;: &quot;alice@corp.com&quot;,
+    &quot;appDisplayName&quot;: &quot;Microsoft 365&quot;,
+    &quot;ipAddress&quot;: &quot;192.168.1.100&quot;,
+    &quot;location&quot;: {&quot;city&quot;: &quot;Tel Aviv&quot;, &quot;countryOrRegion&quot;: &quot;IL&quot;},
+    &quot;status&quot;: {&quot;errorCode&quot;: 0, &quot;failureReason&quot;: null},
+    &quot;riskLevelAggregated&quot;: &quot;none&quot;,
+    &quot;authenticationRequirement&quot;: &quot;singleFactorAuthentication&quot;,  # ← no MFA = risk
+    &quot;conditionalAccessStatus&quot;: &quot;notApplied&quot;
+}
+
+# Impossible travel detection: same user, two different countries, &lt; 1 hour apart
+# Israel at 09:00 and Nigeria at 09:45 = impossible travel → alert
+</code></pre><p><strong>Exercise:</strong>
+Write a Python function <code>detect_impossible_travel(events: list[dict], max_hours: float = 1.0) -&gt; list[dict]</code> that:</p>
+<ul>
+<li>Takes a list of Azure AD sign-in events with <code>userPrincipalName</code>, <code>createdDateTime</code>, <code>location.countryOrRegion</code></li>
+<li>Returns pairs of events where the same user signed in from different countries within <code>max_hours</code></li>
+</ul>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from datetime import datetime, timedelta, timezone
+
+events = [
+    {&quot;user&quot;: &quot;alice@corp.com&quot;, &quot;time&quot;: &quot;2024-01-15T09:00:00Z&quot;, &quot;country&quot;: &quot;IL&quot;},
+    {&quot;user&quot;: &quot;alice@corp.com&quot;, &quot;time&quot;: &quot;2024-01-15T09:45:00Z&quot;, &quot;country&quot;: &quot;NG&quot;},
+    {&quot;user&quot;: &quot;bob@corp.com&quot;,   &quot;time&quot;: &quot;2024-01-15T09:00:00Z&quot;, &quot;country&quot;: &quot;IL&quot;},
+    {&quot;user&quot;: &quot;bob@corp.com&quot;,   &quot;time&quot;: &quot;2024-01-15T14:00:00Z&quot;, &quot;country&quot;: &quot;US&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: one alert for alice (IL → NG in 45 minutes). Bob's login pair (5 hours) should not trigger.</p>
+<hr />
+<h3>Concept 2 — Service Principals and Managed Identities</h3>
+<p>In Azure, applications authenticate as service principals (like service accounts in Linux) or managed identities. Service principals have client credentials (client ID + secret or certificate). Managed identities are automatically managed by Azure — no credential to steal.</p>
+<p>Attack surface: a service principal secret (client secret) is essentially a password for an application identity. If it is hard-coded in code, stored in source control, or leaked in logs, an attacker can authenticate as the application. The application's Azure RBAC role determines the blast radius.</p>
+<p>Data engineering analogy: a service principal with Contributor role on a subscription is like a data pipeline service account with <code>bq.admin</code> rights — it can read, write, and delete any dataset. Credential theft of this service principal is equivalent to leaking an all-access BigQuery service account key.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Using Azure CLI to list service principals:
+az ad sp list --all --query &quot;[].{name:displayName, appId:appId}&quot; -o table
+
+# Check what roles a service principal has:
+az role assignment list --assignee &lt;appId&gt; --all -o table
+
+# Generate a new client secret (for rotation):
+az ad sp credential reset --id &lt;appId&gt;
+
+# Detection: service principal authenticating from an unexpected IP
+# KQL in Sentinel:
+# AADServicePrincipalSignInLogs
+# | where IPAddress !startswith &quot;10.&quot;
+# | where ResultType == 0
+# | project TimeGenerated, ServicePrincipalName, IPAddress, Location
+</code></pre><p><strong>Exercise:</strong>
+Given the following list of Azure role assignments for service principals, identify which principals have dangerous roles and what they could do with them:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>assignments = [
+    {&quot;principal&quot;: &quot;DataPipeline-SP&quot;,      &quot;role&quot;: &quot;Storage Blob Data Reader&quot;,   &quot;scope&quot;: &quot;/subscriptions/xxx/resourceGroups/data-rg&quot;},
+    {&quot;principal&quot;: &quot;BackupAgent-SP&quot;,       &quot;role&quot;: &quot;Contributor&quot;,                 &quot;scope&quot;: &quot;/subscriptions/xxx&quot;},
+    {&quot;principal&quot;: &quot;MonitoringAgent-SP&quot;,   &quot;role&quot;: &quot;Monitoring Reader&quot;,           &quot;scope&quot;: &quot;/subscriptions/xxx&quot;},
+    {&quot;principal&quot;: &quot;DeploymentPipeline-SP&quot;,&quot;role&quot;: &quot;Owner&quot;,                       &quot;scope&quot;: &quot;/subscriptions/xxx&quot;},
+]
+
+DANGEROUS_ROLES = {&quot;Owner&quot;, &quot;Contributor&quot;, &quot;User Access Administrator&quot;}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: two flagged principals (BackupAgent-SP and DeploymentPipeline-SP) with the role, scope, and a one-line explanation of the risk.</p>
+<hr />
+<h3>Concept 3 — Conditional Access and Zero Trust</h3>
+<p>Conditional Access is Azure AD's policy engine: it evaluates every authentication attempt against a set of conditions (user, device, location, risk score) and grants or blocks access — or requires MFA — based on policy. This is the enforcement layer of Zero Trust.</p>
+<p>Zero Trust principle: &quot;never trust, always verify.&quot; No user or device is trusted by default, even inside the corporate network. Every access request is evaluated against policy.</p>
+<p>Detection engineer perspective: Conditional Access policy failures (sign-ins that were blocked by CA) are high-signal events. Attempts to bypass CA (e.g., legacy authentication protocols that CA cannot intercept) are a critical detection target.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Conditional Access policy: require MFA for all sign-ins from outside Israel
+# Policy: IF location != IL AND app = Microsoft 365 THEN require MFA
+
+# Events to detect:
+# 1. Legacy auth bypass: user authenticates via IMAP/POP3/SMTP — CA cannot apply
+#    Detection: AADSignInLogs | where ClientAppUsed in (&quot;IMAP&quot;, &quot;POP3&quot;, &quot;SMTP Auth&quot;)
+#              These bypass MFA entirely — block legacy auth to prevent this
+
+# 2. CA policy gap: user in excluded group signs in without MFA from overseas
+#    Detection: check sign-ins with conditionalAccessStatus = &quot;notApplied&quot;
+#              from non-IL locations for sensitive app access
+
+# 3. Sign-in risk elevated but access granted:
+#    AADSignInLogs | where RiskLevelDuringSignIn in (&quot;medium&quot;, &quot;high&quot;) and ResultType == 0
+</code></pre><p><strong>Exercise:</strong>
+Write a Python function that processes a list of Azure AD sign-in events and flags:</p>
+<ol>
+<li>Any sign-in using a legacy protocol (<code>ClientAppUsed</code> in IMAP, POP3, SMTP Auth, Exchange ActiveSync)</li>
+<li>Any sign-in where <code>conditionalAccessStatus</code> is &quot;notApplied&quot; and the user is not in a known safe list</li>
+<li>Any sign-in where <code>riskLevelAggregated</code> is &quot;medium&quot; or &quot;high&quot; but <code>resultType</code> is 0 (success)</li>
+</ol>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>LEGACY_PROTOCOLS = {&quot;IMAP&quot;, &quot;POP3&quot;, &quot;SMTP Auth&quot;, &quot;Exchange ActiveSync&quot;, &quot;MAPI&quot;}
+SAFE_SERVICE_ACCOUNTS = {&quot;backup-agent@corp.com&quot;}
+
+sign_ins = [
+    {&quot;user&quot;: &quot;alice@corp.com&quot;, &quot;clientApp&quot;: &quot;IMAP&quot;,             &quot;caStatus&quot;: &quot;notApplied&quot;, &quot;risk&quot;: &quot;none&quot;, &quot;result&quot;: 0},
+    {&quot;user&quot;: &quot;bob@corp.com&quot;,   &quot;clientApp&quot;: &quot;Browser&quot;,          &quot;caStatus&quot;: &quot;success&quot;,    &quot;risk&quot;: &quot;high&quot;, &quot;result&quot;: 0},
+    {&quot;user&quot;: &quot;carol@corp.com&quot;, &quot;clientApp&quot;: &quot;Microsoft Teams&quot;,   &quot;caStatus&quot;: &quot;success&quot;,    &quot;risk&quot;: &quot;none&quot;, &quot;result&quot;: 0},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: two flagged events — alice (legacy protocol) and bob (high risk, access granted).</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs for cloud identity attack detection
+<strong>Threat:</strong> Attackers use LLMs to generate convincing spear-phishing emails targeting Azure AD administrators, specifically crafting messages that match the target's communication style (extracted from LinkedIn or public email leaks) to steal admin credentials or perform device code phishing.
+<strong>Opportunity:</strong> Feed Azure AD Conditional Access policy configuration to an LLM and ask it to identify gaps — users or groups excluded from MFA requirements, legacy auth protocols not blocked, high-risk sign-in policies not configured. The LLM can produce a prioritized hardening checklist.
+<strong>Prompt to try:</strong> <code>&quot;Here is our Azure AD Conditional Access policy list as JSON: [paste policies]. Identify any gaps: users or apps excluded from MFA, legacy authentication not blocked, high-risk sign-ins not challenged. Prioritize findings by risk and suggest the specific policy change to fix each gap.&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Identity Enrichment in the Detection Pipeline</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="04-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=security%20log%20enrichment%20identity%20context%20threat%20hunting" target="_blank" rel="noopener">security log enrichment identity context threat hunting</a></p></div>
+<hr />
+<h3>Concept 1 — Why Raw Log Events Are Not Enough</h3>
+<p>A raw log event tells you what happened technically: &quot;IP 10.0.1.99 authenticated as user ID 1234 at 09:00.&quot; But the question you need to answer is: &quot;Is this normal?&quot; To answer that, you need context: Who is user 1234? What department? What is their typical login time? Is 10.0.1.99 their registered device?</p>
+<p>Identity enrichment adds this context to every event by joining against an identity reference dataset. After enrichment, the same event becomes: &quot;Alice (Finance, Chicago, normally authenticates 08:00-17:00 from her registered laptop 10.0.1.22) authenticated from 10.0.1.99 at 09:00.&quot; Now the alert writes itself.</p>
+<p>Data engineering analogy: this is a standard dimensional JOIN. Your log event is a fact table row. Your identity dataset is a dimension table. <code>JOIN ON user_id</code> enriches every fact with the dimension attributes. This is the same pattern as enriching sales transactions with product and customer dimension tables in a star schema.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+
+# Fact: log events
+events = pd.DataFrame([
+    {&quot;time&quot;: &quot;2024-01-15 09:00:00&quot;, &quot;user_id&quot;: &quot;alice&quot;,    &quot;src_ip&quot;: &quot;10.0.1.99&quot;, &quot;event&quot;: &quot;login_success&quot;},
+    {&quot;time&quot;: &quot;2024-01-15 09:05:00&quot;, &quot;user_id&quot;: &quot;bob&quot;,      &quot;src_ip&quot;: &quot;10.0.2.55&quot;, &quot;event&quot;: &quot;file_access&quot;},
+    {&quot;time&quot;: &quot;2024-01-15 22:30:00&quot;, &quot;user_id&quot;: &quot;alice&quot;,    &quot;src_ip&quot;: &quot;45.33.1.1&quot;,  &quot;event&quot;: &quot;login_success&quot;},
+])
+
+# Dimension: identity reference data (from HR/AD/LDAP)
+identities = pd.DataFrame([
+    {&quot;user_id&quot;: &quot;alice&quot;, &quot;dept&quot;: &quot;Finance&quot;, &quot;manager&quot;: &quot;carol&quot;,
+     &quot;normal_hours&quot;: &quot;08:00-17:00&quot;, &quot;registered_ips&quot;: &quot;10.0.1.22,10.0.1.23&quot;},
+    {&quot;user_id&quot;: &quot;bob&quot;,   &quot;dept&quot;: &quot;Engineering&quot;, &quot;manager&quot;: &quot;dave&quot;,
+     &quot;normal_hours&quot;: &quot;09:00-18:00&quot;, &quot;registered_ips&quot;: &quot;10.0.2.55&quot;},
+])
+
+# Enriched events
+enriched = events.merge(identities, on=&quot;user_id&quot;, how=&quot;left&quot;)
+print(enriched[[&quot;time&quot;, &quot;user_id&quot;, &quot;src_ip&quot;, &quot;dept&quot;, &quot;normal_hours&quot;]])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend the enriched DataFrame to flag any event where:</p>
+<ul>
+<li>The <code>src_ip</code> is NOT in the user's <code>registered_ips</code> list, OR</li>
+<li>The event time is outside the user's <code>normal_hours</code></li>
+</ul>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from datetime import datetime
+
+def is_outside_hours(time_str: str, normal_hours: str) -&gt; bool:
+    # normal_hours format: &quot;08:00-17:00&quot;
+    ...
+
+def flag_anomalies(enriched: pd.DataFrame) -&gt; pd.DataFrame:
+    ...
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: two flagged rows — alice's 09:00 login (IP not registered) and alice's 22:30 login (outside hours AND not registered IP).</p>
+<hr />
+<h3>Concept 2 — Building the Identity Reference Dataset</h3>
+<p>In practice, the identity reference dataset is built by pulling from HR systems, Active Directory, Azure AD, and IT asset management. For the detection pipeline, you need at minimum: user ID, department, manager, typical working hours, registered device IPs, and account type (human / service).</p>
+<p>Data engineering analogy: this is exactly like building an SCD Type 1 or Type 2 dimension table in dbt. The source is an HR API or LDAP export; you run a daily refresh; you track changes (hire, termination, role change) that affect access risk.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+from pathlib import Path
+
+# Minimal identity reference schema:
+IDENTITY_SCHEMA = {
+    &quot;user_id&quot;:          str,    # AD sAMAccountName or Azure UPN
+    &quot;display_name&quot;:     str,
+    &quot;department&quot;:       str,
+    &quot;manager&quot;:          str,
+    &quot;account_type&quot;:     str,    # &quot;human&quot; | &quot;service&quot; | &quot;shared&quot;
+    &quot;is_admin&quot;:         bool,   # member of privileged group
+    &quot;registered_ips&quot;:   list,   # known workstation IPs
+    &quot;normal_hours_utc&quot;: str,    # &quot;HH:MM-HH:MM&quot;
+    &quot;is_active&quot;:        bool,   # False = terminated / locked
+    &quot;last_updated&quot;:     str,    # ISO 8601
+}
+
+def load_identity_db(path: str) -&gt; dict[str, dict]:
+    with open(path) as f:
+        records = json.load(f)
+    return {r[&quot;user_id&quot;]: r for r in records}
+
+# Sample identity DB (identity.json):
+sample = [
+    {&quot;user_id&quot;: &quot;alice&quot;, &quot;display_name&quot;: &quot;Alice Cohen&quot;, &quot;department&quot;: &quot;Finance&quot;,
+     &quot;manager&quot;: &quot;carol&quot;, &quot;account_type&quot;: &quot;human&quot;, &quot;is_admin&quot;: False,
+     &quot;registered_ips&quot;: [&quot;10.0.1.22&quot;, &quot;10.0.1.23&quot;], &quot;normal_hours_utc&quot;: &quot;06:00-15:00&quot;,
+     &quot;is_active&quot;: True, &quot;last_updated&quot;: &quot;2024-01-01T00:00:00Z&quot;},
+]
+Path(&quot;identity.json&quot;).write_text(json.dumps(sample))
+db = load_identity_db(&quot;identity.json&quot;)
+print(db[&quot;alice&quot;][&quot;department&quot;])  # → Finance
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>flag_terminated_user_activity(events: list[dict], identity_db: dict) -&gt; list[dict]</code> that flags any event where:</p>
+<ul>
+<li>The user's <code>is_active</code> is False (terminated account still authenticating)</li>
+<li>Or the user's <code>account_type</code> is &quot;service&quot; but the event comes from a human-looking activity (login with interactive LogonType 2)</li>
+</ul>
+<p>Expected output: flagged events with user_id, event_type, and reason string explaining why it was flagged.</p>
+<hr />
+<h3>Concept 3 — The Royal Road: Putting Identity Enrichment Into the Pipeline</h3>
+<p>The W04 Royal Road artifact adds an identity enrichment JOIN to the unified pipeline built in W02 and W03. Every event — whether from Windows EVTX or Linux syslog — gets enriched with user department, admin status, and normal hours before hitting any detection rule.</p>
+<p>This mirrors how production SIEM enrichment works: raw events are enriched at ingest time so detection rules can reference context fields directly, without requiring a secondary lookup at query time.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># pipeline/w04_enrich.py — identity enrichment layer
+import json
+import pandas as pd
+from pathlib import Path
+
+def load_events(paths: list[str]) -&gt; pd.DataFrame:
+    rows = []
+    for p in paths:
+        with open(p) as f:
+            for line in f:
+                rows.append(json.loads(line))
+    df = pd.DataFrame(rows)
+    df[&quot;time&quot;] = pd.to_datetime(df.get(&quot;time&quot;, pd.Series()), errors=&quot;coerce&quot;, utc=True)
+    return df
+
+def enrich_with_identity(df: pd.DataFrame, identity_db: dict) -&gt; pd.DataFrame:
+    def get_attr(user_id, attr, default=None):
+        record = identity_db.get(str(user_id), {})
+        return record.get(attr, default)
+
+    for col in [&quot;department&quot;, &quot;account_type&quot;, &quot;is_admin&quot;, &quot;normal_hours_utc&quot;, &quot;is_active&quot;]:
+        # Try to find the user field — different log sources use different field names
+        user_col = next((c for c in df.columns
+                         if c.lower() in (&quot;user&quot;, &quot;user_id&quot;, &quot;targetusername&quot;, &quot;username&quot;)), None)
+        if user_col:
+            df[col] = df[user_col].map(lambda u: get_attr(u, col))
+    return df
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Wire the enrichment layer into a complete CLI script that:</p>
+<ol>
+<li>Accepts <code>--events</code> (one or more <code>.jsonl</code> file paths) and <code>--identity</code> (path to <code>identity.json</code>)</li>
+<li>Loads and merges all events</li>
+<li>Enriches with identity context</li>
+<li>Runs the off-hours and unknown-IP detections from Day 4 Concept 1</li>
+<li>Writes flagged events to <code>flagged_events.jsonl</code></li>
+<li>Prints: <code>Enriched N events. Flagged M anomalies → flagged_events.jsonl</code></li>
+</ol>
+<p>Expected output: the printed summary and a <code>flagged_events.jsonl</code> containing the enriched, flagged events.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs for user behavior baselines
+<strong>Threat:</strong> An attacker performs slow and patient &quot;living off the land&quot; — all their actions fall within the victim user's normal behavior envelope. Standard rule-based detection with fixed thresholds misses it entirely.
+<strong>Opportunity:</strong> Feed a user's 30-day activity summary (login times, accessed systems, volumes) to an LLM and ask it to identify the subtle behavioral shifts that fall below rule thresholds but still represent deviation from the individual's baseline. The LLM can reason about patterns that are hard to encode as rules.
+<strong>Prompt to try:</strong> <code>&quot;Here is alice@corp.com's login history for the last 30 days as JSON, followed by today's activity. Identify any behavioral changes — in timing, location, accessed systems, or data volume — that deviate from her established pattern, even if they do not trigger a rule. Explain each deviation.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Credential Attack Detection Lab</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="04-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=u6GwzBps6Lo" target="_blank" rel="noopener"><b>Attack Tutorial: How the Kerberoasting Attack Works</b><small>Netwrix</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=threat%20hunting%20credential%20attacks%20Active%20Directory%20SIEM" target="_blank" rel="noopener">threat hunting credential attacks Active Directory SIEM</a></p></div>
+<hr />
+<h3>Concept 1 — Kerberoasting Detection</h3>
+<p>Kerberoasting is a technique where an attacker requests service tickets (TGS) for accounts with Service Principal Names (SPNs). The service ticket is encrypted with the service account's password hash. The attacker takes the ticket offline and cracks it — no network noise during the crack phase.</p>
+<p>Detection is based on Event ID 4769 (Service Ticket Request) with two specific conditions:</p>
+<ol>
+<li>Ticket encryption type = <code>0x17</code> (RC4-HMAC) — modern Kerberos uses AES; RC4 requests are legacy or deliberate downgrade</li>
+<li>Multiple 4769 events from the same source in a short window requesting tickets for multiple different service accounts</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>events = [
+    {&quot;time&quot;: &quot;09:00:01&quot;, &quot;event_id&quot;: &quot;4769&quot;, &quot;user&quot;: &quot;alice&quot;, &quot;service&quot;: &quot;MSSQLSvc/db01&quot;, &quot;enc_type&quot;: &quot;0x12&quot;, &quot;src_ip&quot;: &quot;10.0.1.15&quot;},
+    {&quot;time&quot;: &quot;09:00:03&quot;, &quot;event_id&quot;: &quot;4769&quot;, &quot;user&quot;: &quot;alice&quot;, &quot;service&quot;: &quot;HTTP/web01&quot;,    &quot;enc_type&quot;: &quot;0x17&quot;, &quot;src_ip&quot;: &quot;10.0.1.15&quot;},
+    {&quot;time&quot;: &quot;09:00:05&quot;, &quot;event_id&quot;: &quot;4769&quot;, &quot;user&quot;: &quot;alice&quot;, &quot;service&quot;: &quot;HOST/srv01&quot;,    &quot;enc_type&quot;: &quot;0x17&quot;, &quot;src_ip&quot;: &quot;10.0.1.15&quot;},
+    {&quot;time&quot;: &quot;09:00:07&quot;, &quot;event_id&quot;: &quot;4769&quot;, &quot;user&quot;: &quot;alice&quot;, &quot;service&quot;: &quot;MSSQLSvc/db02&quot;, &quot;enc_type&quot;: &quot;0x17&quot;, &quot;src_ip&quot;: &quot;10.0.1.15&quot;},
+]
+
+def detect_kerberoasting(events: list[dict], threshold: int = 3) -&gt; list[dict]:
+    from collections import defaultdict
+    rc4_by_src: dict[str, list] = defaultdict(list)
+    for e in events:
+        if e.get(&quot;event_id&quot;) == &quot;4769&quot; and e.get(&quot;enc_type&quot;) == &quot;0x17&quot;:
+            rc4_by_src[e[&quot;src_ip&quot;]].append(e)
+    return [
+        {&quot;src_ip&quot;: ip, &quot;count&quot;: len(evts), &quot;services&quot;: [e[&quot;service&quot;] for e in evts]}
+        for ip, evts in rc4_by_src.items()
+        if len(evts) &gt;= threshold
+    ]
+
+print(detect_kerberoasting(events))
+# → [{&quot;src_ip&quot;: &quot;10.0.1.15&quot;, &quot;count&quot;: 3, &quot;services&quot;: [&quot;HTTP/web01&quot;, &quot;HOST/srv01&quot;, &quot;MSSQLSvc/db02&quot;]}]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a time-window constraint to <code>detect_kerberoasting</code>: only count events within a configurable window (e.g., 5 minutes). Use <code>datetime</code> for comparison.</p>
+<p>Expected output: the same alert, but only if the RC4 requests occurred within the specified time window.</p>
+<hr />
+<h3>Concept 2 — AS-REP Roasting and Pre-Authentication Disabled Accounts</h3>
+<p>AS-REP Roasting targets accounts with &quot;Do not require Kerberos preauthentication&quot; enabled. Normally, Kerberos requires the client to prove it knows the password before issuing a TGT. With preauthentication disabled, the KDC responds with an AS-REP encrypted with the user's password hash — without any proof the requester knows the password.</p>
+<p>An attacker can request this AS-REP for any vulnerable account without any credentials at all, then crack it offline.</p>
+<p>Detection: Event ID 4768 where <code>PreAuthType</code> = <code>0</code> (preauthentication not required).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Scan Active Directory for accounts with preauthentication disabled:
+# PowerShell:
+# Get-ADUser -Filter {DoesNotRequirePreAuth -eq $true} -Properties DoesNotRequirePreAuth |
+#   Select-Object Name, SamAccountName
+
+# Simulated result — accounts vulnerable to AS-REP Roasting:
+vulnerable_accounts = [
+    {&quot;name&quot;: &quot;SVC_Backup&quot;,  &quot;sam&quot;: &quot;svc_backup&quot;,  &quot;dept&quot;: &quot;IT&quot;,      &quot;has_spn&quot;: True},
+    {&quot;name&quot;: &quot;OldService&quot;,  &quot;sam&quot;: &quot;old_service&quot;,  &quot;dept&quot;: &quot;unknown&quot;, &quot;has_spn&quot;: False},
+]
+
+# Detection via Event ID 4768:
+auth_events = [
+    {&quot;event_id&quot;: &quot;4768&quot;, &quot;user&quot;: &quot;svc_backup&quot;, &quot;preauth_type&quot;: &quot;0&quot;, &quot;src_ip&quot;: &quot;10.0.99.5&quot;},
+    {&quot;event_id&quot;: &quot;4768&quot;, &quot;user&quot;: &quot;alice&quot;,       &quot;preauth_type&quot;: &quot;2&quot;, &quot;src_ip&quot;: &quot;10.0.1.15&quot;},
+]
+
+flagged = [e for e in auth_events if e.get(&quot;preauth_type&quot;) == &quot;0&quot;]
+print(flagged)
+# → [{&quot;event_id&quot;: &quot;4768&quot;, &quot;user&quot;: &quot;svc_backup&quot;, &quot;preauth_type&quot;: &quot;0&quot;, &quot;src_ip&quot;: &quot;10.0.99.5&quot;}]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>find_asrep_vulnerable(auth_events: list[dict]) -&gt; list[dict]</code> that:</p>
+<ol>
+<li>Finds all Event ID 4768 events with PreAuthType = 0</li>
+<li>Enriches each with the identity DB (account_type, is_admin) from Day 4</li>
+<li>Prioritizes alerts: admin accounts first, service accounts second, standard users third</li>
+</ol>
+<p>Expected output: the flagged event enriched with department and account_type, sorted by risk priority.</p>
+<hr />
+<h3>Concept 3 — Putting It Together: Identity-Enriched Detection Pipeline (Royal Road)</h3>
+<p>The W04 Royal Road artifact completes Phase 1 of the detection pipeline. You now have:</p>
+<ul>
+<li>W01: PCAP parser → network events CSV</li>
+<li>W02: EVTX parser → Windows log JSON Lines</li>
+<li>W03: syslog/auditd parser → Linux log JSON Lines</li>
+<li>W04: identity enrichment JOIN layer</li>
+</ul>
+<p>Together these form the data foundation every detection in Phases 2–7 builds on. Every event has: time, source_host, user_id, src_ip, event_type, plus identity context fields (department, account_type, is_admin, normal_hours).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Full pipeline run — conceptual:
+# 1. Parse inputs
+win_events  = evtx_to_jsonl(&quot;Security.evtx&quot;,        &quot;win_events.jsonl&quot;)
+lin_events  = parse_syslog(&quot;auth.log&quot;,               &quot;lin_events.jsonl&quot;)
+net_events  = parse_pcap(&quot;capture.pcap&quot;,             &quot;net_events.jsonl&quot;)
+
+# 2. Load unified
+all_events  = load_unified([&quot;win_events.jsonl&quot;, &quot;lin_events.jsonl&quot;, &quot;net_events.jsonl&quot;])
+
+# 3. Enrich with identity
+identity_db = load_identity_db(&quot;identity.json&quot;)
+enriched    = enrich_with_identity(all_events, identity_db)
+
+# 4. Run detections
+alerts = []
+alerts += detect_impossible_travel(enriched)
+alerts += detect_kerberoasting(enriched.to_dict(&quot;records&quot;))
+alerts += detect_cross_platform_spray(enriched)
+alerts += detect_terminated_user_activity(enriched.to_dict(&quot;records&quot;), identity_db)
+
+# 5. Output
+for alert in alerts:
+    print(json.dumps(alert))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>pipeline/w04_enrich.py</code> as a complete CLI script following the structure above. It should:</p>
+<ol>
+<li>Accept <code>--events</code> (list of <code>.jsonl</code> paths), <code>--identity identity.json</code>, <code>--output enriched.jsonl</code></li>
+<li>Load and merge all event sources</li>
+<li>Enrich with identity</li>
+<li>Write enriched events to <code>--output</code></li>
+<li>Print: <code>Enriched N events from X sources. Identity matched: Y events. Unmatched: Z events.</code></li>
+</ol>
+<p>Expected output: the printed summary and the enriched <code>.jsonl</code> file. Identity-matched count should equal the number of events where a user_id field was found AND matched a record in the identity DB.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs for detection rule generation from identity context
+<strong>Threat:</strong> An attacker obtains the identity enrichment schema and engineers their attack to operate within &quot;normal&quot; behavior bounds — using stolen credentials during normal business hours from a registered IP — making identity-based anomaly detection ineffective.
+<strong>Opportunity:</strong> Describe an attacker scenario (e.g., &quot;lateral movement using stolen admin credentials during business hours&quot;) and ask an LLM to generate detection rules that do NOT rely solely on time or IP anomalies — instead targeting behavioral indicators like: unusual data access volume, first-time access to sensitive systems, or account accessing systems it has never accessed before.
+<strong>Prompt to try:</strong> <code>&quot;Write a KQL detection rule for Microsoft Sentinel that identifies a user accessing a file server they have never accessed before, where the user has admin privileges and the access occurs via a network logon (Event ID 4624, LogonType 3). Include a 30-day baseline window and explain each clause.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 04</h2>
+<p><strong>Task:</strong> Build <code>pipeline/w04_enrich.py</code> — the identity enrichment JOIN layer that adds user context to every event in the unified pipeline.</p>
+<p><strong>Builds on:</strong></p>
+<ul>
+<li>W02 <code>pipeline/w02_evtx_parser.py</code> → <code>win_events.jsonl</code></li>
+<li>W03 <code>pipeline/w03_syslog_parser.py</code> → <code>lin_events.jsonl</code></li>
+<li>W01 <code>pipeline/w01_pcap_parser.py</code> → <code>net_events.jsonl</code></li>
+</ul>
+<p><strong>Deliverable:</strong> <code>pipeline/w04_enrich.py</code> that:</p>
+<ul>
+<li>Accepts <code>--events &lt;jsonl&gt;...</code> (multiple <code>.jsonl</code> files from W01-W03) and <code>--identity identity.json</code></li>
+<li>Loads all events into a unified DataFrame sorted by time</li>
+<li>Joins with identity DB on any user field found in each event</li>
+<li>Outputs enriched <code>.jsonl</code> with added columns: <code>department</code>, <code>account_type</code>, <code>is_admin</code>, <code>normal_hours_utc</code>, <code>is_active</code></li>
+<li>Also outputs <code>flagged_events.jsonl</code> for events that match: terminated user, off-hours access, or unregistered IP</li>
+<li>Prints: <code>Enriched N events. Identity matched: Y. Flagged: Z anomalies.</code></li>
+</ul>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># pipeline/w04_enrich.py
+import argparse
+import json
+import pandas as pd
+from pathlib import Path
+
+USER_FIELDS = [&quot;user&quot;, &quot;user_id&quot;, &quot;TargetUserName&quot;, &quot;SubjectUserName&quot;, &quot;username&quot;]
+
+def find_user_field(df: pd.DataFrame) -&gt; str | None:
+    return next((c for c in df.columns if c in USER_FIELDS), None)
+
+def load_identity_db(path: str) -&gt; dict[str, dict]:
+    ...
+
+def enrich(df: pd.DataFrame, identity_db: dict) -&gt; pd.DataFrame:
+    ...
+
+def flag_anomalies(df: pd.DataFrame) -&gt; pd.DataFrame:
+    ...
+
+if __name__ == &quot;__main__&quot;:
+    ap = argparse.ArgumentParser()
+    ap.add_argument(&quot;--events&quot;, nargs=&quot;+&quot;, required=True)
+    ap.add_argument(&quot;--identity&quot;, required=True)
+    ap.add_argument(&quot;--output&quot;, default=&quot;enriched.jsonl&quot;)
+    args = ap.parse_args()
+    ...
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Stretch goal:</strong> Add a <code>--summary</code> flag that prints a pivot table: events by department, by event_type, showing normal vs. flagged counts. This is the prototype of a coverage dashboard — built for real in W12.</p>
+<div class="pager"><a class="btn ghost" href="week-03.html">&larr; Week 03</a><a class="btn ghost" href="week-05.html">Week 05 &rarr;</a></div>
+</main></body></html>

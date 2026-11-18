@@ -1,0 +1,1256 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 14 — Network Detection</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 14 — Network Detection</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="14" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 14 — Network Detection</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 4 — Detection Engineering</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Network traffic analysis / SC-200: Network threat detection / GCIA: Network intrusion analysis</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>Zeek conn.log beaconing detector (Python)</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W01 (networking), W08 (log sources), W09 (SIEM queries), W11 (behavioral detection)</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Network Telemetry Sources</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=e1cwKwshC9I" target="_blank" rel="noopener"><b>SOC Lvl 1 / EP.16a / Zeek Tutorial Pt.1 / Security Analyst Training</b><small>Hank Hackerson</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=network%20detection%20Zeek%20Suricata%20PCAP%20network%20telemetry%20SOC%20analyst" target="_blank" rel="noopener">network detection Zeek Suricata PCAP network telemetry SOC analyst</a></p></div>
+<hr />
+<h3>Concept 1 — Network Telemetry Hierarchy</h3>
+<p>Network detection requires a different data source than endpoint detection. Where Sysmon captures what a process does, network telemetry captures what crosses the wire. The three primary network data sources for a SOC:</p>
+<p><strong>PCAP (Packet Capture)</strong>: full packet capture stores every byte of network traffic. Complete fidelity — you can reconstruct sessions, extract files, replay traffic. Cost: 1 Gbps of traffic generates roughly 450 GB/hour of PCAP. Typically retained for 24–72 hours due to storage cost.</p>
+<p><strong>Flow data (NetFlow/IPFIX/sFlow)</strong>: summarized per-connection metadata — source IP, dest IP, source port, dest port, byte count, packet count, duration. No payload content. Typical retention: 30–90 days. Used for beaconing detection, lateral movement detection, volumetric analysis.</p>
+<p><strong>Application-layer logs (Zeek/Bro logs)</strong>: Zeek parses protocols and extracts connection metadata, DNS queries, HTTP headers, SSL certificates, file hashes. Richer than flow data, cheaper than PCAP. Zeek generates per-protocol log files: <code>conn.log</code>, <code>dns.log</code>, <code>http.log</code>, <code>ssl.log</code>, <code>files.log</code>.</p>
+<p>Detection strategy: use Zeek logs as the primary detection source (rich, indexed, queryable). Use PCAP for forensic investigation after an alert fires. Use flow data for trend analysis and lateral movement hunting over long time windows.</p>
+<p>Data engineering analogy: PCAP = raw event stream with full payload (Kafka with message content retained). Flow data = aggregated metrics (Kafka → aggregation pipeline → metrics store). Zeek logs = structured ETL output (Kafka → Flink parsing → enriched event store).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class ZeekConnLog:
+    ts: float               # epoch timestamp
+    uid: str                # unique connection ID
+    id_orig_h: str          # source IP
+    id_orig_p: int          # source port
+    id_resp_h: str          # dest IP
+    id_resp_p: int          # dest port
+    proto: str              # tcp/udp/icmp
+    service: Optional[str]  # application protocol (http, dns, ssl)
+    duration: Optional[float]   # seconds
+    orig_bytes: Optional[int]   # bytes sent by originator
+    resp_bytes: Optional[int]   # bytes sent by responder
+    conn_state: str         # connection state code
+    local_orig: bool        # originator is local
+    local_resp: bool        # responder is local
+
+    def is_outbound(self) -&gt; bool:
+        return self.local_orig and not self.local_resp
+
+    def bytes_ratio(self) -&gt; Optional[float]:
+        if self.resp_bytes and self.orig_bytes and self.orig_bytes &gt; 0:
+            return round(self.resp_bytes / self.orig_bytes, 3)
+        return None
+
+conn = ZeekConnLog(
+    ts=1710499200.0, uid=&quot;CaBcDe1234567&quot;,
+    id_orig_h=&quot;10.0.1.42&quot;,   id_orig_p=54321,
+    id_resp_h=&quot;185.220.101.5&quot;, id_resp_p=443,
+    proto=&quot;tcp&quot;, service=&quot;ssl&quot;,
+    duration=120.3, orig_bytes=1024, resp_bytes=128,
+    conn_state=&quot;SF&quot;, local_orig=True, local_resp=False,
+)
+
+print(f&quot;Outbound: {conn.is_outbound()}&quot;)
+print(f&quot;Bytes ratio (resp/orig): {conn.bytes_ratio()}&quot;)
+print(f&quot;Duration: {conn.duration}s to {conn.id_resp_h}:{conn.id_resp_p}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a method <code>suspicious_port(self) -&gt; bool</code> that returns True if the destination port is in a list of commonly abused ports: 4444, 1234, 8888, 31337, 6667, 6697 (IRC), or if the service is None and dest port is not in a standard port list (80, 443, 53, 22, 25, 587, 993, 995, 8080, 8443). Create five test connections covering: normal HTTPS, a non-standard port with no service, a known evil port (4444), a normal DNS connection, and an HTTP connection on port 8888. Print which connections are flagged.
+Expected output: port 4444 and unidentified non-standard port connections flagged; HTTPS, DNS, HTTP on 8080/8443 not flagged</p>
+<hr />
+<h3>Concept 2 — Zeek conn.log Field Reference</h3>
+<p>Zeek's <code>conn.log</code> is the most important log file for network detection. It records every TCP, UDP, and ICMP connection that Zeek observes. Understanding every field is prerequisite to writing network detection logic.</p>
+<p>Critical fields for detection:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Detection Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>conn_state</code></td>
+<td>string</td>
+<td>SF=success, S0=SYN only (scan), REJ=rejected, RSTO=reset</td>
+</tr>
+<tr>
+<td><code>history</code></td>
+<td>string</td>
+<td>Connection flag history: S=SYN, A=ACK, D=data, F=FIN, R=RST</td>
+</tr>
+<tr>
+<td><code>missed_bytes</code></td>
+<td>int</td>
+<td>Non-zero = packet loss during capture (gaps in analysis)</td>
+</tr>
+<tr>
+<td><code>orig_bytes</code></td>
+<td>int</td>
+<td>Low orig_bytes + high resp_bytes = download/C2 check-in</td>
+</tr>
+<tr>
+<td><code>resp_bytes</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>orig_pkts</code></td>
+<td>int</td>
+<td>Packet counts for volumetric analysis</td>
+</tr>
+<tr>
+<td><code>duration</code></td>
+<td>float</td>
+<td>Very short + repeated = scanning; very long = persistent connection</td>
+</tr>
+</tbody>
+</table>
+<p><code>conn_state</code> codes:</p>
+<ul>
+<li><code>SF</code> — normal established and finished connection</li>
+<li><code>S0</code> — SYN sent, no response (port scan or filtered)</li>
+<li><code>S1</code> — SYN + SYN-ACK, no data (half-open scan)</li>
+<li><code>REJ</code> — connection rejected (RST response)</li>
+<li><code>RSTO</code> — originator reset (connection aborted)</li>
+<li><code>OTH</code> — no SYN, connection in middle of session (asymmetric traffic)</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List
+
+CONN_STATE_DESCRIPTIONS = {
+    &quot;SF&quot;:   &quot;Normal establish + close&quot;,
+    &quot;S0&quot;:   &quot;SYN only — no response (scan/filtered)&quot;,
+    &quot;S1&quot;:   &quot;SYN + SYN-ACK — no data transferred&quot;,
+    &quot;REJ&quot;:  &quot;Connection rejected (RST received)&quot;,
+    &quot;RSTO&quot;: &quot;Originator reset connection&quot;,
+    &quot;RSTOS0&quot;: &quot;Originator sent SYN then RST&quot;,
+    &quot;RSTR&quot;: &quot;Responder reset the connection&quot;,
+    &quot;SH&quot;:   &quot;SYN + FIN — no data (half-open)&quot;,
+    &quot;OTH&quot;:  &quot;Mid-session capture (asymmetric)&quot;,
+}
+
+def categorize_connection(conn: &quot;ZeekConnLog&quot;) -&gt; List[str]:
+    labels = []
+    state_desc = CONN_STATE_DESCRIPTIONS.get(conn.conn_state, &quot;Unknown&quot;)
+    labels.append(f&quot;STATE:{conn.conn_state}({state_desc})&quot;)
+
+    if conn.conn_state == &quot;S0&quot;:
+        labels.append(&quot;SCAN_CANDIDATE&quot;)
+    if conn.duration and conn.duration &gt; 3600:
+        labels.append(&quot;LONG_LIVED_CONNECTION&quot;)
+    if conn.orig_bytes is not None and conn.resp_bytes is not None:
+        if conn.orig_bytes &lt; 200 and conn.resp_bytes &gt; 10_000:
+            labels.append(&quot;ASYMMETRIC_BYTES:possible_C2_beacon&quot;)
+        if conn.orig_bytes &gt; 50_000_000:
+            labels.append(&quot;HIGH_UPLOAD:possible_exfiltration&quot;)
+    return labels
+
+@dataclass
+class ZeekConnLogSimple:
+    uid: str
+    id_orig_h: str
+    id_resp_h: str
+    id_resp_p: int
+    proto: str
+    service: str
+    duration: float
+    orig_bytes: int
+    resp_bytes: int
+    conn_state: str
+    local_orig: bool = True
+    local_resp: bool = False
+
+conns = [
+    ZeekConnLogSimple(&quot;C001&quot;, &quot;10.0.1.42&quot;, &quot;185.220.101.5&quot;, 443, &quot;tcp&quot;, &quot;ssl&quot;,   3720.0, 128,      512,      &quot;SF&quot;),
+    ZeekConnLogSimple(&quot;C002&quot;, &quot;10.0.1.42&quot;, &quot;10.0.1.1&quot;,       22, &quot;tcp&quot;, &quot;ssh&quot;,   0.001,  0,        0,        &quot;S0&quot;),
+    ZeekConnLogSimple(&quot;C003&quot;, &quot;10.0.1.42&quot;, &quot;185.220.101.5&quot;, 443, &quot;tcp&quot;, &quot;ssl&quot;,   0.8,    64,       52_000,   &quot;SF&quot;),
+    ZeekConnLogSimple(&quot;C004&quot;, &quot;10.0.1.42&quot;, &quot;192.168.10.5&quot;, 8080, &quot;tcp&quot;, None,    120.0,  90_000_000, 1024,   &quot;SF&quot;),
+]
+
+for conn in conns:
+    labels = categorize_connection(conn)
+    print(f&quot;{conn.uid} → {conn.id_resp_h}:{conn.id_resp_p}: {labels}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add two more categorization rules: (1) <code>INTERNAL_LATERAL_MOVEMENT</code> if both <code>local_orig</code> and <code>local_resp</code> are True and dest port is in (445, 135, 139, 5985, 5986, 3389); (2) <code>SCAN_SWEEP</code> if conn_state is S0 and it is the third or more occurrence for the same source IP across a provided list of connections (requires the function to accept all connections together). Restructure <code>categorize_connection</code> to accept a connection and a list of all connections. Create a list of 6 connections where at least 3 trigger the scan sweep from the same source and one triggers lateral movement. Print all labels.
+Expected output: 3 connections labeled SCAN_SWEEP for the scanning source; 1 labeled INTERNAL_LATERAL_MOVEMENT; others labeled with STATE/other indicators</p>
+<hr />
+<h3>Concept 3 — DNS Log Analysis</h3>
+<p><code>dns.log</code> is the second most important Zeek log for detection. DNS is used by nearly every C2 framework (DNS tunneling, DGA domains), and it is the first observable artifact when malware phones home. Every outbound connection to an external IP starts with a DNS query.</p>
+<p>Key <code>dns.log</code> fields:</p>
+<ul>
+<li><code>query</code>: the domain name being resolved</li>
+<li><code>qtype_name</code>: query type (A, AAAA, TXT, MX) — TXT queries to external domains are often used for C2 commands</li>
+<li><code>rcode_name</code>: response code (NOERROR, NXDOMAIN, SERVFAIL) — high NXDOMAIN rate = DGA activity</li>
+<li><code>answers</code>: list of resolved IP addresses</li>
+<li><code>TTL</code>: low TTL values (&lt; 60 seconds) indicate fast-flux DNS (botnet infrastructure)</li>
+<li><code>rejected</code>: True if the query was rejected by a DNS filter</li>
+</ul>
+<p>Detection patterns from DNS:</p>
+<ul>
+<li><strong>DGA (Domain Generation Algorithm)</strong>: high entropy domain names that resolve to NXDOMAIN — malware cycling through auto-generated domains looking for active C2</li>
+<li><strong>DNS tunneling</strong>: large TXT record queries, unusually long subdomain labels (data encoded in subdomain)</li>
+<li><strong>Fast-flux</strong>: TTL &lt; 30 seconds + multiple A record answers</li>
+<li><strong>Typosquatting</strong>: domains similar to legitimate domains (leveled by edit distance)</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import math
+from dataclasses import dataclass
+from typing import List, Optional
+
+@dataclass
+class ZeekDNSLog:
+    ts: float
+    uid: str
+    id_orig_h: str
+    query: str
+    qtype_name: str
+    rcode_name: str
+    answers: List[str]
+    ttl: Optional[float]
+
+def shannon_entropy(s: str) -&gt; float:
+    if not s:
+        return 0.0
+    freq = {c: s.count(c) / len(s) for c in set(s)}
+    return -sum(p * math.log2(p) for p in freq.values())
+
+def analyze_dns_query(log: ZeekDNSLog) -&gt; List[str]:
+    indicators = []
+    domain = log.query.lower()
+
+    if log.rcode_name == &quot;NXDOMAIN&quot;:
+        indicators.append(&quot;NXDOMAIN&quot;)
+
+    entropy = shannon_entropy(domain.split(&quot;.&quot;)[0])
+    if entropy &gt; 3.5:
+        indicators.append(f&quot;HIGH_ENTROPY_DOMAIN:{entropy:.2f}&quot;)
+
+    if log.qtype_name == &quot;TXT&quot;:
+        indicators.append(&quot;TXT_QUERY:possible_C2_channel&quot;)
+
+    if log.ttl and log.ttl &lt; 30:
+        indicators.append(f&quot;LOW_TTL:{log.ttl}s:fast_flux&quot;)
+
+    subdomain_part = &quot;.&quot;.join(domain.split(&quot;.&quot;)[:-2]) if len(domain.split(&quot;.&quot;)) &gt; 2 else &quot;&quot;
+    if len(subdomain_part) &gt; 40:
+        indicators.append(f&quot;LONG_SUBDOMAIN:{len(subdomain_part)}chars:possible_tunneling&quot;)
+
+    return indicators
+
+logs = [
+    ZeekDNSLog(1710499200.0, &quot;D001&quot;, &quot;10.0.1.42&quot;, &quot;xkjhqwzplmvb.com&quot;,           &quot;A&quot;,   &quot;NXDOMAIN&quot;, [],                  None),
+    ZeekDNSLog(1710499201.0, &quot;D002&quot;, &quot;10.0.1.42&quot;, &quot;google.com&quot;,                  &quot;A&quot;,   &quot;NOERROR&quot;,  [&quot;142.250.80.46&quot;],    300.0),
+    ZeekDNSLog(1710499202.0, &quot;D003&quot;, &quot;10.0.1.42&quot;, &quot;data.c2.evil.com&quot;,            &quot;TXT&quot;, &quot;NOERROR&quot;,  [&quot;aGVsbG8gd29ybGQ=&quot;], 5.0),
+    ZeekDNSLog(1710499203.0, &quot;D004&quot;, &quot;10.0.1.42&quot;,
+               &quot;aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Q.evil.com&quot;, &quot;A&quot;, &quot;NOERROR&quot;, [&quot;10.10.10.1&quot;], 10.0),
+]
+
+for log in logs:
+    indicators = analyze_dns_query(log)
+    if indicators:
+        print(f&quot;{log.uid} {log.query[:50]}: {indicators}&quot;)
+    else:
+        print(f&quot;{log.uid} {log.query[:50]}: CLEAN&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add detection for two more DNS patterns: (1) <code>HOMOGLYPH_ATTACK</code> — domain contains Unicode characters or has character substitution resembling <code>microsoft.com</code>, <code>google.com</code>, <code>apple.com</code> (check for common substitutions: 0→o, 1→l, rn→m, vv→w, use a simple comparison with <code>difflib.SequenceMatcher</code>); (2) <code>REPEATED_NXDOMAIN</code> — given a list of all DNS logs, flag a source IP that has generated more than 10 NXDOMAIN responses in the batch (DGA behavior). Add both to <code>analyze_dns_query</code> and test with appropriate entries.
+Expected output: homoglyph domain flagged; source with 10+ NXDOMAINs flagged as DGA; clean domains remain CLEAN</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can classify domain names as malicious or benign by reasoning about lexical features (length, entropy, character distribution) without needing a threat intelligence lookup.
+<strong>Threat:</strong> LLM-powered DNS filtering that blocks domains based on LLM classification introduces false positives for legitimate but unusual domain names (brand new TLDs, IDN domains, short cryptic domains used by legitimate services).
+<strong>Opportunity:</strong> Use an LLM as a second-pass triage tool for high-entropy DNS queries — it can cross-reference the domain against known legitimate patterns and explain its reasoning.
+<strong>Prompt to try:</strong> <code>&quot;Classify the following domain names as likely-malicious or likely-legitimate, and explain your reasoning for each. Focus on lexical indicators (entropy, length, character distribution, structure) since you cannot resolve them. Domains: (1) xkjhqwzplmvb.com (2) updates.microsoft-telemetry.com (3) cdn-23.fastly.net (4) d1kq8bvxtjfqn.cloudfront.net (5) aHR0cHM6Ly9ldmlsLmNvbQ.exfil.net. For each: verdict (malicious/benign/suspicious), confidence (1-5), and key lexical indicators.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — C2 Beaconing Detection</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=T7ui-DR6sgU" target="_blank" rel="noopener"><b>Cobalt Strike Detection</b><small>Jose Bravo</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=C2%20beacon%20detection%20Python%20network%20traffic%20periodic%20connections%20Cobalt%20Strike" target="_blank" rel="noopener">C2 beacon detection Python network traffic periodic connections Cobalt Strike</a></p></div>
+<hr />
+<h3>Concept 1 — Beaconing Patterns</h3>
+<p>Command-and-control (C2) malware typically &quot;beacons&quot; — makes periodic outbound connections to a C2 server to check for commands. The beacon is a short HTTP or DNS request sent on a regular schedule (e.g., every 60 seconds) with a small amount of jitter to avoid exact periodicity detection.</p>
+<p>Beacon characteristics:</p>
+<ul>
+<li><strong>Periodicity</strong>: connections at regular intervals (e.g., every 60 ± 10 seconds)</li>
+<li><strong>Consistent destination</strong>: same IP/domain, same port</li>
+<li><strong>Small payload</strong>: check-in beacon is typically &lt; 200 bytes outbound</li>
+<li><strong>Long duration</strong>: a compromised host may beacon for days or weeks</li>
+<li><strong>Jitter</strong>: attacker adds random delay (typically ±20% of interval) to defeat exact-interval detection</li>
+</ul>
+<p>Detection approach: calculate the statistical distribution of inter-arrival times between connections to the same destination. A beacon produces a narrow inter-arrival time distribution (low variance around the mean interval). Legitimate web browsing produces a wide, irregular distribution.</p>
+<p>Metrics used:</p>
+<ul>
+<li><strong>Mean inter-arrival time (μ)</strong>: the likely beacon interval</li>
+<li><strong>Standard deviation (σ)</strong>: low σ = consistent interval = beacon</li>
+<li><strong>Coefficient of variation (CV = σ/μ)</strong>: scale-independent regularity metric; CV &lt; 0.3 is suspicious</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import statistics
+from dataclasses import dataclass
+from typing import List, Tuple
+
+@dataclass
+class ConnectionRecord:
+    source_ip: str
+    dest_ip: str
+    dest_port: int
+    timestamp: float    # epoch seconds
+    orig_bytes: int
+    resp_bytes: int
+
+def compute_beacon_score(connections: List[ConnectionRecord]) -&gt; dict:
+    if len(connections) &lt; 5:
+        return {&quot;verdict&quot;: &quot;INSUFFICIENT_DATA&quot;, &quot;count&quot;: len(connections)}
+
+    timestamps = sorted(c.timestamp for c in connections)
+    intervals = [timestamps[i+1] - timestamps[i] for i in range(len(timestamps)-1)]
+
+    mean_interval = statistics.mean(intervals)
+    if mean_interval == 0:
+        return {&quot;verdict&quot;: &quot;BURST&quot;, &quot;count&quot;: len(connections)}
+
+    stdev = statistics.stdev(intervals) if len(intervals) &gt; 1 else 0
+    cv = stdev / mean_interval
+
+    mean_bytes = statistics.mean(c.orig_bytes for c in connections)
+
+    return {
+        &quot;source_ip&quot;:      connections[0].source_ip,
+        &quot;dest_ip&quot;:        connections[0].dest_ip,
+        &quot;dest_port&quot;:      connections[0].dest_port,
+        &quot;connection_count&quot;: len(connections),
+        &quot;mean_interval_s&quot;: round(mean_interval, 1),
+        &quot;stdev_s&quot;:         round(stdev, 1),
+        &quot;cv&quot;:              round(cv, 3),
+        &quot;mean_bytes_out&quot;:  round(mean_bytes, 0),
+        &quot;verdict&quot;:        &quot;BEACON&quot; if cv &lt; 0.3 and len(connections) &gt;= 10 else &quot;IRREGULAR&quot;,
+    }
+
+import random
+random.seed(42)
+
+base_time = 1710499200.0
+beacon_interval = 60.0
+jitter = 0.15
+
+beacon_connections = [
+    ConnectionRecord(
+        &quot;10.0.1.42&quot;, &quot;185.220.101.5&quot;, 443,
+        timestamp=base_time + i * beacon_interval + random.uniform(-jitter * beacon_interval, jitter * beacon_interval),
+        orig_bytes=random.randint(50, 150),
+        resp_bytes=random.randint(100, 300),
+    )
+    for i in range(20)
+]
+
+result = compute_beacon_score(beacon_connections)
+print(f&quot;Verdict: {result[&#x27;verdict&#x27;]}&quot;)
+print(f&quot;Interval: {result[&#x27;mean_interval_s&#x27;]}s ± {result[&#x27;stdev_s&#x27;]}s (CV={result[&#x27;cv&#x27;]})&quot;)
+print(f&quot;Connections: {result[&#x27;connection_count&#x27;]} over {result[&#x27;mean_interval_s&#x27;] * result[&#x27;connection_count&#x27;] / 60:.1f} min&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Create a second set of connections simulating normal web browsing: 20 connections to a CDN server at irregular intervals (random between 5 and 3600 seconds). Run <code>compute_beacon_score</code> on both. Then add a function <code>beacon_hunting(all_groups: dict) -&gt; List[str]</code> that takes a dict keyed by <code>(source_ip, dest_ip, dest_port)</code> and returns the list of destination keys where <code>verdict == &quot;BEACON&quot;</code>. Run it on both connection groups combined.
+Expected output: beacon connections produce BEACON verdict with CV &lt; 0.3; browsing connections produce IRREGULAR verdict; hunting function returns only the beacon destination</p>
+<hr />
+<h3>Concept 2 — Jitter Analysis and Seasonality</h3>
+<p>Simple CV-based beaconing detection fails against low-jitter beacons (always ±0.5%) and against legitimate services that happen to poll regularly (Windows Update, antivirus definition updates, NTP). Advanced beacon detection adds:</p>
+<p><strong>Seasonality filtering</strong>: legitimate periodic connections (NTP port 123, Windows Update, DNS heartbeats) are allowlisted by port or destination domain. If the destination is a known CDN or a Microsoft IP range, the connection is excluded before beacon scoring.</p>
+<p><strong>Jitter distribution analysis</strong>: true beacons have jitter concentrated around the mean (Gaussian-like). Legitimate periodic traffic often has bimodal distributions (e.g., a service that polls at :00 and :30 of each minute).</p>
+<p><strong>Autocorrelation</strong>: calculate the autocorrelation of the timestamp series at lag-1. Strong positive autocorrelation (ρ &gt; 0.7) indicates a self-similar pattern — the interval at time T predicts the interval at time T+1, which is characteristic of jitter-based beacons.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import statistics
+from typing import List
+
+ALLOWLISTED_PORTS = {53, 123, 80, 443}
+ALLOWLISTED_DEST_PREFIXES = (&quot;8.8.8.8&quot;, &quot;8.8.4.4&quot;, &quot;13.107.&quot;, &quot;20.190.&quot;, &quot;204.79.&quot;)
+
+def should_allowlist(dest_ip: str, dest_port: int) -&gt; bool:
+    if dest_port in ALLOWLISTED_PORTS:
+        return True
+    return any(dest_ip.startswith(prefix) for prefix in ALLOWLISTED_DEST_PREFIXES)
+
+def autocorrelation_lag1(intervals: List[float]) -&gt; float:
+    if len(intervals) &lt; 3:
+        return 0.0
+    n = len(intervals)
+    mean = statistics.mean(intervals)
+    variance = statistics.variance(intervals)
+    if variance == 0:
+        return 1.0
+    covariance = sum((intervals[i] - mean) * (intervals[i+1] - mean) for i in range(n-1)) / (n - 1)
+    return round(covariance / variance, 3)
+
+def enhanced_beacon_score(connections: List[&quot;ConnectionRecord&quot;]) -&gt; dict:
+    if not connections:
+        return {}
+
+    dest_ip = connections[0].dest_ip
+    dest_port = connections[0].dest_port
+
+    if should_allowlist(dest_ip, dest_port):
+        return {&quot;verdict&quot;: &quot;ALLOWLISTED&quot;, &quot;dest&quot;: dest_ip, &quot;port&quot;: dest_port}
+
+    if len(connections) &lt; 5:
+        return {&quot;verdict&quot;: &quot;INSUFFICIENT_DATA&quot;}
+
+    timestamps = sorted(c.timestamp for c in connections)
+    intervals = [timestamps[i+1] - timestamps[i] for i in range(len(timestamps)-1)]
+    mean_i = statistics.mean(intervals)
+    cv = statistics.stdev(intervals) / mean_i if mean_i &gt; 0 else 999
+    acf = autocorrelation_lag1(intervals)
+
+    beacon_score = 0
+    if cv &lt; 0.30:
+        beacon_score += 3
+    elif cv &lt; 0.50:
+        beacon_score += 1
+
+    if acf &gt; 0.70:
+        beacon_score += 2
+
+    if statistics.mean(c.orig_bytes for c in connections) &lt; 300:
+        beacon_score += 1
+
+    verdict = &quot;BEACON&quot; if beacon_score &gt;= 4 else (&quot;SUSPICIOUS&quot; if beacon_score &gt;= 2 else &quot;CLEAN&quot;)
+
+    return {
+        &quot;dest&quot;: dest_ip, &quot;port&quot;: dest_port,
+        &quot;count&quot;: len(connections),
+        &quot;cv&quot;: round(cv, 3), &quot;acf_lag1&quot;: acf,
+        &quot;beacon_score&quot;: beacon_score, &quot;verdict&quot;: verdict,
+    }
+
+# Test the allowlist
+print(f&quot;Google DNS allowlisted: {should_allowlist(&#x27;8.8.8.8&#x27;, 53)}&quot;)
+print(f&quot;Unknown IP port 443: {should_allowlist(&#x27;185.220.101.5&#x27;, 443)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Build a <code>ConnectionRecord</code> list for an NTP sync connection (dest port 123, 4 connections at 3600-second intervals) and a Microsoft Update connection (dest IP starts with <code>20.190.</code>, port 443, 6 connections at irregular intervals). Run <code>enhanced_beacon_score</code> on both — both should be allowlisted or produce low beacon scores. Then run it on the beacon connections from Concept 1 (with <code>dest_port=4444</code> to avoid allowlisting port 443 if needed). Print verdicts for all three.
+Expected output: NTP → ALLOWLISTED; MS Update → ALLOWLISTED or CLEAN; beacon connections on port 4444 → BEACON with score ≥ 4</p>
+<hr />
+<h3>Concept 3 — Lateral Movement Detection via Network</h3>
+<p>Lateral movement leaves network signatures that differ from normal user traffic. Key patterns:</p>
+<ul>
+<li><strong>SMB scanning</strong>: short-duration connections to port 445 across many internal IPs from a single source — indicates automated enumeration</li>
+<li><strong>WMI remote execution</strong>: connections from a workstation to port 135 (RPC endpoint mapper) then an ephemeral high port on another internal host</li>
+<li><strong>Pass-the-Hash / Pass-the-Ticket</strong>: SMB authentication to multiple hosts in rapid succession from a single source, often at unusual hours</li>
+<li><strong>RDP brute force</strong>: multiple connection attempts to port 3389 with REJ or failed state from a single source</li>
+</ul>
+<p>Detection strategy for lateral movement: look for a single internal source connecting to many internal destinations on administrative ports (445, 135, 3389, 5985) within a short time window.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from collections import defaultdict
+from datetime import datetime
+from typing import List, Dict
+
+def detect_lateral_movement(
+    connections: List[&quot;ZeekConnLogSimple&quot;],
+    time_window_seconds: float = 300,
+    min_unique_targets: int = 5,
+    admin_ports: set = None,
+) -&gt; List[dict]:
+    if admin_ports is None:
+        admin_ports = {445, 135, 139, 3389, 5985, 5986, 22}
+
+    source_to_targets: Dict[str, set] = defaultdict(set)
+    source_first_seen: Dict[str, float] = {}
+
+    for conn in connections:
+        if not (conn.local_orig and conn.local_resp):
+            continue
+        if conn.id_resp_p not in admin_ports:
+            continue
+
+        src = conn.id_orig_h
+        if src not in source_first_seen:
+            source_first_seen[src] = conn.ts
+        if conn.ts - source_first_seen[src] &lt;= time_window_seconds:
+            source_to_targets[src].add((conn.id_resp_h, conn.id_resp_p))
+
+    alerts = []
+    for src, targets in source_to_targets.items():
+        unique_hosts = len({t[0] for t in targets})
+        if unique_hosts &gt;= min_unique_targets:
+            alerts.append({
+                &quot;source_ip&quot;: src,
+                &quot;unique_target_hosts&quot;: unique_hosts,
+                &quot;connections&quot;: len(targets),
+                &quot;ports_used&quot;: sorted({t[1] for t in targets}),
+                &quot;verdict&quot;: &quot;LATERAL_MOVEMENT_CANDIDATE&quot;,
+            })
+    return alerts
+
+@dataclass
+class ZeekConnLogSimple:
+    ts: float
+    uid: str
+    id_orig_h: str
+    id_resp_h: str
+    id_orig_p: int
+    id_resp_p: int
+    proto: str
+    service: str
+    duration: float
+    orig_bytes: int
+    resp_bytes: int
+    conn_state: str
+    local_orig: bool = True
+    local_resp: bool = False
+
+base = 1710499200.0
+lateral_conns = [
+    ZeekConnLogSimple(base + i * 10, f&quot;L{i:03d}&quot;, &quot;10.0.1.42&quot;, f&quot;10.0.1.{100+i}&quot;, 54321, 445, &quot;tcp&quot;, &quot;smb&quot;, 0.5, 256, 1024, &quot;SF&quot;, True, True)
+    for i in range(10)
+]
+
+alerts = detect_lateral_movement(lateral_conns)
+for alert in alerts:
+    print(f&quot;ALERT: {alert[&#x27;source_ip&#x27;]} → {alert[&#x27;unique_target_hosts&#x27;]} hosts via ports {alert[&#x27;ports_used&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add two more connection groups to <code>lateral_conns</code>: (1) a legitimate user connecting to 3 internal hosts on port 3389 over 10 minutes (below the threshold — should not alert); (2) a second scanner hitting 8 hosts on port 5985 (WinRM) in 60 seconds (should alert). Rebuild the detection and print all alerts with the source IP and target count. Then add a <code>risk_level</code> key to each alert: &quot;HIGH&quot; if ports include 445 (SMB) or 135 (RPC), &quot;MEDIUM&quot; otherwise.
+Expected output: scanner 1 (10 SMB hosts) → HIGH; scanner 2 (8 WinRM hosts) → MEDIUM; legitimate user (3 RDP hosts) → no alert</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can correlate DNS queries with subsequent network connections to reconstruct the full C2 kill chain in plain English — helping analysts understand the scope of a beacon alert.
+<strong>Threat:</strong> An attacker using DNS-over-HTTPS (DoH) routes all DNS traffic through an encrypted HTTPS tunnel, making DNS queries invisible to Zeek's <code>dns.log</code> and breaking DNS-based detection.
+<strong>Opportunity:</strong> Use an LLM to generate investigation queries that correlate conn.log and dns.log data around a beacon alert, reducing analyst investigation time from 30 minutes to 5 minutes.
+<strong>Prompt to try:</strong> <code>&quot;A beacon alert fired: source IP 10.0.1.42 made 47 connections to 185.220.101.5:443 over 47 minutes with CV=0.08 (mean interval 60.2 seconds, 128 bytes average outbound). Write a 5-step investigation playbook: (1) what to query in Zeek logs, (2) what to check on the source host, (3) how to determine if this is a known C2 framework, (4) how to identify what commands may have been sent, (5) containment actions if confirmed C2. Include the specific Zeek field names and log files to query in each step.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — Intrusion Detection Systems</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=8h_r7brfc3E" target="_blank" rel="noopener"><b>Writing Simple Custom Suricata Rules</b><small>Mohammed M. Alani</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Suricata%20IDS%20rules%20detection%20network%20intrusion%20alert%20signature%20writing" target="_blank" rel="noopener">Suricata IDS rules detection network intrusion alert signature writing</a></p></div>
+<hr />
+<h3>Concept 1 — Suricata Rule Structure</h3>
+<p>Suricata is an open-source network IDS/IPS that performs deep packet inspection and matches traffic against a rule library. Where Zeek extracts metadata, Suricata inspects payload content and matches signatures in real time — the network equivalent of YARA for endpoint files.</p>
+<p>Suricata rule anatomy:</p>
+<pre><code>alert tcp $HOME_NET any -&gt; $EXTERNAL_NET 443 (msg:&quot;Cobalt Strike Beacon HTTPS&quot;; flow:established,to_server; content:&quot;GET&quot;; http_method; content:&quot;/jquery-3.3.1.min.js&quot;; http_uri; threshold:type both,track by_src,count 3,seconds 60; classtype:trojan-activity; sid:9001001; rev:1;)
+</code></pre><p>Components:</p>
+<ul>
+<li><strong>Action</strong>: <code>alert</code> (log), <code>drop</code> (IPS mode), <code>reject</code>, <code>pass</code></li>
+<li><strong>Protocol</strong>: <code>tcp</code>, <code>udp</code>, <code>icmp</code>, <code>http</code>, <code>dns</code>, <code>tls</code></li>
+<li><strong>Source/Dest</strong>: <code>$HOME_NET</code>, <code>$EXTERNAL_NET</code>, specific IP, <code>any</code></li>
+<li><strong>Port</strong>: specific port, port group, <code>any</code></li>
+<li><strong>Options</strong>: everything in parentheses — <code>msg</code>, <code>content</code>, <code>pcre</code>, <code>threshold</code>, <code>classtype</code>, <code>sid</code></li>
+</ul>
+<p>Key option keywords:</p>
+<ul>
+<li><code>content</code>: exact byte match — e.g., <code>content:&quot;evil.exe&quot;</code></li>
+<li><code>pcre</code>: Perl-compatible regex — e.g., <code>pcre:&quot;/[A-Z0-9]{32}\.php/i&quot;</code></li>
+<li><code>flow</code>: direction (established, to_server, to_client)</li>
+<li><code>http_uri</code>, <code>http_header</code>, <code>http_client_body</code>: apply match to specific HTTP layer</li>
+<li><code>threshold</code>: alert suppression — fire once per source per N seconds</li>
+<li><code>sid</code>: unique rule ID (5000000+ for local rules)</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class SuricataRule:
+    action: str
+    proto: str
+    src: str
+    src_port: str
+    direction: str
+    dst: str
+    dst_port: str
+    msg: str
+    content: Optional[str]
+    pcre: Optional[str]
+    flow: Optional[str]
+    classtype: str
+    sid: int
+    rev: int = 1
+
+    def to_rule_string(self) -&gt; str:
+        options = [f&#x27;msg:&quot;{self.msg}&quot;&#x27;]
+        if self.flow:
+            options.append(f&quot;flow:{self.flow}&quot;)
+        if self.content:
+            options.append(f&#x27;content:&quot;{self.content}&quot;&#x27;)
+        if self.pcre:
+            options.append(f&quot;pcre:{self.pcre}&quot;)
+        options += [
+            f&quot;classtype:{self.classtype}&quot;,
+            f&quot;sid:{self.sid}&quot;,
+            f&quot;rev:{self.rev}&quot;,
+        ]
+        opts_str = &quot;; &quot;.join(options) + &quot;;&quot;
+        return (
+            f&quot;{self.action} {self.proto} {self.src} {self.src_port} &quot;
+            f&quot;{self.direction} {self.dst} {self.dst_port} ({opts_str})&quot;
+        )
+
+rule = SuricataRule(
+    action=&quot;alert&quot;, proto=&quot;dns&quot;,
+    src=&quot;$HOME_NET&quot;, src_port=&quot;any&quot;,
+    direction=&quot;-&gt;&quot;, dst=&quot;any&quot;, dst_port=&quot;53&quot;,
+    msg=&quot;DNS Query for High-Entropy Domain&quot;,
+    content=None,
+    pcre=&#x27;&quot;/^[a-z0-9]{12,}\\.(?:com|net|org)$/i&quot;&#x27;,
+    flow=None,
+    classtype=&quot;trojan-activity&quot;,
+    sid=9001002,
+)
+print(rule.to_rule_string())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write three more <code>SuricataRule</code> objects as Python dataclasses and call <code>to_rule_string()</code> on each: (1) an HTTP rule alerting on a User-Agent string that matches a known C2 framework pattern (e.g., Cobalt Strike's default <code>&quot;User-Agent: Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; Trident/5.0)&quot;</code> — use <code>content</code> with <code>http_header</code>); (2) a TLS rule alerting on an SNI hostname containing <code>ngrok.io</code> or <code>serveo.net</code> (tunneling services — use <code>tls.sni</code> or content match in TLS hello); (3) a TCP rule alerting on Meterpreter stage 2 loading (TCP payload starting with <code>\x4d\x5a</code> — MZ header — on a non-standard port). Print all three rule strings.
+Expected output: three valid Suricata rule strings; each with a unique SID, appropriate protocol, and msg</p>
+<hr />
+<h3>Concept 2 — Network Sigma Rules</h3>
+<p>Sigma supports a <code>network_connection</code> log source category that maps to Zeek <code>conn.log</code> fields. Network Sigma rules can be deployed to SIEM platforms that ingest Zeek logs (Elastic, Splunk, Sentinel) using the same Sigma toolchain as endpoint rules.</p>
+<p>A network Sigma rule targeting beaconing looks for the pattern: high connection count to a single external destination within a time window. Most SIEM platforms support this via aggregate functions (KQL's <code>summarize</code>, SPL's <code>stats count</code>).</p>
+<p>Network Sigma limitations compared to Suricata:</p>
+<ul>
+<li>No payload inspection — you cannot match HTTP body content or TLS SNI in a Sigma rule targeting conn.log (you need Zeek <code>http.log</code> or <code>ssl.log</code>)</li>
+<li>Relies on metadata only — connection count, byte volumes, duration</li>
+<li>No real-time blocking capability — Sigma produces alerts, not drops</li>
+</ul>
+<p>Use Suricata for real-time signature matching and inline blocking. Use Sigma for behavioral detection over aggregated metadata over longer time windows.</p>
+<p><strong>Example:</strong></p>
+<pre><code>title: Potential C2 Beaconing — High Connection Count to Single External IP
+id: d1e2f3a4-5b6c-7d8e-9f0a-bcdef1234567
+status: experimental
+description: Detects a single internal host making an unusually high number of
+  connections to the same external IP on the same port within a short time window.
+  Indicator of C2 beaconing or automated outbound traffic.
+references:
+  - https://attack.mitre.org/techniques/T1071/001/
+author: Detection Team
+date: 2024/03/15
+tags:
+  - attack.command_and_control
+  - attack.t1071_001
+logsource:
+  category: network_connection
+  product: zeek
+detection:
+  selection:
+    EventID: conn
+    local_orig: true
+    local_resp: false
+    conn_state: &#x27;SF&#x27;
+  timeframe: 1h
+  condition: selection | count(uid) by id.orig_h, id.resp_h, id.resp_p &gt; 30
+falsepositives:
+  - Streaming media clients
+  - Software update services
+  - Chat and collaboration tools with persistent connections
+level: medium
+</code></pre><p><strong>Exercise:</strong>
+Write a Python function <code>sigma_aggregate_to_kql(rule_yaml_str: str) -&gt; str</code> that parses a Sigma rule YAML string and converts the aggregate condition (<code>count(field) by ... &gt; N</code>) into the equivalent KQL query fragment. The KQL should use <code>| summarize count() by id_orig_h, id_resp_h, id_resp_p | where count_ &gt; 30</code>. Parse the rule above and print the generated KQL. Handle the case where the rule has no aggregate condition by returning the rule as a plain where clause.
+Expected output: KQL query string with the correct field names and threshold; parsed cleanly from the YAML rule above</p>
+<hr />
+<h3>Concept 3 — Threat Intelligence Integration with Network Logs</h3>
+<p>Network log analysis becomes significantly more powerful when enriched with threat intelligence (TI). An IP address appearing in <code>conn.log</code> means little in isolation; the same IP flagged as a known C2 server in a TI feed is an immediate high-priority alert.</p>
+<p>TI enrichment workflow for network logs:</p>
+<ol>
+<li>Extract all external destination IPs from <code>conn.log</code></li>
+<li>Look up each IP against TI feeds (VirusTotal, AbuseIPDB, Shodan, AlienVault OTX)</li>
+<li>Tag each connection with TI hits: confidence score, threat categories, reported malware families</li>
+<li>Correlate TI-tagged connections with user accounts and hostnames</li>
+<li>Auto-escalate connections with TI confidence ≥ 80 to Tier 1 analyst queue</li>
+</ol>
+<p>TI feed limitations: false positives exist (IP reputation can lag — an IP cleaned up but still listed as malicious); TI misses novel infrastructure (zero-day C2 servers never seen before). TI enrichment is a signal multiplier, not a standalone detection.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import Optional, List
+
+@dataclass
+class ThreatIntelRecord:
+    indicator: str
+    indicator_type: str   # &quot;ip&quot; | &quot;domain&quot; | &quot;hash&quot;
+    confidence: int       # 0–100
+    threat_types: List[str]
+    malware_families: List[str]
+    source: str
+
+TI_DATABASE = {
+    &quot;185.220.101.5&quot;: ThreatIntelRecord(
+        &quot;185.220.101.5&quot;, &quot;ip&quot;, 95,
+        [&quot;c2_server&quot;, &quot;ransomware_infrastructure&quot;],
+        [&quot;LockBit&quot;, &quot;BlackCat&quot;],
+        &quot;AlienVault OTX&quot;,
+    ),
+    &quot;10.10.10.99&quot;: ThreatIntelRecord(
+        &quot;10.10.10.99&quot;, &quot;ip&quot;, 75,
+        [&quot;scanner&quot;, &quot;brute_force&quot;],
+        [],
+        &quot;AbuseIPDB&quot;,
+    ),
+}
+
+def enrich_connection(conn: &quot;ZeekConnLogSimple&quot;) -&gt; Optional[dict]:
+    ti = TI_DATABASE.get(conn.id_resp_h)
+    if ti is None:
+        return None
+    return {
+        &quot;source_ip&quot;:       conn.id_orig_h,
+        &quot;dest_ip&quot;:         conn.id_resp_h,
+        &quot;dest_port&quot;:       conn.id_resp_p,
+        &quot;ti_confidence&quot;:   ti.confidence,
+        &quot;threat_types&quot;:    ti.threat_types,
+        &quot;malware_families&quot;: ti.malware_families,
+        &quot;ti_source&quot;:       ti.source,
+        &quot;auto_escalate&quot;:   ti.confidence &gt;= 80,
+    }
+
+test_connections = [
+    ZeekConnLogSimple(1710499200.0, &quot;C001&quot;, &quot;10.0.1.42&quot;, &quot;185.220.101.5&quot;, 54321, 443, &quot;tcp&quot;, &quot;ssl&quot;, 3.0, 128, 512, &quot;SF&quot;),
+    ZeekConnLogSimple(1710499201.0, &quot;C002&quot;, &quot;10.0.1.43&quot;, &quot;8.8.8.8&quot;,       54322,  53, &quot;udp&quot;, &quot;dns&quot;, 0.1,  64,  64, &quot;SF&quot;),
+]
+
+for conn in test_connections:
+    enrichment = enrich_connection(conn)
+    if enrichment:
+        print(f&quot;TI HIT: {enrichment[&#x27;dest_ip&#x27;]} — confidence={enrichment[&#x27;ti_confidence&#x27;]} | {enrichment[&#x27;malware_families&#x27;]}&quot;)
+        print(f&quot;  Auto-escalate: {enrichment[&#x27;auto_escalate&#x27;]}&quot;)
+    else:
+        print(f&quot;No TI: {conn.id_resp_h}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add three more entries to <code>TI_DATABASE</code>: a known phishing domain, a Tor exit node IP, and a DGA-generated domain. Write a function <code>batch_enrich(connections: list, ti_db: dict) -&gt; dict</code> that returns <code>{&quot;hits&quot;: [...], &quot;no_hit&quot;: N, &quot;auto_escalated&quot;: N}</code>. Run it on a list of 10 test connections (3 hitting TI, 7 clean). Print the summary dict and the details of each hit.
+Expected output: summary dict with hits=3, no_hit=7, auto_escalated reflecting rules above; each hit detail printed</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can correlate endpoint EDR alerts with network alerts from the same timeframe and hostname, building a unified kill chain narrative without manual analyst correlation.
+<strong>Threat:</strong> LLMs that receive network flow data containing IP addresses, domains, and connection counts may inadvertently leak network topology information if the prompt is logged or cached by the LLM provider.
+<strong>Opportunity:</strong> Use an LLM to generate a natural-language kill chain summary by correlating a Sysmon process creation event with a subsequent Zeek C2 beacon alert from the same host.
+<strong>Prompt to try:</strong> <code>&quot;Correlate these two security alerts from the same host (ws-042, user CORP\\jsmith): Alert 1 (09:15:23 UTC) - Sysmon Event 1: winword.exe spawned powershell.exe with '-enc aQBlAHgA'. Alert 2 (09:15:45 UTC) - Zeek conn.log: ws-042 (10.0.1.42) began beaconing to 185.220.101.5:443 every 60 seconds with 128 bytes average outbound. Write a kill chain narrative: (1) what likely happened in the 22 seconds between alerts, (2) what ATT&amp;CK techniques are demonstrated, (3) what is the likely malware family, (4) what should an analyst investigate next, (5) immediate containment recommendation.&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — SSL/TLS and HTTP Detection</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=SSL%20TLS%20detection%20JA3%20fingerprinting%20Zeek%20ssl.log%20malicious%20certificate%20detection" target="_blank" rel="noopener">SSL TLS detection JA3 fingerprinting Zeek ssl.log malicious certificate detection</a></p></div>
+<hr />
+<h3>Concept 1 — JA3 TLS Fingerprinting</h3>
+<p>JA3 is a method for creating a fingerprint of a TLS client based on the SSL/TLS ClientHello message fields: SSL version, ciphers, extensions, elliptic curves, and elliptic curve formats. The fingerprint is an MD5 hash of these fields. Because different applications (Chrome, PowerShell, Cobalt Strike) use different TLS parameters, JA3 fingerprints can distinguish C2 tools from legitimate browser traffic even when the destination IP and domain are unknown.</p>
+<p>JA3S is the server-side version — a fingerprint of the ServerHello response. A (JA3, JA3S) pair uniquely identifies a specific C2 framework communicating with its specific C2 server.</p>
+<p>Known malicious JA3 fingerprints are published in threat intelligence databases. Zeek's <code>ssl.log</code> includes the <code>ja3</code> and <code>ja3s</code> fields when using the JA3 script package.</p>
+<p>Use case: a new IP appears in <code>conn.log</code> — no TI hit. But the JA3 fingerprint matches the known Cobalt Strike default JA3 hash. The IP has been active less than 24 hours and is not yet in any TI feed — JA3 catches it early.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+from dataclasses import dataclass
+from typing import List, Optional
+
+KNOWN_MALICIOUS_JA3 = {
+    &quot;51c64c77e60f3980eea90869b68c58a8&quot;: &quot;CobaltStrike&quot;,
+    &quot;6734f37431670b3ab4292b8f60f29984&quot;: &quot;Metasploit&quot;,
+    &quot;a0e9f5d64349fb13191bc781f81f42e1&quot;: &quot;Emotet&quot;,
+}
+
+@dataclass
+class ZeekSSLLog:
+    ts: float
+    uid: str
+    id_orig_h: str
+    id_resp_h: str
+    id_resp_p: int
+    server_name: str     # SNI — the domain being accessed
+    ja3: Optional[str]   # client fingerprint
+    ja3s: Optional[str]  # server fingerprint
+    issuer: Optional[str]
+    subject: Optional[str]
+    validation_status: str
+
+    def tls_alert(self) -&gt; Optional[str]:
+        if self.ja3 and self.ja3 in KNOWN_MALICIOUS_JA3:
+            return f&quot;JA3_MATCH:{KNOWN_MALICIOUS_JA3[self.ja3]}&quot;
+        if self.validation_status not in (&quot;ok&quot;, &quot;&quot;):
+            return f&quot;CERT_INVALID:{self.validation_status}&quot;
+        if self.server_name.endswith((&quot;.ru&quot;, &quot;.cn&quot;, &quot;.onion&quot;)):
+            return f&quot;SUSPICIOUS_SNI_TLD:{self.server_name}&quot;
+        return None
+
+def compute_ja3(
+    ssl_version: int,
+    ciphers: List[int],
+    extensions: List[int],
+    elliptic_curves: List[int],
+    elliptic_curve_formats: List[int],
+) -&gt; str:
+    raw = &quot;,&quot;.join([
+        str(ssl_version),
+        &quot;-&quot;.join(str(c) for c in ciphers),
+        &quot;-&quot;.join(str(e) for e in extensions),
+        &quot;-&quot;.join(str(c) for c in elliptic_curves),
+        &quot;-&quot;.join(str(f) for f in elliptic_curve_formats),
+    ])
+    return hashlib.md5(raw.encode()).hexdigest()
+
+cobalt_ja3 = compute_ja3(
+    ssl_version=769,
+    ciphers=[49195, 49199, 52393, 52392, 49196, 49200],
+    extensions=[0, 5, 10, 11, 13, 65281],
+    elliptic_curves=[29, 23, 24],
+    elliptic_curve_formats=[0],
+)
+print(f&quot;Computed JA3: {cobalt_ja3}&quot;)
+
+ssl_log = ZeekSSLLog(
+    1710499200.0, &quot;SSSL001&quot;, &quot;10.0.1.42&quot;, &quot;185.220.101.5&quot;, 443,
+    server_name=&quot;updates.microsoft-telemetry.com&quot;,
+    ja3=&quot;51c64c77e60f3980eea90869b68c58a8&quot;,
+    ja3s=None,
+    issuer=&quot;Let&#x27;s Encrypt&quot;,
+    subject=&quot;CN=updates.microsoft-telemetry.com&quot;,
+    validation_status=&quot;ok&quot;,
+)
+alert = ssl_log.tls_alert()
+print(f&quot;TLS alert: {alert}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add two more detection checks to <code>tls_alert</code>: (1) <code>SELF_SIGNED_CERT</code> if issuer equals subject (self-signed certificates are commonly used by C2 servers to avoid the cost of a real cert); (2) <code>RECENTLY_ISSUED_CERT</code> — add a <code>cert_not_before</code> field to the dataclass (epoch float) and flag if the certificate was issued less than 7 days ago (use <code>time.time()</code>). Create three test <code>ZeekSSLLog</code> instances covering each new case. Print all alerts.
+Expected output: self-signed cert → SELF_SIGNED_CERT alert; cert issued 2 days ago → RECENTLY_ISSUED_CERT alert; normal cert → no alert</p>
+<hr />
+<h3>Concept 2 — HTTP Log Detection</h3>
+<p>Zeek's <code>http.log</code> records every HTTP transaction: method, URI, user-agent, referrer, response code, response body size. HTTP is the most common C2 protocol because it traverses almost every firewall and blends with legitimate web traffic.</p>
+<p>Key <code>http.log</code> fields for detection:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Detection Pattern</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>user_agent</code></td>
+<td>Known malicious UA strings; no UA (curl/wget); UA doesn't match browser version</td>
+</tr>
+<tr>
+<td><code>uri</code></td>
+<td>Long random-looking URIs; URIs with Base64 patterns; known C2 URI templates</td>
+</tr>
+<tr>
+<td><code>request_body_len</code></td>
+<td>Large POST body on a non-upload endpoint (data exfiltration)</td>
+</tr>
+<tr>
+<td><code>resp_body_len</code></td>
+<td>Very small responses to POST requests (C2 command acknowledgment)</td>
+</tr>
+<tr>
+<td><code>method</code></td>
+<td>PUT/DELETE to non-API endpoints; HEAD beaconing</td>
+</tr>
+<tr>
+<td><code>status_code</code></td>
+<td>200 to all requests regardless of URI content (C2 server always returns 200)</td>
+</tr>
+</tbody>
+</table>
+<p>Common C2 HTTP patterns:</p>
+<ul>
+<li><strong>GET /juliet-golf.php</strong>: random-looking URI that maps to a C2 tasking endpoint</li>
+<li><strong>Cookie: SESSIONID=aGVsbG8gd29ybGQ=</strong>: Base64-encoded C2 data in cookie headers</li>
+<li><strong>User-Agent: Mozilla/4.0 (compatible; MSIE 6.0)</strong>: outdated IE UA used by old malware families</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List, Optional
+import re
+import base64
+
+@dataclass
+class ZeekHTTPLog:
+    ts: float
+    uid: str
+    id_orig_h: str
+    id_resp_h: str
+    method: str
+    host: str
+    uri: str
+    user_agent: str
+    request_body_len: int
+    resp_body_len: int
+    status_code: int
+    referrer: Optional[str] = None
+
+SUSPICIOUS_UA_PATTERNS = [
+    r&quot;MSIE [456]\.&quot;,                       # very outdated IE
+    r&quot;^python-requests/&quot;,                  # automated requests library
+    r&quot;^Go-http-client/&quot;,                   # Go default HTTP client
+    r&quot;^curl/&quot;,                             # command-line tool
+    r&quot;^Wget/&quot;,                             # wget
+]
+
+def analyze_http_log(log: ZeekHTTPLog) -&gt; List[str]:
+    indicators = []
+    ua = log.user_agent
+
+    for pattern in SUSPICIOUS_UA_PATTERNS:
+        if re.search(pattern, ua, re.IGNORECASE):
+            indicators.append(f&quot;SUSPICIOUS_UA:{pattern}&quot;)
+            break
+
+    uri_entropy_score = sum(1 for c in log.uri if c not in &quot;-_./abcdefghijklmnopqrstuvwxyz0123456789&quot;) / max(len(log.uri), 1)
+    if uri_entropy_score &gt; 0.3:
+        indicators.append(f&quot;HIGH_ENTROPY_URI&quot;)
+
+    if log.method == &quot;POST&quot; and log.request_body_len &gt; 100_000:
+        indicators.append(f&quot;LARGE_POST_BODY:{log.request_body_len}B:possible_exfil&quot;)
+
+    if log.method == &quot;POST&quot; and log.resp_body_len &lt; 50:
+        indicators.append(&quot;SMALL_POST_RESPONSE:possible_C2_ack&quot;)
+
+    return indicators
+
+logs = [
+    ZeekHTTPLog(1710499200.0, &quot;H001&quot;, &quot;10.0.1.42&quot;, &quot;185.220.101.5&quot;, &quot;GET&quot;,  &quot;evil.com&quot;,  &quot;/xKjQwzPlMv.php&quot;, &quot;Mozilla/4.0 (compatible; MSIE 6.0)&quot;, 0, 512, 200),
+    ZeekHTTPLog(1710499201.0, &quot;H002&quot;, &quot;10.0.1.42&quot;, &quot;185.220.101.5&quot;, &quot;POST&quot;, &quot;evil.com&quot;,  &quot;/upload&quot;,         &quot;python-requests/2.28.0&quot;, 250_000, 32, 200),
+    ZeekHTTPLog(1710499202.0, &quot;H003&quot;, &quot;10.0.1.42&quot;, &quot;google.com&quot;,    &quot;GET&quot;,  &quot;google.com&quot;, &quot;/search?q=test&quot;, &quot;Mozilla/5.0 (Windows NT 10.0)&quot;, 0, 50_000, 200),
+]
+
+for log in logs:
+    indicators = analyze_http_log(log)
+    print(f&quot;{log.uid}: {indicators or [&#x27;CLEAN&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add two more checks to <code>analyze_http_log</code>: (1) <code>BASE64_IN_COOKIE</code> — detect if the request referrer or a reconstructed cookie header contains a Base64-encoded string longer than 20 characters (check using <code>base64.b64decode</code> without error for a string extracted with <code>re.findall(r'[A-Za-z0-9+/=]{20,}', ...)</code>); (2) <code>NO_REFERRER_ON_POST</code> — flag POST requests with no referrer and a non-empty request body (legitimate browser POSTs usually have a referrer). Add one test log for each new indicator and print results.
+Expected output: BASE64_IN_COOKIE fires on a log with a base64 pattern; NO_REFERRER_ON_POST fires on a referrer-less POST; other logs unaffected</p>
+<hr />
+<h3>Concept 3 — File Extraction and Hash Detection</h3>
+<p>Zeek's <code>files.log</code> records metadata about files transferred over observed protocols (HTTP, SMB, FTP, SMTP). Each file transfer generates a record with: file hash (MD5, SHA1, SHA256), MIME type, filename, source/destination IPs, and the protocol used for transfer.</p>
+<p>File hash detection workflow:</p>
+<ol>
+<li>Extract SHA256 hashes from <code>files.log</code> in real time</li>
+<li>Look up each hash against threat intelligence (VirusTotal, internal YARA scan results)</li>
+<li>Alert on known-malicious hashes</li>
+<li>Alert on high-risk MIME types delivered from external sources (<code>.exe</code>, <code>.dll</code>, <code>.ps1</code>, <code>.hta</code>, <code>.vbs</code> from outside the corporate perimeter)</li>
+</ol>
+<p>Legitimate and malicious deliveries look identical at the network level unless you inspect the file content. A <code>.exe</code> delivered via HTTPS from <code>download.microsoft.com</code> is legitimate; the same <code>.exe</code> delivered from a newly-registered domain is highly suspicious.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List, Optional
+
+KNOWN_MALICIOUS_HASHES = {
+    &quot;44d88612fea8a8f36de82e1278abb02f&quot;: &quot;EICAR test file&quot;,
+    &quot;a94a8fe5ccb19ba61c4c0873d391e987982fbbd3&quot;: &quot;Mimikatz (SHA1)&quot;,
+}
+
+HIGH_RISK_MIME_TYPES = {
+    &quot;application/x-dosexec&quot;,         # PE executable
+    &quot;application/x-msdownload&quot;,      # MSI/DLL
+    &quot;text/x-powershell&quot;,             # PowerShell script
+    &quot;application/hta&quot;,               # HTA
+    &quot;application/x-vbs&quot;,             # VBScript
+    &quot;application/x-msdos-program&quot;,
+}
+
+@dataclass
+class ZeekFileLog:
+    ts: float
+    uid: str
+    id_orig_h: str
+    id_resp_h: str
+    source: str    # &quot;HTTP&quot; | &quot;SMB&quot; | &quot;SMTP&quot;
+    filename: Optional[str]
+    mime_type: str
+    md5: Optional[str]
+    sha256: Optional[str]
+    total_bytes: int
+    is_local_dest: bool
+
+    def file_alerts(self) -&gt; List[str]:
+        alerts = []
+
+        for hash_val in [self.md5, self.sha256]:
+            if hash_val and hash_val.lower() in KNOWN_MALICIOUS_HASHES:
+                alerts.append(f&quot;KNOWN_MALICIOUS_HASH:{KNOWN_MALICIOUS_HASHES[hash_val.lower()]}&quot;)
+
+        if self.mime_type in HIGH_RISK_MIME_TYPES and not self.is_local_dest:
+            alerts.append(f&quot;HIGH_RISK_FILE_INBOUND:{self.mime_type}&quot;)
+
+        if self.filename and any(self.filename.lower().endswith(ext) for ext in (&quot;.exe&quot;, &quot;.dll&quot;, &quot;.ps1&quot;, &quot;.hta&quot;, &quot;.vbs&quot;)):
+            if not self.is_local_dest:
+                alerts.append(f&quot;SUSPICIOUS_EXTENSION_INBOUND:{self.filename}&quot;)
+
+        return alerts
+
+file_logs = [
+    ZeekFileLog(1710499200.0, &quot;F001&quot;, &quot;185.220.101.5&quot;, &quot;10.0.1.42&quot;, &quot;HTTP&quot;,
+                &quot;payload.exe&quot;, &quot;application/x-dosexec&quot;,
+                &quot;44d88612fea8a8f36de82e1278abb02f&quot;, None, 68000, False),
+    ZeekFileLog(1710499201.0, &quot;F002&quot;, &quot;download.microsoft.com&quot;, &quot;10.0.1.42&quot;, &quot;HTTP&quot;,
+                &quot;windows_update.exe&quot;, &quot;application/x-dosexec&quot;,
+                None, None, 52_000_000, False),
+    ZeekFileLog(1710499202.0, &quot;F003&quot;, &quot;10.0.1.42&quot;, &quot;185.220.101.5&quot;, &quot;HTTP&quot;,
+                None, &quot;application/octet-stream&quot;,
+                None, None, 2_000_000, True),
+]
+
+for fl in file_logs:
+    alerts = fl.file_alerts()
+    print(f&quot;{fl.uid} ({fl.filename or &#x27;unnamed&#x27;}): {alerts or [&#x27;CLEAN&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a check <code>DOUBLE_EXTENSION_TRICK</code> for filenames that end with a pattern like <code>invoice.pdf.exe</code> or <code>document.docx.vbs</code> (a legitimate-looking extension followed by a malicious extension). Use a regex to detect this. Also add <code>SUSPICIOUS_DOWNLOAD_RATIO</code> for files where the source is HTTP, the file is a PE executable, and the download happened from a domain registered less than 30 days ago — simulate this by adding a <code>domain_age_days: Optional[int]</code> field to the dataclass. Add two test file logs that trigger each new check. Print results.
+Expected output: double extension file triggers DOUBLE_EXTENSION_TRICK; new domain PE download triggers SUSPICIOUS_DOWNLOAD_RATIO; existing logs unaffected</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can identify previously unknown C2 frameworks from JA3 fingerprints and HTTP URI patterns by reasoning about structural similarities to known frameworks.
+<strong>Threat:</strong> Certificate transparency logs expose the domain names of newly-issued TLS certificates — attackers now pre-register domains and obtain certificates weeks before launching attacks, defeating TTL-based newness detection.
+<strong>Opportunity:</strong> Use an LLM to build a comprehensive JA3 fingerprint database by extracting fingerprints from open-source C2 framework code, without needing live traffic captures.
+<strong>Prompt to try:</strong> <code>&quot;I observed these network connection characteristics from a suspicious host: (1) JA3=51c64c77e60f3980eea90869b68c58a8, (2) HTTP requests every 60s to /jquery-3.3.1.min.js with 128-byte GET body and 512-byte response, (3) User-Agent: Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; Trident/5.0), (4) POST requests every 5 minutes to /post.php with 2-4KB body. Identify the likely C2 framework, the malware operator's likely configuration (sleep time, jitter), and what actions may have been executed based on the POST frequency and volume. What additional network IOCs should I look for to confirm attribution?&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Building the Zeek Beaconing Detector</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=czbzvMpl0I8" target="_blank" rel="noopener"><b>Threat Hunting with Python and Pandas</b><small>RSAC Cybersecurity</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Python%20Zeek%20conn.log%20beaconing%20detection%20pandas%20statistics%20network%20hunting" target="_blank" rel="noopener">Python Zeek conn.log beaconing detection pandas statistics network hunting</a></p></div>
+<hr />
+<h3>Concept 1 — Parsing Zeek Logs with Python</h3>
+<p>Zeek log files are TSV (tab-separated values) with a JSON header describing the fields and types. Parsing them in Python is straightforward with <code>pandas</code> but requires handling Zeek's special values: <code>-</code> (null), <code>(empty)</code> (empty string), and the header format.</p>
+<p>Zeek conn.log TSV format:</p>
+<pre><code>#separator \x09
+#set_separator ,
+#empty_field (empty)
+#unset_field -
+#fields ts uid id.orig_h id.orig_p id.resp_h id.resp_p proto service duration orig_bytes resp_bytes conn_state
+#types time string addr port addr port enum string interval count count string
+1710499200.123456	CaBcDe1234567	10.0.1.42	54321	185.220.101.5	443	tcp	ssl	120.3	1024	128	SF
+</code></pre><p>The <code>#fields</code> line defines column names; <code>#types</code> defines data types. Lines starting with <code>#</code> are header/metadata lines to be skipped when reading as data.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+from io import StringIO
+
+SAMPLE_CONN_LOG = &quot;&quot;&quot;#separator \\x09
+#set_separator ,
+#empty_field (empty)
+#unset_field -
+#fields ts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\tservice\tduration\torig_bytes\tresp_bytes\tconn_state
+#types time\tstring\taddr\tport\taddr\tport\tenum\tstring\tinterval\tcount\tcount\tstring
+1710499200.0\tC001\t10.0.1.42\t54321\t185.220.101.5\t443\ttcp\tssl\t120.3\t128\t512\tSF
+1710499260.0\tC002\t10.0.1.42\t54322\t185.220.101.5\t443\ttcp\tssl\t118.7\t130\t508\tSF
+1710499320.0\tC003\t10.0.1.42\t54323\t185.220.101.5\t443\ttcp\tssl\t121.1\t126\t515\tSF
+1710499380.0\tC004\t10.0.1.42\t54324\t185.220.101.5\t443\ttcp\tssl\t119.5\t128\t510\tSF
+1710499440.0\tC005\t10.0.1.42\t54325\t185.220.101.5\t443\ttcp\tssl\t120.0\t129\t512\tSF
+&quot;&quot;&quot;
+
+def parse_zeek_conn_log(log_content: str) -&gt; pd.DataFrame:
+    lines = log_content.strip().splitlines()
+    fields_line = next(l for l in lines if l.startswith(&quot;#fields&quot;))
+    columns = fields_line.replace(&quot;#fields\t&quot;, &quot;&quot;).split(&quot;\t&quot;)
+    data_lines = [l for l in lines if not l.startswith(&quot;#&quot;)]
+    df = pd.read_csv(StringIO(&quot;\n&quot;.join(data_lines)), sep=&quot;\t&quot;, names=columns, na_values=[&quot;-&quot;, &quot;(empty)&quot;])
+    df[&quot;ts&quot;] = pd.to_numeric(df[&quot;ts&quot;])
+    for col in [&quot;orig_bytes&quot;, &quot;resp_bytes&quot;, &quot;id.orig_p&quot;, &quot;id.resp_p&quot;]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors=&quot;coerce&quot;)
+    return df
+
+df = parse_zeek_conn_log(SAMPLE_CONN_LOG)
+print(df[[&quot;ts&quot;, &quot;id.orig_h&quot;, &quot;id.resp_h&quot;, &quot;id.resp_p&quot;, &quot;orig_bytes&quot;, &quot;resp_bytes&quot;]].to_string())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>parse_zeek_conn_log</code> to also accept a file path (if the input doesn't contain <code>\n</code>, treat it as a path and read the file). Add a parameter <code>local_net_prefix: str = &quot;10.0.&quot;</code> and add a derived column <code>is_outbound</code> (True when <code>id.orig_h</code> starts with the prefix and <code>id.resp_h</code> does not). Filter the resulting DataFrame to show only outbound connections and print the filtered result. Simulate a mixed dataset by adding two internal-to-internal connections to the sample log content.
+Expected output: full parsed DataFrame; is_outbound column correct for each row; filtered view shows only external-destination rows</p>
+<hr />
+<h3>Concept 2 — Beacon Scoring with Pandas</h3>
+<p>Pandas is well-suited for beacon detection: <code>groupby</code> aggregates connections per (source, destination, port) tuple; <code>diff</code> calculates inter-arrival times; <code>describe</code> provides the statistical summary for scoring.</p>
+<p>The beacon scoring pipeline:</p>
+<ol>
+<li>Filter to outbound <code>SF</code> connections only</li>
+<li>Group by <code>(id.orig_h, id.resp_h, id.resp_p)</code></li>
+<li>Sort each group by <code>ts</code></li>
+<li>Calculate <code>interval = ts.diff()</code></li>
+<li>Aggregate: <code>mean_interval</code>, <code>std_interval</code>, <code>cv</code>, <code>count</code>, <code>mean_bytes</code></li>
+<li>Filter: <code>count &gt;= 10 AND cv &lt; 0.35</code></li>
+<li>Score: combine CV, count, and byte size into a single beacon confidence score</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+import numpy as np
+
+def beacon_scan_pandas(df: pd.DataFrame, min_connections: int = 10, cv_threshold: float = 0.35) -&gt; pd.DataFrame:
+    outbound = df[
+        (df.get(&quot;is_outbound&quot;, True) == True) &amp;
+        (df[&quot;conn_state&quot;] == &quot;SF&quot;)
+    ].copy()
+
+    outbound = outbound.sort_values(&quot;ts&quot;)
+
+    def group_stats(group: pd.DataFrame) -&gt; pd.Series:
+        intervals = group[&quot;ts&quot;].diff().dropna()
+        if len(intervals) &lt; max(min_connections - 1, 4):
+            return pd.Series(dtype=float)
+        mean_i = intervals.mean()
+        if mean_i == 0:
+            return pd.Series(dtype=float)
+        cv = intervals.std() / mean_i
+        return pd.Series({
+            &quot;connection_count&quot;: len(group),
+            &quot;mean_interval_s&quot;:  round(mean_i, 1),
+            &quot;std_interval_s&quot;:   round(intervals.std(), 1),
+            &quot;cv&quot;:               round(cv, 3),
+            &quot;mean_orig_bytes&quot;:  group[&quot;orig_bytes&quot;].mean(),
+            &quot;time_span_s&quot;:      group[&quot;ts&quot;].max() - group[&quot;ts&quot;].min(),
+        })
+
+    stats = outbound.groupby(
+        [&quot;id.orig_h&quot;, &quot;id.resp_h&quot;, &quot;id.resp_p&quot;],
+        group_keys=False,
+    ).apply(group_stats).dropna()
+
+    if stats.empty:
+        return pd.DataFrame()
+
+    beacons = stats[
+        (stats[&quot;cv&quot;] &lt; cv_threshold) &amp;
+        (stats[&quot;connection_count&quot;] &gt;= min_connections)
+    ].copy()
+
+    beacons[&quot;beacon_score&quot;] = (
+        (1 - beacons[&quot;cv&quot;]) * 0.5 +
+        (beacons[&quot;connection_count&quot;].clip(upper=50) / 50) * 0.3 +
+        (1 / (1 + beacons[&quot;mean_orig_bytes&quot;] / 1000)) * 0.2
+    ).round(3)
+
+    return beacons.sort_values(&quot;beacon_score&quot;, ascending=False)
+
+import random
+random.seed(42)
+base = 1710499200.0
+rows = []
+for i in range(20):
+    rows.append({
+        &quot;ts&quot;: base + i * 60 + random.uniform(-9, 9),
+        &quot;uid&quot;: f&quot;C{i:04d}&quot;, &quot;id.orig_h&quot;: &quot;10.0.1.42&quot;, &quot;id.orig_p&quot;: 50000 + i,
+        &quot;id.resp_h&quot;: &quot;185.220.101.5&quot;, &quot;id.resp_p&quot;: 443,
+        &quot;proto&quot;: &quot;tcp&quot;, &quot;service&quot;: &quot;ssl&quot;,
+        &quot;orig_bytes&quot;: random.randint(100, 160), &quot;resp_bytes&quot;: random.randint(400, 600),
+        &quot;conn_state&quot;: &quot;SF&quot;, &quot;is_outbound&quot;: True,
+    })
+df_sim = pd.DataFrame(rows)
+result = beacon_scan_pandas(df_sim)
+if not result.empty:
+    print(result[[&quot;connection_count&quot;, &quot;mean_interval_s&quot;, &quot;cv&quot;, &quot;beacon_score&quot;]].to_string())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a second connection group to <code>df_sim</code>: 15 connections to <code>8.8.8.8:53</code> at irregular intervals simulating DNS lookup traffic (random intervals 0.1–120 seconds). Rebuild <code>beacon_scan_pandas</code> on the combined DataFrame. Confirm only the beacon group (185.220.101.5) appears in the results, not the DNS traffic. Print the final beacon table with all columns. Then add a <code>verdict</code> column: <code>&quot;BEACON&quot;</code> if <code>beacon_score &gt; 0.7</code>, <code>&quot;SUSPICIOUS&quot;</code> if <code>0.5–0.7</code>, <code>&quot;REVIEW&quot;</code> if below 0.5.
+Expected output: only the 185.220.101.5 group in results; verdict column present; DNS traffic not appearing</p>
+<hr />
+<h3>Concept 3 — Full Beaconing Detector Module</h3>
+<p>The Royal Road deliverable for W14 combines log parsing, beacon scoring, and alert output into a standalone Python module. The module reads a Zeek <code>conn.log</code> file, runs beacon scoring, and outputs alerts as JSON.</p>
+<p>Integration with the detection pipeline:</p>
+<ul>
+<li>Alerts from this module feed into the same alert queue as Sigma rules (alert schema matches W09 output)</li>
+<li>The module is called by the CI pipeline on sample log files as a smoke test</li>
+<li>Output JSON can be ingested into a SIEM as custom detection output</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+import argparse
+from pathlib import Path
+from datetime import datetime
+
+def run_beacon_detector(
+    log_path: str,
+    output_path: str,
+    min_connections: int = 10,
+    cv_threshold: float = 0.35,
+    local_net: str = &quot;10.&quot;,
+) -&gt; dict:
+    from io import StringIO
+    import pandas as pd
+
+    content = Path(log_path).read_text(encoding=&quot;utf-8&quot;) if Path(log_path).exists() else log_path
+
+    df = parse_zeek_conn_log(content)
+    df[&quot;is_outbound&quot;] = (
+        df[&quot;id.orig_h&quot;].str.startswith(local_net) &amp;
+        ~df[&quot;id.resp_h&quot;].str.startswith(local_net)
+    )
+
+    results = beacon_scan_pandas(df, min_connections=min_connections, cv_threshold=cv_threshold)
+
+    alerts = []
+    if not results.empty:
+        for idx, row in results.reset_index().iterrows():
+            alerts.append({
+                &quot;alert_id&quot;:         f&quot;BEACON-{idx+1:04d}&quot;,
+                &quot;rule&quot;:             &quot;zeek_beaconing_detector&quot;,
+                &quot;technique&quot;:        &quot;T1071.001&quot;,
+                &quot;source_ip&quot;:        row[&quot;id.orig_h&quot;],
+                &quot;dest_ip&quot;:          row[&quot;id.resp_h&quot;],
+                &quot;dest_port&quot;:        int(row[&quot;id.resp_p&quot;]),
+                &quot;connection_count&quot;: int(row[&quot;connection_count&quot;]),
+                &quot;mean_interval_s&quot;:  row[&quot;mean_interval_s&quot;],
+                &quot;cv&quot;:               row[&quot;cv&quot;],
+                &quot;beacon_score&quot;:     row[&quot;beacon_score&quot;],
+                &quot;severity&quot;:         &quot;HIGH&quot; if row[&quot;beacon_score&quot;] &gt; 0.7 else &quot;MEDIUM&quot;,
+                &quot;generated_at&quot;:     datetime.utcnow().isoformat() + &quot;Z&quot;,
+            })
+
+    output = {&quot;alert_count&quot;: len(alerts), &quot;alerts&quot;: alerts}
+    Path(output_path).write_text(json.dumps(output, indent=2), encoding=&quot;utf-8&quot;)
+    return output
+
+INLINE_LOG = &quot;&quot;&quot;#separator \\x09
+#fields ts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\tservice\tduration\torig_bytes\tresp_bytes\tconn_state
+&quot;&quot;&quot;
+import random, math
+random.seed(42)
+inline_rows = []
+for i in range(15):
+    inline_rows.append(f&quot;{1710499200.0 + i * 60 + random.uniform(-8,8):.6f}\tC{i:04d}\t10.0.1.42\t{50000+i}\t185.220.101.5\t443\ttcp\tssl\t120.0\t{random.randint(100,150)}\t{random.randint(400,600)}\tSF&quot;)
+full_log = INLINE_LOG + &quot;\n&quot;.join(inline_rows)
+
+output = run_beacon_detector(full_log, &quot;beacon_alerts.json&quot;, min_connections=10)
+print(f&quot;Alerts generated: {output[&#x27;alert_count&#x27;]}&quot;)
+for alert in output[&quot;alerts&quot;]:
+    print(f&quot;  {alert[&#x27;alert_id&#x27;]}: {alert[&#x27;source_ip&#x27;]} → {alert[&#x27;dest_ip&#x27;]}:{alert[&#x27;dest_port&#x27;]} | score={alert[&#x27;beacon_score&#x27;]} | {alert[&#x27;severity&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>run_beacon_detector</code> to also write a markdown summary file <code>beacon_report.md</code> alongside the JSON output. The report should have: a header with run timestamp, a table of detected beacons (source, dest, port, interval, score, severity), and a &quot;No beacons detected&quot; message if the alert list is empty. Run the detector on the inline log and print the contents of the generated markdown file.
+Expected output: <code>beacon_alerts.json</code> written; <code>beacon_report.md</code> written with the detected beacon in a formatted table; contents of the markdown file printed</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can generate narrative threat reports from raw beacon detection output, translating JSON alert fields into incident documentation suitable for ticket systems and compliance reporting.
+<strong>Threat:</strong> A SOC that over-automates beacon reporting via LLM may auto-close alerts for low-scoring beacons (score=0.55) that are genuinely malicious but well-configured to evade detection thresholds.
+<strong>Opportunity:</strong> Use an LLM to suggest follow-up investigation steps tailored to the specific beacon parameters (interval, byte size, destination) that would either confirm or dismiss the alert.
+<strong>Prompt to try:</strong> <code>&quot;Generate a 3-paragraph incident ticket description for the following beacon detection: Source=10.0.1.42 (CORP\\jsmith's workstation, ws-042), Destination=185.220.101.5:443, 47 connections over 47 minutes, mean interval 60.2s, CV=0.08, mean outbound bytes=128, SSL with server_name=updates.microsoft-sync.com (registered 3 days ago). Paragraph 1: what was detected and why it is suspicious. Paragraph 2: potential attack scenario and likely malware family. Paragraph 3: recommended investigation steps and data sources to check. Use standard incident ticket language (Priority: High, MITRE technique: T1071.001).&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 14</h2>
+<p><strong>Task:</strong> Build a standalone Python beaconing detector that reads a Zeek <code>conn.log</code> file and produces structured JSON alerts.
+<strong>Builds on:</strong> W11 behavioral detector (same pattern: train on baseline, detect on new data) + W13 alert schema (JSON output matches endpoint alert format for unified SIEM ingestion)
+<strong>Deliverable:</strong> <code>network/beacon_detector.py</code> — a standalone Python module containing:</p>
+<ul>
+<li><code>parse_zeek_conn_log(content: str) -&gt; pd.DataFrame</code> — TSV parser handling Zeek headers</li>
+<li><code>beacon_scan_pandas(df, min_connections, cv_threshold) -&gt; pd.DataFrame</code> — statistical beacon scoring</li>
+<li><code>run_beacon_detector(log_path, output_path, ...) -&gt; dict</code> — full pipeline</li>
+<li><code>__main__</code> block with <code>argparse</code>: <code>--log</code>, <code>--output</code>, <code>--min-connections</code>, <code>--cv-threshold</code>, <code>--local-net</code></li>
+<li>Writes both <code>beacon_alerts.json</code> and <code>beacon_report.md</code></li>
+</ul>
+<p>Script must be runnable standalone: <code>python beacon_detector.py --log conn.log --output alerts.json</code>
+Expected output when run: &quot;Scanned N connections | Detected M beacons | Output: alerts.json, beacon_report.md&quot;</p>
+<p><strong>Stretch goal:</strong> Add a <code>--allowlist</code> parameter that accepts a comma-separated list of destination IPs or CIDRs to exclude from beacon scoring. Implement CIDR matching using <code>ipaddress.ip_network</code>. Add an allowlist of known-good Microsoft and Google IP ranges (hard-coded defaults). Display which connections were allowlisted at the end of the run summary.</p>
+<div class="pager"><a class="btn ghost" href="week-13.html">&larr; Week 13</a><a class="btn ghost" href="week-15.html">Week 15 &rarr;</a></div>
+</main></body></html>

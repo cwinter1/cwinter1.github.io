@@ -1,0 +1,1357 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 22 — LLM Detection Pipeline</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 22 — LLM Detection Pipeline</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="22" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 22 — LLM Detection Pipeline</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 6 — AI/LLM Security</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: automated triage / SC-200: Sentinel workbooks + automation / GCIA: alert enrichment</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>RAG alert enrichment prototype: ChromaDB + LLM summary + pipeline output JSON</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W10 (RAG pipeline), W19 (ML detection), W20 (LLM security), W21 (SOC agents)</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Why RAG for Alert Enrichment?</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="22-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=tLMViADvSNE" target="_blank" rel="noopener"><b>Every RAG Strategy Explained in 13 Minutes (No Fluff)</b><small>Cole Medin</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=RAG%20retrieval%20augmented%20generation%20security%20alert%20enrichment%20LLM" target="_blank" rel="noopener">RAG retrieval augmented generation security alert enrichment LLM</a></p></div>
+<hr />
+<h3>Concept 1 — The Analyst Knowledge Problem</h3>
+<p>A junior SOC analyst looking at an alert for the first time faces an information access problem: the alert contains a technique ID, a hostname, and some raw telemetry. To make a triage decision, they need context that lives in three places: (1) institutional knowledge (&quot;this host is the CI/CD server, PowerShell on it is expected&quot;), (2) threat intelligence (&quot;this technique was used by APT33 against Israeli financial sector last quarter&quot;), and (3) past incidents (&quot;we saw this exact pattern 10 days ago on a different host&quot;). A senior analyst has this context in their head. A junior analyst needs to search 4 different systems manually.</p>
+<p>RAG (Retrieval-Augmented Generation) solves this by storing that context in a vector database and retrieving the most relevant chunks at query time before passing them to an LLM for synthesis. The LLM does not need to &quot;know&quot; the answers — it only needs to reason over the retrieved chunks. This is important for security because hallucinated threat intel is worse than no answer.</p>
+<p>Data engineering analogy: RAG is a lookup join on the LLM's reasoning step. Instead of letting the model generate from weights alone, you JOIN the model's context against a curated knowledge base before it generates the answer — the same reason you enrich a Kafka event with a reference table before writing to the data warehouse.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+import hashlib
+
+
+@dataclass
+class KnowledgeChunk:
+    chunk_id: str
+    source: str            # &quot;runbook&quot;, &quot;threat_intel&quot;, &quot;incident_history&quot;, &quot;asset_inventory&quot;
+    content: str
+    tags: list[str] = field(default_factory=list)
+    technique_ids: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_text(cls, source: str, content: str, tags: list[str] = None,
+                  technique_ids: list[str] = None) -&gt; &quot;KnowledgeChunk&quot;:
+        chunk_id = hashlib.sha256(f&quot;{source}:{content}&quot;.encode()).hexdigest()[:12]
+        return cls(
+            chunk_id=chunk_id,
+            source=source,
+            content=content,
+            tags=tags or [],
+            technique_ids=technique_ids or [],
+        )
+
+    def word_count(self) -&gt; int:
+        return len(self.content.split())
+
+
+KNOWLEDGE_BASE: list[KnowledgeChunk] = [
+    KnowledgeChunk.from_text(
+        source=&quot;asset_inventory&quot;,
+        content=&quot;Host CI-PROD-01 runs Jenkins CI/CD pipelines. PowerShell and cmd.exe execution &quot;
+                &quot;by the jenkins service account is expected. Alerts from this host should be &quot;
+                &quot;reviewed against the Jenkins job history before escalation.&quot;,
+        tags=[&quot;ci_cd&quot;, &quot;jenkins&quot;],
+    ),
+    KnowledgeChunk.from_text(
+        source=&quot;threat_intel&quot;,
+        content=&quot;APT33 (Elfin) has been observed targeting Israeli financial sector organizations &quot;
+                &quot;using T1071.001 (Application Layer Protocol) for C2 over HTTPS. Known C2 domains &quot;
+                &quot;include *.update-service[.]net and *.cdn-distribution[.]com patterns.&quot;,
+        tags=[&quot;apt33&quot;, &quot;iran&quot;, &quot;financial_sector&quot;],
+        technique_ids=[&quot;T1071.001&quot;],
+    ),
+    KnowledgeChunk.from_text(
+        source=&quot;incident_history&quot;,
+        content=&quot;INC-20240110: WS-FINANCE-03 was confirmed compromised via T1071.001 beaconing to &quot;
+                &quot;185.220.101.22. Root cause: malicious PDF via phishing (T1566.001). Remediation: &quot;
+                &quot;endpoint reimaged, user account reset, firewall block applied to /24.&quot;,
+        tags=[&quot;confirmed_compromise&quot;, &quot;t1071_001&quot;],
+        technique_ids=[&quot;T1071.001&quot;, &quot;T1566.001&quot;],
+    ),
+    KnowledgeChunk.from_text(
+        source=&quot;runbook&quot;,
+        content=&quot;T1071.001 Triage Runbook: (1) Look up IP in threat intel (VirusTotal, Shodan). &quot;
+                &quot;(2) Check process making connection — expected? (3) Check parent process chain. &quot;
+                &quot;(4) Pull 7-day netflow for this host. (5) If IP score &gt; 70: isolate and escalate. &quot;
+                &quot;(6) If IP score &lt; 20 and process is browser: likely benign, close.&quot;,
+        tags=[&quot;runbook&quot;, &quot;t1071_001&quot;],
+        technique_ids=[&quot;T1071.001&quot;],
+    ),
+]
+
+for chunk in KNOWLEDGE_BASE:
+    print(f&quot;[{chunk.source:20s}] {chunk.chunk_id}  {chunk.word_count()} words  tags={chunk.tags[:2]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>filter_by_technique(kb: list[KnowledgeChunk], technique_id: str) -&gt; list[KnowledgeChunk]</code> that returns all chunks whose <code>technique_ids</code> list contains <code>technique_id</code>. Then write <code>filter_by_source(kb, source: str) -&gt; list[KnowledgeChunk]</code>.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>technique = &quot;T1071.001&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: three chunks match T1071.001 (threat_intel, incident_history, runbook); one matches source=&quot;asset_inventory&quot;.</p>
+<hr />
+<h3>Concept 2 — Embeddings and Semantic Similarity</h3>
+<p>An embedding is a fixed-size vector of floating-point numbers that encodes the semantic meaning of a text. Two texts that mean similar things will have vectors that are close together in the embedding space (high cosine similarity). This is what allows a vector database to retrieve &quot;T1071.001 triage steps&quot; even when the query says &quot;how do I handle C2 beaconing alerts&quot;.</p>
+<p>In production, embeddings are computed by a model (OpenAI text-embedding-3-small, Anthropic embeddings, or open-source models like sentence-transformers). For this course, we simulate embeddings using keyword-based overlap scoring — which is conceptually equivalent for understanding the retrieval mechanism, without the API dependency.</p>
+<p>Cosine similarity between two vectors A and B is: <code>(A · B) / (|A| × |B|)</code>. In the keyword simulation, we represent each chunk as a set of keywords and compute Jaccard similarity (intersection / union) as a stand-in.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+from dataclasses import dataclass
+
+
+STOPWORDS = {&quot;the&quot;, &quot;a&quot;, &quot;an&quot;, &quot;is&quot;, &quot;are&quot;, &quot;was&quot;, &quot;were&quot;, &quot;for&quot;, &quot;of&quot;, &quot;to&quot;, &quot;in&quot;,
+             &quot;on&quot;, &quot;at&quot;, &quot;by&quot;, &quot;with&quot;, &quot;this&quot;, &quot;that&quot;, &quot;be&quot;, &quot;it&quot;, &quot;from&quot;, &quot;as&quot;,
+             &quot;or&quot;, &quot;and&quot;, &quot;if&quot;, &quot;has&quot;, &quot;have&quot;, &quot;had&quot;}
+
+
+def tokenize(text: str) -&gt; set[str]:
+    tokens = re.findall(r&quot;[a-z0-9_\.\-]+&quot;, text.lower())
+    return {t for t in tokens if t not in STOPWORDS and len(t) &gt; 2}
+
+
+def jaccard_similarity(set_a: set[str], set_b: set[str]) -&gt; float:
+    if not set_a and not set_b:
+        return 0.0
+    intersection = len(set_a &amp; set_b)
+    union = len(set_a | set_b)
+    return intersection / union
+
+
+@dataclass
+class RetrievalResult:
+    chunk: KnowledgeChunk
+    score: float
+
+
+def retrieve_top_k(query: str, kb: list[KnowledgeChunk], k: int = 3) -&gt; list[RetrievalResult]:
+    query_tokens = tokenize(query)
+    scored = []
+    for chunk in kb:
+        chunk_tokens = tokenize(chunk.content + &quot; &quot; + &quot; &quot;.join(chunk.tags + chunk.technique_ids))
+        score = jaccard_similarity(query_tokens, chunk_tokens)
+        scored.append(RetrievalResult(chunk=chunk, score=score))
+    scored.sort(key=lambda r: r.score, reverse=True)
+    return scored[:k]
+
+
+query = &quot;PowerShell execution on CI server, T1059.001, should I escalate?&quot;
+results = retrieve_top_k(query, KNOWLEDGE_BASE, k=3)
+
+print(f&quot;Query: {query}\n&quot;)
+for i, r in enumerate(results, 1):
+    print(f&quot;#{i} [{r.chunk.source}] score={r.score:.3f}&quot;)
+    print(f&quot;   {r.chunk.content[:120]}...&quot;)
+    print()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>explain_retrieval(query: str, result: RetrievalResult) -&gt; str</code> that returns a one-sentence explanation of why <code>result</code> was retrieved for <code>query</code>. It should list the top 3 overlapping tokens between the query and the chunk content (by computing <code>tokenize(query) &amp; tokenize(result.chunk.content)</code> and taking any 3).</p>
+<p>Expected output: a sentence like <code>&quot;Retrieved because shared terms: powershell, execution, ci&quot;</code>.</p>
+<hr />
+<h3>Concept 3 — The RAG Context Window</h3>
+<p>When the LLM generates a triage summary, it receives: the system prompt, the alert data, and the retrieved chunks. The total must fit within the context window. Context budget planning is a design constraint, not a nice-to-have.</p>
+<p>Typical budget for an alert enrichment call:</p>
+<ul>
+<li>System prompt: ~500 tokens</li>
+<li>Alert data: ~300 tokens</li>
+<li>Retrieved chunks (top-3 at 200 tokens each): ~600 tokens</li>
+<li>Reserve for output: 500 tokens</li>
+<li>Total: ~1,900 tokens per alert call</li>
+</ul>
+<p>With claude-sonnet-4-6 at 200K token context, a single alert is trivially small. The constraint appears when you batch alerts: 1,000 alerts per hour × 1,900 tokens = 1.9M tokens/hour. At $3/1M input tokens, that is $5.70/hour for input alone. At scale, chunking strategy (how many tokens per chunk, how many chunks retrieved) directly affects cost.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+
+TOKENS_PER_WORD_APPROX = 1.33
+
+
+def estimate_tokens(text: str) -&gt; int:
+    return int(len(text.split()) * TOKENS_PER_WORD_APPROX)
+
+
+@dataclass
+class ContextBudget:
+    total_window: int
+    system_prompt_tokens: int
+    alert_tokens: int
+    output_reserve: int
+
+    def available_for_retrieval(self) -&gt; int:
+        return self.total_window - self.system_prompt_tokens - self.alert_tokens - self.output_reserve
+
+    def max_chunks(self, avg_chunk_tokens: int) -&gt; int:
+        return max(0, self.available_for_retrieval() // avg_chunk_tokens)
+
+    def utilization(self, retrieved_chunks: list[KnowledgeChunk]) -&gt; dict:
+        retrieval_tokens = sum(estimate_tokens(c.content) for c in retrieved_chunks)
+        total_used = self.system_prompt_tokens + self.alert_tokens + retrieval_tokens
+        return {
+            &quot;system_prompt&quot;: self.system_prompt_tokens,
+            &quot;alert&quot;: self.alert_tokens,
+            &quot;retrieval&quot;: retrieval_tokens,
+            &quot;total_used&quot;: total_used,
+            &quot;remaining&quot;: self.total_window - total_used - self.output_reserve,
+            &quot;utilization_pct&quot;: total_used / self.total_window,
+        }
+
+
+SYSTEM_PROMPT = &quot;&quot;&quot;You are a SOC triage assistant. Using the provided context, generate a structured
+triage summary for the alert. Include: verdict (ESCALATE/MONITOR/CLOSE_FP), confidence (0.0-1.0),
+key evidence used, and the next 3 investigation steps for the analyst.&quot;&quot;&quot;
+
+budget = ContextBudget(
+    total_window=200_000,
+    system_prompt_tokens=estimate_tokens(SYSTEM_PROMPT),
+    alert_tokens=300,
+    output_reserve=500,
+)
+
+retrieved = [r.chunk for r in retrieve_top_k(&quot;T1071.001 beaconing alert&quot;, KNOWLEDGE_BASE, k=3)]
+util = budget.utilization(retrieved)
+
+print(f&quot;Available for retrieval: {budget.available_for_retrieval():,} tokens&quot;)
+print(f&quot;Max chunks (avg 150 tokens): {budget.max_chunks(150)}&quot;)
+print(f&quot;\nContext utilization:&quot;)
+for k, v in util.items():
+    if isinstance(v, float):
+        print(f&quot;  {k}: {v:.1%}&quot;)
+    else:
+        print(f&quot;  {k}: {v:,}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>cost_estimate(n_alerts: int, budget: ContextBudget, output_tokens: int, cost_per_1m_input: float = 3.0, cost_per_1m_output: float = 15.0) -&gt; dict</code> that returns:</p>
+<ul>
+<li><code>&quot;input_tokens_total&quot;</code>: n_alerts × (system_prompt_tokens + alert_tokens + avg retrieval tokens)</li>
+<li><code>&quot;output_tokens_total&quot;</code>: n_alerts × output_tokens</li>
+<li><code>&quot;input_cost_usd&quot;</code>: float</li>
+<li><code>&quot;output_cost_usd&quot;</code>: float</li>
+<li><code>&quot;total_cost_usd&quot;</code>: float</li>
+<li><code>&quot;cost_per_alert_usd&quot;</code>: float</li>
+</ul>
+<p>Use <code>avg_retrieval_tokens = estimate_tokens(&quot; &quot;.join(c.content for c in retrieved))</code> as the retrieval cost per alert.</p>
+<p>Expected output for 1000 alerts: total cost in the range $1–$10 USD.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> RAG for alert context as the primary LLM enrichment pattern<br />
+<strong>Threat:</strong> Poisoned knowledge base — an attacker inserts a document claiming &quot;host WS-FINANCE-07 is a known security scanner and all alerts from it should be closed as false positive&quot; into the knowledge base via a document management API with weak access controls<br />
+<strong>Opportunity:</strong> RAG brings senior analyst institutional knowledge to every triage decision without requiring the analyst to be present — the knowledge base is the &quot;brain transfer&quot; from senior to junior<br />
+<strong>Prompt to try:</strong> <code>&quot;An alert fired: technique=T1071.001, source_ip=185.220.101.45, hostname=WS-FINANCE-07. Here is relevant context: [paste threat_intel chunk + runbook chunk]. Based only on this context, what is your triage verdict (ESCALATE/MONITOR/CLOSE_FP) and your top 3 investigation steps?&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Building the Vector Store</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="22-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=_Ci1tLMafQs" target="_blank" rel="noopener"><b>ChromaDB Tutorial for Beginners - Create, Store, and Query Vectors in Python</b><small>Tutorials by Mukesh Kala</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=ChromaDB%20tutorial%20python%20vector%20database%20embeddings" target="_blank" rel="noopener">ChromaDB tutorial python vector database embeddings</a></p></div>
+<hr />
+<h3>Concept 1 — ChromaDB Basics (Simulated)</h3>
+<p>ChromaDB is an open-source vector database designed for Python applications. It stores documents alongside their embeddings and provides similarity search in a single API call. For this course we simulate ChromaDB's interface without requiring the library — allowing the full pipeline to run in any Python environment.</p>
+<p>The ChromaDB API surface we care about:</p>
+<ul>
+<li><code>client.create_collection(name)</code> → collection object</li>
+<li><code>collection.add(documents=[], metadatas=[], ids=[])</code> → stores chunks</li>
+<li><code>collection.query(query_texts=[], n_results=k)</code> → returns top-k similar chunks with distances</li>
+</ul>
+<p>Distance in ChromaDB uses cosine distance (1 - cosine_similarity), so lower distance = more relevant. Our simulation uses 1 - Jaccard similarity as the distance metric.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class SimulatedCollection:
+    name: str
+    _documents: list[str] = field(default_factory=list)
+    _metadatas: list[dict] = field(default_factory=list)
+    _ids: list[str] = field(default_factory=list)
+
+    def add(self, documents: list[str], metadatas: list[dict], ids: list[str]) -&gt; None:
+        if len(documents) != len(ids):
+            raise ValueError(&quot;documents and ids must have the same length&quot;)
+        self._documents.extend(documents)
+        self._metadatas.extend(metadatas)
+        self._ids.extend(ids)
+
+    def query(self, query_texts: list[str], n_results: int = 3) -&gt; dict[str, list]:
+        all_results: dict[str, list] = {&quot;documents&quot;: [], &quot;metadatas&quot;: [], &quot;distances&quot;: [], &quot;ids&quot;: []}
+
+        for query_text in query_texts:
+            q_tokens = tokenize(query_text)
+            scored: list[tuple[float, int]] = []
+            for i, doc in enumerate(self._documents):
+                doc_tokens = tokenize(doc)
+                similarity = jaccard_similarity(q_tokens, doc_tokens)
+                distance = 1.0 - similarity
+                scored.append((distance, i))
+            scored.sort(key=lambda x: x[0])
+            top = scored[:n_results]
+
+            all_results[&quot;documents&quot;].append([self._documents[i] for _, i in top])
+            all_results[&quot;metadatas&quot;].append([self._metadatas[i] for _, i in top])
+            all_results[&quot;distances&quot;].append([d for d, _ in top])
+            all_results[&quot;ids&quot;].append([self._ids[i] for _, i in top])
+
+        return all_results
+
+    def count(self) -&gt; int:
+        return len(self._ids)
+
+
+class SimulatedChromaClient:
+    def __init__(self):
+        self._collections: dict[str, SimulatedCollection] = {}
+
+    def create_collection(self, name: str) -&gt; SimulatedCollection:
+        if name in self._collections:
+            return self._collections[name]
+        col = SimulatedCollection(name=name)
+        self._collections[name] = col
+        return col
+
+    def get_collection(self, name: str) -&gt; SimulatedCollection:
+        if name not in self._collections:
+            raise KeyError(f&quot;Collection &#x27;{name}&#x27; does not exist&quot;)
+        return self._collections[name]
+
+
+# Build knowledge base in simulated ChromaDB
+client = SimulatedChromaClient()
+collection = client.create_collection(&quot;soc_knowledge_base&quot;)
+
+collection.add(
+    documents=[chunk.content for chunk in KNOWLEDGE_BASE],
+    metadatas=[{&quot;source&quot;: chunk.source, &quot;tags&quot;: &quot;,&quot;.join(chunk.tags),
+                &quot;technique_ids&quot;: &quot;,&quot;.join(chunk.technique_ids)} for chunk in KNOWLEDGE_BASE],
+    ids=[chunk.chunk_id for chunk in KNOWLEDGE_BASE],
+)
+
+print(f&quot;Collection &#x27;{collection.name}&#x27; contains {collection.count()} documents&quot;)
+
+results = collection.query(query_texts=[&quot;T1071.001 beaconing C2 alert escalation&quot;], n_results=2)
+for doc, meta, dist in zip(results[&quot;documents&quot;][0], results[&quot;metadatas&quot;][0], results[&quot;distances&quot;][0]):
+    print(f&quot;\ndistance={dist:.3f}  source={meta[&#x27;source&#x27;]}&quot;)
+    print(f&quot;{doc[:100]}...&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>add_knowledge_chunk(collection: SimulatedCollection, chunk: KnowledgeChunk) -&gt; None</code> that adds a single chunk to the collection. Then add a new chunk:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>new_chunk = KnowledgeChunk.from_text(
+    source=&quot;asset_inventory&quot;,
+    content=&quot;Host WS-HR-04 belongs to the HR department. The user r.mizrahi is an HR administrator &quot;
+            &quot;with access to the payroll database. Outbound connections from this host to unknown IPs &quot;
+            &quot;should always be escalated — no scanning or automation tools are expected here.&quot;,
+    tags=[&quot;hr_department&quot;, &quot;high_sensitivity&quot;],
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: collection count increases to 5; querying &quot;HR department outbound connection&quot; retrieves the new chunk as top result.</p>
+<hr />
+<h3>Concept 2 — Ingesting the Knowledge Base</h3>
+<p>A production SOC knowledge base has multiple source types: runbooks (structured Markdown), threat intelligence reports (PDF or JSON), incident history (SIEM exports), asset inventory (CMDB exports). Each source requires a different ingest adapter that normalizes the content into <code>KnowledgeChunk</code> format before loading into the vector store.</p>
+<p>Chunking strategy: documents longer than ~300 words should be split into overlapping chunks (50-word overlap prevents context loss at chunk boundaries). Short entries (asset inventory rows, IOC records) can be stored as single chunks. The chunk size directly affects retrieval quality — too large and irrelevant content dilutes the similarity score; too small and a single chunk lacks enough context for the LLM to reason from.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+
+def split_into_chunks(text: str, max_words: int = 150, overlap_words: int = 30) -&gt; list[str]:
+    words = text.split()
+    if len(words) &lt;= max_words:
+        return [text]
+    chunks: list[str] = []
+    step = max_words - overlap_words
+    for start in range(0, len(words), step):
+        chunk_words = words[start:start + max_words]
+        chunks.append(&quot; &quot;.join(chunk_words))
+        if start + max_words &gt;= len(words):
+            break
+    return chunks
+
+
+@dataclass
+class IngestStats:
+    source: str
+    raw_documents: int
+    chunks_produced: int
+    avg_words_per_chunk: float
+
+    def __str__(self) -&gt; str:
+        return (f&quot;IngestStats(source={self.source}, raw_docs={self.raw_documents}, &quot;
+                f&quot;chunks={self.chunks_produced}, avg_words={self.avg_words_per_chunk:.0f})&quot;)
+
+
+def ingest_runbook(runbook_text: str, source_tag: str,
+                   technique_ids: list[str] = None) -&gt; tuple[list[KnowledgeChunk], IngestStats]:
+    raw_chunks = split_into_chunks(runbook_text, max_words=150, overlap_words=25)
+    result: list[KnowledgeChunk] = []
+    for i, chunk_text in enumerate(raw_chunks):
+        chunk = KnowledgeChunk.from_text(
+            source=source_tag,
+            content=chunk_text,
+            tags=[&quot;runbook&quot;, f&quot;chunk_{i}&quot;],
+            technique_ids=technique_ids or [],
+        )
+        result.append(chunk)
+    stats = IngestStats(
+        source=source_tag,
+        raw_documents=1,
+        chunks_produced=len(result),
+        avg_words_per_chunk=sum(c.word_count() for c in result) / max(1, len(result)),
+    )
+    return result, stats
+
+
+long_runbook = &quot;&quot;&quot;
+T1059.001 PowerShell Triage Runbook.
+Step 1: Retrieve the full PowerShell command line from ScriptBlock logging (Event ID 4104).
+Step 2: Check if the execution policy was bypassed using -ExecutionPolicy Bypass or -ep bypass.
+Step 3: Look for encoded commands: -EncodedCommand flag or Base64-encoded strings in the commandline.
+Step 4: Identify the parent process. Expected parents: svchost.exe, explorer.exe, cmd.exe.
+Unexpected parents that warrant escalation: winword.exe, excel.exe, outlook.exe (macro execution).
+Step 5: Search for downloaded payloads in temp directories: C:\\Users\\*\\AppData\\Local\\Temp\\,
+C:\\Windows\\Temp\\, and common LOLBin staging paths.
+Step 6: If encoded command or macro parent found: ESCALATE immediately.
+Step 7: If powershell.exe spawned by legitimate admin tool: MONITOR, add to watchlist.
+Step 8: Check if user account is a service account. Service accounts running interactive PowerShell
+should always be escalated regardless of command content.
+&quot;&quot;&quot;
+
+chunks, stats = ingest_runbook(long_runbook, &quot;runbook_t1059&quot;, [&quot;T1059.001&quot;])
+print(stats)
+for i, c in enumerate(chunks):
+    print(f&quot;  Chunk {i}: {c.word_count()} words  id={c.chunk_id}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>ingest_ioc_list(ioc_entries: list[dict], source_tag: str) -&gt; tuple[list[KnowledgeChunk], IngestStats]</code> where each entry has <code>{&quot;ioc_value&quot;: str, &quot;ioc_type&quot;: str, &quot;threat_actor&quot;: str, &quot;technique_ids&quot;: list[str], &quot;confidence&quot;: str}</code>. Each IOC becomes one chunk with content formatted as: <code>&quot;IOC: {ioc_value} (type: {ioc_type}). Threat actor: {threat_actor}. Confidence: {confidence}.&quot;</code>.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ioc_feed = [
+    {&quot;ioc_value&quot;: &quot;185.220.101.45&quot;, &quot;ioc_type&quot;: &quot;ip&quot;, &quot;threat_actor&quot;: &quot;APT33&quot;,
+     &quot;technique_ids&quot;: [&quot;T1071.001&quot;], &quot;confidence&quot;: &quot;high&quot;},
+    {&quot;ioc_value&quot;: &quot;update-service.net&quot;, &quot;ioc_type&quot;: &quot;domain&quot;, &quot;threat_actor&quot;: &quot;APT33&quot;,
+     &quot;technique_ids&quot;: [&quot;T1071.001&quot;], &quot;confidence&quot;: &quot;medium&quot;},
+    {&quot;ioc_value&quot;: &quot;d41d8cd98f00b204e9800998ecf8427e&quot;, &quot;ioc_type&quot;: &quot;md5&quot;, &quot;threat_actor&quot;: &quot;AGRIUS&quot;,
+     &quot;technique_ids&quot;: [&quot;T1027&quot;], &quot;confidence&quot;: &quot;high&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: 3 chunks produced, each readable as a one-sentence IOC description.</p>
+<hr />
+<h3>Concept 3 — Querying and Result Ranking</h3>
+<p>Retrieved chunks must be ranked and filtered before being sent to the LLM. Two reasons: (1) a chunk with very low similarity (distance &gt; 0.9) is probably noise and will confuse the LLM more than help it; (2) duplicate or near-duplicate chunks from the same source waste context window budget.</p>
+<p>Post-retrieval filtering steps:</p>
+<ol>
+<li>Distance threshold: drop any chunk with distance &gt; <code>MAX_DISTANCE</code> (typically 0.85 for Jaccard-based simulation, lower for real embeddings)</li>
+<li>Source deduplication: if two chunks have the same source and high overlap, keep only the higher-ranked one</li>
+<li>Relevance explanation: for each retained chunk, record which query terms it matched — this becomes part of the audit trail for the LLM's decision</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>MAX_DISTANCE = 0.90
+
+
+def filter_retrieved_results(
+    results: dict[str, list],
+    query_index: int = 0,
+    max_distance: float = MAX_DISTANCE,
+) -&gt; list[tuple[str, dict, float]]:
+    docs = results[&quot;documents&quot;][query_index]
+    metas = results[&quot;metadatas&quot;][query_index]
+    distances = results[&quot;distances&quot;][query_index]
+    ids = results[&quot;ids&quot;][query_index]
+
+    filtered: list[tuple[str, dict, float]] = []
+    seen_sources: set[str] = set()
+
+    for doc, meta, dist, chunk_id in zip(docs, metas, distances, ids):
+        if dist &gt; max_distance:
+            continue
+        source = meta.get(&quot;source&quot;, &quot;unknown&quot;)
+        if source in seen_sources:
+            continue
+        seen_sources.add(source)
+        filtered.append((doc, meta, dist))
+
+    return filtered
+
+
+def format_context_for_llm(filtered: list[tuple[str, dict, float]]) -&gt; str:
+    sections: list[str] = []
+    for i, (doc, meta, dist) in enumerate(filtered, 1):
+        source = meta.get(&quot;source&quot;, &quot;unknown&quot;)
+        sections.append(f&quot;[Context {i} | source: {source} | relevance: {1-dist:.2f}]\n{doc}&quot;)
+    return &quot;\n\n---\n\n&quot;.join(sections)
+
+
+test_results = collection.query(query_texts=[&quot;PowerShell execution macro parent T1059&quot;], n_results=4)
+filtered = filter_retrieved_results(test_results, max_distance=MAX_DISTANCE)
+context_block = format_context_for_llm(filtered)
+
+print(f&quot;Retrieved: {len(test_results[&#x27;documents&#x27;][0])}  After filtering: {len(filtered)}&quot;)
+print(&quot;\nFormatted context block:&quot;)
+print(context_block[:500])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a second filtering rule to <code>filter_retrieved_results</code>: if two chunks share the same <code>technique_id</code> (first technique in <code>meta[&quot;technique_ids&quot;].split(&quot;,&quot;)</code>) and both have distance &lt; 0.5, keep only the one with lower distance. This prevents both the runbook and a threat intel chunk about the same technique from both being included when they cover the same ground.</p>
+<p>Expected output: when two chunks share T1071.001 and both score well, only the better-scoring one is included.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Semantic retrieval as the memory layer for SOC agents<br />
+<strong>Threat:</strong> Query injection — an analyst's search query is user-controlled input that gets passed to the vector store. A malicious insider could craft a query string that retrieves sensitive asset information (PII, credentials) stored in the knowledge base, then exfiltrate it via the LLM output<br />
+<strong>Opportunity:</strong> The knowledge base acts as a long-term memory that outlives individual analysts — runbooks, incident history, and threat intel persist even when the author leaves the team<br />
+<strong>Prompt to try:</strong> <code>&quot;I have a security knowledge base with 50 runbooks and 3 years of incident history stored in ChromaDB. An alert fired for T1078 (Valid Accounts). Write a Python function that constructs the optimal query string for ChromaDB to maximize retrieval of (1) the T1078 runbook, (2) past incidents involving credential abuse, (3) asset inventory entries for high-value targets. The function takes the alert dict as input.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — LLM Summary Generation</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="22-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=VllkW63LWbY" target="_blank" rel="noopener"><b>LLMs + Instructor: Generate Structured Output in Python Easily</b><small>NeuralNine</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=LLM%20structured%20output%20JSON%20security%20triage%20summary%20generation" target="_blank" rel="noopener">LLM structured output JSON security triage summary generation</a></p></div>
+<hr />
+<h3>Concept 1 — Structured Output for Triage Summaries</h3>
+<p>An LLM that produces free-form text for triage is unusable in production. An analyst cannot parse a paragraph when they are working an incident under time pressure. The LLM output must be structured — a JSON object with defined fields that a downstream system can read programmatically.</p>
+<p>Structured output patterns (from W10): use a system prompt that constrains the output format, provide a JSON schema as part of the prompt, and parse the response with validation. If the LLM returns malformed JSON, retry once with an explicit correction prompt before falling back to a default low-confidence verdict.</p>
+<p>For alert enrichment, the triage summary schema must include: verdict, confidence, primary evidence used (which chunks were decisive), investigation steps, and a human-readable explanation. The explanation is the one free-text field — everything else is typed.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+from dataclasses import dataclass, field
+
+
+@dataclass
+class TriageSummary:
+    alert_id: str
+    verdict: str                    # &quot;ESCALATE&quot;, &quot;MONITOR&quot;, &quot;CLOSE_FP&quot;
+    confidence: float               # 0.0–1.0
+    primary_evidence: list[str]     # which context sources were decisive
+    investigation_steps: list[str]  # ordered next actions for analyst
+    explanation: str                # human-readable one-paragraph summary
+    model_used: str
+    context_chunks_used: int
+
+    def to_json(self) -&gt; str:
+        return json.dumps({
+            &quot;alert_id&quot;: self.alert_id,
+            &quot;verdict&quot;: self.verdict,
+            &quot;confidence&quot;: self.confidence,
+            &quot;primary_evidence&quot;: self.primary_evidence,
+            &quot;investigation_steps&quot;: self.investigation_steps,
+            &quot;explanation&quot;: self.explanation,
+            &quot;model_used&quot;: self.model_used,
+            &quot;context_chunks_used&quot;: self.context_chunks_used,
+        }, indent=2)
+
+    def is_actionable(self) -&gt; bool:
+        return self.confidence &gt;= 0.75 and self.verdict in (&quot;ESCALATE&quot;, &quot;CLOSE_FP&quot;)
+
+
+TRIAGE_SUMMARY_SCHEMA = {
+    &quot;verdict&quot;: &quot;string: one of ESCALATE, MONITOR, CLOSE_FP&quot;,
+    &quot;confidence&quot;: &quot;float 0.0–1.0&quot;,
+    &quot;primary_evidence&quot;: &quot;list of strings: which context sources were decisive&quot;,
+    &quot;investigation_steps&quot;: &quot;list of 3 strings: next actions for analyst&quot;,
+    &quot;explanation&quot;: &quot;string: 2-sentence plain English summary&quot;,
+}
+
+
+def build_triage_prompt(alert: dict, context_block: str) -&gt; str:
+    return f&quot;&quot;&quot;You are a SOC triage assistant. Analyze the alert using the provided context.
+Output ONLY valid JSON matching this schema: {json.dumps(TRIAGE_SUMMARY_SCHEMA, indent=2)}
+
+ALERT:
+{json.dumps(alert, indent=2)}
+
+CONTEXT:
+{context_block}
+
+Respond with JSON only. No markdown, no explanation outside the JSON.&quot;&quot;&quot;
+
+
+def simulate_llm_triage(prompt: str, alert_id: str) -&gt; TriageSummary:
+    # Simulation: parse alert from prompt to produce deterministic output
+    # In production: call claude-sonnet-4-6 with structured output
+    has_high_score = &quot;known_c2&quot; in prompt or &quot;score: 85&quot; in prompt
+    has_runbook = &quot;runbook&quot; in prompt.lower()
+
+    verdict = &quot;ESCALATE&quot; if has_high_score else &quot;MONITOR&quot;
+    confidence = 0.91 if has_high_score and has_runbook else 0.60
+    steps = [&quot;Check process making connection&quot;, &quot;Pull 7-day netflow&quot;, &quot;Request endpoint isolation if confirmed&quot;]
+
+    return TriageSummary(
+        alert_id=alert_id,
+        verdict=verdict,
+        confidence=confidence,
+        primary_evidence=[&quot;threat_intel&quot;, &quot;runbook&quot;] if has_runbook else [&quot;alert_data&quot;],
+        investigation_steps=steps,
+        explanation=&quot;High-confidence C2 beaconing detected based on known malicious IP. Runbook recommends isolation.&quot;,
+        model_used=&quot;simulation&quot;,
+        context_chunks_used=len(context_block.split(&quot;---&quot;)),
+    )
+
+
+alert_data = {&quot;alert_id&quot;: &quot;ALERT-001&quot;, &quot;technique&quot;: &quot;T1071.001&quot;,
+              &quot;source_ip&quot;: &quot;185.220.101.45&quot;, &quot;hostname&quot;: &quot;WS-FINANCE-07&quot;}
+prompt = build_triage_prompt(alert_data, context_block)
+summary = simulate_llm_triage(prompt, alert_data[&quot;alert_id&quot;])
+
+print(summary.to_json())
+print(f&quot;\nActionable: {summary.is_actionable()}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>parse_llm_response(response_text: str, alert_id: str, model_used: str, chunks_used: int) -&gt; TriageSummary</code> that:</p>
+<ol>
+<li>Attempts <code>json.loads(response_text)</code></li>
+<li>If it fails, tries to extract JSON from inside <code>json ... </code> code fences</li>
+<li>If both fail, returns a default TriageSummary with verdict=&quot;MONITOR&quot;, confidence=0.0, and explanation=&quot;LLM response parse failure&quot;</li>
+<li>Validates that <code>verdict</code> is one of the three valid values; if not, sets confidence to 0.0</li>
+</ol>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>valid_response = &#x27;{&quot;verdict&quot;: &quot;ESCALATE&quot;, &quot;confidence&quot;: 0.88, &quot;primary_evidence&quot;: [&quot;threat_intel&quot;], &quot;investigation_steps&quot;: [&quot;step1&quot;, &quot;step2&quot;, &quot;step3&quot;], &quot;explanation&quot;: &quot;Clear C2.&quot;}&#x27;
+fenced_response = &#x27;```json\n{&quot;verdict&quot;: &quot;CLOSE_FP&quot;, &quot;confidence&quot;: 0.82, &quot;primary_evidence&quot;: [], &quot;investigation_steps&quot;: [], &quot;explanation&quot;: &quot;Benign.&quot;}\n```&#x27;
+bad_response = &quot;I cannot determine the verdict without more information.&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: three TriageSummary objects — first valid, second extracted from fence, third default with confidence=0.0.</p>
+<hr />
+<h3>Concept 2 — Retry and Fallback Logic</h3>
+<p>LLM calls fail. The model returns malformed JSON, the API times out, or the confidence is too low to act on. A production RAG enrichment pipeline must handle each of these cases without losing the alert.</p>
+<p>Retry strategy for LLM calls:</p>
+<ol>
+<li>First attempt: full context (retrieved chunks + alert)</li>
+<li>If JSON parse fails: retry with correction prompt (&quot;Your previous response was not valid JSON. Try again.&quot;)</li>
+<li>If confidence &lt; 0.50: retry with expanded context (fetch more chunks, increase n_results)</li>
+<li>If all retries fail: emit a <code>MANUAL_REVIEW</code> verdict with all raw enrichment data attached — never silently drop</li>
+</ol>
+<p>This is the same retry-with-backoff pattern from W3 (API reliability), applied to LLM calls.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+from dataclasses import dataclass
+
+
+@dataclass
+class LLMCallResult:
+    success: bool
+    summary: TriageSummary | None
+    attempts: int
+    failure_reason: str = &quot;&quot;
+
+
+def call_llm_with_retry(
+    alert: dict,
+    context_block: str,
+    max_attempts: int = 3,
+    min_confidence: float = 0.50,
+) -&gt; LLMCallResult:
+    alert_id = alert.get(&quot;alert_id&quot;, &quot;unknown&quot;)
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            prompt = build_triage_prompt(alert, context_block)
+            summary = simulate_llm_triage(prompt, alert_id)
+
+            if summary.confidence &lt; min_confidence:
+                if attempt &lt; max_attempts:
+                    continue  # retry with broader context
+                # Final attempt still low confidence
+                summary.verdict = &quot;MONITOR&quot;
+                summary.investigation_steps.insert(0, &quot;Manual review required — low model confidence&quot;)
+
+            return LLMCallResult(success=True, summary=summary, attempts=attempt)
+
+        except Exception as e:
+            if attempt == max_attempts:
+                fallback = TriageSummary(
+                    alert_id=alert_id,
+                    verdict=&quot;MONITOR&quot;,
+                    confidence=0.0,
+                    primary_evidence=[],
+                    investigation_steps=[&quot;Manual review required — all LLM attempts failed&quot;],
+                    explanation=f&quot;Enrichment failed after {max_attempts} attempts: {e}&quot;,
+                    model_used=&quot;fallback&quot;,
+                    context_chunks_used=0,
+                )
+                return LLMCallResult(success=False, summary=fallback,
+                                     attempts=attempt, failure_reason=str(e))
+            time.sleep(0.1 * attempt)
+
+    return LLMCallResult(success=False, summary=None, attempts=max_attempts, failure_reason=&quot;max retries&quot;)
+
+
+result = call_llm_with_retry(alert_data, context_block)
+print(f&quot;Success: {result.success}  Attempts: {result.attempts}&quot;)
+if result.summary:
+    print(f&quot;Verdict: {result.summary.verdict}  Confidence: {result.summary.confidence:.0%}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Modify <code>call_llm_with_retry</code> to accept <code>expanded_collection: SimulatedCollection | None = None</code>. If <code>expanded_collection</code> is provided and <code>summary.confidence &lt; min_confidence</code> on attempt 1, re-query the collection with <code>n_results=5</code> (instead of 3) and rebuild <code>context_block</code> before attempt 2. Log the fact that expanded context was used in <code>summary.explanation</code>.</p>
+<p>Expected output: attempt 2 uses a larger context block; explanation mentions &quot;expanded context used on retry&quot;.</p>
+<hr />
+<h3>Concept 3 — Audit Trail for LLM Decisions</h3>
+<p>Every LLM-generated triage decision must be auditable. An analyst reviewing the decision three weeks later must be able to answer: what context did the model see, what did it produce, which analyst reviewed it, and was it correct?</p>
+<p>The audit record must be immutable — once written, it cannot be modified. In practice this means append-only storage (a log file, a write-once S3 bucket, or a database table with no UPDATE permissions for the enrichment service account). The record must include the full prompt (or a hash if privacy-sensitive), the full response, and the final human-confirmed verdict.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+
+@dataclass
+class EnrichmentAuditRecord:
+    audit_id: str
+    alert_id: str
+    timestamp: str
+    model_used: str
+    n_context_chunks: int
+    context_sources: list[str]
+    prompt_hash: str         # SHA-256 of the full prompt — not stored, for verification
+    response_hash: str       # SHA-256 of the raw LLM response
+    verdict: str
+    confidence: float
+    human_reviewed: bool
+    human_verdict: str | None
+    analyst_id: str | None
+
+    def to_json(self) -&gt; str:
+        return json.dumps({
+            &quot;audit_id&quot;: self.audit_id,
+            &quot;alert_id&quot;: self.alert_id,
+            &quot;timestamp&quot;: self.timestamp,
+            &quot;model_used&quot;: self.model_used,
+            &quot;n_context_chunks&quot;: self.n_context_chunks,
+            &quot;context_sources&quot;: self.context_sources,
+            &quot;prompt_hash&quot;: self.prompt_hash,
+            &quot;response_hash&quot;: self.response_hash,
+            &quot;verdict&quot;: self.verdict,
+            &quot;confidence&quot;: self.confidence,
+            &quot;human_reviewed&quot;: self.human_reviewed,
+            &quot;human_verdict&quot;: self.human_verdict,
+            &quot;analyst_id&quot;: self.analyst_id,
+        }, indent=2)
+
+    def was_correct(self) -&gt; bool | None:
+        if not self.human_reviewed or self.human_verdict is None:
+            return None
+        return self.verdict == self.human_verdict
+
+
+def hash_text(text: str) -&gt; str:
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def create_audit_record(
+    alert_id: str,
+    prompt: str,
+    llm_response_json: str,
+    summary: TriageSummary,
+    filtered_chunks: list[tuple],
+) -&gt; EnrichmentAuditRecord:
+    audit_id = f&quot;AUD-{hash_text(alert_id + datetime.now(timezone.utc).isoformat())}&quot;
+    return EnrichmentAuditRecord(
+        audit_id=audit_id,
+        alert_id=alert_id,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        model_used=summary.model_used,
+        n_context_chunks=len(filtered_chunks),
+        context_sources=[m.get(&quot;source&quot;, &quot;unknown&quot;) for _, m, _ in filtered_chunks],
+        prompt_hash=hash_text(prompt),
+        response_hash=hash_text(llm_response_json),
+        verdict=summary.verdict,
+        confidence=summary.confidence,
+        human_reviewed=False,
+        human_verdict=None,
+        analyst_id=None,
+    )
+
+
+sample_prompt = build_triage_prompt(alert_data, context_block)
+audit = create_audit_record(
+    alert_id=&quot;ALERT-001&quot;,
+    prompt=sample_prompt,
+    llm_response_json=summary.to_json(),
+    summary=summary,
+    filtered_chunks=filtered,
+)
+print(audit.to_json())
+print(f&quot;\nCorrect? {audit.was_correct()} (not yet reviewed)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>mark_reviewed(record: EnrichmentAuditRecord, analyst_id: str, human_verdict: str) -&gt; EnrichmentAuditRecord</code> that returns a NEW record (do not mutate in place) with <code>human_reviewed=True</code>, <code>analyst_id</code> set, <code>human_verdict</code> set. Then write <code>compute_model_accuracy(records: list[EnrichmentAuditRecord]) -&gt; float</code> that returns the fraction of reviewed records where <code>was_correct()</code> is True.</p>
+<p>Expected output: after marking a record reviewed, <code>was_correct()</code> returns True or False; accuracy computed over a list returns a float.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLM hallucination risk in threat intelligence summarization<br />
+<strong>Threat:</strong> The LLM generates a confident triage summary citing a threat actor that is not in the retrieved context — it &quot;remembered&quot; a plausible fact from pre-training data. An analyst acts on this hallucinated intel and requests isolation of a host that was never actually compromised.<br />
+<strong>Opportunity:</strong> Grounding the LLM output by requiring it to cite the exact chunk ID and quote the relevant sentence for every factual claim — hallucinated claims cannot be cited, so the citation requirement forces the model to stay within the retrieved context<br />
+<strong>Prompt to try:</strong> <code>&quot;You are a SOC triage assistant. For every factual claim in your triage summary, you MUST cite the exact chunk ID and a direct quote from that chunk. If you cannot cite a claim, do not make it. Context chunks: {context_block}. Alert: T1071.001, IP=185.220.101.45. Produce a triage summary with citations.&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Pipeline Assembly</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="22-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=vAK0iqA6-QI" target="_blank" rel="noopener"><b>RAG Tutorial 2026: Complete Introduction to Retrieval Augmented Generation</b><small>Sujan Anand</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=end%20to%20end%20RAG%20pipeline%20python%20production%20security" target="_blank" rel="noopener">end to end RAG pipeline python production security</a></p></div>
+<hr />
+<h3>Concept 1 — The Full Enrichment Pipeline</h3>
+<p>Connect all components from D1–D3 into a single callable pipeline:</p>
+<ol>
+<li>Receive alert → normalize to <code>CanonicalAlert</code></li>
+<li>Build ChromaDB query from alert fields</li>
+<li>Retrieve top-k chunks + filter</li>
+<li>Format context block</li>
+<li>Call LLM with retry</li>
+<li>Parse and validate triage summary</li>
+<li>Write audit record</li>
+<li>Return enriched case package</li>
+</ol>
+<p>This pipeline runs for every alert that enters the SOC. Its latency budget is the key SLA: most SOC automation targets &lt; 30 seconds end-to-end, leaving time for the analyst to read and act within a 5-minute response window.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+
+@dataclass
+class PipelineOutput:
+    alert_id: str
+    case_package_json: str
+    audit_record_json: str
+    pipeline_latency_ms: float
+    success: bool
+    failure_reason: str = &quot;&quot;
+
+
+def build_query_from_alert(alert: CanonicalAlert) -&gt; str:
+    parts: list[str] = []
+    if alert.technique_id:
+        parts.append(alert.technique_id)
+    if alert.source_ip:
+        parts.append(alert.source_ip)
+    parts.append(alert.hostname)
+    if alert.commandline:
+        parts.append(alert.commandline[:100])
+    return &quot; &quot;.join(parts)
+
+
+def run_enrichment_pipeline(
+    raw_alert: dict,
+    adapter_fn,
+    chroma_collection: SimulatedCollection,
+    n_results: int = 3,
+    max_distance: float = 0.90,
+) -&gt; PipelineOutput:
+    t0 = datetime.now(timezone.utc)
+    alert_id = raw_alert.get(&quot;SystemAlertId&quot;, raw_alert.get(&quot;alert_id&quot;, &quot;unknown&quot;))
+
+    try:
+        # Step 1: normalize
+        canonical = adapter_fn(raw_alert)
+
+        # Step 2-3: retrieve and filter
+        query = build_query_from_alert(canonical)
+        results = chroma_collection.query(query_texts=[query], n_results=n_results)
+        filtered = filter_retrieved_results(results, max_distance=max_distance)
+
+        # Step 4: format context
+        ctx_block = format_context_for_llm(filtered)
+
+        # Step 5-6: LLM call with retry
+        alert_dict = canonical.to_dict()
+        llm_result = call_llm_with_retry(alert_dict, ctx_block)
+        summary = llm_result.summary
+
+        # Step 7: audit record
+        prompt = build_triage_prompt(alert_dict, ctx_block)
+        audit = create_audit_record(alert_id, prompt, summary.to_json(), summary, filtered)
+
+        # Step 8: case package
+        from dataclasses import asdict
+        pkg_dict = {
+            &quot;case_id&quot;: f&quot;CASE-{audit.audit_id}&quot;,
+            &quot;alert_id&quot;: alert_id,
+            &quot;triage_summary&quot;: json.loads(summary.to_json()),
+            &quot;context_sources&quot;: [m.get(&quot;source&quot;) for _, m, _ in filtered],
+        }
+
+        elapsed_ms = (datetime.now(timezone.utc) - t0).total_seconds() * 1000
+        return PipelineOutput(
+            alert_id=alert_id,
+            case_package_json=json.dumps(pkg_dict, indent=2),
+            audit_record_json=audit.to_json(),
+            pipeline_latency_ms=elapsed_ms,
+            success=llm_result.success,
+        )
+
+    except Exception as e:
+        elapsed_ms = (datetime.now(timezone.utc) - t0).total_seconds() * 1000
+        return PipelineOutput(
+            alert_id=alert_id,
+            case_package_json=&quot;{}&quot;,
+            audit_record_json=&quot;{}&quot;,
+            pipeline_latency_ms=elapsed_ms,
+            success=False,
+            failure_reason=str(e),
+        )
+
+
+output = run_enrichment_pipeline(raw_sentinel, adapt_sentinel_alert, collection)
+print(f&quot;Pipeline completed in {output.pipeline_latency_ms:.0f}ms  success={output.success}&quot;)
+print(f&quot;\nCase package (first 400 chars):&quot;)
+print(output.case_package_json[:400])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>batch_enrich(raw_alerts: list[dict], adapter_fn, collection: SimulatedCollection) -&gt; list[PipelineOutput]</code> that processes each alert and returns a list of outputs. Then write <code>pipeline_stats(outputs: list[PipelineOutput]) -&gt; dict</code> that returns:</p>
+<ul>
+<li><code>&quot;total&quot;</code>: int</li>
+<li><code>&quot;success_count&quot;</code>: int</li>
+<li><code>&quot;failure_count&quot;</code>: int</li>
+<li><code>&quot;avg_latency_ms&quot;</code>: float (successful only)</li>
+<li><code>&quot;escalation_count&quot;</code>: int (alerts where case_package contains <code>&quot;verdict&quot;: &quot;ESCALATE&quot;</code>)</li>
+</ul>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>alerts_batch = [raw_sentinel,
+    {&quot;alert_id&quot;: &quot;ALERT-002&quot;, &quot;technique&quot;: &quot;T1059.001&quot;,
+     &quot;source_ip&quot;: &quot;10.0.0.55&quot;, &quot;hostname&quot;: &quot;CI-PROD-01&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: two outputs processed; stats show counts and average latency.</p>
+<hr />
+<h3>Concept 2 — Streaming Output for Real-Time SOC</h3>
+<p>For a real-time SOC dashboard, waiting for the full LLM response before displaying anything creates latency. Streaming output shows the analyst the triage reasoning as it is generated — they can start reading the explanation while the model is still generating the investigation steps.</p>
+<p>Streaming is an LLM API feature: instead of returning the full response in one HTTP body, the API sends server-sent events (SSE) with partial response chunks. In Python, this is <code>stream=True</code> on the Anthropic client, which returns a context manager that yields <code>MessageStreamEvent</code> objects.</p>
+<p>For our simulation, we implement streaming by yielding characters one at a time from the pre-built response string — same concept, no API required.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+from typing import Generator
+
+
+def simulate_streaming_llm(prompt: str, alert_id: str) -&gt; Generator[str, None, None]:
+    summary = simulate_llm_triage(prompt, alert_id)
+    full_response = summary.to_json()
+    # Simulate streaming: yield one character at a time with tiny delay
+    for char in full_response:
+        yield char
+        time.sleep(0.001)  # 1ms per character simulates ~500 tokens/sec
+
+
+def consume_stream(stream: Generator[str, None, None], display_live: bool = False) -&gt; str:
+    buffer = &quot;&quot;
+    for chunk in stream:
+        buffer += chunk
+        if display_live:
+            print(chunk, end=&quot;&quot;, flush=True)
+    return buffer
+
+
+def streaming_pipeline_step(alert_dict: dict, context_block: str) -&gt; str:
+    prompt = build_triage_prompt(alert_dict, alert_dict.get(&quot;alert_id&quot;, &quot;&quot;))
+    stream = simulate_streaming_llm(prompt, alert_dict.get(&quot;alert_id&quot;, &quot;&quot;))
+    complete_response = consume_stream(stream, display_live=False)
+    return complete_response
+
+
+response_text = streaming_pipeline_step(alert_data, context_block)
+print(f&quot;Streamed {len(response_text)} characters&quot;)
+print(f&quot;Valid JSON: &quot;, end=&quot;&quot;)
+try:
+    json.loads(response_text)
+    print(&quot;yes&quot;)
+except json.JSONDecodeError as e:
+    print(f&quot;no — {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>stream_with_timeout(stream: Generator[str, None, None], timeout_seconds: float = 5.0) -&gt; tuple[str, bool]</code> that consumes the stream but returns early if the total elapsed time exceeds <code>timeout_seconds</code>. Return a tuple <code>(partial_or_full_response, timed_out)</code>. If timed out, the partial response is whatever was buffered before the cutoff.</p>
+<p>Expected output: for a stream that takes &lt; 5s, returns (full_response, False); for a very long response with timeout=0.01, returns (partial, True).</p>
+<hr />
+<h3>Concept 3 — Output Schema and SIEM Integration</h3>
+<p>The final output of the enrichment pipeline is a SIEM event. Every enriched alert should generate a log entry that is queryable in Sentinel, Splunk, or Elastic alongside the original alert. This closes the loop: the detection fires → the enrichment pipeline runs → the enriched verdict lands back in the SIEM as a correlated event.</p>
+<p>The SIEM enrichment event schema must be flat (SIEM query languages work poorly on nested JSON), include the original alert ID as a join key, and include all fields that an analyst might filter on: verdict, confidence, technique, model used, context sources.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+
+@dataclass
+class SIEMEnrichmentEvent:
+    event_source: str
+    event_type: str
+    timestamp: str
+    original_alert_id: str
+    enrichment_verdict: str
+    enrichment_confidence: float
+    technique_id: str
+    hostname: str
+    model_used: str
+    context_sources_csv: str
+    n_context_chunks: int
+    investigation_step_1: str
+    investigation_step_2: str
+    investigation_step_3: str
+    pipeline_latency_ms: float
+
+    def to_flat_json(self) -&gt; str:
+        return json.dumps({
+            &quot;event_source&quot;: self.event_source,
+            &quot;event_type&quot;: self.event_type,
+            &quot;timestamp&quot;: self.timestamp,
+            &quot;original_alert_id&quot;: self.original_alert_id,
+            &quot;enrichment_verdict&quot;: self.enrichment_verdict,
+            &quot;enrichment_confidence&quot;: self.enrichment_confidence,
+            &quot;technique_id&quot;: self.technique_id,
+            &quot;hostname&quot;: self.hostname,
+            &quot;model_used&quot;: self.model_used,
+            &quot;context_sources_csv&quot;: self.context_sources_csv,
+            &quot;n_context_chunks&quot;: self.n_context_chunks,
+            &quot;investigation_step_1&quot;: self.investigation_step_1,
+            &quot;investigation_step_2&quot;: self.investigation_step_2,
+            &quot;investigation_step_3&quot;: self.investigation_step_3,
+            &quot;pipeline_latency_ms&quot;: self.pipeline_latency_ms,
+        }, indent=2)
+
+
+SIGMA_RULE_ENRICHMENT_ESCALATION = &quot;&quot;&quot;
+title: LLM Enrichment High-Confidence Escalation
+id: f8a3b2c1-9d4e-4f5a-8c7b-3e2d1a0f9b8e
+status: experimental
+description: LLM enrichment pipeline recommends ESCALATE with confidence &gt;= 0.80
+logsource:
+    category: alert_enrichment
+    product: llm_enrichment_pipeline
+detection:
+    selection:
+        event_source: llm_enrichment_pipeline
+        enrichment_verdict: ESCALATE
+    filter_low_confidence:
+        enrichment_confidence|lt: 0.80
+    condition: selection and not filter_low_confidence
+falsepositives:
+    - LLM model calibration issues during initial deployment
+level: high
+tags:
+    - llm.enrichment
+    - triage.escalation
+&quot;&quot;&quot;
+
+
+def pipeline_output_to_siem_event(
+    output: PipelineOutput,
+    summary: TriageSummary,
+    canonical_alert: CanonicalAlert,
+) -&gt; SIEMEnrichmentEvent:
+    steps = summary.investigation_steps
+    return SIEMEnrichmentEvent(
+        event_source=&quot;llm_enrichment_pipeline&quot;,
+        event_type=&quot;alert_enrichment_complete&quot;,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        original_alert_id=output.alert_id,
+        enrichment_verdict=summary.verdict,
+        enrichment_confidence=summary.confidence,
+        technique_id=canonical_alert.technique_id,
+        hostname=canonical_alert.hostname,
+        model_used=summary.model_used,
+        context_sources_csv=&quot;,&quot;.join(summary.primary_evidence),
+        n_context_chunks=summary.context_chunks_used,
+        investigation_step_1=steps[0] if len(steps) &gt; 0 else &quot;&quot;,
+        investigation_step_2=steps[1] if len(steps) &gt; 1 else &quot;&quot;,
+        investigation_step_3=steps[2] if len(steps) &gt; 2 else &quot;&quot;,
+        pipeline_latency_ms=output.pipeline_latency_ms,
+    )
+
+
+canonical_from_raw = adapt_sentinel_alert(raw_sentinel)
+siem_event = pipeline_output_to_siem_event(output, summary, canonical_from_raw)
+print(siem_event.to_flat_json())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>kql_query_for_verdict(verdict: str, min_confidence: float) -&gt; str</code> that returns a KQL query string for Microsoft Sentinel to find all enrichment events matching the verdict and confidence threshold:</p>
+<pre><code>EnrichmentEvents_CL
+| where event_source_s == &quot;llm_enrichment_pipeline&quot;
+| where enrichment_verdict_s == &quot;{verdict}&quot;
+| where enrichment_confidence_d &gt;= {min_confidence}
+| project timestamp_t, original_alert_id_s, technique_id_s, hostname_s, enrichment_confidence_d
+| order by timestamp_t desc
+</code></pre><p>Write a function that takes <code>verdict: str</code> and <code>min_confidence: float</code> and returns the correctly parameterized string. Verify that it generates valid KQL with no string interpolation injection risk (all values validated before insertion).</p>
+<p>Expected output: a correctly formatted KQL string with no raw f-string interpolation from untrusted input.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLM as the synthesis layer in a RAG pipeline<br />
+<strong>Threat:</strong> Context window stuffing — an attacker who can write to the knowledge base inserts an enormous document that, when retrieved, consumes the entire context window and prevents the legitimate runbook and threat intel from being retrieved<br />
+<strong>Opportunity:</strong> Token-aware retrieval with diversity scoring ensures no single source dominates the context window; the pipeline enforces a maximum token budget per source<br />
+<strong>Prompt to try:</strong> <code>&quot;I'm building a RAG enrichment pipeline for SOC alerts. Each alert retrieves 3 context chunks (max 150 tokens each) and sends them to an LLM for triage. Design a diversity scoring function that penalizes retrieving 3 chunks from the same source. The function should take a list of (chunk, distance) tuples and return a reranked list that maximizes both relevance and source diversity. Output as Python code.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Production Hardening and Coverage Map</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="22-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=production%20LLM%20pipeline%20reliability%20monitoring%20observability" target="_blank" rel="noopener">production LLM pipeline reliability monitoring observability</a></p></div>
+<hr />
+<h3>Concept 1 — Pipeline Monitoring and Observability</h3>
+<p>A production enrichment pipeline must emit metrics that the SOC team can monitor. The three critical metrics: (1) pipeline success rate (fraction of alerts successfully enriched), (2) model decision distribution (what fraction of verdicts are ESCALATE vs. MONITOR vs. CLOSE_FP), (3) mean latency per alert.</p>
+<p>Decision distribution drift is the most important signal: if the model's ESCALATE rate jumps from 12% to 40% overnight, either the threat landscape changed dramatically or the model is misconfigured. Either way, a human needs to investigate.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from collections import defaultdict
+from datetime import datetime, timezone
+import json
+
+
+@dataclass
+class PipelineMetrics:
+    window_start: str
+    window_end: str
+    total_alerts: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    verdict_counts: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    latency_ms_list: list[float] = field(default_factory=list)
+
+    def record(self, output: PipelineOutput, verdict: str | None) -&gt; None:
+        self.total_alerts += 1
+        if output.success:
+            self.success_count += 1
+            if verdict:
+                self.verdict_counts[verdict] += 1
+        else:
+            self.failure_count += 1
+        self.latency_ms_list.append(output.pipeline_latency_ms)
+
+    def success_rate(self) -&gt; float:
+        return self.success_count / max(1, self.total_alerts)
+
+    def p95_latency_ms(self) -&gt; float:
+        if not self.latency_ms_list:
+            return 0.0
+        sorted_lat = sorted(self.latency_ms_list)
+        idx = int(len(sorted_lat) * 0.95)
+        return sorted_lat[min(idx, len(sorted_lat) - 1)]
+
+    def verdict_distribution(self) -&gt; dict[str, float]:
+        total = sum(self.verdict_counts.values())
+        if total == 0:
+            return {}
+        return {k: v / total for k, v in self.verdict_counts.items()}
+
+    def drift_detected(self, baseline_escalation_rate: float, threshold: float = 0.20) -&gt; bool:
+        current = self.verdict_distribution().get(&quot;ESCALATE&quot;, 0.0)
+        return abs(current - baseline_escalation_rate) &gt; threshold
+
+    def to_json(self) -&gt; str:
+        return json.dumps({
+            &quot;window_start&quot;: self.window_start,
+            &quot;window_end&quot;: self.window_end,
+            &quot;total_alerts&quot;: self.total_alerts,
+            &quot;success_rate&quot;: self.success_rate(),
+            &quot;p95_latency_ms&quot;: self.p95_latency_ms(),
+            &quot;verdict_distribution&quot;: self.verdict_distribution(),
+        }, indent=2)
+
+
+metrics = PipelineMetrics(
+    window_start=datetime.now(timezone.utc).isoformat(),
+    window_end=datetime.now(timezone.utc).isoformat(),
+)
+
+sample_outputs = [
+    PipelineOutput(&quot;ALT-001&quot;, &quot;{}&quot;, &quot;{}&quot;, 450.0, True),
+    PipelineOutput(&quot;ALT-002&quot;, &quot;{}&quot;, &quot;{}&quot;, 380.0, True),
+    PipelineOutput(&quot;ALT-003&quot;, &quot;{}&quot;, &quot;{}&quot;, 0.0, False, &quot;timeout&quot;),
+]
+sample_verdicts = [&quot;ESCALATE&quot;, &quot;MONITOR&quot;, None]
+
+for out, verdict in zip(sample_outputs, sample_verdicts):
+    metrics.record(out, verdict)
+
+print(metrics.to_json())
+print(f&quot;\nDrift detected (baseline 15%): {metrics.drift_detected(0.15)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a method <code>alert_on_thresholds(success_rate_min: float = 0.90, p95_max_ms: float = 30_000.0) -&gt; list[str]</code> to <code>PipelineMetrics</code> that returns a list of alert strings (empty = healthy):</p>
+<ul>
+<li>If <code>success_rate() &lt; success_rate_min</code>: add <code>&quot;SUCCESS_RATE_BELOW_THRESHOLD: {rate:.0%}&quot;</code></li>
+<li>If <code>p95_latency_ms() &gt; p95_max_ms</code>: add <code>&quot;P95_LATENCY_EXCEEDED: {latency:.0f}ms&quot;</code></li>
+<li>If <code>drift_detected(0.15)</code>: add <code>&quot;VERDICT_DISTRIBUTION_DRIFT_DETECTED&quot;</code></li>
+</ul>
+<p>Expected output: for the sample above, SUCCESS_RATE alert fires (0.67 &lt; 0.90).</p>
+<hr />
+<h3>Concept 2 — Knowledge Base Maintenance</h3>
+<p>A RAG knowledge base degrades without maintenance. Old runbooks become stale when procedures change. Threat intel about TTPs from three years ago may no longer reflect current actor behavior. Incident history from before a major network redesign may mislead the LLM about which hosts are high-risk.</p>
+<p>Maintenance operations: (1) TTL-based expiry — each chunk has a <code>valid_until</code> date; the pipeline skips expired chunks; (2) usage tracking — chunks that are never retrieved in 90 days are candidates for deletion; (3) conflict detection — if two chunks contradict each other (one says host X is safe, another says X is compromised), flag for human review.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+
+@dataclass
+class ManagedChunk(KnowledgeChunk):
+    created_date: str = &quot;&quot;
+    valid_until: str = &quot;&quot;   # ISO date string, &quot;&quot; = never expires
+    retrieval_count: int = 0
+    last_retrieved: str = &quot;&quot;
+
+    def is_expired(self, as_of: date = None) -&gt; bool:
+        if not self.valid_until:
+            return False
+        check_date = as_of or date.today()
+        return date.fromisoformat(self.valid_until) &lt; check_date
+
+    def is_stale(self, no_retrieval_days: int = 90, as_of: date = None) -&gt; bool:
+        if not self.last_retrieved:
+            # Never retrieved — stale if older than threshold
+            if not self.created_date:
+                return False
+            check_date = as_of or date.today()
+            created = date.fromisoformat(self.created_date)
+            return (check_date - created).days &gt; no_retrieval_days
+        check_date = as_of or date.today()
+        last = date.fromisoformat(self.last_retrieved)
+        return (check_date - last).days &gt; no_retrieval_days
+
+
+def audit_knowledge_base(chunks: list[ManagedChunk], as_of: date = None) -&gt; dict:
+    as_of = as_of or date.today()
+    expired = [c for c in chunks if c.is_expired(as_of)]
+    stale = [c for c in chunks if not c.is_expired(as_of) and c.is_stale(as_of=as_of)]
+    active = [c for c in chunks if not c.is_expired(as_of) and not c.is_stale(as_of=as_of)]
+    return {
+        &quot;total&quot;: len(chunks),
+        &quot;active&quot;: len(active),
+        &quot;expired_ids&quot;: [c.chunk_id for c in expired],
+        &quot;stale_ids&quot;: [c.chunk_id for c in stale],
+    }
+
+
+test_date = date.today()
+managed_chunks = [
+    ManagedChunk(
+        chunk_id=&quot;c001&quot;, source=&quot;threat_intel&quot;,
+        content=&quot;APT33 C2 infrastructure using 185.x/24 netblock.&quot;,
+        created_date=(test_date - timedelta(days=200)).isoformat(),
+        valid_until=(test_date - timedelta(days=10)).isoformat(),
+        retrieval_count=15,
+        last_retrieved=(test_date - timedelta(days=5)).isoformat(),
+    ),
+    ManagedChunk(
+        chunk_id=&quot;c002&quot;, source=&quot;runbook&quot;,
+        content=&quot;T1071.001 triage: check IP reputation, check process...&quot;,
+        created_date=(test_date - timedelta(days=30)).isoformat(),
+        valid_until=&quot;&quot;,
+        retrieval_count=40,
+        last_retrieved=(test_date - timedelta(days=1)).isoformat(),
+    ),
+    ManagedChunk(
+        chunk_id=&quot;c003&quot;, source=&quot;asset_inventory&quot;,
+        content=&quot;Host LEGACY-WIN2008 decommissioned as of 2023.&quot;,
+        created_date=(test_date - timedelta(days=400)).isoformat(),
+        valid_until=&quot;&quot;,
+        retrieval_count=0,
+        last_retrieved=&quot;&quot;,
+    ),
+]
+
+result = audit_knowledge_base(managed_chunks)
+print(f&quot;Total: {result[&#x27;total&#x27;]}  Active: {result[&#x27;active&#x27;]}&quot;)
+print(f&quot;Expired: {result[&#x27;expired_ids&#x27;]}&quot;)
+print(f&quot;Stale: {result[&#x27;stale_ids&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>recommend_updates(audit_result: dict, chunks: list[ManagedChunk]) -&gt; list[str]</code> that returns a list of human-readable recommendations:</p>
+<ul>
+<li>For each expired chunk: <code>&quot;REMOVE: {chunk_id} ({source}) — expired&quot;</code></li>
+<li>For each stale chunk: <code>&quot;REVIEW: {chunk_id} ({source}) — not retrieved in 90+ days&quot;</code></li>
+<li>If expired_count &gt; active_count: <code>&quot;WARNING: more expired chunks than active — urgent knowledge base refresh needed&quot;</code></li>
+</ul>
+<p>Expected output: REMOVE for c001, REVIEW for c003, no WARNING (1 expired vs 1 active).</p>
+<hr />
+<h3>Concept 3 — End-to-End Coverage Map</h3>
+<p>The final deliverable for Phase 6 is a coverage map that shows which detection gaps the AI/LLM pipeline addresses and which remain. This closes out the detection coverage thread started in W12 (coverage dashboard) and continued in W19 (ML anomaly coverage).</p>
+<p>For the LLM enrichment pipeline specifically, coverage means: which alert types are enriched with relevant context (good retrieval), which are enriched but the model hallucinates (low confidence output), and which receive no context (knowledge base gap).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from enum import Enum
+
+
+class EnrichmentCoverage(Enum):
+    FULL = &quot;full&quot;         # knowledge base has relevant chunks, model confident
+    PARTIAL = &quot;partial&quot;   # some context retrieved but low confidence output
+    GAP = &quot;gap&quot;           # no relevant chunks retrieved (distance &gt; threshold for all)
+    EXCLUDED = &quot;excluded&quot; # alert type not in pipeline scope
+
+
+@dataclass
+class EnrichmentCoverageEntry:
+    technique_id: str
+    technique_name: str
+    coverage: EnrichmentCoverage
+    reason: str
+    kb_chunks_available: int
+    avg_retrieval_distance: float | None
+    avg_model_confidence: float | None
+
+
+ENRICHMENT_COVERAGE_MAP: list[EnrichmentCoverageEntry] = [
+    EnrichmentCoverageEntry(&quot;T1071.001&quot;, &quot;Application Layer Protocol (C2)&quot;, EnrichmentCoverage.FULL,
+        &quot;Runbook + threat intel + incident history available&quot;,
+        kb_chunks_available=3, avg_retrieval_distance=0.42, avg_model_confidence=0.88),
+    EnrichmentCoverageEntry(&quot;T1059.001&quot;, &quot;PowerShell Execution&quot;, EnrichmentCoverage.FULL,
+        &quot;Detailed runbook with triage steps and parent process guidance&quot;,
+        kb_chunks_available=2, avg_retrieval_distance=0.38, avg_model_confidence=0.85),
+    EnrichmentCoverageEntry(&quot;T1566.001&quot;, &quot;Phishing&quot;, EnrichmentCoverage.PARTIAL,
+        &quot;Incident history available but no current runbook — model confidence varies&quot;,
+        kb_chunks_available=1, avg_retrieval_distance=0.61, avg_model_confidence=0.62),
+    EnrichmentCoverageEntry(&quot;T1078&quot;, &quot;Valid Accounts (Credential Abuse)&quot;, EnrichmentCoverage.GAP,
+        &quot;No runbook or threat intel chunks for credential-based attacks&quot;,
+        kb_chunks_available=0, avg_retrieval_distance=None, avg_model_confidence=None),
+    EnrichmentCoverageEntry(&quot;T1003.001&quot;, &quot;LSASS Memory Dumping&quot;, EnrichmentCoverage.GAP,
+        &quot;Credential access techniques not yet in knowledge base&quot;,
+        kb_chunks_available=0, avg_retrieval_distance=None, avg_model_confidence=None),
+    EnrichmentCoverageEntry(&quot;physical_security_alert&quot;, &quot;Physical Access Alert&quot;, EnrichmentCoverage.EXCLUDED,
+        &quot;Out of scope — handled by physical security team&quot;,
+        kb_chunks_available=0, avg_retrieval_distance=None, avg_model_confidence=None),
+]
+
+
+def print_coverage_summary(coverage_map: list[EnrichmentCoverageEntry]) -&gt; None:
+    from collections import Counter
+    counts = Counter(e.coverage.value for e in coverage_map)
+    total_in_scope = sum(1 for e in coverage_map if e.coverage != EnrichmentCoverage.EXCLUDED)
+    full = counts.get(&quot;full&quot;, 0)
+    print(f&quot;Enrichment Coverage Summary&quot;)
+    print(f&quot;{&#x27;=&#x27;*40}&quot;)
+    print(f&quot;In scope:  {total_in_scope} techniques&quot;)
+    print(f&quot;Full:      {full} ({full/max(1,total_in_scope):.0%})&quot;)
+    print(f&quot;Partial:   {counts.get(&#x27;partial&#x27;, 0)}&quot;)
+    print(f&quot;Gap:       {counts.get(&#x27;gap&#x27;, 0)}&quot;)
+    print(f&quot;Excluded:  {counts.get(&#x27;excluded&#x27;, 0)}&quot;)
+    print()
+    for entry in coverage_map:
+        icon = {&quot;full&quot;: &quot;+&quot;, &quot;partial&quot;: &quot;~&quot;, &quot;gap&quot;: &quot;!&quot;, &quot;excluded&quot;: &quot;-&quot;}[entry.coverage.value]
+        conf = f&quot;conf={entry.avg_model_confidence:.0%}&quot; if entry.avg_model_confidence else &quot;no data&quot;
+        print(f&quot;  [{icon}] {entry.technique_id:12s}  {entry.coverage.value:10s}  {conf}&quot;)
+
+
+print_coverage_summary(ENRICHMENT_COVERAGE_MAP)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>gap_remediation_plan(coverage_map: list[EnrichmentCoverageEntry]) -&gt; list[str]</code> that returns a prioritized list of knowledge base additions to fill coverage gaps:</p>
+<ul>
+<li>For each GAP entry: <code>&quot;ADD RUNBOOK for {technique_id} ({technique_name}) — no context available&quot;</code></li>
+<li>For each PARTIAL entry with <code>avg_model_confidence &lt; 0.70</code>: <code>&quot;UPDATE KNOWLEDGE BASE for {technique_id} — confidence below threshold&quot;</code></li>
+<li>Sort: PARTIAL before GAP (fixing a partial is cheaper than building from scratch)</li>
+</ul>
+<p>Expected output: T1566.001 update recommendation first (partial, conf=0.62), then two gap entries for T1078 and T1003.001.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLM pipeline as a force multiplier in Israeli SOC context<br />
+<strong>Threat:</strong> Over-automation risk — Israeli SOCs under pressure from reserve duty shortages may lower the confidence threshold for auto-close below safe levels; a poorly calibrated model closes real incidents as false positives during high-alert periods<br />
+<strong>Opportunity:</strong> LLM triage running 24/7 means reserve duty absences no longer create alert backlog; the pipeline processes alerts continuously and only routes true positives to the (reduced) human team<br />
+<strong>Prompt to try:</strong> <code>&quot;A 5-person SOC in an Israeli fintech has 2 analysts on reserve duty. The LLM enrichment pipeline currently auto-closes CLOSE_FP verdicts with confidence &gt;= 0.85. The security lead wants to lower this to 0.70 to reduce backlog during the reserve period. What are the risks of lowering the threshold, and what compensating controls would you recommend to maintain detection quality?&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 22</h2>
+<p><strong>Task:</strong> Build <code>rag_enrichment/</code> folder containing the full RAG alert enrichment prototype as runnable Python modules.</p>
+<p><strong>Builds on:</strong> W10 RAG pipeline (ChromaDB, embeddings, chunking), W19 ML anomaly alerts (structured output format), W20 LLM security controls (audit trail, injection scanning), W21 SOC agent design (case package schema, pipeline output)</p>
+<p><strong>Deliverable:</strong></p>
+<pre><code>rag_enrichment/
+├── knowledge_base.py       # KnowledgeChunk, ManagedChunk, KNOWLEDGE_BASE, filter/ingest functions
+├── vector_store.py         # SimulatedCollection, SimulatedChromaClient, retrieve_top_k, filter_retrieved_results
+├── llm_enrichment.py       # TriageSummary, build_triage_prompt, simulate_llm_triage, call_llm_with_retry
+├── audit.py                # EnrichmentAuditRecord, create_audit_record, mark_reviewed, compute_model_accuracy
+├── pipeline.py             # CanonicalAlert adapters, run_enrichment_pipeline, batch_enrich, pipeline_stats
+├── siem_output.py          # SIEMEnrichmentEvent, pipeline_output_to_siem_event, kql_query_for_verdict
+├── monitoring.py           # PipelineMetrics, alert_on_thresholds
+├── kb_maintenance.py       # audit_knowledge_base, recommend_updates, gap_remediation_plan
+├── coverage_map.py         # EnrichmentCoverageEntry, ENRICHMENT_COVERAGE_MAP, print_coverage_summary
+└── pipeline_output/
+    └── enrichment_sample.json   # run_enrichment_pipeline() output for raw_sentinel alert
+</code></pre><p><strong>Stretch goal:</strong> Add <code>real_mode/llm_client.py</code> with a <code>call_claude(prompt: str, model: str = &quot;claude-sonnet-4-6&quot;) -&gt; str</code> function using the Anthropic SDK (commented out by default, enabled by setting <code>ANTHROPIC_API_KEY</code> env var). Replace <code>simulate_llm_triage</code> with a real call when the key is present, fall back to simulation when absent. Add <code>os.getenv(&quot;ANTHROPIC_API_KEY&quot;)</code> check at pipeline startup.</p>
+<div class="pager"><a class="btn ghost" href="week-21.html">&larr; Week 21</a><a class="btn ghost" href="week-23.html">Week 23 &rarr;</a></div>
+</main></body></html>

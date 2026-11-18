@@ -1,0 +1,2129 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 15 — Cloud Detection: Azure &amp; GCP</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 15 — Cloud Detection: Azure &amp; GCP</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="15" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 15 — Cloud Detection: Azure &amp; GCP</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 4 — Detection Engineering</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Cloud Security Monitoring / SC-200: Microsoft Sentinel cloud detections / GCIA: Cloud log analysis</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>2 production cloud detection rules: Azure impossible travel + GCP IAM abuse</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W12 (detection methodology), W13 (Sigma rules), W14 (network beaconing)</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Azure Log Architecture &amp; Sentinel Ingestion</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="15-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=220xP-Ok92s" target="_blank" rel="noopener"><b>Microsoft Sentinel Tutorial: Introduction, Capabilities, and Architecture</b><small>CyberPlatter</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Microsoft%20Sentinel%20log%20ingestion%20architecture%202024" target="_blank" rel="noopener">Microsoft Sentinel log ingestion architecture 2024</a></p></div>
+<hr />
+<h3>Concept 1 — Azure Log Taxonomy</h3>
+<p>Azure generates logs at three distinct layers, each with different retention defaults, query latency, and cost profiles. Understanding which layer a log lives in determines how you write detections and how quickly you can respond.</p>
+<p><strong>Activity Logs</strong> capture control-plane operations — who created a VM, who changed a firewall rule, who assigned a role. These are tenant-scoped and free up to 90 days. Think of them as your DDL audit log: they record schema changes (infrastructure changes), not row-level operations (user behavior).</p>
+<p><strong>Diagnostic Logs</strong> capture data-plane operations — sign-ins, resource access, application events. These must be explicitly routed to a Log Analytics Workspace. By default they go nowhere. This is the equivalent of <code>SET AUDIT_TRAIL = DB</code> in Oracle — it must be turned on.</p>
+<p><strong>Microsoft Sentinel</strong> is a SIEM layer on top of Log Analytics. It adds UEBA (User and Entity Behavior Analytics), incident management, and KQL-based analytics rules. A Sentinel analytics rule is functionally identical to a scheduled KQL query that fires an alert when row count &gt; 0.</p>
+<p>Data flows: Azure service → Diagnostic Settings → Log Analytics Workspace → Sentinel connectors → analytics rules → incidents.</p>
+<p><strong>Key tables in Sentinel:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>What it contains</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SigninLogs</code></td>
+<td>Azure AD interactive sign-ins</td>
+</tr>
+<tr>
+<td><code>AADNonInteractiveUserSignInLogs</code></td>
+<td>OAuth token acquisitions, app sign-ins</td>
+</tr>
+<tr>
+<td><code>AuditLogs</code></td>
+<td>Azure AD config changes (user creation, role assignment)</td>
+</tr>
+<tr>
+<td><code>AzureActivity</code></td>
+<td>ARM control-plane (resource create/delete/modify)</td>
+</tr>
+<tr>
+<td><code>SecurityEvent</code></td>
+<td>Windows Security events from connected VMs</td>
+</tr>
+<tr>
+<td><code>OfficeActivity</code></td>
+<td>M365 (Exchange, SharePoint, Teams)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Analogy:</strong> Log Analytics Workspace = a managed data warehouse. Sentinel = a BI layer with scheduled reports that page oncall when a threshold is crossed. Diagnostic Settings = the ETL job that loads data into the warehouse. Without the ETL job, the warehouse is empty.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Simulate Azure SigninLogs schema — what Sentinel receives
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+
+@dataclass
+class AzureSigninLog:
+    TimeGenerated: datetime
+    UserPrincipalName: str
+    UserDisplayName: str
+    AppDisplayName: str
+    IPAddress: str
+    Location: str           # country code, e.g. &quot;IL&quot;
+    City: str
+    Latitude: float
+    Longitude: float
+    ResultType: str         # &quot;0&quot; = success, &quot;50126&quot; = bad password, etc.
+    ResultDescription: str
+    RiskLevelDuringSignIn: str   # &quot;none&quot;, &quot;low&quot;, &quot;medium&quot;, &quot;high&quot;
+    AuthenticationRequirement: str  # &quot;singleFactorAuthentication&quot;, &quot;multiFactorAuthentication&quot;
+    DeviceDetail: dict = field(default_factory=dict)
+    ConditionalAccessStatus: str = &quot;notApplied&quot;
+    IsInteractive: bool = True
+
+    def is_successful(self) -&gt; bool:
+        return self.ResultType == &quot;0&quot;
+
+    def is_risky(self) -&gt; bool:
+        return self.RiskLevelDuringSignIn in (&quot;medium&quot;, &quot;high&quot;)
+
+    def country(self) -&gt; str:
+        return self.Location.upper()
+
+# Example: two logins from different countries close in time
+import math
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -&gt; float:
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    return 2 * R * math.asin(math.sqrt(a))
+
+login_1 = AzureSigninLog(
+    TimeGenerated=datetime(2024, 6, 1, 9, 0, 0),
+    UserPrincipalName=&quot;alice@corp.com&quot;, UserDisplayName=&quot;Alice&quot;,
+    AppDisplayName=&quot;Microsoft Teams&quot;, IPAddress=&quot;82.80.1.10&quot;,
+    Location=&quot;IL&quot;, City=&quot;Tel Aviv&quot;, Latitude=32.08, Longitude=34.78,
+    ResultType=&quot;0&quot;, ResultDescription=&quot;Success&quot;,
+    RiskLevelDuringSignIn=&quot;none&quot;, AuthenticationRequirement=&quot;singleFactorAuthentication&quot;
+)
+login_2 = AzureSigninLog(
+    TimeGenerated=datetime(2024, 6, 1, 10, 30, 0),
+    UserPrincipalName=&quot;alice@corp.com&quot;, UserDisplayName=&quot;Alice&quot;,
+    AppDisplayName=&quot;Microsoft Teams&quot;, IPAddress=&quot;185.220.101.5&quot;,
+    Location=&quot;RU&quot;, City=&quot;Moscow&quot;, Latitude=55.75, Longitude=37.62,
+    ResultType=&quot;0&quot;, ResultDescription=&quot;Success&quot;,
+    RiskLevelDuringSignIn=&quot;none&quot;, AuthenticationRequirement=&quot;singleFactorAuthentication&quot;
+)
+
+distance_km = haversine_km(login_1.Latitude, login_1.Longitude, login_2.Latitude, login_2.Longitude)
+elapsed_hours = (login_2.TimeGenerated - login_1.TimeGenerated).total_seconds() / 3600
+speed_kmh = distance_km / elapsed_hours
+print(f&quot;Distance: {distance_km:.0f} km | Elapsed: {elapsed_hours:.1f}h | Speed: {speed_kmh:.0f} km/h&quot;)
+# Output:
+# Distance: 2831 km | Elapsed: 1.5h | Speed: 1888 km/h
+# Commercial flight speed ≈ 900 km/h — physically impossible without supersonic travel
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend the <code>AzureSigninLog</code> dataclass with a method <code>risk_score() -&gt; int</code> that returns a score 0–100 based on:</p>
+<ul>
+<li>+40 if <code>RiskLevelDuringSignIn</code> is &quot;high&quot;, +20 if &quot;medium&quot;</li>
+<li>+30 if <code>AuthenticationRequirement</code> is &quot;singleFactorAuthentication&quot; (no MFA)</li>
+<li>+20 if <code>ResultType != &quot;0&quot;</code> (failed login)</li>
+<li>+10 if <code>ConditionalAccessStatus == &quot;notApplied&quot;</code></li>
+</ul>
+<p>Create two sign-in events: one low-risk (MFA, success, no risk, CA applied) and one high-risk (no MFA, success, high risk, CA not applied). Call <code>risk_score()</code> on each and assert the high-risk score is at least 60 points higher than the low-risk score.</p>
+<p>Expected output:</p>
+<pre><code>low_risk.risk_score() = 0
+high_risk.risk_score() = 90
+difference = 90
+</code></pre><hr />
+<h3>Concept 2 — KQL for Azure Detections</h3>
+<p>KQL (Kusto Query Language) is the query language of Log Analytics and Sentinel. Syntactically it resembles a pipeline of transformations, which should feel natural to a data engineer: each <code>|</code> operator passes its result set to the next step, exactly like a pandas method chain or a dbt model lineage.</p>
+<p><strong>Core KQL operators and their pandas equivalents:</strong></p>
+<table>
+<thead>
+<tr>
+<th>KQL operator</th>
+<th>Pandas equivalent</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>where</code></td>
+<td><code>.query()</code> / boolean mask</td>
+</tr>
+<tr>
+<td><code>project</code></td>
+<td><code>.loc[:, cols]</code> / <code>__getitem__</code></td>
+</tr>
+<tr>
+<td><code>extend</code></td>
+<td><code>.assign()</code></td>
+</tr>
+<tr>
+<td><code>summarize ... by</code></td>
+<td><code>.groupby().agg()</code></td>
+</tr>
+<tr>
+<td><code>join kind=inner</code></td>
+<td><code>pd.merge(..., how='inner')</code></td>
+</tr>
+<tr>
+<td><code>order by</code></td>
+<td><code>.sort_values()</code></td>
+</tr>
+<tr>
+<td><code>let</code></td>
+<td>variable assignment</td>
+</tr>
+<tr>
+<td><code>mv-expand</code></td>
+<td><code>.explode()</code></td>
+</tr>
+<tr>
+<td><code>bin(TimeGenerated, 1h)</code></td>
+<td><code>pd.Grouper(freq='1h')</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Impossible travel detection in KQL:</strong></p>
+<pre><code>// KQL — Microsoft Sentinel analytics rule
+// Impossible Travel Detection
+let MaxSpeedKmH = 900.0;
+let LookbackHours = 24h;
+SigninLogs
+| where TimeGenerated &gt;= ago(LookbackHours)
+| where ResultType == &quot;0&quot;                          // successful sign-ins only
+| project TimeGenerated, UserPrincipalName, IPAddress,
+          Location, Latitude, Longitude, AppDisplayName,
+          AuthenticationRequirement, RiskLevelDuringSignIn
+| order by UserPrincipalName asc, TimeGenerated asc
+| serialize                                         // required before prev()
+| extend PrevTime      = prev(TimeGenerated, 1),
+         PrevLocation  = prev(Location, 1),
+         PrevLat       = prev(Latitude, 1),
+         PrevLon       = prev(Longitude, 1),
+         PrevUser      = prev(UserPrincipalName, 1)
+| where UserPrincipalName == PrevUser               // same user, consecutive rows
+| where Location != PrevLocation                    // different country
+| extend ElapsedHours = datetime_diff(&#x27;second&#x27;, TimeGenerated, PrevTime) / 3600.0
+| extend DistanceKm = 2 * 6371.0 * asin(sqrt(
+    pow(sin(radians(Latitude - PrevLat) / 2), 2) +
+    cos(radians(PrevLat)) * cos(radians(Latitude)) *
+    pow(sin(radians(Longitude - PrevLon) / 2), 2)
+  ))
+| extend SpeedKmH = DistanceKm / ElapsedHours
+| where SpeedKmH &gt; MaxSpeedKmH
+| project TimeGenerated, UserPrincipalName, IPAddress,
+          Location, PrevLocation, DistanceKm, ElapsedHours, SpeedKmH,
+          AuthenticationRequirement, RiskLevelDuringSignIn, AppDisplayName
+</code></pre><p>The equivalent Python simulation for unit testing:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+import numpy as np
+
+def haversine_vectorized(lat1: pd.Series, lon1: pd.Series,
+                          lat2: pd.Series, lon2: pd.Series) -&gt; pd.Series:
+    R = 6371.0
+    dlat = np.radians(lat2 - lat1)
+    dlon = np.radians(lon2 - lon1)
+    a = np.sin(dlat/2)**2 + np.cos(np.radians(lat1)) * np.cos(np.radians(lat2)) * np.sin(dlon/2)**2
+    return 2 * R * np.arcsin(np.sqrt(a))
+
+def detect_impossible_travel(df: pd.DataFrame, max_speed_kmh: float = 900.0) -&gt; pd.DataFrame:
+    df = df.sort_values([&quot;UserPrincipalName&quot;, &quot;TimeGenerated&quot;]).copy()
+    df[&quot;PrevTime&quot;]     = df.groupby(&quot;UserPrincipalName&quot;)[&quot;TimeGenerated&quot;].shift(1)
+    df[&quot;PrevLocation&quot;] = df.groupby(&quot;UserPrincipalName&quot;)[&quot;Location&quot;].shift(1)
+    df[&quot;PrevLat&quot;]      = df.groupby(&quot;UserPrincipalName&quot;)[&quot;Latitude&quot;].shift(1)
+    df[&quot;PrevLon&quot;]      = df.groupby(&quot;UserPrincipalName&quot;)[&quot;Longitude&quot;].shift(1)
+
+    df = df.dropna(subset=[&quot;PrevTime&quot;])
+    df = df[df[&quot;Location&quot;] != df[&quot;PrevLocation&quot;]]
+
+    df[&quot;ElapsedHours&quot;] = (df[&quot;TimeGenerated&quot;] - df[&quot;PrevTime&quot;]).dt.total_seconds() / 3600.0
+    df = df[df[&quot;ElapsedHours&quot;] &gt; 0]
+
+    df[&quot;DistanceKm&quot;] = haversine_vectorized(df[&quot;PrevLat&quot;], df[&quot;PrevLon&quot;], df[&quot;Latitude&quot;], df[&quot;Longitude&quot;])
+    df[&quot;SpeedKmH&quot;] = df[&quot;DistanceKm&quot;] / df[&quot;ElapsedHours&quot;]
+
+    return df[df[&quot;SpeedKmH&quot;] &gt; max_speed_kmh][
+        [&quot;TimeGenerated&quot;, &quot;UserPrincipalName&quot;, &quot;Location&quot;, &quot;PrevLocation&quot;,
+         &quot;DistanceKm&quot;, &quot;ElapsedHours&quot;, &quot;SpeedKmH&quot;]
+    ].reset_index(drop=True)
+
+# Test with sample data
+rows = [
+    {&quot;TimeGenerated&quot;: pd.Timestamp(&quot;2024-06-01 09:00&quot;), &quot;UserPrincipalName&quot;: &quot;alice@corp.com&quot;,
+     &quot;Location&quot;: &quot;IL&quot;, &quot;Latitude&quot;: 32.08, &quot;Longitude&quot;: 34.78},
+    {&quot;TimeGenerated&quot;: pd.Timestamp(&quot;2024-06-01 10:30&quot;), &quot;UserPrincipalName&quot;: &quot;alice@corp.com&quot;,
+     &quot;Location&quot;: &quot;RU&quot;, &quot;Latitude&quot;: 55.75, &quot;Longitude&quot;: 37.62},
+    {&quot;TimeGenerated&quot;: pd.Timestamp(&quot;2024-06-01 09:00&quot;), &quot;UserPrincipalName&quot;: &quot;bob@corp.com&quot;,
+     &quot;Location&quot;: &quot;IL&quot;, &quot;Latitude&quot;: 32.08, &quot;Longitude&quot;: 34.78},
+    {&quot;TimeGenerated&quot;: pd.Timestamp(&quot;2024-06-01 12:00&quot;), &quot;UserPrincipalName&quot;: &quot;bob@corp.com&quot;,
+     &quot;Location&quot;: &quot;DE&quot;, &quot;Latitude&quot;: 52.52, &quot;Longitude&quot;: 13.40},
+]
+df = pd.DataFrame(rows)
+df[&quot;TimeGenerated&quot;] = pd.to_datetime(df[&quot;TimeGenerated&quot;])
+alerts = detect_impossible_travel(df)
+print(alerts.to_string(index=False))
+# Expected: alice row fires (1888 km/h), bob row does not (safe speed)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a <code>severity</code> column to the <code>detect_impossible_travel</code> output:</p>
+<ul>
+<li><code>&quot;High&quot;</code> if <code>SpeedKmH &gt; 5000</code> (likely VPN or two separate actors on same account)</li>
+<li><code>&quot;Medium&quot;</code> if <code>SpeedKmH &gt; 900</code></li>
+</ul>
+<p>Then add a second filter: the function should only alert when <code>ElapsedHours &lt; 4</code> (logins more than 4 hours apart are suspicious but usually explained by VPN — flag separately). Create a dataset with one row of each category and verify the severity assignments.</p>
+<p>Expected output:</p>
+<pre><code>UserPrincipalName  SpeedKmH  ElapsedHours  severity
+alice@corp.com     1888.0    1.5           Medium
+carol@corp.com     7541.0    0.2           High
+</code></pre><hr />
+<h3>Concept 3 — Sentinel Analytics Rule Structure</h3>
+<p>A Sentinel analytics rule is a scheduled KQL query wrapped in metadata that controls alert frequency, severity, incident grouping, and entity mapping. Understanding the metadata fields is essential for writing production rules that don't flood the SOC with duplicate incidents.</p>
+<p><strong>Rule metadata fields:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Purpose</th>
+<th>Analogy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>severity</code></td>
+<td>Triage priority (High/Medium/Low/Informational)</td>
+<td>SLA tier on a support ticket</td>
+</tr>
+<tr>
+<td><code>queryFrequency</code></td>
+<td>How often the rule runs (e.g., <code>1h</code>)</td>
+<td>Airflow schedule interval</td>
+</tr>
+<tr>
+<td><code>queryPeriod</code></td>
+<td>How far back the query looks (e.g., <code>1d</code>)</td>
+<td>Window size in a rolling aggregation</td>
+</tr>
+<tr>
+<td><code>triggerOperator</code></td>
+<td>Condition to fire (<code>GreaterThan</code>, <code>Equal</code>)</td>
+<td>Alert threshold</td>
+</tr>
+<tr>
+<td><code>triggerThreshold</code></td>
+<td>Numeric threshold for the operator</td>
+<td>Row count to trigger</td>
+</tr>
+<tr>
+<td><code>entityMappings</code></td>
+<td>Links alert columns to entity types (User, IP, Host)</td>
+<td>Foreign key to UEBA profiles</td>
+</tr>
+<tr>
+<td><code>incidentConfiguration</code></td>
+<td>Controls alert-to-incident grouping rules</td>
+<td>Dedup key in an alert system</td>
+</tr>
+<tr>
+<td><code>suppressionEnabled</code></td>
+<td>Suppress duplicate alerts within a window</td>
+<td>Cooldown period</td>
+</tr>
+</tbody>
+</table>
+<p>A rule that runs every 5 minutes looking back 5 minutes is a real-time streaming detection. A rule that runs every 24 hours looking back 7 days is a batch anomaly hunt. Most production rules live somewhere between.</p>
+<p><strong>Example — Sentinel rule ARM template (Python-generated):</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+from datetime import datetime
+
+def generate_sentinel_rule(
+    rule_id: str,
+    display_name: str,
+    description: str,
+    query: str,
+    severity: str,
+    query_frequency: str,
+    query_period: str,
+    trigger_threshold: int = 0,
+    tactics: list[str] | None = None,
+    techniques: list[str] | None = None,
+) -&gt; dict:
+    return {
+        &quot;id&quot;: f&quot;/subscriptions/{{subscriptionId}}/resourceGroups/{{rg}}/providers/&quot;
+              f&quot;Microsoft.OperationalInsights/workspaces/{{workspace}}/providers/&quot;
+              f&quot;Microsoft.SecurityInsights/alertRules/{rule_id}&quot;,
+        &quot;name&quot;: rule_id,
+        &quot;type&quot;: &quot;Microsoft.SecurityInsights/alertRules&quot;,
+        &quot;kind&quot;: &quot;Scheduled&quot;,
+        &quot;properties&quot;: {
+            &quot;displayName&quot;: display_name,
+            &quot;description&quot;: description,
+            &quot;severity&quot;: severity,
+            &quot;enabled&quot;: True,
+            &quot;query&quot;: query,
+            &quot;queryFrequency&quot;: query_frequency,
+            &quot;queryPeriod&quot;: query_period,
+            &quot;triggerOperator&quot;: &quot;GreaterThan&quot;,
+            &quot;triggerThreshold&quot;: trigger_threshold,
+            &quot;suppressionEnabled&quot;: False,
+            &quot;suppressionDuration&quot;: &quot;PT1H&quot;,
+            &quot;tactics&quot;: tactics or [],
+            &quot;techniques&quot;: techniques or [],
+            &quot;incidentConfiguration&quot;: {
+                &quot;createIncident&quot;: True,
+                &quot;groupingConfiguration&quot;: {
+                    &quot;enabled&quot;: True,
+                    &quot;reopenClosedIncident&quot;: False,
+                    &quot;lookbackDuration&quot;: &quot;PT5H&quot;,
+                    &quot;matchingMethod&quot;: &quot;AnyAlert&quot;,
+                    &quot;groupByEntities&quot;: [&quot;Account&quot;],
+                    &quot;groupByAlertDetails&quot;: [],
+                    &quot;groupByCustomDetails&quot;: []
+                }
+            },
+            &quot;entityMappings&quot;: [
+                {
+                    &quot;entityType&quot;: &quot;Account&quot;,
+                    &quot;fieldMappings&quot;: [{&quot;identifier&quot;: &quot;FullName&quot;, &quot;columnName&quot;: &quot;UserPrincipalName&quot;}]
+                },
+                {
+                    &quot;entityType&quot;: &quot;IP&quot;,
+                    &quot;fieldMappings&quot;: [{&quot;identifier&quot;: &quot;Address&quot;, &quot;columnName&quot;: &quot;IPAddress&quot;}]
+                }
+            ]
+        }
+    }
+
+IMPOSSIBLE_TRAVEL_QUERY = &quot;&quot;&quot;
+let MaxSpeedKmH = 900.0;
+SigninLogs
+| where TimeGenerated &gt;= ago(24h)
+| where ResultType == &quot;0&quot;
+| order by UserPrincipalName asc, TimeGenerated asc
+| serialize
+| extend PrevTime = prev(TimeGenerated, 1), PrevLocation = prev(Location, 1),
+         PrevLat = prev(Latitude, 1), PrevLon = prev(Longitude, 1),
+         PrevUser = prev(UserPrincipalName, 1)
+| where UserPrincipalName == PrevUser and Location != PrevLocation
+| extend ElapsedHours = datetime_diff(&#x27;second&#x27;, TimeGenerated, PrevTime) / 3600.0
+| extend DistanceKm = 2 * 6371.0 * asin(sqrt(
+    pow(sin(radians(Latitude - PrevLat) / 2), 2) +
+    cos(radians(PrevLat)) * cos(radians(Latitude)) *
+    pow(sin(radians(Longitude - PrevLon) / 2), 2)))
+| extend SpeedKmH = DistanceKm / ElapsedHours
+| where SpeedKmH &gt; MaxSpeedKmH and ElapsedHours &lt; 4
+| project TimeGenerated, UserPrincipalName, IPAddress, Location, PrevLocation,
+          DistanceKm, ElapsedHours, SpeedKmH
+&quot;&quot;&quot;
+
+rule = generate_sentinel_rule(
+    rule_id=&quot;impossible-travel-signin&quot;,
+    display_name=&quot;Impossible Travel — Successful Sign-In&quot;,
+    description=&quot;Detects user signing in from two geographically distant locations within a time window that implies physically impossible travel speed.&quot;,
+    query=IMPOSSIBLE_TRAVEL_QUERY,
+    severity=&quot;High&quot;,
+    query_frequency=&quot;PT1H&quot;,
+    query_period=&quot;P1D&quot;,
+    tactics=[&quot;InitialAccess&quot;],
+    techniques=[&quot;T1078&quot;],
+)
+print(json.dumps(rule[&quot;properties&quot;][&quot;incidentConfiguration&quot;], indent=2))
+# Outputs grouping config that merges alerts for same Account within 5 hours
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a <code>validate_sentinel_rule(rule: dict) -&gt; list[str]</code> function that returns a list of error messages (empty list = valid). It must check:</p>
+<ul>
+<li><code>severity</code> is one of <code>(&quot;High&quot;, &quot;Medium&quot;, &quot;Low&quot;, &quot;Informational&quot;)</code></li>
+<li><code>queryFrequency</code> and <code>queryPeriod</code> both match ISO 8601 duration format (<code>PT\d+[HMD]</code> or <code>P\d+D</code>)</li>
+<li><code>triggerThreshold</code> is an integer &gt;= 0</li>
+<li><code>entityMappings</code> is a non-empty list</li>
+<li><code>tactics</code> contains only valid MITRE tactic names from this set: <code>{&quot;InitialAccess&quot;, &quot;Execution&quot;, &quot;Persistence&quot;, &quot;PrivilegeEscalation&quot;, &quot;DefenseEvasion&quot;, &quot;CredentialAccess&quot;, &quot;Discovery&quot;, &quot;LateralMovement&quot;, &quot;Collection&quot;, &quot;Exfiltration&quot;, &quot;CommandAndControl&quot;, &quot;Impact&quot;}</code></li>
+</ul>
+<p>Call it on the <code>rule</code> generated above (should return <code>[]</code>) and on a deliberately invalid rule with severity &quot;Critical&quot; and an empty <code>entityMappings</code>.</p>
+<p>Expected output:</p>
+<pre><code>Valid rule errors: []
+Invalid rule errors: [&quot;severity must be one of: High, Medium, Low, Informational&quot;, &quot;entityMappings must be non-empty&quot;]
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Azure AD sign-in log enrichment and triage
+<strong>Threat:</strong> Attackers use LLMs to generate synthetic sign-in traffic (realistic geolocations, timing, user-agents) that defeats statistical anomaly detection trained on historical baselines
+<strong>Opportunity:</strong> LLM explains impossible travel alerts in plain English for L1 analysts: &quot;Alice signed in from Tel Aviv at 09:00 and Moscow at 10:30 — 2831 km in 90 minutes. Commercial flight minimum is ~4.5 hours. This is either a compromised account or simultaneous VPN use. Recommended action: verify with user, check for MFA gaps.&quot;
+<strong>Prompt to try:</strong> <code>&quot;Here is an Azure sign-in alert: user alice@corp.com signed in successfully from IL at 09:00 and from RU at 10:30, speed 1888 km/h, no MFA. In 3 bullet points: (1) most likely explanation, (2) top 2 follow-up investigation steps, (3) recommended immediate containment action.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — GCP Log Architecture &amp; Cloud Audit Logs</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="15-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=gtfVCnQ5uJo" target="_blank" rel="noopener"><b>Google Cloud Chronicle SIEM: Everything You Need to Know Before Implementing It</b><small>Cloud Computing 101</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=GCP%20Cloud%20Audit%20Logs%20security%20monitoring%20Chronicle%20SIEM" target="_blank" rel="noopener">GCP Cloud Audit Logs security monitoring Chronicle SIEM</a></p></div>
+<hr />
+<h3>Concept 1 — GCP Log Taxonomy</h3>
+<p>GCP's logging architecture differs from Azure in three important ways: logs are centralized in Cloud Logging by default (no opt-in routing required), IAM audit logs are split into three sub-types with different enable requirements, and Chronicle is GCP's SIEM rather than Sentinel.</p>
+<p><strong>GCP Audit Log types:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Contents</th>
+<th>Enabled by default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Admin Activity</td>
+<td>Who created/modified/deleted resources</td>
+<td>Yes — always on</td>
+</tr>
+<tr>
+<td>Data Access</td>
+<td>Who read data from a resource</td>
+<td>No — must be enabled per service</td>
+</tr>
+<tr>
+<td>System Events</td>
+<td>GCP-internal maintenance events</td>
+<td>Yes — always on</td>
+</tr>
+<tr>
+<td>Policy Denied</td>
+<td>Requests blocked by IAM <code>deny</code> policies</td>
+<td>Yes for VPC SC</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Key log sources for threat detection:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Log source</th>
+<th>Detection use case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cloudresourcemanager.googleapis.com/projects</code></td>
+<td>New project creation (shadow IT)</td>
+</tr>
+<tr>
+<td><code>iam.googleapis.com</code></td>
+<td>Role grants, service account key creation</td>
+</tr>
+<tr>
+<td><code>compute.googleapis.com</code></td>
+<td>VM creation in unusual region</td>
+</tr>
+<tr>
+<td><code>storage.googleapis.com</code></td>
+<td>Public bucket access, mass download</td>
+</tr>
+<tr>
+<td><code>container.googleapis.com</code></td>
+<td>GKE cluster config changes</td>
+</tr>
+<tr>
+<td><code>secretmanager.googleapis.com</code></td>
+<td>Secret access, especially in bulk</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Log entry structure — all GCP audit logs share a common schema:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Optional
+
+@dataclass
+class GCPAuditLogEntry:
+    insertId: str
+    timestamp: datetime
+    severity: str                   # &quot;INFO&quot;, &quot;WARNING&quot;, &quot;ERROR&quot;
+    logName: str                    # e.g. &quot;projects/my-proj/logs/cloudaudit.googleapis.com%2Factivity&quot;
+    resource_type: str              # &quot;iam_role&quot;, &quot;gcs_bucket&quot;, &quot;gce_instance&quot;, etc.
+    resource_project_id: str
+    protoPayload_methodName: str    # e.g. &quot;google.iam.v1.IAM.SetIamPolicy&quot;
+    protoPayload_serviceName: str   # e.g. &quot;iam.googleapis.com&quot;
+    protoPayload_authenticationInfo_principalEmail: str
+    protoPayload_requestMetadata_callerIp: str
+    protoPayload_requestMetadata_callerSuppliedUserAgent: str
+    protoPayload_status_code: int   # 0 = success, non-zero = error
+    protoPayload_request: dict
+    protoPayload_response: dict
+
+    def is_iam_change(self) -&gt; bool:
+        return &quot;iam&quot; in self.protoPayload_serviceName.lower()
+
+    def is_service_account_operation(self) -&gt; bool:
+        return &quot;serviceAccount&quot; in self.protoPayload_methodName
+
+    def caller_is_service_account(self) -&gt; bool:
+        return self.protoPayload_authenticationInfo_principalEmail.endswith(&quot;.gserviceaccount.com&quot;)
+
+    def is_privileged_method(self) -&gt; bool:
+        privileged = {
+            &quot;google.iam.v1.IAM.SetIamPolicy&quot;,
+            &quot;google.iam.admin.v1.CreateServiceAccountKey&quot;,
+            &quot;google.iam.admin.v1.CreateServiceAccount&quot;,
+            &quot;google.cloud.resourcemanager.v3.Projects.SetIamPolicy&quot;,
+            &quot;storage.setIamPermissions&quot;,
+        }
+        return self.protoPayload_methodName in privileged
+
+# Sample IAM abuse log entry
+sample_iam_grant = GCPAuditLogEntry(
+    insertId=&quot;abc123&quot;,
+    timestamp=datetime(2024, 6, 1, 14, 30, 0),
+    severity=&quot;INFO&quot;,
+    logName=&quot;projects/prod-project/logs/cloudaudit.googleapis.com%2Factivity&quot;,
+    resource_type=&quot;project&quot;,
+    resource_project_id=&quot;prod-project&quot;,
+    protoPayload_methodName=&quot;google.cloud.resourcemanager.v3.Projects.SetIamPolicy&quot;,
+    protoPayload_serviceName=&quot;cloudresourcemanager.googleapis.com&quot;,
+    protoPayload_authenticationInfo_principalEmail=&quot;attacker@compromised-account.com&quot;,
+    protoPayload_requestMetadata_callerIp=&quot;185.220.101.5&quot;,
+    protoPayload_requestMetadata_callerSuppliedUserAgent=&quot;python-requests/2.28.0&quot;,
+    protoPayload_status_code=0,
+    protoPayload_request={&quot;policy&quot;: {&quot;bindings&quot;: [{&quot;role&quot;: &quot;roles/owner&quot;, &quot;members&quot;: [&quot;user:attacker@evil.com&quot;]}]}},
+    protoPayload_response={}
+)
+
+print(f&quot;Privileged: {sample_iam_grant.is_privileged_method()}&quot;)
+print(f&quot;IAM change: {sample_iam_grant.is_iam_change()}&quot;)
+print(f&quot;Role granted: {sample_iam_grant.protoPayload_request[&#x27;policy&#x27;][&#x27;bindings&#x27;][0][&#x27;role&#x27;]}&quot;)
+# Output:
+# Privileged: True
+# IAM change: True
+# Role granted: roles/owner
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>classify_gcp_log(entry: GCPAuditLogEntry) -&gt; str</code> that returns one of:</p>
+<ul>
+<li><code>&quot;IAM_PRIVILEGE_ESCALATION&quot;</code> — <code>is_privileged_method()</code> is True AND the request contains <code>&quot;roles/owner&quot;</code> or <code>&quot;roles/editor&quot;</code> or <code>&quot;roles/iam.securityAdmin&quot;</code> in the policy bindings</li>
+<li><code>&quot;SERVICE_ACCOUNT_ABUSE&quot;</code> — a service account is calling <code>CreateServiceAccountKey</code> (SA creating new keys for itself or another SA)</li>
+<li><code>&quot;EXTERNAL_IP_ACCESS&quot;</code> — callerIp does not start with <code>&quot;10.&quot;</code> or <code>&quot;172.&quot;</code> or <code>&quot;192.168.&quot;</code> (non-RFC-1918 IP accessing a privileged method)</li>
+<li><code>&quot;NORMAL&quot;</code> — none of the above</li>
+</ul>
+<p>Test with three entries: one IAM privilege escalation from external IP, one service account creating a key, one normal read from internal IP.</p>
+<p>Expected output:</p>
+<pre><code>entry1: IAM_PRIVILEGE_ESCALATION
+entry2: SERVICE_ACCOUNT_ABUSE
+entry3: NORMAL
+</code></pre><hr />
+<h3>Concept 2 — GCP IAM Abuse Detection Patterns</h3>
+<p>IAM (Identity and Access Management) is GCP's permission layer. Every API call is authorized against an IAM policy. Attackers who gain initial access (via phishing, leaked service account keys, or OAuth token theft) immediately try to escalate privileges and establish persistence by creating new service accounts, generating keys, or granting themselves owner roles.</p>
+<p><strong>The four-stage GCP IAM attack pattern:</strong></p>
+<ol>
+<li><strong>Initial foothold</strong> — Attacker obtains a service account JSON key from a leaked repo, CI/CD misconfiguration, or compromised developer workstation</li>
+<li><strong>Reconnaissance</strong> — Calls <code>projects.getIamPolicy</code>, <code>resourcemanager.projects.list</code>, <code>storage.buckets.list</code> to understand the environment. These are Data Access logs — only visible if Data Access logging is enabled</li>
+<li><strong>Privilege escalation</strong> — Calls <code>SetIamPolicy</code> to grant themselves <code>roles/owner</code> or <code>roles/iam.securityAdmin</code> on the project</li>
+<li><strong>Persistence</strong> — Creates a new service account, generates a key, and uses that as a backdoor even after the original credential is rotated</li>
+</ol>
+<p><strong>Detection logic for each stage:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Iterator
+from collections import defaultdict
+
+PRIVILEGE_ROLES = {
+    &quot;roles/owner&quot;,
+    &quot;roles/editor&quot;,
+    &quot;roles/iam.securityAdmin&quot;,
+    &quot;roles/resourcemanager.projectIamAdmin&quot;,
+    &quot;roles/iam.serviceAccountAdmin&quot;,
+}
+
+RECON_METHODS = {
+    &quot;google.iam.v1.IAM.GetIamPolicy&quot;,
+    &quot;google.cloud.resourcemanager.v3.Projects.GetIamPolicy&quot;,
+    &quot;storage.buckets.list&quot;,
+    &quot;container.projects.locations.clusters.list&quot;,
+}
+
+PERSISTENCE_METHODS = {
+    &quot;google.iam.admin.v1.CreateServiceAccount&quot;,
+    &quot;google.iam.admin.v1.CreateServiceAccountKey&quot;,
+    &quot;google.iam.admin.v1.EnableServiceAccount&quot;,
+}
+
+def extract_granted_roles(request: dict) -&gt; list[str]:
+    roles = []
+    bindings = request.get(&quot;policy&quot;, {}).get(&quot;bindings&quot;, [])
+    for binding in bindings:
+        roles.append(binding.get(&quot;role&quot;, &quot;&quot;))
+    return roles
+
+@dataclass
+class IAMAbuseAlert:
+    principal: str
+    project_id: str
+    stage: str
+    method: str
+    callerIp: str
+    timestamp: datetime
+    details: str
+
+def detect_iam_abuse_sequence(
+    entries: list[GCPAuditLogEntry],
+    recon_window_minutes: int = 30,
+) -&gt; list[IAMAbuseAlert]:
+    alerts: list[IAMAbuseAlert] = []
+    by_principal: dict[str, list[GCPAuditLogEntry]] = defaultdict(list)
+
+    for e in entries:
+        by_principal[e.protoPayload_authenticationInfo_principalEmail].append(e)
+
+    for principal, principal_entries in by_principal.items():
+        principal_entries.sort(key=lambda e: e.timestamp)
+
+        recon_seen: list[datetime] = []
+        for e in principal_entries:
+            # Recon detection
+            if e.protoPayload_methodName in RECON_METHODS:
+                recon_seen.append(e.timestamp)
+
+            # Privilege escalation
+            if e.protoPayload_methodName == &quot;google.cloud.resourcemanager.v3.Projects.SetIamPolicy&quot;:
+                granted = extract_granted_roles(e.protoPayload_request)
+                priv_roles = [r for r in granted if r in PRIVILEGE_ROLES]
+                if priv_roles:
+                    recent_recon = [t for t in recon_seen
+                                    if e.timestamp - t &lt;= timedelta(minutes=recon_window_minutes)]
+                    alert = IAMAbuseAlert(
+                        principal=principal,
+                        project_id=e.resource_project_id,
+                        stage=&quot;PRIVILEGE_ESCALATION&quot;,
+                        method=e.protoPayload_methodName,
+                        callerIp=e.protoPayload_requestMetadata_callerIp,
+                        timestamp=e.timestamp,
+                        details=f&quot;Granted: {priv_roles}. Preceded by {len(recent_recon)} recon calls in {recon_window_minutes}m window.&quot;
+                    )
+                    alerts.append(alert)
+
+            # Persistence
+            if e.protoPayload_methodName in PERSISTENCE_METHODS:
+                alerts.append(IAMAbuseAlert(
+                    principal=principal,
+                    project_id=e.resource_project_id,
+                    stage=&quot;PERSISTENCE&quot;,
+                    method=e.protoPayload_methodName,
+                    callerIp=e.protoPayload_requestMetadata_callerIp,
+                    timestamp=e.timestamp,
+                    details=f&quot;Service account persistence via {e.protoPayload_methodName}&quot;
+                ))
+
+    return alerts
+
+# Sample sequence: recon → escalation → persistence
+now = datetime(2024, 6, 1, 14, 0, 0)
+sequence = [
+    GCPAuditLogEntry(&quot;e1&quot;, now, &quot;INFO&quot;, &quot;proj/logs/activity&quot;, &quot;project&quot;, &quot;prod&quot;,
+        &quot;google.iam.v1.IAM.GetIamPolicy&quot;, &quot;iam.googleapis.com&quot;,
+        &quot;attacker@corp.com&quot;, &quot;185.1.1.1&quot;, &quot;python/3.11&quot;, 0, {}, {}),
+    GCPAuditLogEntry(&quot;e2&quot;, now + timedelta(minutes=10), &quot;INFO&quot;, &quot;proj/logs/activity&quot;, &quot;project&quot;, &quot;prod&quot;,
+        &quot;google.cloud.resourcemanager.v3.Projects.SetIamPolicy&quot;, &quot;cloudresourcemanager.googleapis.com&quot;,
+        &quot;attacker@corp.com&quot;, &quot;185.1.1.1&quot;, &quot;python/3.11&quot;, 0,
+        {&quot;policy&quot;: {&quot;bindings&quot;: [{&quot;role&quot;: &quot;roles/owner&quot;, &quot;members&quot;: [&quot;user:attacker@corp.com&quot;]}]}}, {}),
+    GCPAuditLogEntry(&quot;e3&quot;, now + timedelta(minutes=15), &quot;INFO&quot;, &quot;proj/logs/activity&quot;, &quot;iam_service_account&quot;, &quot;prod&quot;,
+        &quot;google.iam.admin.v1.CreateServiceAccountKey&quot;, &quot;iam.googleapis.com&quot;,
+        &quot;attacker@corp.com&quot;, &quot;185.1.1.1&quot;, &quot;python/3.11&quot;, 0, {}, {}),
+]
+alerts = detect_iam_abuse_sequence(sequence)
+for a in alerts:
+    print(f&quot;[{a.stage}] {a.principal} — {a.method} — {a.details}&quot;)
+# Output:
+# [PRIVILEGE_ESCALATION] attacker@corp.com — ...SetIamPolicy — Granted: [&#x27;roles/owner&#x27;]. Preceded by 1 recon calls in 30m window.
+# [PERSISTENCE] attacker@corp.com — ...CreateServiceAccountKey — Service account persistence via ...
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a third detection category <code>&quot;LATERAL_MOVEMENT&quot;</code> to <code>detect_iam_abuse_sequence</code>. It should fire when the same principal calls <code>SetIamPolicy</code> on more than two distinct <code>resource_project_id</code> values within a 60-minute window (attacker is spreading owner access across multiple projects). Add test entries spanning three projects and verify the new alert fires with <code>stage=&quot;LATERAL_MOVEMENT&quot;</code> and includes a count of affected projects in <code>details</code>.</p>
+<p>Expected output:</p>
+<pre><code>[LATERAL_MOVEMENT] attacker@corp.com — affected 3 projects within 45 minutes
+</code></pre><hr />
+<h3>Concept 3 — Chronicle SIEM and YARA-L Rules</h3>
+<p>Chronicle is GCP's SIEM, built on the UDM (Unified Data Model) schema. Where Sentinel uses KQL, Chronicle uses YARA-L 2.0 — a rule language that looks like a hybrid of YARA (for pattern matching) and SQL (for aggregation). Chronicle normalizes all ingested logs into UDM events before the rules engine evaluates them.</p>
+<p><strong>UDM (Unified Data Model) key fields for network and identity events:</strong></p>
+<table>
+<thead>
+<tr>
+<th>UDM field</th>
+<th>Maps to</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>metadata.event_type</code></td>
+<td><code>USER_LOGIN</code>, <code>NETWORK_CONNECTION</code>, <code>FILE_CREATION</code>, etc.</td>
+</tr>
+<tr>
+<td><code>principal.user.email_addresses</code></td>
+<td>Source identity</td>
+</tr>
+<tr>
+<td><code>principal.ip</code></td>
+<td>Source IP</td>
+</tr>
+<tr>
+<td><code>target.user.email_addresses</code></td>
+<td>Target identity</td>
+</tr>
+<tr>
+<td><code>target.resource.name</code></td>
+<td>Affected resource</td>
+</tr>
+<tr>
+<td><code>network.ip_protocol</code></td>
+<td>TCP/UDP</td>
+</tr>
+<tr>
+<td><code>security_result.severity</code></td>
+<td>Alert severity</td>
+</tr>
+</tbody>
+</table>
+<p><strong>YARA-L rule structure:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># YARA-L rule as a Python string — for linting and documentation
+YARA_L_IMPOSSIBLE_TRAVEL = &quot;&quot;&quot;
+rule impossible_travel_detection {
+  meta:
+    author = &quot;SOC Team&quot;
+    description = &quot;Detects user logins from geographically impossible locations&quot;
+    severity = &quot;HIGH&quot;
+    mitre_attack_technique = &quot;T1078&quot;
+
+  events:
+    $login1.metadata.event_type = &quot;USER_LOGIN&quot;
+    $login1.metadata.vendor_name = &quot;Microsoft&quot;
+    $login1.security_result.action = &quot;ALLOW&quot;
+    $login1.principal.user.email_addresses = $user_email
+    $login1.principal.location.country_or_region = $country1
+
+    $login2.metadata.event_type = &quot;USER_LOGIN&quot;
+    $login2.metadata.vendor_name = &quot;Microsoft&quot;
+    $login2.security_result.action = &quot;ALLOW&quot;
+    $login2.principal.user.email_addresses = $user_email
+    $login2.principal.location.country_or_region = $country2
+
+    $country1 != $country2
+    $login1.metadata.event_timestamp.seconds &lt;
+      $login2.metadata.event_timestamp.seconds
+    ($login2.metadata.event_timestamp.seconds -
+      $login1.metadata.event_timestamp.seconds) &lt; 14400   // 4 hours in seconds
+
+  match:
+    $user_email over 4h
+
+  condition:
+    $login1 and $login2
+}
+&quot;&quot;&quot;
+
+# Python-based YARA-L rule validator (structural check)
+import re
+
+def validate_yara_l_rule(rule_text: str) -&gt; list[str]:
+    errors = []
+
+    if not re.search(r&#x27;rule\s+\w+\s*\{&#x27;, rule_text):
+        errors.append(&quot;Missing rule declaration&quot;)
+
+    required_sections = [&quot;meta:&quot;, &quot;events:&quot;, &quot;match:&quot;, &quot;condition:&quot;]
+    for section in required_sections:
+        if section not in rule_text:
+            errors.append(f&quot;Missing section: {section}&quot;)
+
+    meta_fields = [&quot;author&quot;, &quot;description&quot;, &quot;severity&quot;, &quot;mitre_attack_technique&quot;]
+    for field in meta_fields:
+        if field not in rule_text:
+            errors.append(f&quot;Missing meta field: {field}&quot;)
+
+    valid_severities = {&quot;LOW&quot;, &quot;MEDIUM&quot;, &quot;HIGH&quot;, &quot;CRITICAL&quot;}
+    sev_match = re.search(r&#x27;severity\s*=\s*&quot;(\w+)&quot;&#x27;, rule_text)
+    if sev_match and sev_match.group(1) not in valid_severities:
+        errors.append(f&quot;Invalid severity: {sev_match.group(1)}&quot;)
+
+    mitre_match = re.search(r&#x27;mitre_attack_technique\s*=\s*&quot;(T\d{4}(?:\.\d{3})?)&quot;&#x27;, rule_text)
+    if not mitre_match:
+        errors.append(&quot;mitre_attack_technique must match T\\d{4} or T\\d{4}.\\d{3}&quot;)
+
+    return errors
+
+errors = validate_yara_l_rule(YARA_L_IMPOSSIBLE_TRAVEL)
+print(f&quot;Validation errors: {errors}&quot;)
+# Output: Validation errors: []
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a YARA-L rule string <code>YARA_L_GCP_IAM_ESCALATION</code> that detects GCP <code>SetIamPolicy</code> calls where the request grants <code>roles/owner</code> to a non-service-account identity. Structure it with all four required sections. Then call <code>validate_yara_l_rule()</code> on it and confirm zero errors.</p>
+<p>The <code>events:</code> section should match:</p>
+<ul>
+<li><code>$e.metadata.event_type = &quot;USER_RESOURCE_ACCESS&quot;</code></li>
+<li><code>$e.target.application = &quot;cloudresourcemanager.googleapis.com&quot;</code></li>
+<li><code>$e.metadata.product_event_type = &quot;google.cloud.resourcemanager.v3.Projects.SetIamPolicy&quot;</code></li>
+<li><code>$e.security_result.action = &quot;ALLOW&quot;</code></li>
+<li><code>$e.principal.user.email_addresses = /^[^@]+@[^@]+\.[^@]+$/</code> (not a service account)</li>
+</ul>
+<p>Expected output:</p>
+<pre><code>Validation errors: []
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> GCP IAM log triage and blast radius estimation
+<strong>Threat:</strong> Attacker uses an LLM-enabled API agent to enumerate GCP permissions programmatically and generate targeted privilege escalation paths (enumerate → identify weakest SA → generate exploit chain)
+<strong>Opportunity:</strong> SOC analyst pastes a sequence of GCP audit log entries into an LLM and asks for a kill chain summary — the LLM identifies the recon → escalation → persistence pattern in seconds vs. manual pivot across three log tables
+<strong>Prompt to try:</strong> <code>&quot;I have 5 GCP audit log entries: [paste JSON]. Identify whether this sequence represents an attack, and if so: (1) which stage of the attack lifecycle (recon/escalation/persistence/exfil), (2) what the attacker now has access to, (3) the minimum remediation steps to contain the incident.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — Cloud Detection Rules: Azure Impossible Travel</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="15-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=Azure%20Sentinel%20impossible%20travel%20detection%20false%20positives%20tuning" target="_blank" rel="noopener">Azure Sentinel impossible travel detection false positives tuning</a></p></div>
+<hr />
+<h3>Concept 1 — False Positive Analysis for Impossible Travel</h3>
+<p>The impossible travel rule has predictable false positive patterns that, if not suppressed, will overwhelm the SOC and cause analysts to start ignoring it. False positive analysis is the gap between a working rule and a production rule.</p>
+<p><strong>Common impossible travel false positives:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Root cause</th>
+<th>Why it looks like impossible travel</th>
+<th>Suppression method</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>VPN with exit node in another country</td>
+<td>User in IL using US-exit VPN</td>
+<td>Allowlist known VPN IP ranges per user</td>
+</tr>
+<tr>
+<td>CDN or proxy</td>
+<td>Company proxy in Germany, user in Israel</td>
+<td>Allowlist corporate egress IPs</td>
+</tr>
+<tr>
+<td>Mobile carrier NAT</td>
+<td>Carrier assigns different country IP</td>
+<td>Suppress if elapsed_hours &gt; 2</td>
+</tr>
+<tr>
+<td>Shared service accounts</td>
+<td>Automation runs in multiple regions simultaneously</td>
+<td>Exclude service account UPNs</td>
+</tr>
+<tr>
+<td>Travel</td>
+<td>User genuinely flew and landed</td>
+<td>Elapsed hours &gt; 6 suppresses most cases</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Tuning the rule:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import Optional
+
+KNOWN_VPN_RANGES: list[str] = [
+    &quot;10.0.0.0/8&quot;,
+    &quot;172.16.0.0/12&quot;,
+    &quot;192.168.0.0/16&quot;,
+    &quot;198.18.0.0/15&quot;,   # corporate VPN range
+]
+
+CORPORATE_EGRESS_IPS: set[str] = {
+    &quot;203.0.113.10&quot;,
+    &quot;203.0.113.11&quot;,
+    &quot;203.0.113.12&quot;,
+}
+
+SERVICE_ACCOUNT_SUFFIXES: tuple[str, ...] = (
+    &quot;@automation.corp.com&quot;,
+    &quot;@svc.corp.com&quot;,
+    &quot;@noreply.corp.com&quot;,
+)
+
+import ipaddress
+
+def ip_in_range(ip: str, cidr: str) -&gt; bool:
+    try:
+        return ipaddress.ip_address(ip) in ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return False
+
+def is_known_vpn(ip: str) -&gt; bool:
+    return any(ip_in_range(ip, r) for r in KNOWN_VPN_RANGES)
+
+def is_corporate_egress(ip: str) -&gt; bool:
+    return ip in CORPORATE_EGRESS_IPS
+
+def is_service_account(upn: str) -&gt; bool:
+    return any(upn.endswith(s) for s in SERVICE_ACCOUNT_SUFFIXES)
+
+@dataclass
+class ImpossibleTravelFPFilter:
+    min_speed_kmh: float = 900.0
+    max_elapsed_hours_to_alert: float = 4.0
+    min_elapsed_hours_to_alert: float = 0.1   # &lt; 6 min is likely clock skew
+    exclude_vpn: bool = True
+    exclude_corporate_egress: bool = True
+    exclude_service_accounts: bool = True
+
+    def should_alert(self, alert_row: dict) -&gt; tuple[bool, str]:
+        upn = alert_row[&quot;UserPrincipalName&quot;]
+        ip = alert_row[&quot;IPAddress&quot;]
+        elapsed = alert_row[&quot;ElapsedHours&quot;]
+        speed = alert_row[&quot;SpeedKmH&quot;]
+
+        if speed &lt; self.min_speed_kmh:
+            return False, &quot;below_speed_threshold&quot;
+        if elapsed &gt; self.max_elapsed_hours_to_alert:
+            return False, &quot;elapsed_too_long&quot;
+        if elapsed &lt; self.min_elapsed_hours_to_alert:
+            return False, &quot;likely_clock_skew&quot;
+        if self.exclude_service_accounts and is_service_account(upn):
+            return False, &quot;service_account&quot;
+        if self.exclude_vpn and is_known_vpn(ip):
+            return False, &quot;known_vpn&quot;
+        if self.exclude_corporate_egress and is_corporate_egress(ip):
+            return False, &quot;corporate_egress&quot;
+
+        return True, &quot;alert&quot;
+
+fp_filter = ImpossibleTravelFPFilter()
+
+test_cases = [
+    {&quot;UserPrincipalName&quot;: &quot;alice@corp.com&quot;, &quot;IPAddress&quot;: &quot;185.1.1.1&quot;,
+     &quot;ElapsedHours&quot;: 1.5, &quot;SpeedKmH&quot;: 1888},   # should alert
+    {&quot;UserPrincipalName&quot;: &quot;svc@automation.corp.com&quot;, &quot;IPAddress&quot;: &quot;185.1.1.1&quot;,
+     &quot;ElapsedHours&quot;: 1.5, &quot;SpeedKmH&quot;: 1888},   # service account — suppress
+    {&quot;UserPrincipalName&quot;: &quot;bob@corp.com&quot;, &quot;IPAddress&quot;: &quot;203.0.113.10&quot;,
+     &quot;ElapsedHours&quot;: 1.5, &quot;SpeedKmH&quot;: 1888},   # corp egress — suppress
+    {&quot;UserPrincipalName&quot;: &quot;carol@corp.com&quot;, &quot;IPAddress&quot;: &quot;185.2.2.2&quot;,
+     &quot;ElapsedHours&quot;: 5.0, &quot;SpeedKmH&quot;: 950},    # elapsed too long — suppress
+]
+
+for tc in test_cases:
+    should_alert, reason = fp_filter.should_alert(tc)
+    print(f&quot;{tc[&#x27;UserPrincipalName&#x27;]}: alert={should_alert}, reason={reason}&quot;)
+# Output:
+# alice@corp.com: alert=True, reason=alert
+# svc@automation.corp.com: alert=False, reason=service_account
+# bob@corp.com: alert=False, reason=corporate_egress
+# carol@corp.com: alert=False, reason=elapsed_too_long
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>ImpossibleTravelFPFilter</code> with a method <code>fp_rate_report(test_cases: list[dict]) -&gt; dict</code> that returns a dictionary summarizing suppression: keys are the distinct reasons, values are counts. Call it on the four test cases above and add two more test cases that trigger <code>known_vpn</code> and <code>likely_clock_skew</code> suppressions.</p>
+<p>Expected output:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>{
+  &quot;alert&quot;: 1,
+  &quot;service_account&quot;: 1,
+  &quot;corporate_egress&quot;: 1,
+  &quot;elapsed_too_long&quot;: 1,
+  &quot;known_vpn&quot;: 1,
+  &quot;likely_clock_skew&quot;: 1
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 2 — Production Sigma Rule: Azure Impossible Travel</h3>
+<p>A production Sigma rule for impossible travel must handle the cross-event correlation (two separate sign-in events for the same user), which Sigma supports via the <code>temporal</code> correlation type introduced in Sigma v2.</p>
+<p><strong>Production Sigma rule:</strong></p>
+<pre><code># azure_impossible_travel.yml
+title: Azure AD Impossible Travel — Successful Sign-In
+id: a5c3f2e1-8d4b-4a7e-9b2c-6f1d0e3a5c7b
+status: production
+description: |
+  Detects a user successfully authenticating from two geographically
+  distant locations within a time window that implies physically
+  impossible travel. Threshold: &gt; 900 km/h (commercial aircraft max).
+  Filters service accounts, known VPN ranges, and corporate egress IPs.
+author: SOC Team
+date: 2024-06-01
+modified: 2024-06-01
+references:
+  - https://attack.mitre.org/techniques/T1078/
+tags:
+  - attack.initial_access
+  - attack.t1078
+  - attack.persistence
+  - attack.t1078.004
+logsource:
+  product: azure
+  service: signinlogs
+detection:
+  signin_success:
+    ResultType: &#x27;0&#x27;
+  filter_service_accounts:
+    UserPrincipalName|endswith:
+      - &#x27;@automation.corp.com&#x27;
+      - &#x27;@svc.corp.com&#x27;
+  filter_corporate_egress:
+    IPAddress:
+      - &#x27;203.0.113.10&#x27;
+      - &#x27;203.0.113.11&#x27;
+  condition: signin_success and not filter_service_accounts and not filter_corporate_egress
+correlation:
+  type: temporal_ordered
+  rules: azure_impossible_travel
+  group-by:
+    - UserPrincipalName
+  timespan: 4h
+  ordered: true
+  aliases:
+    first_login:
+      Location: first_country
+    second_login:
+      Location: second_country
+  condition:
+    first_country != second_country
+fields:
+  - UserPrincipalName
+  - IPAddress
+  - Location
+  - AppDisplayName
+  - AuthenticationRequirement
+  - RiskLevelDuringSignIn
+falsepositives:
+  - VPN users with foreign exit nodes
+  - Corporate proxy servers in other countries
+  - Shared service accounts (filtered above)
+  - Users who travelled by air (elapsed hours typically &gt; 4h)
+level: high
+</code></pre><p>To represent and validate this rule in Python:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import yaml
+from dataclasses import dataclass
+
+IMPOSSIBLE_TRAVEL_RULE_YAML = &quot;&quot;&quot;
+title: Azure AD Impossible Travel — Successful Sign-In
+id: a5c3f2e1-8d4b-4a7e-9b2c-6f1d0e3a5c7b
+status: production
+description: Detects user authenticating from two geographically distant locations within 4 hours implying impossible travel.
+author: SOC Team
+date: 2024-06-01
+modified: 2024-06-01
+tags:
+  - attack.initial_access
+  - attack.t1078
+logsource:
+  product: azure
+  service: signinlogs
+detection:
+  signin_success:
+    ResultType: &#x27;0&#x27;
+  filter_service_accounts:
+    UserPrincipalName|endswith:
+      - &#x27;@automation.corp.com&#x27;
+  filter_corporate_egress:
+    IPAddress:
+      - &#x27;203.0.113.10&#x27;
+  condition: signin_success and not filter_service_accounts and not filter_corporate_egress
+falsepositives:
+  - VPN users with foreign exit nodes
+  - Users who travelled by air
+level: high
+&quot;&quot;&quot;
+
+def validate_sigma_rule(rule_yaml: str) -&gt; list[str]:
+    errors = []
+    try:
+        rule = yaml.safe_load(rule_yaml)
+    except yaml.YAMLError as e:
+        return [f&quot;YAML parse error: {e}&quot;]
+
+    required = [&quot;title&quot;, &quot;id&quot;, &quot;status&quot;, &quot;description&quot;, &quot;logsource&quot;, &quot;detection&quot;, &quot;level&quot;]
+    for field in required:
+        if field not in rule:
+            errors.append(f&quot;Missing required field: {field}&quot;)
+
+    if &quot;detection&quot; in rule:
+        det = rule[&quot;detection&quot;]
+        if &quot;condition&quot; not in det:
+            errors.append(&quot;detection block missing condition&quot;)
+
+    if &quot;level&quot; in rule and rule[&quot;level&quot;] not in (&quot;informational&quot;, &quot;low&quot;, &quot;medium&quot;, &quot;high&quot;, &quot;critical&quot;):
+        errors.append(f&quot;Invalid level: {rule[&#x27;level&#x27;]}&quot;)
+
+    if &quot;tags&quot; in rule:
+        for tag in rule[&quot;tags&quot;]:
+            if not (tag.startswith(&quot;attack.&quot;) or tag.startswith(&quot;detection.&quot;)):
+                errors.append(f&quot;Tag &#x27;{tag}&#x27; should start with &#x27;attack.&#x27; or &#x27;detection.&#x27;&quot;)
+
+    return errors
+
+errors = validate_sigma_rule(IMPOSSIBLE_TRAVEL_RULE_YAML)
+print(f&quot;Sigma validation errors: {errors}&quot;)
+# Output: Sigma validation errors: []
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add two more validation checks to <code>validate_sigma_rule</code>:</p>
+<ol>
+<li><code>id</code> must be a valid UUID4 format (matches <code>[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}</code>)</li>
+<li><code>date</code> and <code>modified</code> fields (if present) must be parseable as <code>YYYY-MM-DD</code></li>
+</ol>
+<p>Test with the existing rule (should still pass) and with a modified version where <code>id</code> is <code>&quot;not-a-uuid&quot;</code> and <code>date</code> is <code>&quot;01/06/2024&quot;</code>.</p>
+<p>Expected output:</p>
+<pre><code>Valid rule errors: []
+Invalid rule errors: [&quot;id is not a valid UUID4&quot;, &quot;date must be YYYY-MM-DD format: 01/06/2024&quot;]
+</code></pre><hr />
+<h3>Concept 3 — Sentinel Alert Enrichment Pipeline</h3>
+<p>Raw Sentinel alerts contain field names and error codes that L1 analysts cannot interpret without a lookup table. An enrichment pipeline adds human-readable context before the alert reaches the analyst, reducing mean time to triage (MTTT).</p>
+<p><strong>Enrichment data sources for Azure sign-in alerts:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Data source</th>
+<th>Fields added</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Azure AD result code lookup</td>
+<td><code>ResultDescription</code> → plain English failure reason</td>
+</tr>
+<tr>
+<td>IP geolocation (MaxMind/ip-api)</td>
+<td>Country, city, ISP, ASN for <code>IPAddress</code></td>
+</tr>
+<tr>
+<td>Threat intelligence feed</td>
+<td><code>IPAddress</code> → TI match (malicious/anonymous proxy/TOR)</td>
+</tr>
+<tr>
+<td>User directory</td>
+<td><code>UserPrincipalName</code> → department, manager, job title</td>
+</tr>
+<tr>
+<td>UEBA score</td>
+<td><code>UserPrincipalName</code> → anomaly score from historical baseline</td>
+</tr>
+</tbody>
+</table>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+from dataclasses import dataclass, field
+from typing import Optional
+
+AZURE_RESULT_CODES: dict[str, str] = {
+    &quot;0&quot;: &quot;Success&quot;,
+    &quot;50126&quot;: &quot;Invalid username or password&quot;,
+    &quot;50074&quot;: &quot;MFA required but not performed&quot;,
+    &quot;50076&quot;: &quot;MFA required by Conditional Access&quot;,
+    &quot;50079&quot;: &quot;User must enroll in MFA&quot;,
+    &quot;53003&quot;: &quot;Blocked by Conditional Access&quot;,
+    &quot;70011&quot;: &quot;Invalid OAuth scope&quot;,
+    &quot;90095&quot;: &quot;Consent required — admin approval needed&quot;,
+}
+
+KNOWN_TOR_RANGES = {&quot;185.220.101.0/24&quot;, &quot;185.220.102.0/24&quot;}  # simplified
+
+@dataclass
+class EnrichedSigninAlert:
+    # Original fields
+    TimeGenerated: str
+    UserPrincipalName: str
+    IPAddress: str
+    Location: str
+    ResultType: str
+    SpeedKmH: float
+    PrevLocation: str
+    ElapsedHours: float
+
+    # Enriched fields
+    ResultDescription: str = &quot;&quot;
+    IsTorExit: bool = False
+    UserDepartment: str = &quot;Unknown&quot;
+    UserManager: str = &quot;Unknown&quot;
+    UEBAScore: float = 0.0
+    RiskSummary: str = &quot;&quot;
+
+    def enrich(self, user_directory: dict[str, dict], ueba_scores: dict[str, float]) -&gt; None:
+        self.ResultDescription = AZURE_RESULT_CODES.get(self.ResultType, f&quot;Unknown ({self.ResultType})&quot;)
+        self.IsTorExit = any(
+            ip_in_range(self.IPAddress, r) for r in KNOWN_TOR_RANGES
+        )
+        user_info = user_directory.get(self.UserPrincipalName, {})
+        self.UserDepartment = user_info.get(&quot;department&quot;, &quot;Unknown&quot;)
+        self.UserManager = user_info.get(&quot;manager&quot;, &quot;Unknown&quot;)
+        self.UEBAScore = ueba_scores.get(self.UserPrincipalName, 0.0)
+
+        risks = []
+        if self.SpeedKmH &gt; 5000:
+            risks.append(f&quot;extreme speed {self.SpeedKmH:.0f} km/h (likely VPN or account sharing)&quot;)
+        elif self.SpeedKmH &gt; 900:
+            risks.append(f&quot;impossible travel {self.SpeedKmH:.0f} km/h ({self.PrevLocation} → {self.Location})&quot;)
+        if self.IsTorExit:
+            risks.append(&quot;source IP is a known TOR exit node&quot;)
+        if self.UEBAScore &gt; 80:
+            risks.append(f&quot;UEBA anomaly score {self.UEBAScore:.0f}/100&quot;)
+        self.RiskSummary = &quot;; &quot;.join(risks) if risks else &quot;No additional risk indicators&quot;
+
+USER_DIR = {
+    &quot;alice@corp.com&quot;: {&quot;department&quot;: &quot;Finance&quot;, &quot;manager&quot;: &quot;david@corp.com&quot;},
+}
+UEBA_SCORES = {&quot;alice@corp.com&quot;: 85.0}
+
+alert = EnrichedSigninAlert(
+    TimeGenerated=&quot;2024-06-01T10:30:00Z&quot;,
+    UserPrincipalName=&quot;alice@corp.com&quot;,
+    IPAddress=&quot;185.220.101.5&quot;,
+    Location=&quot;RU&quot;,
+    ResultType=&quot;0&quot;,
+    SpeedKmH=1888.0,
+    PrevLocation=&quot;IL&quot;,
+    ElapsedHours=1.5,
+)
+alert.enrich(USER_DIR, UEBA_SCORES)
+print(f&quot;Department: {alert.UserDepartment}&quot;)
+print(f&quot;TOR exit: {alert.IsTorExit}&quot;)
+print(f&quot;UEBA: {alert.UEBAScore}&quot;)
+print(f&quot;Risk: {alert.RiskSummary}&quot;)
+# Output:
+# Department: Finance
+# TOR exit: True
+# UEBA: 85.0
+# Risk: impossible travel 1888 km/h (IL → RU); source IP is a known TOR exit node; UEBA anomaly score 85/100
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>triage_priority(alert: EnrichedSigninAlert) -&gt; str</code> that returns <code>&quot;P1&quot;</code>, <code>&quot;P2&quot;</code>, or <code>&quot;P3&quot;</code> using this scoring:</p>
+<ul>
+<li>P1: TOR exit node AND UEBAScore &gt; 70</li>
+<li>P1: SpeedKmH &gt; 3000 (extreme — likely account takeover)</li>
+<li>P2: SpeedKmH &gt; 900 AND UEBAScore &gt; 50</li>
+<li>P2: TOR exit node (any speed)</li>
+<li>P3: everything else</li>
+</ul>
+<p>Create one alert of each priority level and verify the assignments.</p>
+<p>Expected output:</p>
+<pre><code>P1_alert priority: P1
+P2_alert priority: P2
+P3_alert priority: P3
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Alert narrative generation for SOC handoff
+<strong>Threat:</strong> Alert fatigue from repetitive high-volume alerts causes analysts to write template responses without reading actual alert data — a pattern LLMs can exploit if they generate convincing-but-wrong triage notes at scale
+<strong>Opportunity:</strong> Auto-generate a triage narrative for each enriched alert: &quot;Finance user Alice (managed by David) signed in successfully from Tel Aviv at 09:00 and Moscow at 10:30 — 1888 km/h. Source IP 185.220.101.5 is a known TOR exit node. UEBA score: 85/100. Recommended: P1 — disable account and contact manager.&quot;
+<strong>Prompt to try:</strong> <code>&quot;Summarize this Azure AD impossible travel alert for a SOC analyst who needs to decide in 60 seconds whether to escalate: User: alice@corp.com, Dept: Finance, Speed: 1888 km/h (IL→RU), TOR exit: yes, MFA: no, UEBA: 85/100. Output: one sentence verdict and three bullet-point next steps.&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — GCP IAM Abuse Rule (Production)</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="15-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=GCP%20IAM%20privilege%20escalation%20detection%20security%20logging" target="_blank" rel="noopener">GCP IAM privilege escalation detection security logging</a></p></div>
+<hr />
+<h3>Concept 1 — Production Sigma Rule: GCP IAM Abuse</h3>
+<p>The GCP IAM escalation Sigma rule must correlate multiple audit log events for the same principal within a time window — detecting the recon → escalation → persistence chain rather than any single event in isolation.</p>
+<pre><code># gcp_iam_privilege_escalation.yml
+title: GCP IAM Privilege Escalation — Owner Role Grant
+id: b7e4d1c3-9f2a-4b8e-8c5d-7a0b3e6d9f1c
+status: production
+description: |
+  Detects a GCP principal granting roles/owner, roles/editor, or
+  roles/iam.securityAdmin to any identity on a project.
+  Combined with preceding GetIamPolicy calls, this indicates
+  the reconnaissance → privilege escalation kill chain.
+author: SOC Team
+date: 2024-06-01
+modified: 2024-06-01
+references:
+  - https://attack.mitre.org/techniques/T1078/004/
+  - https://cloud.google.com/iam/docs/audit-logging
+tags:
+  - attack.privilege_escalation
+  - attack.t1078.004
+  - attack.persistence
+  - attack.t1484
+logsource:
+  product: gcp
+  service: audit
+detection:
+  set_iam_policy:
+    protoPayload.methodName: &#x27;google.cloud.resourcemanager.v3.Projects.SetIamPolicy&#x27;
+    protoPayload.status.code: 0
+  privilege_role:
+    protoPayload.request.policy.bindings.role|contains:
+      - &#x27;roles/owner&#x27;
+      - &#x27;roles/editor&#x27;
+      - &#x27;roles/iam.securityAdmin&#x27;
+      - &#x27;roles/resourcemanager.projectIamAdmin&#x27;
+  filter_break_glass:
+    protoPayload.authenticationInfo.principalEmail|startswith:
+      - &#x27;break-glass@&#x27;
+      - &#x27;emergency-access@&#x27;
+  filter_terraform:
+    protoPayload.requestMetadata.callerSuppliedUserAgent|contains:
+      - &#x27;Terraform&#x27;
+      - &#x27;google-cloud-sdk&#x27;
+  condition: set_iam_policy and privilege_role and not filter_break_glass and not filter_terraform
+fields:
+  - protoPayload.authenticationInfo.principalEmail
+  - protoPayload.requestMetadata.callerIp
+  - protoPayload.request.policy.bindings
+  - resource.labels.project_id
+falsepositives:
+  - Terraform runs in CI/CD pipelines (filtered by user agent)
+  - Break-glass emergency access accounts (filtered by email prefix)
+  - Legitimate onboarding of new project owners via approved change process
+level: high
+</code></pre><div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Python representation and validator for the GCP IAM rule
+GCP_IAM_RULE_YAML = &quot;&quot;&quot;
+title: GCP IAM Privilege Escalation — Owner Role Grant
+id: b7e4d1c3-9f2a-4b8e-8c5d-7a0b3e6d9f1c
+status: production
+description: Detects GCP principal granting privileged roles on a project.
+author: SOC Team
+date: 2024-06-01
+modified: 2024-06-01
+tags:
+  - attack.privilege_escalation
+  - attack.t1078.004
+logsource:
+  product: gcp
+  service: audit
+detection:
+  set_iam_policy:
+    protoPayload.methodName: &#x27;google.cloud.resourcemanager.v3.Projects.SetIamPolicy&#x27;
+  privilege_role:
+    protoPayload.request.policy.bindings.role|contains:
+      - &#x27;roles/owner&#x27;
+      - &#x27;roles/editor&#x27;
+  filter_terraform:
+    protoPayload.requestMetadata.callerSuppliedUserAgent|contains:
+      - &#x27;Terraform&#x27;
+  condition: set_iam_policy and privilege_role and not filter_terraform
+falsepositives:
+  - Terraform CI/CD pipelines
+level: high
+&quot;&quot;&quot;
+
+# Test the rule against simulated log entries
+def apply_sigma_detection(rule_yaml: str, log_entries: list[dict]) -&gt; list[dict]:
+    rule = yaml.safe_load(rule_yaml)
+    detection = rule[&quot;detection&quot;]
+
+    results = []
+    for entry in log_entries:
+        method_match = (
+            entry.get(&quot;protoPayload.methodName&quot;) ==
+            detection[&quot;set_iam_policy&quot;][&quot;protoPayload.methodName&quot;]
+        )
+        role = entry.get(&quot;protoPayload.request.policy.bindings.role&quot;, &quot;&quot;)
+        role_match = any(r in role for r in detection[&quot;privilege_role&quot;][&quot;protoPayload.request.policy.bindings.role|contains&quot;])
+        ua = entry.get(&quot;protoPayload.requestMetadata.callerSuppliedUserAgent&quot;, &quot;&quot;)
+        tf_filter = any(t in ua for t in detection[&quot;filter_terraform&quot;][&quot;protoPayload.requestMetadata.callerSuppliedUserAgent|contains&quot;])
+
+        if method_match and role_match and not tf_filter:
+            results.append(entry)
+    return results
+
+test_entries = [
+    {
+        &quot;protoPayload.methodName&quot;: &quot;google.cloud.resourcemanager.v3.Projects.SetIamPolicy&quot;,
+        &quot;protoPayload.request.policy.bindings.role&quot;: &quot;roles/owner&quot;,
+        &quot;protoPayload.requestMetadata.callerSuppliedUserAgent&quot;: &quot;python-requests/2.28&quot;,
+        &quot;protoPayload.authenticationInfo.principalEmail&quot;: &quot;attacker@corp.com&quot;,
+    },
+    {
+        &quot;protoPayload.methodName&quot;: &quot;google.cloud.resourcemanager.v3.Projects.SetIamPolicy&quot;,
+        &quot;protoPayload.request.policy.bindings.role&quot;: &quot;roles/owner&quot;,
+        &quot;protoPayload.requestMetadata.callerSuppliedUserAgent&quot;: &quot;Terraform/1.5.0 HashiCorp&quot;,
+        &quot;protoPayload.authenticationInfo.principalEmail&quot;: &quot;ci-runner@corp.com&quot;,
+    },
+    {
+        &quot;protoPayload.methodName&quot;: &quot;google.iam.v1.IAM.GetIamPolicy&quot;,
+        &quot;protoPayload.request.policy.bindings.role&quot;: &quot;&quot;,
+        &quot;protoPayload.requestMetadata.callerSuppliedUserAgent&quot;: &quot;python-requests/2.28&quot;,
+        &quot;protoPayload.authenticationInfo.principalEmail&quot;: &quot;attacker@corp.com&quot;,
+    },
+]
+
+alerts = apply_sigma_detection(GCP_IAM_RULE_YAML, test_entries)
+print(f&quot;Alerts fired: {len(alerts)}&quot;)
+for a in alerts:
+    print(f&quot;  Principal: {a[&#x27;protoPayload.authenticationInfo.principalEmail&#x27;]}&quot;)
+# Output:
+# Alerts fired: 1
+#   Principal: attacker@corp.com
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a third filter to <code>GCP_IAM_RULE_YAML</code> called <code>filter_break_glass</code> that suppresses entries where <code>protoPayload.authenticationInfo.principalEmail</code> starts with <code>&quot;break-glass@&quot;</code> or <code>&quot;emergency-&quot;</code>. Update <code>apply_sigma_detection</code> to handle <code>|startswith</code> operators in filter conditions. Add a test entry for <code>break-glass@corp.com</code> granting <code>roles/owner</code> and confirm it is suppressed.</p>
+<p>Expected output:</p>
+<pre><code>Alerts fired: 1
+  Principal: attacker@corp.com
+(break-glass entry suppressed)
+</code></pre><hr />
+<h3>Concept 2 — Cloud Detection Coverage Dashboard</h3>
+<p>The cloud detection coverage dashboard extends the W12 coverage dashboard with cloud-specific dimensions: each cloud platform has its own service categories, and coverage must be measured per platform × per service × per ATT&amp;CK technique.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+
+class CloudPlatform(Enum):
+    AZURE = &quot;azure&quot;
+    GCP = &quot;gcp&quot;
+    AWS = &quot;aws&quot;
+
+class CloudService(Enum):
+    IAM = &quot;iam&quot;
+    COMPUTE = &quot;compute&quot;
+    STORAGE = &quot;storage&quot;
+    NETWORK = &quot;network&quot;
+    KUBERNETES = &quot;kubernetes&quot;
+    SERVERLESS = &quot;serverless&quot;
+
+@dataclass
+class CloudDetectionRule:
+    rule_id: str
+    title: str
+    platform: CloudPlatform
+    service: CloudService
+    technique_id: str
+    technique_name: str
+    status: str             # draft / experimental / production
+    level: str              # low / medium / high / critical
+    log_source: str
+    has_fp_filter: bool
+    last_tested: Optional[str] = None
+
+@dataclass
+class CloudCoverageReport:
+    rules: list[CloudDetectionRule]
+
+    def coverage_by_platform(self) -&gt; dict[str, int]:
+        result: dict[str, int] = {}
+        for r in self.rules:
+            if r.status == &quot;production&quot;:
+                key = r.platform.value
+                result[key] = result.get(key, 0) + 1
+        return result
+
+    def coverage_by_service(self) -&gt; dict[str, int]:
+        result: dict[str, int] = {}
+        for r in self.rules:
+            if r.status == &quot;production&quot;:
+                key = r.service.value
+                result[key] = result.get(key, 0) + 1
+        return result
+
+    def missing_coverage(self, required_techniques: list[str]) -&gt; list[str]:
+        covered = {r.technique_id for r in self.rules if r.status == &quot;production&quot;}
+        return [t for t in required_techniques if t not in covered]
+
+    def rules_without_fp_filter(self) -&gt; list[str]:
+        return [r.rule_id for r in self.rules if not r.has_fp_filter and r.status == &quot;production&quot;]
+
+# Build a sample coverage report with our two new cloud rules
+report = CloudCoverageReport(rules=[
+    CloudDetectionRule(
+        rule_id=&quot;azure-impossible-travel&quot;,
+        title=&quot;Azure AD Impossible Travel&quot;,
+        platform=CloudPlatform.AZURE,
+        service=CloudService.IAM,
+        technique_id=&quot;T1078&quot;,
+        technique_name=&quot;Valid Accounts&quot;,
+        status=&quot;production&quot;,
+        level=&quot;high&quot;,
+        log_source=&quot;SigninLogs&quot;,
+        has_fp_filter=True,
+        last_tested=&quot;2024-06-01&quot;,
+    ),
+    CloudDetectionRule(
+        rule_id=&quot;gcp-iam-escalation&quot;,
+        title=&quot;GCP IAM Privilege Escalation&quot;,
+        platform=CloudPlatform.GCP,
+        service=CloudService.IAM,
+        technique_id=&quot;T1078.004&quot;,
+        technique_name=&quot;Cloud Accounts&quot;,
+        status=&quot;production&quot;,
+        level=&quot;high&quot;,
+        log_source=&quot;cloudaudit&quot;,
+        has_fp_filter=True,
+        last_tested=&quot;2024-06-01&quot;,
+    ),
+    CloudDetectionRule(
+        rule_id=&quot;gcp-storage-public&quot;,
+        title=&quot;GCP Storage Bucket Made Public&quot;,
+        platform=CloudPlatform.GCP,
+        service=CloudService.STORAGE,
+        technique_id=&quot;T1530&quot;,
+        technique_name=&quot;Data from Cloud Storage&quot;,
+        status=&quot;experimental&quot;,
+        level=&quot;high&quot;,
+        log_source=&quot;cloudaudit&quot;,
+        has_fp_filter=False,
+    ),
+])
+
+print(&quot;Coverage by platform:&quot;, report.coverage_by_platform())
+print(&quot;Coverage by service:&quot;, report.coverage_by_service())
+print(&quot;Missing coverage:&quot;, report.missing_coverage([&quot;T1078&quot;, &quot;T1078.004&quot;, &quot;T1530&quot;, &quot;T1537&quot;]))
+print(&quot;Rules without FP filter:&quot;, report.rules_without_fp_filter())
+# Output:
+# Coverage by platform: {&#x27;azure&#x27;: 1, &#x27;gcp&#x27;: 1}
+# Coverage by service: {&#x27;iam&#x27;: 2}
+# Missing coverage: [&#x27;T1530&#x27;, &#x27;T1537&#x27;]
+# Rules without FP filter: []
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a method <code>coverage_score_by_platform(self) -&gt; dict[str, float]</code> that returns a score 0.0–1.0 for each platform present in the rules list. Score = (number of production rules for that platform) / (total rules for that platform, including experimental and draft). Add one more draft rule for AWS and verify the output includes all three platforms with their respective scores.</p>
+<p>Expected output:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>{&quot;azure&quot;: 1.0, &quot;gcp&quot;: 0.5, &quot;aws&quot;: 0.0}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><hr />
+<h3>Concept 3 — Cloud MITRE ATT&amp;CK Matrix</h3>
+<p>The standard MITRE ATT&amp;CK Enterprise matrix applies to cloud environments with cloud-specific sub-techniques. Understanding which techniques are most prevalent in cloud breaches helps prioritize detection work.</p>
+<p><strong>Top cloud-relevant ATT&amp;CK techniques (with example log sources):</strong></p>
+<table>
+<thead>
+<tr>
+<th>Technique</th>
+<th>Sub-technique</th>
+<th>Cloud context</th>
+<th>Log source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1078</td>
+<td>T1078.004 Cloud Accounts</td>
+<td>Stolen OAuth tokens, service account keys</td>
+<td>SigninLogs, cloudaudit</td>
+</tr>
+<tr>
+<td>T1098</td>
+<td>T1098.001 Additional Cloud Credentials</td>
+<td>New SA keys, app registrations</td>
+<td>AuditLogs, cloudaudit</td>
+</tr>
+<tr>
+<td>T1530</td>
+<td>—</td>
+<td>Public bucket exposure, data theft</td>
+<td>Storage logs</td>
+</tr>
+<tr>
+<td>T1537</td>
+<td>—</td>
+<td>Exfiltration via cloud storage sync</td>
+<td>Storage logs, DNS</td>
+</tr>
+<tr>
+<td>T1484</td>
+<td>T1484.001 Group Policy Modification</td>
+<td>Org policy changes in GCP</td>
+<td>cloudaudit</td>
+</tr>
+<tr>
+<td>T1562</td>
+<td>T1562.008 Disable Cloud Logs</td>
+<td>Disabling audit logging</td>
+<td>cloudaudit</td>
+</tr>
+<tr>
+<td>T1580</td>
+<td>—</td>
+<td>Cloud infrastructure discovery</td>
+<td>cloudaudit Data Access</td>
+</tr>
+</tbody>
+</table>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class CloudTechniqueProfile:
+    technique_id: str
+    name: str
+    cloud_platforms: list[str]
+    log_sources: list[str]
+    detection_difficulty: str   # low / medium / high
+    attacker_prevalence: str    # low / medium / high / critical
+    detection_notes: str
+
+CLOUD_TECHNIQUE_PROFILES: list[CloudTechniqueProfile] = [
+    CloudTechniqueProfile(
+        technique_id=&quot;T1078.004&quot;,
+        name=&quot;Valid Accounts — Cloud Accounts&quot;,
+        cloud_platforms=[&quot;azure&quot;, &quot;gcp&quot;, &quot;aws&quot;],
+        log_sources=[&quot;SigninLogs&quot;, &quot;cloudaudit&quot;, &quot;CloudTrail&quot;],
+        detection_difficulty=&quot;medium&quot;,
+        attacker_prevalence=&quot;critical&quot;,
+        detection_notes=&quot;Impossible travel + UEBA most effective. Single-event detection has high FP rate.&quot;,
+    ),
+    CloudTechniqueProfile(
+        technique_id=&quot;T1098.001&quot;,
+        name=&quot;Account Manipulation — Additional Cloud Credentials&quot;,
+        cloud_platforms=[&quot;azure&quot;, &quot;gcp&quot;, &quot;aws&quot;],
+        log_sources=[&quot;AuditLogs&quot;, &quot;cloudaudit&quot;],
+        detection_difficulty=&quot;low&quot;,
+        attacker_prevalence=&quot;high&quot;,
+        detection_notes=&quot;CreateServiceAccountKey and AddApplicationCredentials are single-event detectable.&quot;,
+    ),
+    CloudTechniqueProfile(
+        technique_id=&quot;T1562.008&quot;,
+        name=&quot;Impair Defenses — Disable Cloud Logs&quot;,
+        cloud_platforms=[&quot;azure&quot;, &quot;gcp&quot;, &quot;aws&quot;],
+        log_sources=[&quot;AzureActivity&quot;, &quot;cloudaudit&quot;],
+        detection_difficulty=&quot;low&quot;,
+        attacker_prevalence=&quot;medium&quot;,
+        detection_notes=&quot;Single event: DeleteSink, UpdateSink, StopLogging — alert immediately.&quot;,
+    ),
+    CloudTechniqueProfile(
+        technique_id=&quot;T1530&quot;,
+        name=&quot;Data from Cloud Storage&quot;,
+        cloud_platforms=[&quot;azure&quot;, &quot;gcp&quot;, &quot;aws&quot;],
+        log_sources=[&quot;StorageLogs&quot;, &quot;cloudaudit Data Access&quot;],
+        detection_difficulty=&quot;high&quot;,
+        attacker_prevalence=&quot;high&quot;,
+        detection_notes=&quot;Requires Data Access logging enabled. Volume-based detection (bytes/session) most practical.&quot;,
+    ),
+]
+
+def prioritized_detection_backlog(profiles: list[CloudTechniqueProfile]) -&gt; list[CloudTechniqueProfile]:
+    severity_rank = {&quot;critical&quot;: 0, &quot;high&quot;: 1, &quot;medium&quot;: 2, &quot;low&quot;: 3}
+    difficulty_rank = {&quot;low&quot;: 0, &quot;medium&quot;: 1, &quot;high&quot;: 2}
+    return sorted(
+        profiles,
+        key=lambda p: (severity_rank[p.attacker_prevalence], difficulty_rank[p.detection_difficulty])
+    )
+
+backlog = prioritized_detection_backlog(CLOUD_TECHNIQUE_PROFILES)
+for p in backlog:
+    print(f&quot;{p.technique_id} | prevalence={p.attacker_prevalence} | difficulty={p.detection_difficulty}&quot;)
+# Output (highest priority first):
+# T1078.004 | prevalence=critical | difficulty=medium
+# T1098.001 | prevalence=high | difficulty=low
+# T1562.008 | prevalence=medium | difficulty=low
+# T1530    | prevalence=high | difficulty=high
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>generate_coverage_gap_md(profiles: list[CloudTechniqueProfile], covered_techniques: set[str]) -&gt; str</code> that returns a markdown table of uncovered techniques, sorted by <code>attacker_prevalence</code> descending. Columns: <code>Technique</code>, <code>Name</code>, <code>Prevalence</code>, <code>Difficulty</code>, <code>Priority</code> (1 = highest, based on rank from <code>prioritized_detection_backlog</code>).</p>
+<p>Call it with <code>covered_techniques = {&quot;T1078.004&quot;}</code> and confirm the output includes T1098.001, T1562.008, T1530 in priority order.</p>
+<p>Expected output:</p>
+<pre><code>| Technique | Name | Prevalence | Difficulty | Priority |
+|-----------|------|-----------|-----------|---------|
+| T1098.001 | Account Manipulation... | high | low | 1 |
+| T1530     | Data from Cloud Storage | high | high | 2 |
+| T1562.008 | Impair Defenses... | medium | low | 3 |
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Cloud policy misconfiguration detection and remediation
+<strong>Threat:</strong> LLM-assisted cloud attack tooling (e.g., HackerGPT variants) automates privilege escalation path discovery across GCP/Azure, recommending the shortest path from a compromised service account to <code>roles/owner</code>
+<strong>Opportunity:</strong> SOC can use LLM to explain IAM policy diffs in plain English: &quot;Before: alice has roles/viewer. After: alice has roles/owner. This is a privilege escalation — alice now has full control over the project including the ability to delete all resources, disable logging, and exfiltrate all data.&quot;
+<strong>Prompt to try:</strong> <code>&quot;Compare these two GCP IAM policies: [before JSON] vs [after JSON]. Describe (1) what permissions were added, (2) the blast radius if the identity is compromised, (3) whether this change should trigger a security review.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Cloud Detection Integration Module</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="15-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><p class="alt">Find a video: <a href="https://www.youtube.com/results?search_query=cloud%20detection%20engineering%20Azure%20GCP%20unified%20pipeline%20Python" target="_blank" rel="noopener">cloud detection engineering Azure GCP unified pipeline Python</a></p></div>
+<hr />
+<h3>Concept 1 — Multi-Cloud Normalization Schema</h3>
+<p>When a SOC covers multiple cloud platforms, analysts face a terminology mismatch problem: Azure calls it <code>UserPrincipalName</code>, GCP calls it <code>principalEmail</code>, AWS calls it <code>userIdentity.arn</code>. A normalization layer maps all platforms to a shared schema — the same problem solved by Elastic Common Schema (ECS) and OCSF (Open Cybersecurity Schema Framework).</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+
+class CloudEventType(Enum):
+    IAM_CHANGE = &quot;iam_change&quot;
+    LOGIN = &quot;login&quot;
+    RESOURCE_CREATE = &quot;resource_create&quot;
+    RESOURCE_DELETE = &quot;resource_delete&quot;
+    DATA_ACCESS = &quot;data_access&quot;
+    POLICY_CHANGE = &quot;policy_change&quot;
+    CONFIG_CHANGE = &quot;config_change&quot;
+
+class CloudPlatformEnum(Enum):
+    AZURE = &quot;azure&quot;
+    GCP = &quot;gcp&quot;
+    AWS = &quot;aws&quot;
+
+@dataclass
+class NormalizedCloudEvent:
+    # Shared schema across all platforms
+    event_id: str
+    timestamp: datetime
+    platform: CloudPlatformEnum
+    event_type: CloudEventType
+    actor_identity: str         # UPN / email / ARN
+    actor_ip: str
+    actor_user_agent: str
+    target_resource: str        # resource name / ARN / GCP resource
+    target_project: str         # subscription / project / account
+    action: str                 # method name / operation name
+    outcome: str                # &quot;success&quot; or &quot;failure&quot;
+    raw_payload: dict
+
+    @classmethod
+    def from_azure_signin(cls, log: dict) -&gt; &quot;NormalizedCloudEvent&quot;:
+        return cls(
+            event_id=log.get(&quot;CorrelationId&quot;, &quot;&quot;),
+            timestamp=datetime.fromisoformat(log[&quot;TimeGenerated&quot;].replace(&quot;Z&quot;, &quot;&quot;)),
+            platform=CloudPlatformEnum.AZURE,
+            event_type=CloudEventType.LOGIN,
+            actor_identity=log[&quot;UserPrincipalName&quot;],
+            actor_ip=log[&quot;IPAddress&quot;],
+            actor_user_agent=log.get(&quot;DeviceDetail&quot;, {}).get(&quot;browser&quot;, &quot;&quot;),
+            target_resource=&quot;AzureAD&quot;,
+            target_project=log.get(&quot;TenantId&quot;, &quot;&quot;),
+            action=&quot;UserSignIn&quot;,
+            outcome=&quot;success&quot; if log.get(&quot;ResultType&quot;) == &quot;0&quot; else &quot;failure&quot;,
+            raw_payload=log,
+        )
+
+    @classmethod
+    def from_gcp_audit(cls, entry: dict) -&gt; &quot;NormalizedCloudEvent&quot;:
+        proto = entry.get(&quot;protoPayload&quot;, {})
+        return cls(
+            event_id=entry.get(&quot;insertId&quot;, &quot;&quot;),
+            timestamp=datetime.fromisoformat(entry[&quot;timestamp&quot;].replace(&quot;Z&quot;, &quot;&quot;)),
+            platform=CloudPlatformEnum.GCP,
+            event_type=CloudEventType.IAM_CHANGE
+            if &quot;iam&quot; in proto.get(&quot;serviceName&quot;, &quot;&quot;) else CloudEventType.RESOURCE_CREATE,
+            actor_identity=proto.get(&quot;authenticationInfo&quot;, {}).get(&quot;principalEmail&quot;, &quot;&quot;),
+            actor_ip=proto.get(&quot;requestMetadata&quot;, {}).get(&quot;callerIp&quot;, &quot;&quot;),
+            actor_user_agent=proto.get(&quot;requestMetadata&quot;, {}).get(&quot;callerSuppliedUserAgent&quot;, &quot;&quot;),
+            target_resource=entry.get(&quot;resource&quot;, {}).get(&quot;type&quot;, &quot;&quot;),
+            target_project=entry.get(&quot;resource&quot;, {}).get(&quot;labels&quot;, {}).get(&quot;project_id&quot;, &quot;&quot;),
+            action=proto.get(&quot;methodName&quot;, &quot;&quot;),
+            outcome=&quot;success&quot; if proto.get(&quot;status&quot;, {}).get(&quot;code&quot;, 0) == 0 else &quot;failure&quot;,
+            raw_payload=entry,
+        )
+
+    def is_external_actor(self) -&gt; bool:
+        internal_domains = {&quot;corp.com&quot;, &quot;internal.corp.com&quot;, &quot;svc.corp.com&quot;}
+        domain = self.actor_identity.split(&quot;@&quot;)[-1] if &quot;@&quot; in self.actor_identity else &quot;&quot;
+        return domain not in internal_domains
+
+# Test normalization
+azure_log = {
+    &quot;TimeGenerated&quot;: &quot;2024-06-01T10:30:00Z&quot;,
+    &quot;CorrelationId&quot;: &quot;azure-123&quot;,
+    &quot;UserPrincipalName&quot;: &quot;alice@corp.com&quot;,
+    &quot;IPAddress&quot;: &quot;185.220.101.5&quot;,
+    &quot;ResultType&quot;: &quot;0&quot;,
+    &quot;TenantId&quot;: &quot;tenant-abc&quot;,
+    &quot;DeviceDetail&quot;: {&quot;browser&quot;: &quot;Chrome&quot;},
+}
+gcp_log = {
+    &quot;insertId&quot;: &quot;gcp-456&quot;,
+    &quot;timestamp&quot;: &quot;2024-06-01T14:00:00Z&quot;,
+    &quot;resource&quot;: {&quot;type&quot;: &quot;project&quot;, &quot;labels&quot;: {&quot;project_id&quot;: &quot;prod&quot;}},
+    &quot;protoPayload&quot;: {
+        &quot;authenticationInfo&quot;: {&quot;principalEmail&quot;: &quot;attacker@external.com&quot;},
+        &quot;requestMetadata&quot;: {&quot;callerIp&quot;: &quot;185.1.1.1&quot;, &quot;callerSuppliedUserAgent&quot;: &quot;python/3.11&quot;},
+        &quot;methodName&quot;: &quot;google.cloud.resourcemanager.v3.Projects.SetIamPolicy&quot;,
+        &quot;serviceName&quot;: &quot;cloudresourcemanager.googleapis.com&quot;,
+        &quot;status&quot;: {&quot;code&quot;: 0},
+    },
+}
+
+azure_event = NormalizedCloudEvent.from_azure_signin(azure_log)
+gcp_event = NormalizedCloudEvent.from_gcp_audit(gcp_log)
+
+print(f&quot;Azure event type: {azure_event.event_type.value}, actor: {azure_event.actor_identity}&quot;)
+print(f&quot;GCP event type: {gcp_event.event_type.value}, external: {gcp_event.is_external_actor()}&quot;)
+# Output:
+# Azure event type: login, actor: alice@corp.com
+# GCP event type: iam_change, external: True
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add an <code>@classmethod from_aws_cloudtrail(cls, entry: dict) -&gt; &quot;NormalizedCloudEvent&quot;</code> that maps AWS CloudTrail entries to the shared schema. The CloudTrail entry structure is:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>{
+    &quot;eventTime&quot;: &quot;2024-06-01T15:00:00Z&quot;,
+    &quot;eventID&quot;: &quot;aws-789&quot;,
+    &quot;eventName&quot;: &quot;AttachUserPolicy&quot;,
+    &quot;userIdentity&quot;: {&quot;arn&quot;: &quot;arn:aws:iam::123:user/attacker&quot;, &quot;type&quot;: &quot;IAMUser&quot;},
+    &quot;sourceIPAddress&quot;: &quot;1.2.3.4&quot;,
+    &quot;userAgent&quot;: &quot;aws-cli/2.0&quot;,
+    &quot;requestParameters&quot;: {&quot;policyArn&quot;: &quot;arn:aws:iam::aws:policy/AdministratorAccess&quot;},
+    &quot;responseElements&quot;: None,
+    &quot;errorCode&quot;: None,
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Map <code>errorCode == None</code> to <code>outcome = &quot;success&quot;</code>. Map IAM-related <code>eventName</code> values to <code>CloudEventType.IAM_CHANGE</code>.</p>
+<p>Expected output:</p>
+<pre><code>AWS event type: iam_change, actor: arn:aws:iam::123:user/attacker, outcome: success
+</code></pre><hr />
+<h3>Concept 2 — Unified Cloud Detection Pipeline</h3>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+import argparse
+from pathlib import Path
+from datetime import datetime
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+import re
+
+@dataclass
+class CloudAlert:
+    alert_id: str
+    rule_id: str
+    rule_title: str
+    platform: str
+    technique_id: str
+    severity: str
+    timestamp: str
+    actor: str
+    actor_ip: str
+    target: str
+    project: str
+    action: str
+    details: dict = field(default_factory=dict)
+    suppressed: bool = False
+    suppression_reason: str = &quot;&quot;
+
+def run_impossible_travel_detection(events: list[NormalizedCloudEvent]) -&gt; list[CloudAlert]:
+    import math
+    alerts = []
+    login_events = [e for e in events if e.event_type == CloudEventType.LOGIN and e.outcome == &quot;success&quot;]
+    by_actor: dict[str, list[NormalizedCloudEvent]] = {}
+    for e in login_events:
+        by_actor.setdefault(e.actor_identity, []).append(e)
+
+    def _lat_lon_from_ip(ip: str) -&gt; tuple[float, float]:
+        # Stub: in production use MaxMind GeoIP2 or ip-api.com
+        known = {
+            &quot;82.80.1.10&quot;: (32.08, 34.78),
+            &quot;185.220.101.5&quot;: (55.75, 37.62),
+        }
+        return known.get(ip, (0.0, 0.0))
+
+    for actor, actor_events in by_actor.items():
+        actor_events.sort(key=lambda e: e.timestamp)
+        for i in range(1, len(actor_events)):
+            prev, curr = actor_events[i - 1], actor_events[i]
+            lat1, lon1 = _lat_lon_from_ip(prev.actor_ip)
+            lat2, lon2 = _lat_lon_from_ip(curr.actor_ip)
+            if (lat1, lon1) == (lat2, lon2) or (lat1, lon1) == (0.0, 0.0):
+                continue
+            elapsed_h = (curr.timestamp - prev.timestamp).total_seconds() / 3600.0
+            if elapsed_h &lt;= 0:
+                continue
+            dlat = math.radians(lat2 - lat1)
+            dlon = math.radians(lon2 - lon1)
+            a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+            dist_km = 2 * 6371 * math.asin(math.sqrt(a))
+            speed = dist_km / elapsed_h
+            if speed &gt; 900 and elapsed_h &lt; 4:
+                alerts.append(CloudAlert(
+                    alert_id=f&quot;IT-{actor}-{int(curr.timestamp.timestamp())}&quot;,
+                    rule_id=&quot;azure-impossible-travel&quot;,
+                    rule_title=&quot;Azure AD Impossible Travel&quot;,
+                    platform=&quot;azure&quot;,
+                    technique_id=&quot;T1078&quot;,
+                    severity=&quot;high&quot;,
+                    timestamp=curr.timestamp.isoformat(),
+                    actor=actor,
+                    actor_ip=curr.actor_ip,
+                    target=&quot;AzureAD&quot;,
+                    project=curr.target_project,
+                    action=curr.action,
+                    details={&quot;speed_kmh&quot;: round(speed, 0), &quot;elapsed_hours&quot;: round(elapsed_h, 2),
+                             &quot;from_ip&quot;: prev.actor_ip, &quot;to_ip&quot;: curr.actor_ip},
+                ))
+    return alerts
+
+def run_gcp_iam_detection(events: list[NormalizedCloudEvent]) -&gt; list[CloudAlert]:
+    alerts = []
+    PRIVILEGE_METHODS = {
+        &quot;google.cloud.resourcemanager.v3.Projects.SetIamPolicy&quot;,
+        &quot;google.iam.admin.v1.CreateServiceAccountKey&quot;,
+    }
+    for e in events:
+        if e.platform != CloudPlatformEnum.GCP:
+            continue
+        if e.action not in PRIVILEGE_METHODS:
+            continue
+        if e.outcome != &quot;success&quot;:
+            continue
+        ua = e.actor_user_agent.lower()
+        if &quot;terraform&quot; in ua or &quot;google-cloud-sdk&quot; in ua:
+            continue
+        payload = e.raw_payload.get(&quot;protoPayload&quot;, {})
+        bindings = payload.get(&quot;request&quot;, {}).get(&quot;policy&quot;, {}).get(&quot;bindings&quot;, [])
+        priv_roles = [b[&quot;role&quot;] for b in bindings
+                      if b.get(&quot;role&quot;) in {&quot;roles/owner&quot;, &quot;roles/editor&quot;, &quot;roles/iam.securityAdmin&quot;}]
+        if not priv_roles and e.action == &quot;google.iam.admin.v1.CreateServiceAccountKey&quot;:
+            priv_roles = [&quot;service_account_key_created&quot;]
+        if priv_roles:
+            alerts.append(CloudAlert(
+                alert_id=f&quot;GCP-IAM-{e.event_id}&quot;,
+                rule_id=&quot;gcp-iam-escalation&quot;,
+                rule_title=&quot;GCP IAM Privilege Escalation&quot;,
+                platform=&quot;gcp&quot;,
+                technique_id=&quot;T1078.004&quot;,
+                severity=&quot;high&quot;,
+                timestamp=e.timestamp.isoformat(),
+                actor=e.actor_identity,
+                actor_ip=e.actor_ip,
+                target=e.target_resource,
+                project=e.target_project,
+                action=e.action,
+                details={&quot;privileged_roles&quot;: priv_roles},
+            ))
+    return alerts
+
+def run_cloud_detection_pipeline(
+    events: list[NormalizedCloudEvent],
+    output_path: Optional[str] = None,
+) -&gt; list[CloudAlert]:
+    all_alerts: list[CloudAlert] = []
+    all_alerts.extend(run_impossible_travel_detection(events))
+    all_alerts.extend(run_gcp_iam_detection(events))
+    all_alerts.sort(key=lambda a: a.timestamp)
+
+    summary = {
+        &quot;run_timestamp&quot;: datetime.utcnow().isoformat(),
+        &quot;events_processed&quot;: len(events),
+        &quot;alerts_fired&quot;: len(all_alerts),
+        &quot;by_rule&quot;: {},
+        &quot;by_severity&quot;: {},
+    }
+    for alert in all_alerts:
+        summary[&quot;by_rule&quot;][alert.rule_id] = summary[&quot;by_rule&quot;].get(alert.rule_id, 0) + 1
+        summary[&quot;by_severity&quot;][alert.severity] = summary[&quot;by_severity&quot;].get(alert.severity, 0) + 1
+
+    output = {&quot;summary&quot;: summary, &quot;alerts&quot;: [asdict(a) for a in all_alerts]}
+    if output_path:
+        Path(output_path).write_text(json.dumps(output, indent=2), encoding=&quot;utf-8&quot;)
+    return all_alerts
+
+if __name__ == &quot;__main__&quot;:
+    parser = argparse.ArgumentParser(description=&quot;Cloud detection pipeline&quot;)
+    parser.add_argument(&quot;--azure-log&quot;, help=&quot;Path to Azure SigninLogs JSONL&quot;)
+    parser.add_argument(&quot;--gcp-log&quot;, help=&quot;Path to GCP Audit Log JSONL&quot;)
+    parser.add_argument(&quot;--output&quot;, default=&quot;cloud_alerts.json&quot;)
+    args = parser.parse_args()
+
+    events: list[NormalizedCloudEvent] = []
+    if args.azure_log:
+        for line in Path(args.azure_log).read_text().splitlines():
+            if line.strip():
+                events.append(NormalizedCloudEvent.from_azure_signin(json.loads(line)))
+    if args.gcp_log:
+        for line in Path(args.gcp_log).read_text().splitlines():
+            if line.strip():
+                events.append(NormalizedCloudEvent.from_gcp_audit(json.loads(line)))
+
+    alerts = run_cloud_detection_pipeline(events, args.output)
+    print(f&quot;Processed {len(events)} events, fired {len(alerts)} alerts → {args.output}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a <code>generate_markdown_report(alerts: list[CloudAlert]) -&gt; str</code> function that produces a markdown alert summary. Format:</p>
+<pre><code># Cloud Detection Report — 2024-06-01T10:30:00
+
+## Summary
+- Total alerts: 2
+- High severity: 2
+- Rules fired: azure-impossible-travel (1), gcp-iam-escalation (1)
+
+## Alerts
+
+### [HIGH] Azure AD Impossible Travel
+- Actor: alice@corp.com
+- IP: 185.220.101.5
+- Speed: 1888.0 km/h (IL → RU)
+- Time: 2024-06-01T10:30:00
+</code></pre><p>Call it on a list containing one impossible travel alert and one GCP IAM alert and assert the output contains both rule titles.</p>
+<p>Expected output: a markdown string with both alert titles and correct severity tags.</p>
+<hr />
+<h3>Concept 3 — Cloud Detection Sigma → KQL/Chronicle Conversion</h3>
+<p>The end-to-end production workflow converts Sigma rules to platform-specific query languages automatically, keeping the Sigma YAML as the single source of truth.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pathlib import Path
+import re
+
+def sigma_to_kql_azure_signin(sigma_yaml: str) -&gt; str:
+    rule = yaml.safe_load(sigma_yaml)
+    detection = rule.get(&quot;detection&quot;, {})
+    condition = detection.get(&quot;condition&quot;, &quot;&quot;)
+    kql_filters: list[str] = []
+
+    for block_name, block in detection.items():
+        if block_name == &quot;condition&quot;:
+            continue
+        if not isinstance(block, dict):
+            continue
+        block_is_filter = block_name.startswith(&quot;filter_&quot;)
+        for field, value in block.items():
+            kql_field = field.split(&quot;|&quot;)[0]
+            operator = field.split(&quot;|&quot;)[1] if &quot;|&quot; in field else &quot;eq&quot;
+            if isinstance(value, list):
+                values_str = &quot;, &quot;.join(f&#x27;&quot;{v}&quot;&#x27; for v in value)
+                if operator == &quot;endswith&quot;:
+                    parts = &quot; or &quot;.join(f&#x27;{kql_field} endswith &quot;{v}&quot;&#x27; for v in value)
+                    clause = f&quot;({parts})&quot;
+                elif operator == &quot;contains&quot;:
+                    parts = &quot; or &quot;.join(f&#x27;{kql_field} contains &quot;{v}&quot;&#x27; for v in value)
+                    clause = f&quot;({parts})&quot;
+                else:
+                    clause = f&quot;{kql_field} in ({values_str})&quot;
+            else:
+                if operator == &quot;eq&quot;:
+                    clause = f&#x27;{kql_field} == &quot;{value}&quot;&#x27;
+                else:
+                    clause = f&#x27;{kql_field} {operator} &quot;{value}&quot;&#x27;
+
+            if block_is_filter:
+                kql_filters.append(f&quot;| where not ({clause})&quot;)
+            else:
+                kql_filters.append(f&quot;| where {clause}&quot;)
+
+    logsource = rule.get(&quot;logsource&quot;, {})
+    table = &quot;SigninLogs&quot; if logsource.get(&quot;service&quot;) == &quot;signinlogs&quot; else &quot;AzureActivity&quot;
+
+    lines = [
+        f&quot;// {rule.get(&#x27;title&#x27;, &#x27;Sigma Rule&#x27;)}&quot;,
+        f&quot;// Technique: {&#x27;, &#x27;.join(t for t in rule.get(&#x27;tags&#x27;, []) if &#x27;attack.t&#x27; in t)}&quot;,
+        f&quot;// Level: {rule.get(&#x27;level&#x27;, &#x27;unknown&#x27;)}&quot;,
+        table,
+    ] + kql_filters + [
+        &quot;| project TimeGenerated, UserPrincipalName, IPAddress, Location, ResultType, ResultDescription&quot;
+    ]
+    return &quot;\n&quot;.join(lines)
+
+kql_output = sigma_to_kql_azure_signin(IMPOSSIBLE_TRAVEL_RULE_YAML)
+print(kql_output)
+# Output:
+# // Azure AD Impossible Travel — Successful Sign-In
+# // Technique: attack.t1078
+# // Level: high
+# SigninLogs
+# | where ResultType == &quot;0&quot;
+# | where not (UserPrincipalName endswith &quot;@automation.corp.com&quot;)
+# | where not (IPAddress == &quot;203.0.113.10&quot;)
+# | project TimeGenerated, ...
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a <code>sigma_to_gcp_log_filter(sigma_yaml: str) -&gt; str</code> function that converts a GCP-targeted Sigma rule YAML into a GCP Logging filter string (used in <code>gcloud logging read</code>). Map:</p>
+<ul>
+<li><code>protoPayload.methodName: 'X'</code> → <code>protoPayload.methodName=&quot;X&quot;</code></li>
+<li><code>filter_*</code> blocks → <code>NOT (...)</code> clauses joined with <code>AND</code></li>
+<li>Multiple values in a list → <code>(value1 OR value2)</code></li>
+</ul>
+<p>Call it on <code>GCP_IAM_RULE_YAML</code> and confirm the output starts with <code>protoPayload.methodName=</code>.</p>
+<p>Expected output:</p>
+<pre><code>protoPayload.methodName=&quot;google.cloud.resourcemanager.v3.Projects.SetIamPolicy&quot;
+AND (protoPayload.request.policy.bindings.role=&quot;roles/owner&quot; OR protoPayload.request.policy.bindings.role=&quot;roles/editor&quot;)
+AND NOT (protoPayload.requestMetadata.callerSuppliedUserAgent=&quot;Terraform&quot; OR ...)
+</code></pre><hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> Sigma → KQL/YARA-L automated translation quality
+<strong>Threat:</strong> LLM-assisted rule translation can silently change detection logic (e.g., translating <code>contains</code> as exact match), creating gaps that attackers learn to exploit once they find the published translated rules
+<strong>Opportunity:</strong> Use an LLM as a translation reviewer: provide the original Sigma YAML and the generated KQL side-by-side and ask &quot;does this KQL implement the same detection logic as the Sigma rule? List any discrepancies.&quot; This is faster than manual cross-platform testing.
+<strong>Prompt to try:</strong> <code>&quot;Review this Sigma rule and its KQL translation for logic equivalence. Sigma: [YAML]. KQL: [query]. List any field, operator, or filter discrepancies. Rate confidence 0-100 that they detect the same events.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 15</h2>
+<p><strong>Task:</strong> Write 2 production Sigma rules — one Azure impossible travel rule and one GCP IAM escalation rule — and wire them into the Python cloud detection pipeline as a unified <code>cloud_detector.py</code> module.</p>
+<p><strong>Builds on:</strong></p>
+<ul>
+<li>W12: <code>methodology/coverage_dashboard.py</code> — add the two new cloud rules to the coverage report</li>
+<li>W13: <code>rules/rules.json</code> index — add both cloud rules as entries</li>
+<li>W14: <code>network/beacon_detector.py</code> pattern — <code>cloud_detector.py</code> follows same: parse → normalize → detect → alert JSON output</li>
+</ul>
+<p><strong>Deliverable:</strong></p>
+<pre><code>cloud/
+├── azure_impossible_travel.yml   ← production Sigma rule
+├── gcp_iam_escalation.yml        ← production Sigma rule
+├── cloud_detector.py             ← NormalizedCloudEvent + two detection functions + run_cloud_detection_pipeline()
+└── cloud_alerts.json             ← sample output (5 test events → 2 alerts)
+</code></pre><p><strong>Stretch goal:</strong> Add a third rule for <code>T1562.008 — Disable Cloud Logs</code> (GCP <code>DeleteSink</code> / Azure <code>Microsoft.Insights/diagnosticSettings/delete</code>) and add it to the coverage dashboard as a third production rule.</p>
+<div class="pager"><a class="btn ghost" href="week-14.html">&larr; Week 14</a><a class="btn ghost" href="week-16.html">Week 16 &rarr;</a></div>
+</main></body></html>

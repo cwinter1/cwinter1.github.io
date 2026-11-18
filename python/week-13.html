@@ -1,0 +1,1435 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 13 — dbt Foundations</title>
+<link rel="stylesheet" href="style.css"><script>window.SITE_DATASETS = ["datasets/titanic_train.csv"];</script>
+<script src="app.js" defer></script></head>
+<body data-site="python">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Python Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 13 — dbt Foundations</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a><a class="btn ghost" href="#day-6">Day 6</a></div><p class="note">Done this week: <span data-week-count="13" data-size="6"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><p class="note">Cells that need a file other than the Titanic table, a web connection, a database server or a package that is not available in the browser will show an error when run. Read those instead.</p><h2 id="day-1">Day 1 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-1"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D1_dbt_Project_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 13  |  DAY 1  |  dbt PROJECT STRUCTURE
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Understand what dbt does and where it fits in the data stack
+#  2. Know the dbt project folder layout and each folder&#x27;s purpose
+#  3. Read and interpret dbt_project.yml configuration
+#  4. Choose the right materialization for a given use case
+#
+#  TIME:  ~40 minutes
+#
+#  INSTALL
+#  ───────
+#  pip install dbt-core dbt-duckdb duckdb
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;dbt tutorial for beginners analytics engineering&quot;
+#  Video: &quot;DBT Course for Beginners to Advanced | Data Build Tool (dbt) Tutorial | Data Engineering&quot; -- Eclasess EduTech
+#        https://www.youtube.com/watch?v=ziyFbdHaoxc
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+print(&#x27;dbt Project Structure lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D1_dbt_Project_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — WHAT dbt DOES
+# ══════════════════════════════════════════════════════════════
+# dbt (data build tool) sits in the TRANSFORM layer of ELT pipelines.
+#
+# EL is done by tools like Fivetran, Airbyte, or your own Python scripts.
+# dbt does the T: it runs SQL SELECT statements inside your warehouse
+# (BigQuery, Snowflake, Redshift, DuckDB) and materializes them as tables or views.
+#
+# Key idea: a dbt MODEL is just a .sql file with a SELECT statement.
+# dbt figures out the CREATE TABLE / INSERT logic automatically.
+#
+# dbt also:
+#   - resolves dependencies between models (runs them in the right order)
+#   - runs data quality tests after each build
+#   - generates documentation and a lineage DAG
+#   - works with version control (git) as the source of truth
+#
+# SIMULATION NOTE:
+#   In this curriculum we simulate dbt using DuckDB + Python.
+#   Every concept shown here maps 1-to-1 to real dbt commands.
+#   Real dbt commands are shown as comments.
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+# A dbt model file looks like this (models/staging/stg_orders.sql):
+#
+#   select
+#       order_id,
+#       customer_id,
+#       order_date,
+#       amount
+#   from {{ source(&#x27;raw&#x27;, &#x27;orders&#x27;) }}
+#   where order_date &gt;= &#x27;2024-01-01&#x27;
+#
+# dbt compiles that to:
+#   CREATE VIEW staging.stg_orders AS
+#   SELECT order_id, customer_id, order_date, amount
+#   FROM raw.orders WHERE order_date &gt;= &#x27;2024-01-01&#x27;
+#
+# In our simulation: we run the SQL directly on DuckDB.
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+# Create a raw table (this is what Fivetran/Airbyte would load)
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw_orders (
+        order_id    INTEGER,
+        customer_id INTEGER,
+        order_date  DATE,
+        amount      DECIMAL(10,2)
+    )
+&#x27;&#x27;&#x27;)
+con.execute(&#x27;&#x27;&#x27;
+    INSERT INTO raw_orders VALUES
+        (1, 101, &#x27;2024-03-01&#x27;, 250.00),
+        (2, 102, &#x27;2024-03-02&#x27;, 89.50),
+        (3, 101, &#x27;2024-03-03&#x27;, 412.00),
+        (4, 103, &#x27;2023-12-15&#x27;, 75.00)
+&#x27;&#x27;&#x27;)
+
+# This is what a dbt staging model does: select and filter raw data
+stg_orders_sql = &#x27;&#x27;&#x27;
+    SELECT order_id, customer_id, order_date, amount
+    FROM raw_orders
+    WHERE order_date &gt;= &#x27;2024-01-01&#x27;
+&#x27;&#x27;&#x27;
+
+result = con.execute(stg_orders_sql).fetchdf()
+print(&#x27;stg_orders model output:&#x27;)
+print(result)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D1_dbt_Project_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# A raw table raw_employees has been loaded into DuckDB.
+# Write a dbt-style staging model SQL string called stg_employees_sql
+# that selects: employee_id, department, hire_date, salary
+# and filters to only employees hired on or after 2022-01-01.
+# Then execute it on con and print the result.
+#
+# Expected output (3 rows):
+#    employee_id department  hire_date    salary
+#  0         201      Sales 2022-03-15   55000.0
+#  1         202         IT 2023-07-01   82000.0
+#  2         203    Finance 2022-11-20   67000.0
+#
+# --- starting data ---
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw_employees (
+        employee_id INTEGER, department VARCHAR,
+        hire_date DATE, salary DECIMAL(10,2)
+    )
+&#x27;&#x27;&#x27;)
+con.execute(&#x27;&#x27;&#x27;
+    INSERT INTO raw_employees VALUES
+        (201, &#x27;Sales&#x27;,   &#x27;2022-03-15&#x27;, 55000),
+        (202, &#x27;IT&#x27;,      &#x27;2023-07-01&#x27;, 82000),
+        (203, &#x27;Finance&#x27;, &#x27;2022-11-20&#x27;, 67000),
+        (200, &#x27;HR&#x27;,      &#x27;2019-05-10&#x27;, 48000)
+&#x27;&#x27;&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D1_dbt_Project_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — dbt PROJECT FOLDER LAYOUT
+# ══════════════════════════════════════════════════════════════
+# When you run &#x27;dbt init my_project&#x27;, it creates:
+#
+#   my_project/
+#   ├── dbt_project.yml    &lt;- project config (name, version, model paths)
+#   ├── profiles.yml       &lt;- connection config (host, db, schema, credentials)
+#   ├── models/            &lt;- your SQL transformation files
+#   │   ├── staging/        &lt;- stg_* models: rename, cast, filter raw data
+#   │   ├── intermediate/   &lt;- int_* models: joins, business logic
+#   │   └── mart/           &lt;- fct_* and dim_* models: final business tables
+#   ├── seeds/             &lt;- CSV files loaded as tables (small reference data)
+#   ├── tests/             &lt;- custom SQL tests (singular tests)
+#   ├── macros/            &lt;- reusable Jinja functions
+#   └── snapshots/         &lt;- SCD Type 2 slowly changing dimension configs
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+# A dbt_project.yml file looks like this:
+dbt_project_yml = {
+    &#x27;name&#x27;: &#x27;sales_pipeline&#x27;,
+    &#x27;version&#x27;: &#x27;1.0.0&#x27;,
+    &#x27;profile&#x27;: &#x27;sales_pipeline&#x27;,          # matches profiles.yml
+    &#x27;model-paths&#x27;: [&#x27;models&#x27;],
+    &#x27;seed-paths&#x27;: [&#x27;seeds&#x27;],
+    &#x27;test-paths&#x27;: [&#x27;tests&#x27;],
+    &#x27;macro-paths&#x27;: [&#x27;macros&#x27;],
+    &#x27;models&#x27;: {
+        &#x27;sales_pipeline&#x27;: {
+            &#x27;staging&#x27;: {&#x27;materialized&#x27;: &#x27;view&#x27;},       # staging = cheap views
+            &#x27;intermediate&#x27;: {&#x27;materialized&#x27;: &#x27;view&#x27;},
+            &#x27;mart&#x27;: {&#x27;materialized&#x27;: &#x27;table&#x27;}           # mart = permanent tables
+        }
+    }
+}
+
+for section, value in dbt_project_yml[&#x27;models&#x27;][&#x27;sales_pipeline&#x27;].items():
+    print(f&quot;  models/{section}/  -&gt; materialized as {value[&#x27;materialized&#x27;]}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D1_dbt_Project_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Given the list of files below, write a function classify_dbt_file(filepath)
+# that returns the dbt folder category for each file:
+# &#x27;model&#x27;, &#x27;seed&#x27;, &#x27;test&#x27;, &#x27;macro&#x27;, &#x27;snapshot&#x27;, or &#x27;config&#x27;
+#
+# Expected output:
+#   models/staging/stg_customers.sql -&gt; model
+#   seeds/country_codes.csv          -&gt; seed
+#   tests/assert_positive_revenue.sql -&gt; test
+#   macros/cents_to_dollars.sql       -&gt; macro
+#   snapshots/snap_customers.sql      -&gt; snapshot
+#   dbt_project.yml                   -&gt; config
+#
+# --- starting data ---
+files = [
+    &#x27;models/staging/stg_customers.sql&#x27;,
+    &#x27;seeds/country_codes.csv&#x27;,
+    &#x27;tests/assert_positive_revenue.sql&#x27;,
+    &#x27;macros/cents_to_dollars.sql&#x27;,
+    &#x27;snapshots/snap_customers.sql&#x27;,
+    &#x27;dbt_project.yml&#x27;
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D1_dbt_Project_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — MATERIALIZATIONS
+# ══════════════════════════════════════════════════════════════
+# Materialization = how dbt persists a model in the warehouse.
+#
+#   view        -&gt; CREATE OR REPLACE VIEW (no data stored, always fresh)
+#                  Use for: staging models, lightweight transformations
+#                  Cost: query runs every time the view is queried
+#
+#   table       -&gt; DROP + CREATE TABLE AS SELECT (data stored physically)
+#                  Use for: mart models, wide aggregations, final outputs
+#                  Cost: full rebuild every dbt run
+#
+#   incremental -&gt; INSERT only new/changed rows since last run
+#                  Use for: large event tables (millions of rows)
+#                  Cost: only processes the delta
+#
+#   ephemeral   -&gt; compiled as a CTE, never persisted
+#                  Use for: intermediate logic you do not want stored
+#
+# In dbt_project.yml or in the model file itself:
+#   {{ config(materialized=&#x27;table&#x27;) }}
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+scenarios = [
+    (&#x27;stg_orders&#x27;,       &#x27;Rename + cast raw columns, no joins&#x27;),
+    (&#x27;int_orders_joined&#x27;, &#x27;Join orders with customers&#x27;),
+    (&#x27;fct_daily_revenue&#x27;, &#x27;Daily revenue aggregation, queried by BI tool&#x27;),
+    (&#x27;dim_customers&#x27;,    &#x27;Customer dimension table, 2M rows&#x27;),
+    (&#x27;util_date_spine&#x27;,  &#x27;Utility CTE used inside 3 other models&#x27;),
+]
+
+recommended = {
+    &#x27;stg_orders&#x27;: &#x27;view&#x27;,
+    &#x27;int_orders_joined&#x27;: &#x27;view&#x27;,
+    &#x27;fct_daily_revenue&#x27;: &#x27;table&#x27;,
+    &#x27;dim_customers&#x27;: &#x27;incremental&#x27;,
+    &#x27;util_date_spine&#x27;: &#x27;ephemeral&#x27;,
+}
+
+for model, desc in scenarios:
+    mat = recommended[model]
+    print(f&quot;  {model:&lt;22} -&gt; {mat:&lt;12}  ({desc})&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D1_dbt_Project_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Write a function recommend_materialization(model_name, row_count, is_queried_by_bi)
+# that returns the recommended dbt materialization as a string.
+#
+# Rules:
+#   - model starts with &#x27;stg_&#x27;              -&gt; &#x27;view&#x27;
+#   - model starts with &#x27;int_&#x27;              -&gt; &#x27;view&#x27;
+#   - model starts with &#x27;util_&#x27;             -&gt; &#x27;ephemeral&#x27;
+#   - row_count &gt; 1_000_000                 -&gt; &#x27;incremental&#x27;
+#   - is_queried_by_bi is True              -&gt; &#x27;table&#x27;
+#   - everything else                       -&gt; &#x27;table&#x27;
+#
+# Expected output:
+#   stg_sales        100000  False -&gt; view
+#   int_joined       500000  False -&gt; view
+#   util_dates            0  False -&gt; ephemeral
+#   fct_events      5000000  False -&gt; incremental
+#   dim_products      50000   True -&gt; table
+#
+# --- starting data ---
+test_models = [
+    (&#x27;stg_sales&#x27;,    100_000, False),
+    (&#x27;int_joined&#x27;,   500_000, False),
+    (&#x27;util_dates&#x27;,         0, False),
+    (&#x27;fct_events&#x27;,  5_000_000, False),
+    (&#x27;dim_products&#x27;,  50_000,  True),
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-2">Day 2 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-2"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D2_dbt_Models_Ref.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 13  |  DAY 2  |  dbt MODELS AND ref()
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Write a dbt model as a SQL SELECT stored in a Python string
+#  2. Use ref() to chain models together (dependency resolution)
+#  3. Run a 2-model pipeline on DuckDB and verify outputs
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;dbt models ref function tutorial&quot;
+#  Video: &quot;dbt: Using The Ref Function&quot; -- Wadson Guimatsa (slect io)
+#        https://www.youtube.com/watch?v=dPJ38HaW4Vw
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+# Simulation helpers
+# In real dbt, ref(&#x27;model_name&#x27;) resolves to the correct schema.table in the warehouse.
+# Here we return the table name directly since DuckDB has no schemas in memory.
+def ref(model_name):
+    return model_name
+
+def run_model(con, name, sql):
+    &quot;&quot;&quot;Execute a dbt-style model: create a view from the SQL.&quot;&quot;&quot;
+    con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+    print(f&#x27;  Model {name} materialized.&#x27;)
+
+print(&#x27;dbt Models and ref() lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D2_dbt_Models_Ref.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — A MODEL IS A SQL SELECT
+# ══════════════════════════════════════════════════════════════
+# A dbt model file (models/staging/stg_orders.sql) contains ONLY a SELECT.
+# No CREATE TABLE. No INSERT. dbt adds that based on the materialization config.
+#
+# The naming convention matters:
+#   stg_  -&gt; staging model (clean raw data)
+#   int_  -&gt; intermediate model (joins, business logic)
+#   fct_  -&gt; fact table (events, transactions)
+#   dim_  -&gt; dimension table (customers, products)
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+# Load raw data
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw_bookings AS SELECT * FROM (VALUES
+        (1, &#x27;hotel&#x27;, &#x27;2024-01-10&#x27;, 3, 450.00),
+        (2, &#x27;resort&#x27;, &#x27;2024-01-15&#x27;, 7, 1200.00),
+        (3, &#x27;hotel&#x27;, &#x27;2024-02-01&#x27;, 2, 310.00),
+        (4, &#x27;resort&#x27;, &#x27;2024-02-20&#x27;, 5, 900.00)
+    ) AS t(booking_id, hotel_type, check_in, nights, revenue)
+&#x27;&#x27;&#x27;)
+
+# This is stg_bookings.sql in dbt
+stg_bookings_sql = f&#x27;&#x27;&#x27;
+    SELECT
+        booking_id,
+        hotel_type,
+        CAST(check_in AS DATE)  AS check_in_date,
+        nights,
+        ROUND(revenue, 2)       AS revenue_usd
+    FROM raw_bookings
+&#x27;&#x27;&#x27;
+
+run_model(con, &#x27;stg_bookings&#x27;, stg_bookings_sql)
+print(con.execute(&#x27;SELECT * FROM stg_bookings&#x27;).fetchdf())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D2_dbt_Models_Ref.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# A raw_employees table is loaded. Write a staging model stg_employees_sql
+# that selects: employee_id, full_name (first_name || &#x27; &#x27; || last_name),
+# department, CAST(hire_date AS DATE), salary as salary_usd.
+# Then call run_model() and print the result.
+#
+# Expected output (4 rows with full_name column):
+#    employee_id      full_name department  hire_date  salary_usd
+#  0         101    Alice Smith      Sales 2021-03-10     62000.0
+#  1         102      Bob Jones         IT 2022-07-01     88000.0
+#  2         103   Carol Nguyen    Finance 2020-11-15     71000.0
+#  3         104  David Patel         HR   2023-01-20     55000.0
+#
+# --- starting data ---
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw_employees AS SELECT * FROM (VALUES
+        (101, &#x27;Alice&#x27;,  &#x27;Smith&#x27;,   &#x27;Sales&#x27;,   &#x27;2021-03-10&#x27;, 62000),
+        (102, &#x27;Bob&#x27;,    &#x27;Jones&#x27;,   &#x27;IT&#x27;,       &#x27;2022-07-01&#x27;, 88000),
+        (103, &#x27;Carol&#x27;,  &#x27;Nguyen&#x27;,  &#x27;Finance&#x27;,  &#x27;2020-11-15&#x27;, 71000),
+        (104, &#x27;David&#x27;,  &#x27;Patel&#x27;,   &#x27;HR&#x27;,       &#x27;2023-01-20&#x27;, 55000)
+    ) AS t(employee_id, first_name, last_name, department, hire_date, salary)
+&#x27;&#x27;&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D2_dbt_Models_Ref.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — ref() FOR DEPENDENCY CHAINING
+# ══════════════════════════════════════════════════════════════
+# ref(&#x27;model_name&#x27;) is how dbt models reference each other.
+# It does two things:
+#   1. Resolves to the correct schema.table in the warehouse at compile time
+#   2. Tells dbt &quot;this model DEPENDS ON that model&quot; — builds the DAG
+#
+# Without ref(), if you hardcode a table name:
+#   SELECT * FROM analytics.stg_orders          &lt;- WRONG: breaks in different environments
+# With ref():
+#   SELECT * FROM {{ ref(&#x27;stg_orders&#x27;) }}       &lt;- CORRECT: resolves to right env automatically
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+# stg_bookings already exists from Concept 1.
+# Now we build a mart model that references it via ref().
+
+# In real dbt, fct_monthly_revenue.sql would contain:
+#   SELECT
+#       DATE_TRUNC(&#x27;month&#x27;, check_in_date) AS month,
+#       hotel_type,
+#       COUNT(*)        AS bookings,
+#       SUM(revenue_usd) AS total_revenue
+#   FROM {{ ref(&#x27;stg_bookings&#x27;) }}
+#   GROUP BY 1, 2
+
+fct_monthly_revenue_sql = f&#x27;&#x27;&#x27;
+    SELECT
+        DATE_TRUNC(&#x27;month&#x27;, check_in_date) AS month,
+        hotel_type,
+        COUNT(*)         AS bookings,
+        SUM(revenue_usd) AS total_revenue
+    FROM {ref(&#x27;stg_bookings&#x27;)}
+    GROUP BY 1, 2
+    ORDER BY 1, 2
+&#x27;&#x27;&#x27;
+
+run_model(con, &#x27;fct_monthly_revenue&#x27;, fct_monthly_revenue_sql)
+print(con.execute(&#x27;SELECT * FROM fct_monthly_revenue&#x27;).fetchdf())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D2_dbt_Models_Ref.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# stg_employees was created in Exercise 1.
+# Write a mart model fct_dept_headcount_sql that references stg_employees
+# and returns: department, headcount (COUNT), avg_salary (AVG salary_usd rounded to 2dp)
+# ordered by headcount descending.
+# Use ref() for the table reference.
+#
+# Expected output:
+#   department  headcount  avg_salary
+#   Sales               1    62000.00
+#   IT                  1    88000.00
+#   Finance             1    71000.00
+#   HR                  1    55000.00
+#</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D2_dbt_Models_Ref.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — BUILDING THE LINEAGE DAG
+# ══════════════════════════════════════════════════════════════
+# Every ref() call creates a directed edge in the dbt DAG.
+# dbt uses this to determine execution order: upstream models run first.
+#
+# Example DAG:
+#   raw_orders  raw_customers
+#       |              |
+#   stg_orders   stg_customers
+#       |    \          |
+#       |    int_orders_customers
+#       |              |
+#            fct_revenue
+#
+# &#x27;dbt run&#x27; executes in topological order. &#x27;dbt run -s fct_revenue+&#x27;
+# runs fct_revenue and everything downstream of it.
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+# Simulate the DAG execution order
+dag = {
+    &#x27;stg_bookings&#x27;:         [],
+    &#x27;stg_hotels&#x27;:           [],
+    &#x27;int_bookings_hotels&#x27;:  [&#x27;stg_bookings&#x27;, &#x27;stg_hotels&#x27;],
+    &#x27;fct_revenue&#x27;:          [&#x27;int_bookings_hotels&#x27;],
+}
+
+def topological_sort(dag):
+    visited, order = set(), []
+    def visit(node):
+        if node in visited:
+            return
+        visited.add(node)
+        for dep in dag.get(node, []):
+            visit(dep)
+        order.append(node)
+    for node in dag:
+        visit(node)
+    return order
+
+execution_order = topological_sort(dag)
+print(&#x27;dbt execution order:&#x27;)
+for i, model in enumerate(execution_order, 1):
+    deps = dag[model]
+    dep_str = f&quot;depends on: {deps}&quot; if deps else &quot;no dependencies&quot;
+    print(f&#x27;  {i}. {model}  ({dep_str})&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D2_dbt_Models_Ref.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Build a 3-model pipeline on the sales data below:
+#   stg_sales_sql       -&gt; select and cast raw_sales columns
+#   stg_products_sql    -&gt; select and cast raw_products columns
+#   fct_sales_sql       -&gt; join stg_sales ref stg_products, compute total_value (qty * price)
+# Run all three models using run_model() in the correct order.
+# Print the final fct_sales result.
+#
+# Expected fct_sales output (4 rows):
+#    sale_id product_name  qty   price  total_value
+#  0       1       Widget    3   15.00        45.00
+#  1       2      Gadget     2   39.99        79.98
+#  2       3       Widget    5   15.00        75.00
+#  3       4       Gizmo     1   59.00        59.00
+#
+# --- starting data ---
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw_sales AS SELECT * FROM (VALUES
+        (1, 101, 3), (2, 102, 2), (3, 101, 5), (4, 103, 1)
+    ) AS t(sale_id, product_id, qty)
+&#x27;&#x27;&#x27;)
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw_products AS SELECT * FROM (VALUES
+        (101, &#x27;Widget&#x27;, 15.00),
+        (102, &#x27;Gadget&#x27;, 39.99),
+        (103, &#x27;Gizmo&#x27;,  59.00)
+    ) AS t(product_id, product_name, price)
+&#x27;&#x27;&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-3">Day 3 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-3"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D3_dbt_Sources.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 13  |  DAY 3  |  dbt SOURCES
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Understand what sources are and why they are different from models
+#  2. Define a sources.yml file and register raw tables
+#  3. Use source() in a staging model to reference raw tables safely
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;dbt sources tutorial sources.yml&quot;
+#  Video: &quot;How to create sources in data build tool (dbt) | Tutorial for beginners&quot; -- Mastering Snowflake
+#        https://www.youtube.com/watch?v=BwRJQLgeODs
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+def ref(model_name):
+    return model_name
+
+def source(schema, table):
+    # In real dbt this resolves to schema.table in the warehouse.
+    # We return the raw table name for our DuckDB simulation.
+    return f&#x27;{schema}__{table}&#x27;
+
+def run_model(con, name, sql):
+    con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+    print(f&#x27;  Model {name} materialized.&#x27;)
+
+print(&#x27;dbt Sources lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D3_dbt_Sources.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — SOURCES VS MODELS
+# ══════════════════════════════════════════════════════════════
+# Sources are raw tables loaded into your warehouse by EL tools (Fivetran, Airbyte).
+# You do NOT create or own them. dbt just needs to know they exist.
+#
+# Why not just hardcode the table name?
+#   SELECT * FROM raw.orders   &lt;- breaks if the schema is renamed, no lineage tracking
+#
+# With dbt sources:
+#   SELECT * FROM {{ source(&#x27;raw&#x27;, &#x27;orders&#x27;) }}
+#   -&gt; dbt knows this model depends on raw.orders
+#   -&gt; dbt can test freshness: alert if orders data is &gt; 24h old
+#   -&gt; lineage graph shows raw.orders -&gt; stg_orders -&gt; fct_revenue
+#
+# Sources are declared in sources.yml (or any YAML file in models/).
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+# A sources.yml file looks like this:
+sources_yml = {
+    &#x27;version&#x27;: 2,
+    &#x27;sources&#x27;: [
+        {
+            &#x27;name&#x27;: &#x27;raw&#x27;,                       # source name used in source(&#x27;raw&#x27;, ...)
+            &#x27;database&#x27;: &#x27;production&#x27;,            # BigQuery project or warehouse db
+            &#x27;schema&#x27;: &#x27;raw_data&#x27;,                # schema where raw tables live
+            &#x27;tables&#x27;: [
+                {&#x27;name&#x27;: &#x27;orders&#x27;,
+                 &#x27;description&#x27;: &#x27;Orders loaded by Fivetran from Shopify&#x27;},
+                {&#x27;name&#x27;: &#x27;customers&#x27;,
+                 &#x27;description&#x27;: &#x27;Customer records from CRM&#x27;},
+                {&#x27;name&#x27;: &#x27;products&#x27;,
+                 &#x27;description&#x27;: &#x27;Product catalog from ERP&#x27;}
+            ]
+        }
+    ]
+}
+
+for table in sources_yml[&#x27;sources&#x27;][0][&#x27;tables&#x27;]:
+    src_name = sources_yml[&#x27;sources&#x27;][0][&#x27;name&#x27;]
+    print(f&quot;  source(&#x27;{src_name}&#x27;, &#x27;{table[&#x27;name&#x27;]}&#x27;)  -&gt;  {table[&#x27;description&#x27;]}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D3_dbt_Sources.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Build a sources_yml dict for a source called &#x27;erp&#x27; with schema &#x27;erp_raw&#x27;,
+# containing three tables: &#x27;employees&#x27;, &#x27;departments&#x27;, &#x27;salaries&#x27;.
+# Then print each source() reference that a dbt model would use.
+#
+# Expected output:
+#   source(&#x27;erp&#x27;, &#x27;employees&#x27;)    -&gt;  erp_raw.employees
+#   source(&#x27;erp&#x27;, &#x27;departments&#x27;)  -&gt;  erp_raw.departments
+#   source(&#x27;erp&#x27;, &#x27;salaries&#x27;)     -&gt;  erp_raw.salaries</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D3_dbt_Sources.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — source() IN A STAGING MODEL
+# ══════════════════════════════════════════════════════════════
+# Staging models always read from source(), never from ref().
+# Models downstream of staging always use ref(), never source().
+#
+#   raw tables (source)  -&gt;  stg_* (read with source())  -&gt;  int_*/fct_* (read with ref())
+#
+# This single rule keeps the lineage graph clean and testable.
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+# Create the raw table with the name our source() function will produce
+# source(&#x27;raw&#x27;, &#x27;bookings&#x27;) -&gt; &#x27;raw__bookings&#x27;
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE raw__bookings AS SELECT * FROM (VALUES
+        (1, &#x27;A101&#x27;, &#x27;2024-01-10&#x27;, 450.00),
+        (2, &#x27;B205&#x27;, &#x27;2024-01-15&#x27;, 1200.00),
+        (3, &#x27;A101&#x27;, &#x27;2024-02-01&#x27;, 310.00)
+    ) AS t(booking_id, room_code, check_in, revenue)
+&#x27;&#x27;&#x27;)
+
+# stg_bookings.sql in dbt:
+#   SELECT booking_id, room_code, CAST(check_in AS DATE) AS check_in_date, revenue
+#   FROM {{ source(&#x27;raw&#x27;, &#x27;bookings&#x27;) }}
+
+stg_bookings_sql = f&#x27;&#x27;&#x27;
+    SELECT
+        booking_id,
+        room_code,
+        CAST(check_in AS DATE) AS check_in_date,
+        revenue
+    FROM {source(&#x27;raw&#x27;, &#x27;bookings&#x27;)}
+&#x27;&#x27;&#x27;
+
+run_model(con, &#x27;stg_bookings&#x27;, stg_bookings_sql)
+print(con.execute(&#x27;SELECT * FROM stg_bookings&#x27;).fetchdf())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D3_dbt_Sources.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# A raw table erp__employees exists (note: source(&#x27;erp&#x27;, &#x27;employees&#x27;) produces erp__employees).
+# Write a staging model stg_employees_sql that uses source() to reference it.
+# Select: employee_id, full_name (first || &#x27; &#x27; || last), department, CAST(hire_date AS DATE).
+# Run the model and print the result.
+#
+# Expected output (3 rows):
+#    employee_id      full_name department  hire_date
+#  0         201    Alice Smith      Sales 2022-03-15
+#  1         202      Bob Jones         IT 2023-07-01
+#  2         203  Carol Nguyen    Finance 2020-11-20
+#
+# --- starting data ---
+con.execute(&#x27;&#x27;&#x27;
+    CREATE TABLE erp__employees AS SELECT * FROM (VALUES
+        (201, &#x27;Alice&#x27;, &#x27;Smith&#x27;,  &#x27;Sales&#x27;,   &#x27;2022-03-15&#x27;),
+        (202, &#x27;Bob&#x27;,   &#x27;Jones&#x27;,  &#x27;IT&#x27;,       &#x27;2023-07-01&#x27;),
+        (203, &#x27;Carol&#x27;, &#x27;Nguyen&#x27;, &#x27;Finance&#x27;,  &#x27;2020-11-20&#x27;)
+    ) AS t(employee_id, first_name, last_name, department, hire_date)
+&#x27;&#x27;&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D3_dbt_Sources.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — SOURCE FRESHNESS
+# ══════════════════════════════════════════════════════════════
+# dbt can check when a source was last updated and alert if it is stale.
+# You add a freshness block to sources.yml:
+#
+#   loaded_at_field: _fivetran_synced   &lt;- timestamp column dbt checks
+#   freshness:
+#     warn_after: {count: 12, period: hour}
+#     error_after: {count: 24, period: hour}
+#
+# Command: dbt source freshness
+# Result:  WARN if last load &gt; 12h ago, ERROR if &gt; 24h ago.
+#
+# This is critical for pipelines that power live dashboards.
+# An Analytics Engineer wires this into their Airflow/CI alert system.
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+from datetime import datetime, timedelta
+
+def check_source_freshness(last_loaded_at, warn_hours=12, error_hours=24):
+    &quot;&quot;&quot;Simulate dbt source freshness check.&quot;&quot;&quot;
+    age_hours = (datetime.now() - last_loaded_at).total_seconds() / 3600
+    if age_hours &gt; error_hours:
+        return &#x27;ERROR&#x27;, f&#x27;Source is {age_hours:.1f}h old (limit: {error_hours}h)&#x27;
+    elif age_hours &gt; warn_hours:
+        return &#x27;WARN&#x27;,  f&#x27;Source is {age_hours:.1f}h old (limit: {warn_hours}h)&#x27;
+    return &#x27;PASS&#x27;, f&#x27;Source is {age_hours:.1f}h old — fresh&#x27;
+
+scenarios = [
+    (&#x27;orders&#x27;,    datetime.now() - timedelta(hours=3)),
+    (&#x27;customers&#x27;, datetime.now() - timedelta(hours=15)),
+    (&#x27;products&#x27;,  datetime.now() - timedelta(hours=26)),
+]
+
+for table, loaded_at in scenarios:
+    status, msg = check_source_freshness(loaded_at)
+    print(f&#x27;  {table:&lt;12} [{status}]  {msg}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D3_dbt_Sources.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Using check_source_freshness(), build a function run_freshness_check(sources_dict)
+# that takes a dict of {table_name: last_loaded_at} and prints a freshness report.
+# Any table with ERROR status should raise a RuntimeError at the end
+# with the message: &#x27;Pipeline halted: N source(s) failed freshness check.&#x27;
+#
+# Expected output:
+#   invoices      [PASS]  Source is 1.0h old — fresh
+#   line_items    [WARN]  Source is 13.0h old (limit: 12h)
+#   payments      [ERROR] Source is 25.0h old (limit: 24h)
+#   RuntimeError: Pipeline halted: 1 source(s) failed freshness check.
+#
+# --- starting data ---
+sources_to_check = {
+    &#x27;invoices&#x27;:   datetime.now() - timedelta(hours=1),
+    &#x27;line_items&#x27;: datetime.now() - timedelta(hours=13),
+    &#x27;payments&#x27;:   datetime.now() - timedelta(hours=25),
+}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-4">Day 4 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-4"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D4_dbt_Schema_Tests.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 13  |  DAY 4  |  dbt SCHEMA TESTS
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Understand the four built-in dbt tests and when to use each
+#  2. Write a schema.yml that tests a model&#x27;s columns
+#  3. Simulate dbt test execution and interpret PASS/FAIL results
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;dbt schema tests tutorial not_null unique accepted_values&quot;
+#  Video: &quot;dbt Generic Tests Explained — not_null, unique, accepted_values &amp; more | dbt Tutorial&quot; -- Datazard
+#        https://www.youtube.com/watch?v=yKh_WxMSfpQ
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+def run_model(con, name, sql):
+    con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+
+# dbt test simulation helpers
+def test_not_null(con, model, column):
+    count = con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {column} IS NULL&#x27;).fetchone()[0]
+    return &#x27;PASS&#x27; if count == 0 else f&#x27;FAIL ({count} nulls found)&#x27;
+
+def test_unique(con, model, column):
+    count = con.execute(f&#x27;SELECT COUNT(*) FROM (SELECT {column} FROM {model} GROUP BY {column} HAVING COUNT(*) &gt; 1)&#x27;).fetchone()[0]
+    return &#x27;PASS&#x27; if count == 0 else f&#x27;FAIL ({count} duplicate values found)&#x27;
+
+def test_accepted_values(con, model, column, values):
+    vals = &#x27;, &#x27;.join(f&quot;&#x27;{v}&#x27;&quot; for v in values)
+    count = con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {column} NOT IN ({vals})&#x27;).fetchone()[0]
+    return &#x27;PASS&#x27; if count == 0 else f&#x27;FAIL ({count} unexpected values found)&#x27;
+
+def test_relationships(con, model, column, ref_model, ref_column):
+    count = con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {column} NOT IN (SELECT {ref_column} FROM {ref_model})&#x27;).fetchone()[0]
+    return &#x27;PASS&#x27; if count == 0 else f&#x27;FAIL ({count} orphaned foreign keys)&#x27;
+
+print(&#x27;dbt Schema Tests lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D4_dbt_Schema_Tests.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — THE FOUR BUILT-IN dbt TESTS
+# ══════════════════════════════════════════════════════════════
+# dbt runs SQL assertions against your models after every build.
+# A test FAILS if its SQL query returns any rows (rows = violations).
+#
+# Four built-in generic tests:
+#
+#   not_null          -&gt; column has no NULL values
+#   unique            -&gt; column has no duplicate values
+#   accepted_values   -&gt; column only contains values from a defined list
+#   relationships     -&gt; column values exist in another model&#x27;s column (FK integrity)
+#
+# Declared in schema.yml alongside model documentation.
+# Command: dbt test  (or dbt build = dbt run + dbt test)
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+run_model(con, &#x27;stg_orders&#x27;, &#x27;&#x27;&#x27;
+    SELECT * FROM (VALUES
+        (1, 101, &#x27;completed&#x27;, 250.00),
+        (2, 102, &#x27;pending&#x27;,    89.50),
+        (3, 101, &#x27;completed&#x27;, 412.00),
+        (4, 103, &#x27;shipped&#x27;,   175.00)
+    ) AS t(order_id, customer_id, status, amount)
+&#x27;&#x27;&#x27;)
+
+# Run all four tests on stg_orders
+tests = [
+    (&#x27;not_null&#x27;,         test_not_null(con, &#x27;stg_orders&#x27;, &#x27;order_id&#x27;)),
+    (&#x27;unique&#x27;,           test_unique(con, &#x27;stg_orders&#x27;, &#x27;order_id&#x27;)),
+    (&#x27;accepted_values&#x27;,  test_accepted_values(con, &#x27;stg_orders&#x27;, &#x27;status&#x27;,
+                              [&#x27;completed&#x27;, &#x27;pending&#x27;, &#x27;shipped&#x27;, &#x27;cancelled&#x27;])),
+]
+
+print(&#x27;dbt test results for stg_orders:&#x27;)
+for test_name, result in tests:
+    print(f&#x27;  {test_name:&lt;20} {result}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D4_dbt_Schema_Tests.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# stg_employees_dirty has data quality issues. Run the four tests below
+# and print PASS or FAIL for each. The broken data should surface failures.
+#
+# Expected output:
+#   not_null  employee_id   PASS
+#   not_null  department    FAIL (1 nulls found)
+#   unique    employee_id   FAIL (1 duplicate values found)
+#   accepted_values status  FAIL (1 unexpected values found)
+#
+# --- starting data ---
+run_model(con, &#x27;stg_employees_dirty&#x27;, &#x27;&#x27;&#x27;
+    SELECT * FROM (VALUES
+        (201, &#x27;Sales&#x27;,   &#x27;active&#x27;),
+        (202,  NULL,     &#x27;active&#x27;),
+        (201, &#x27;IT&#x27;,      &#x27;active&#x27;),
+        (204, &#x27;Finance&#x27;, &#x27;unknown&#x27;)
+    ) AS t(employee_id, department, status)
+&#x27;&#x27;&#x27;)
+tests_to_run = [
+    (&#x27;not_null&#x27;,        &#x27;employee_id&#x27;),
+    (&#x27;not_null&#x27;,        &#x27;department&#x27;),
+    (&#x27;unique&#x27;,          &#x27;employee_id&#x27;),
+    (&#x27;accepted_values&#x27;, &#x27;status&#x27;),
+]
+valid_statuses = [&#x27;active&#x27;, &#x27;inactive&#x27;, &#x27;terminated&#x27;]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D4_dbt_Schema_Tests.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — schema.yml STRUCTURE
+# ══════════════════════════════════════════════════════════════
+# Tests are declared in schema.yml. This file also holds descriptions.
+# dbt compiles each test into a SQL query and runs it against your warehouse.
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+# What a schema.yml looks like in dbt:
+schema_yml = {
+    &#x27;version&#x27;: 2,
+    &#x27;models&#x27;: [
+        {
+            &#x27;name&#x27;: &#x27;stg_orders&#x27;,
+            &#x27;description&#x27;: &#x27;Cleaned orders from Shopify raw data&#x27;,
+            &#x27;columns&#x27;: [
+                {
+                    &#x27;name&#x27;: &#x27;order_id&#x27;,
+                    &#x27;description&#x27;: &#x27;Primary key&#x27;,
+                    &#x27;tests&#x27;: [&#x27;not_null&#x27;, &#x27;unique&#x27;]
+                },
+                {
+                    &#x27;name&#x27;: &#x27;customer_id&#x27;,
+                    &#x27;tests&#x27;: [&#x27;not_null&#x27;,
+                              {&#x27;relationships&#x27;: {&#x27;to&#x27;: &quot;ref(&#x27;stg_customers&#x27;)&quot;,
+                                                 &#x27;field&#x27;: &#x27;customer_id&#x27;}}]
+                },
+                {
+                    &#x27;name&#x27;: &#x27;status&#x27;,
+                    &#x27;tests&#x27;: [{&#x27;accepted_values&#x27;: {
+                        &#x27;values&#x27;: [&#x27;completed&#x27;, &#x27;pending&#x27;, &#x27;shipped&#x27;, &#x27;cancelled&#x27;]
+                    }}]
+                }
+            ]
+        }
+    ]
+}
+
+for col in schema_yml[&#x27;models&#x27;][0][&#x27;columns&#x27;]:
+    tests = col.get(&#x27;tests&#x27;, [])
+    test_names = [t if isinstance(t, str) else list(t.keys())[0] for t in tests]
+    print(f&quot;  {col[&#x27;name&#x27;]:&lt;15} tests: {test_names}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D4_dbt_Schema_Tests.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Build a schema_yml dict for model &#x27;stg_products&#x27; with these columns:
+#   product_id:   not_null, unique
+#   category:     not_null, accepted_values [&#x27;electronics&#x27;, &#x27;clothing&#x27;, &#x27;food&#x27;]
+#   price:        not_null
+# Then parse the dict and print one line per column showing its tests.
+#
+# Expected output:
+#   product_id   tests: [&#x27;not_null&#x27;, &#x27;unique&#x27;]
+#   category     tests: [&#x27;not_null&#x27;, &#x27;accepted_values&#x27;]
+#   price        tests: [&#x27;not_null&#x27;]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D4_dbt_Schema_Tests.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — LLM TEST FAILURE EXPLAINER
+# ══════════════════════════════════════════════════════════════
+# When dbt test runs return FAIL, engineers must quickly understand:
+#   - what the data quality violation means in business terms
+#   - where the fix belongs (source system, staging model, or schema.yml)
+#
+# Pattern (connects W10_D2 prompt engineering):
+#   1. Run dbt tests, collect each failure as a structured dict
+#   2. Build a prompt: model, column, test type, failure count
+#   3. LLM returns a plain-English explanation + concrete fix suggestion
+#
+# This replaces hours of manual diagnosis with a 2-second LLM call.
+# The same call_llm() wrapper is used in W15, W16, W17 project files.
+#
+# SIMULATION MODE — no API key needed.
+# REAL MODE (Groq): shown in call_llm() docstring below.
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+def call_llm(system_prompt: str, user_prompt: str) -&gt; str:
+    &quot;&quot;&quot;
+    SIMULATION MODE — deterministic response for known failure patterns.
+    REAL MODE (uncomment + set GROQ_API_KEY in .env):
+
+    from openai import OpenAI
+    import os
+    client = OpenAI(
+        api_key=os.getenv(&#x27;GROQ_API_KEY&#x27;),
+        base_url=&#x27;https://api.groq.com/openai/v1&#x27;,
+    )
+    resp = client.chat.completions.create(
+        model=&#x27;llama3-8b-8192&#x27;,
+        messages=[
+            {&#x27;role&#x27;: &#x27;system&#x27;, &#x27;content&#x27;: system_prompt},
+            {&#x27;role&#x27;: &#x27;user&#x27;,   &#x27;content&#x27;: user_prompt},
+        ],
+        temperature=0.1,
+    )
+    return resp.choices[0].message.content
+    &quot;&quot;&quot;
+    if &#x27;not_null&#x27; in user_prompt and &#x27;department&#x27; in user_prompt:
+        return (
+            &quot;The department column contains 1 NULL value — a row was loaded &quot;
+            &quot;without a department assignment. Fix: add COALESCE(department, &quot;
+            &quot;&#x27;Unassigned&#x27;) in the staging model, or enforce NOT NULL at source.&quot;
+        )
+    if &#x27;unique&#x27; in user_prompt and &#x27;employee_id&#x27; in user_prompt:
+        return (
+            &quot;employee_id has a duplicate (id 201 appears twice) — primary key &quot;
+            &quot;violation. Fix: add ROW_NUMBER() OVER (PARTITION BY employee_id &quot;
+            &quot;ORDER BY updated_at DESC) in staging and filter to rank = 1.&quot;
+        )
+    if &#x27;accepted_values&#x27; in user_prompt:
+        return (
+            &quot;An unexpected status value was found outside the allowed list. &quot;
+            &quot;Fix: update accepted_values in schema.yml to include the new value, &quot;
+            &quot;or reject it at source and alert the upstream team.&quot;
+        )
+    return &quot;Test PASS — no explanation needed.&quot;
+
+
+# Run a test, then explain any failure with the LLM
+system_prompt = (
+    &quot;You are a senior data engineer reviewing dbt test failures. &quot;
+    &quot;Explain the issue in 2-3 sentences and give one concrete fix.&quot;
+)
+
+failure = {
+    &#x27;model&#x27;: &#x27;stg_employees_dirty&#x27;, &#x27;column&#x27;: &#x27;department&#x27;,
+    &#x27;test&#x27;: &#x27;not_null&#x27;, &#x27;fail_count&#x27;: 1,
+}
+
+result = test_not_null(con, &#x27;stg_employees_dirty&#x27;, &#x27;department&#x27;)
+print(f&quot;  not_null  department  {result}&quot;)
+
+if result != &#x27;PASS&#x27;:
+    user_prompt = (
+        f&quot;Model: {failure[&#x27;model&#x27;]} | Column: {failure[&#x27;column&#x27;]} | &quot;
+        f&quot;Test: {failure[&#x27;test&#x27;]} | Failures: {failure[&#x27;fail_count&#x27;]}&quot;
+    )
+    explanation = call_llm(system_prompt, user_prompt)
+    print(f&quot;  LLM: {explanation}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D4_dbt_Schema_Tests.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Run the full test suite on stg_customers and stg_invoices.
+# For every FAIL result, call call_llm() with a structured failure
+# prompt and print the LLM explanation directly below the FAIL line.
+# For PASS results, print the PASS line only — no LLM call.
+#
+# Tests to run:
+#   stg_customers: customer_id -&gt; not_null, unique
+#   stg_invoices:  invoice_id  -&gt; not_null, unique
+#                  customer_id -&gt; not_null
+#                  customer_id -&gt; relationships(stg_customers.customer_id)
+#                  type        -&gt; accepted_values [&#x27;standard&#x27;, &#x27;credit&#x27;]
+#
+# Format each output line as:
+#   model.column   test_type   PASS / FAIL (N ...)
+#   LLM: &lt;explanation&gt;          &lt;- only printed on FAIL
+#
+# Expected output (all tests PASS on the clean data below):
+#   stg_customers.customer_id   not_null          PASS
+#   stg_customers.customer_id   unique            PASS
+#   stg_invoices.invoice_id     not_null          PASS
+#   stg_invoices.invoice_id     unique            PASS
+#   stg_invoices.customer_id    not_null          PASS
+#   stg_invoices.customer_id    relationships     PASS
+#   stg_invoices.type           accepted_values   PASS
+#
+# --- starting data ---
+run_model(con, &#x27;stg_customers&#x27;, &#x27;&#x27;&#x27;
+    SELECT * FROM (VALUES
+        (1, &#x27;Acme Corp&#x27;), (2, &#x27;Beta LLC&#x27;), (3, &#x27;Gamma Inc&#x27;)
+    ) AS t(customer_id, company_name)
+&#x27;&#x27;&#x27;)
+run_model(con, &#x27;stg_invoices&#x27;, &#x27;&#x27;&#x27;
+    SELECT * FROM (VALUES
+        (101, 1, &#x27;standard&#x27;, 5000.00),
+        (102, 2, &#x27;credit&#x27;,   -250.00),
+        (103, 3, &#x27;standard&#x27;, 8200.00)
+    ) AS t(invoice_id, customer_id, type, amount)
+&#x27;&#x27;&#x27;)
+# call_llm() and system_prompt are defined in CONCEPT 3 above.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D4_dbt_Schema_Tests.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 4 — SECURITY GATE: dbt CONTRACT GATE (CIA: I)
+# ══════════════════════════════════════════════════════════════
+# Analogy: the building inspector who must sign off on the foundations
+# before the contractor can pour the walls — no downstream work until
+# the base layer passes.
+#
+# CIA focus: Integrity — data contracts must be enforced on every dbt
+# source before downstream models run.
+#
+# Checks:
+#   1. Every source table must have a &#x27;freshness&#x27; key (availability contract)
+#   2. Every PII column (email, phone, ssn, national_id, passport) must have
+#      at least one test defined — untested PII is a compliance gap
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+import re
+from dataclasses import dataclass, field
+
+_PII_COL_PATTERN = re.compile(r&quot;email|phone|ssn|national_id|passport&quot;, re.I)
+
+
+class MissingFreshnessError(Exception):
+    pass
+
+
+class PIIColumnUntestedError(Exception):
+    pass
+
+
+@dataclass
+class ContractReport:
+    passed: bool
+    violations: list = field(default_factory=list)
+
+
+def dbt_contract_gate(sources_config: dict) -&gt; ContractReport:
+    for table in sources_config.get(&quot;tables&quot;, []):
+        name = table.get(&quot;name&quot;, &quot;&quot;)
+        if &quot;freshness&quot; not in table:
+            raise MissingFreshnessError(f&quot;Table &#x27;{name}&#x27; missing freshness config&quot;)
+        for col in table.get(&quot;columns&quot;, []):
+            col_name = col.get(&quot;name&quot;, &quot;&quot;)
+            if _PII_COL_PATTERN.search(col_name) and not col.get(&quot;tests&quot;):
+                raise PIIColumnUntestedError(
+                    f&quot;PII column &#x27;{col_name}&#x27; in &#x27;{name}&#x27; has no tests defined&quot;
+                )
+    return ContractReport(passed=True)
+
+
+# Compliant source — passes
+compliant = {
+    &quot;tables&quot;: [
+        {
+            &quot;name&quot;: &quot;stg_customers&quot;,
+            &quot;freshness&quot;: {&quot;warn_after&quot;: {&quot;count&quot;: 24, &quot;period&quot;: &quot;hour&quot;}},
+            &quot;columns&quot;: [
+                {&quot;name&quot;: &quot;customer_id&quot;, &quot;tests&quot;: [&quot;not_null&quot;, &quot;unique&quot;]},
+                {&quot;name&quot;: &quot;email&quot;, &quot;tests&quot;: [&quot;not_null&quot;]},
+            ],
+        }
+    ]
+}
+report = dbt_contract_gate(compliant)
+print(f&quot;stg_customers: passed={report.passed}&quot;)
+
+# Missing freshness — blocked
+try:
+    dbt_contract_gate({&quot;tables&quot;: [{&quot;name&quot;: &quot;stg_orders&quot;, &quot;columns&quot;: []}]})
+except MissingFreshnessError as e:
+    print(f&quot;MissingFreshnessError: {e}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D4_dbt_Schema_Tests.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 4
+# ══════════════════════════════════════════════════════════════
+# sources_to_check has two tables: stg_orders (compliant) and
+# stg_employees (missing freshness + untested PII column).
+# Call dbt_contract_gate() on each table individually by wrapping
+# each in its own single-table dict: {&quot;tables&quot;: [table_dict]}.
+# For the compliant table: print &#x27;stg_orders: PASS&#x27;.
+# For each violation: catch the exception and print its class name + message.
+#
+# Expected output:
+#   stg_orders: PASS
+#   MissingFreshnessError: Table &#x27;stg_employees&#x27; missing freshness config
+#
+# --- starting data ---
+sources_to_check = [
+    {
+        &quot;name&quot;: &quot;stg_orders&quot;,
+        &quot;freshness&quot;: {&quot;warn_after&quot;: {&quot;count&quot;: 6, &quot;period&quot;: &quot;hour&quot;}},
+        &quot;columns&quot;: [
+            {&quot;name&quot;: &quot;order_id&quot;, &quot;tests&quot;: [&quot;not_null&quot;, &quot;unique&quot;]},
+            {&quot;name&quot;: &quot;status&quot;,   &quot;tests&quot;: [&quot;accepted_values&quot;]},
+        ]
+    },
+    {
+        &quot;name&quot;: &quot;stg_employees&quot;,
+        &quot;columns&quot;: [
+            {&quot;name&quot;: &quot;employee_id&quot;, &quot;tests&quot;: [&quot;not_null&quot;, &quot;unique&quot;]},
+            {&quot;name&quot;: &quot;email&quot;,       &quot;tests&quot;: []},
+        ]
+    },
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-5">Day 5 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-5"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D5_dbt_Mart_Models.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 13  |  DAY 5  |  dbt MART MODELS — 3-LAYER ARCHITECTURE
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Apply staging -&gt; intermediate -&gt; mart pattern on hotel_bookings data
+#  2. Write a mart model that aggregates for BI consumption
+#  3. Run the full 3-layer pipeline and verify the output
+#
+#  TIME:  ~40 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;dbt project structure staging intermediate mart&quot;
+#  Video: &quot;dbt Modularity: Building Models with Staging, Intermediate &amp; Mart Layers #dbt #dataengineering&quot; -- Data Engineering Studies
+#        https://www.youtube.com/watch?v=86qxAUB8aQM
+#        (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+import os
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+def ref(model_name):
+    return model_name
+
+def source(schema, table):
+    return f&#x27;{schema}__{table}&#x27;
+
+def run_model(con, name, sql, materialized=&#x27;view&#x27;):
+    if materialized == &#x27;table&#x27;:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {name} AS {sql}&#x27;)
+    else:
+        con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+    print(f&#x27;  [{materialized:&gt;12}]  {name}&#x27;)
+
+# Load hotel_bookings dataset
+try:
+    this_dir = os.getcwd()
+    ds_path  = os.path.join(this_dir, &#x27;..&#x27;, &#x27;datasets&#x27;, &#x27;hotel_bookings.xlsx&#x27;)
+    import pandas as pd
+    df = pd.read_excel(ds_path)
+    con.execute(&#x27;CREATE TABLE raw__hotel_bookings AS SELECT * FROM df&#x27;)
+    print(f&#x27;Loaded hotel_bookings: {len(df)} rows&#x27;)
+except Exception:
+    # Fallback: small inline sample
+    con.execute(&#x27;&#x27;&#x27;
+        CREATE TABLE raw__hotel_bookings AS SELECT * FROM (VALUES
+            (&#x27;City Hotel&#x27;,  2, &#x27;2024-01&#x27;, 0, 120.50, &#x27;GB&#x27;),
+            (&#x27;City Hotel&#x27;,  3, &#x27;2024-01&#x27;, 1,  98.00, &#x27;DE&#x27;),
+            (&#x27;Resort Hotel&#x27;,5, &#x27;2024-02&#x27;, 0, 210.00, &#x27;US&#x27;),
+            (&#x27;Resort Hotel&#x27;,1, &#x27;2024-02&#x27;, 0, 195.00, &#x27;FR&#x27;),
+            (&#x27;City Hotel&#x27;,  2, &#x27;2024-03&#x27;, 0, 115.00, &#x27;GB&#x27;)
+        ) AS t(hotel, lead_time, arrival_month, is_canceled, adr, country)
+    &#x27;&#x27;&#x27;)
+    print(&#x27;Using inline sample data.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D5_dbt_Mart_Models.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — STAGING LAYER
+# ══════════════════════════════════════════════════════════════
+# Staging models (stg_*) do three things only:
+#   1. Rename columns to your team&#x27;s naming standard
+#   2. Cast data types correctly (string dates -&gt; DATE, int cents -&gt; DECIMAL)
+#   3. Filter obviously bad rows (test mode flags, system records)
+#
+# Staging models are always views (cheap, always fresh).
+# They read from source(), never from ref().
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+stg_bookings_sql = f&#x27;&#x27;&#x27;
+    SELECT
+        hotel                                       AS hotel_type,
+        lead_time                                   AS lead_time_days,
+        arrival_month,
+        CAST(is_canceled AS BOOLEAN)                AS is_canceled,
+        ROUND(CAST(adr AS DECIMAL(10,2)), 2)        AS avg_daily_rate,
+        country
+    FROM {source(&#x27;raw&#x27;, &#x27;hotel_bookings&#x27;)}
+    WHERE is_canceled = 0
+&#x27;&#x27;&#x27;
+
+run_model(con, &#x27;stg_bookings&#x27;, stg_bookings_sql, &#x27;view&#x27;)
+print(f&#x27;  stg_bookings row count: {con.execute(&quot;SELECT COUNT(*) FROM stg_bookings&quot;).fetchone()[0]}&#x27;)
+print(con.execute(&#x27;SELECT * FROM stg_bookings LIMIT 3&#x27;).fetchdf())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D5_dbt_Mart_Models.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Write an intermediate model int_bookings_enriched_sql that reads from stg_bookings
+# and adds two computed columns:
+#   revenue_bucket: &#x27;low&#x27; if avg_daily_rate &lt; 100, &#x27;mid&#x27; if &lt; 200, &#x27;high&#x27; otherwise
+#   is_long_stay:   TRUE if lead_time_days &gt; 30, FALSE otherwise
+# Run the model as a view and print the first 5 rows.
+#
+# Expected output (5 rows, 2 new columns):
+#   hotel_type  lead_time_days  arrival_month  avg_daily_rate  revenue_bucket  is_long_stay
+#   ...         ...             ...            ...             low/mid/high    True/False</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D5_dbt_Mart_Models.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — MART LAYER
+# ══════════════════════════════════════════════════════════════
+# Mart models (fct_*, dim_*) are the final business-ready output.
+# They are materialized as tables (not views) because:
+#   - BI tools query them constantly
+#   - They are expensive to compute every time
+#   - Pre-computing saves warehouse cost
+#
+# fct_ = fact tables: rows = events (orders, bookings, page views)
+# dim_ = dimension tables: rows = entities (customers, products, hotels)
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+# fct_monthly_hotel_revenue: aggregation mart model
+fct_monthly_revenue_sql = f&#x27;&#x27;&#x27;
+    SELECT
+        hotel_type,
+        arrival_month,
+        country,
+        COUNT(*)                    AS bookings,
+        ROUND(AVG(avg_daily_rate), 2) AS avg_rate,
+        ROUND(SUM(avg_daily_rate), 2) AS total_revenue
+    FROM {ref(&#x27;stg_bookings&#x27;)}
+    GROUP BY 1, 2, 3
+    ORDER BY total_revenue DESC
+&#x27;&#x27;&#x27;
+
+run_model(con, &#x27;fct_monthly_revenue&#x27;, fct_monthly_revenue_sql, &#x27;table&#x27;)
+print(con.execute(&#x27;SELECT * FROM fct_monthly_revenue LIMIT 5&#x27;).fetchdf())</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D5_dbt_Mart_Models.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Write a mart model dim_hotels_sql that reads from stg_bookings
+# and returns one row per hotel_type with:
+#   hotel_type, total_bookings, avg_lead_time (rounded to 1dp),
+#   pct_long_stay (% of bookings with lead_time_days &gt; 30, rounded to 1dp)
+# Use ref() and run as a table materialization.
+# Assumes int_bookings_enriched was created in Exercise 1.
+#
+# Expected output (2 rows, one per hotel type):
+#   hotel_type  total_bookings  avg_lead_time  pct_long_stay
+#   ...         ...             ...            ...</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D5_dbt_Mart_Models.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — APPLIED PATTERN
+# ══════════════════════════════════════════════════════════════
+# Combine the patterns from Concepts 1 and 2 into a complete workflow.
+# The example below shows all components working together.
+#
+# EXAMPLE ───────────────────────────────────────────────────────
+# Run the complete pipeline with error handling:
+print(&#x27;All concepts combined — see exercises to apply this pattern.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D5_dbt_Mart_Models.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Validate the fct_monthly_revenue mart model with 3 assertions:
+#   1. total_revenue &gt; 0 for all rows
+#   2. bookings &gt;= 1 for all rows
+#   3. avg_rate is not null for any row
+# Print PASS or FAIL with a description for each.
+# All three should PASS on the data produced in Concept 2.
+#
+# Expected output:
+#   [PASS] total_revenue &gt; 0
+#   [PASS] bookings &gt;= 1
+#   [PASS] avg_rate is not null</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-6">Day 6 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-6"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D6_Project_dbt_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 13  |  DAY 6  |  PROJECT — FULL dbt PIPELINE
+# ══════════════════════════════════════════════════════════════
+#
+#  PROJECT: Hotel Bookings Analytics Pipeline
+#  Build a full 3-layer dbt pipeline on hotel_bookings.
+#  End result: a mart table a BI analyst can query directly.
+#
+#  Skills stacked:
+#    W10 — Groq LLM API (prompt engineering)
+#    W13 — dbt staging / intermediate / mart models
+#
+#  TASK 5 uses LLM to auto-generate schema.yml documentation
+#  from the mart columns — connects W10_D2 prompt engineering.
+#
+#  SIMULATION MODE — runs without API keys.
+#  REAL MODE       — Groq API call shown in call_llm() docstring.
+#
+#  TIME:  ~70 minutes
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+import os
+import pandas as pd
+
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+def ref(model_name):
+    return model_name
+
+def source(schema, table):
+    return f&#x27;{schema}__{table}&#x27;
+
+def run_model(con, name, sql, materialized=&#x27;view&#x27;):
+    if materialized == &#x27;table&#x27;:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {name} AS {sql}&#x27;)
+    else:
+        con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+    rows = con.execute(f&#x27;SELECT COUNT(*) FROM {name}&#x27;).fetchone()[0]
+    print(f&#x27;  [{materialized:&gt;12}]  {name}  ({rows} rows)&#x27;)
+
+def dbt_test(con, model, column, test_type, values=None, ref_model=None, ref_col=None):
+    if test_type == &#x27;not_null&#x27;:
+        n = con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {column} IS NULL&#x27;).fetchone()[0]
+        return &#x27;PASS&#x27; if n == 0 else f&#x27;FAIL ({n} nulls)&#x27;
+    elif test_type == &#x27;unique&#x27;:
+        n = con.execute(f&#x27;SELECT COUNT(*) FROM (SELECT {column} FROM {model} GROUP BY {column} HAVING COUNT(*)&gt;1)&#x27;).fetchone()[0]
+        return &#x27;PASS&#x27; if n == 0 else f&#x27;FAIL ({n} dupes)&#x27;
+    elif test_type == &#x27;accepted_values&#x27;:
+        vals = &#x27;, &#x27;.join(f&quot;&#x27;{v}&#x27;&quot; for v in values)
+        n = con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {column} NOT IN ({vals})&#x27;).fetchone()[0]
+        return &#x27;PASS&#x27; if n == 0 else f&#x27;FAIL ({n} bad values)&#x27;
+    return &#x27;UNKNOWN&#x27;
+
+# ── LLM helper (SIMULATION MODE) ──────────────────────────────
+# Used in Task 5 to auto-generate schema.yml column descriptions.
+# In W10_D2 you built prompts that extracted structured output.
+# Here the LLM acts as a documentation writer.
+def call_llm(system_prompt: str, user_prompt: str) -&gt; str:
+    &quot;&quot;&quot;
+    SIMULATION MODE — returns a realistic hardcoded YAML block.
+    REAL MODE (uncomment + set GROQ_API_KEY in .env):
+
+    from openai import OpenAI
+    client = OpenAI(
+        api_key=os.getenv(&#x27;GROQ_API_KEY&#x27;),
+        base_url=&#x27;https://api.groq.com/openai/v1&#x27;,
+    )
+    resp = client.chat.completions.create(
+        model=&#x27;llama3-8b-8192&#x27;,
+        messages=[
+            {&#x27;role&#x27;: &#x27;system&#x27;, &#x27;content&#x27;: system_prompt},
+            {&#x27;role&#x27;: &#x27;user&#x27;,   &#x27;content&#x27;: user_prompt},
+        ],
+        temperature=0.1,
+    )
+    return resp.choices[0].message.content
+    &quot;&quot;&quot;
+    if &#x27;schema.yml&#x27; in user_prompt or &#x27;document&#x27; in user_prompt.lower():
+        return (
+            &quot;version: 2\n&quot;
+            &quot;models:\n&quot;
+            &quot;  - name: fct_hotel_summary\n&quot;
+            &quot;    description: &gt;\n&quot;
+            &quot;      Mart table summarising non-cancelled hotel bookings by hotel type\n&quot;
+            &quot;      and rate tier. One row per hotel_type + rate_tier combination.\n&quot;
+            &quot;    columns:\n&quot;
+            &quot;      - name: hotel_type\n&quot;
+            &quot;        description: Hotel category (City Hotel or Resort Hotel).\n&quot;
+            &quot;        tests: [not_null]\n&quot;
+            &quot;      - name: rate_tier\n&quot;
+            &quot;        description: Pricing band derived from avg_daily_rate.\n&quot;
+            &quot;        tests: [not_null, accepted_values: {values: [budget, standard, premium]}]\n&quot;
+            &quot;      - name: bookings\n&quot;
+            &quot;        description: Count of non-cancelled bookings in this segment.\n&quot;
+            &quot;        tests: [not_null]\n&quot;
+            &quot;      - name: avg_rate\n&quot;
+            &quot;        description: Average daily rate in USD for this segment.\n&quot;
+            &quot;      - name: avg_lead_time\n&quot;
+            &quot;        description: Average days between booking and arrival.\n&quot;
+        )
+    return &quot;No documentation generated — check your prompt.&quot;
+
+try:
+    this_dir = os.getcwd()
+    ds_path  = os.path.join(this_dir, &#x27;..&#x27;, &#x27;datasets&#x27;, &#x27;hotel_bookings.xlsx&#x27;)
+    df = pd.read_excel(ds_path)
+    con.execute(&#x27;CREATE TABLE raw__hotel_bookings AS SELECT * FROM df&#x27;)
+    print(f&#x27;Loaded hotel_bookings dataset: {len(df)} rows&#x27;)
+except Exception:
+    con.execute(&#x27;&#x27;&#x27;
+        CREATE TABLE raw__hotel_bookings AS SELECT * FROM (VALUES
+            (&#x27;City Hotel&#x27;,  7,  &#x27;2024-01&#x27;, 0, 120.50, &#x27;GB&#x27;, 2),
+            (&#x27;City Hotel&#x27;,  45, &#x27;2024-01&#x27;, 1,  98.00, &#x27;DE&#x27;, 3),
+            (&#x27;Resort Hotel&#x27;,3,  &#x27;2024-02&#x27;, 0, 210.00, &#x27;US&#x27;, 5),
+            (&#x27;Resort Hotel&#x27;,60, &#x27;2024-02&#x27;, 0, 195.00, &#x27;FR&#x27;, 1),
+            (&#x27;City Hotel&#x27;,  14, &#x27;2024-03&#x27;, 0, 115.00, &#x27;GB&#x27;, 2),
+            (&#x27;Resort Hotel&#x27;,2,  &#x27;2024-03&#x27;, 0, 180.00, &#x27;US&#x27;, 4)
+        ) AS t(hotel, lead_time, arrival_month, is_canceled, adr, country, stays_in_week_nights)
+    &#x27;&#x27;&#x27;)
+    print(&#x27;Using inline sample data.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D6_Project_dbt_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 1 — STAGING MODEL
+# ══════════════════════════════════════════════════════════════
+# Write stg_hotel_bookings_sql that reads from source(&#x27;raw&#x27;, &#x27;hotel_bookings&#x27;)
+# and produces these cleaned columns:
+#   hotel_type       (hotel renamed)
+#   lead_time_days   (lead_time renamed)
+#   arrival_month
+#   is_canceled      (cast to BOOLEAN)
+#   avg_daily_rate   (adr cast to DECIMAL(10,2), rounded to 2dp)
+#   country
+#   total_nights     (stays_in_week_nights renamed if present, else 0)
+# Filter: only non-cancelled bookings (is_canceled = 0)
+# Materialize as view. Print row count.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D6_Project_dbt_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 2 — INTERMEDIATE MODEL
+# ══════════════════════════════════════════════════════════════
+# Write int_bookings_classified_sql that reads from stg_hotel_bookings
+# and adds:
+#   rate_tier:  &#x27;budget&#x27; if avg_daily_rate &lt; 100, &#x27;standard&#x27; if &lt; 200, &#x27;premium&#x27; otherwise
+#   trip_type:  &#x27;weekend&#x27; if total_nights &lt;= 2, &#x27;short&#x27;   if &lt;= 5, &#x27;extended&#x27; otherwise
+# Materialize as view. Print first 5 rows.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D6_Project_dbt_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 3 — MART MODEL + TESTS
+# ══════════════════════════════════════════════════════════════
+# Write fct_hotel_summary_sql that reads from int_bookings_classified
+# and returns per hotel_type + rate_tier:
+#   bookings (COUNT), avg_rate (AVG avg_daily_rate rounded to 2dp),
+#   avg_lead_time (AVG lead_time_days rounded to 1dp)
+# Materialize as TABLE. Print the full result.
+#
+# Then run these dbt_test() checks on fct_hotel_summary:
+#   not_null   hotel_type
+#   not_null   rate_tier
+#   accepted_values rate_tier [&#x27;budget&#x27;, &#x27;standard&#x27;, &#x27;premium&#x27;]
+# Print PASS/FAIL for each.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D6_Project_dbt_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 4 — LINEAGE AND DAG SUMMARY
+# ══════════════════════════════════════════════════════════════
+# Build a dag dict that represents the dependency graph for the 3-model pipeline
+# you just built. Then write a topological_sort(dag) function and print
+# the execution order with each model&#x27;s layer (staging/intermediate/mart).
+#
+# Expected output:
+#   Execution order:
+#     1. stg_hotel_bookings      [staging]
+#     2. int_bookings_classified [intermediate]
+#     3. fct_hotel_summary       [mart]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_13_dbt_Foundations/W13_D6_Project_dbt_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 5 — LLM SCHEMA DOCUMENTATION GENERATOR
+# ══════════════════════════════════════════════════════════════
+# In production, every dbt model needs a schema.yml with column
+# descriptions and tests. Writing this by hand is slow.
+# This task uses LLM to generate it from the mart structure —
+# the same prompt engineering pattern from W10_D2.
+#
+# Step 1 — introspect fct_hotel_summary.
+#   Query PRAGMA table_info(&#x27;fct_hotel_summary&#x27;) or use
+#   con.execute(&#x27;DESCRIBE fct_hotel_summary&#x27;).fetchdf()
+#   to get the column names and types.
+#   Format them as a string like:
+#     &quot;hotel_type (VARCHAR), rate_tier (VARCHAR), bookings (BIGINT), ...&quot;
+#
+# Step 2 — query the mart for 3 sample rows.
+#   Format as a readable string of dicts.
+#
+# Step 3 — write a system_prompt telling the LLM it is a senior
+#   analytics engineer writing dbt schema.yml documentation.
+#   Write a user_prompt that includes:
+#     - the column names and types from Step 1
+#     - the 3 sample rows from Step 2
+#     - a request to produce a valid schema.yml YAML block
+#       with description + tests for each column.
+#
+# Step 4 — call call_llm(system_prompt, user_prompt).
+#   Print &quot;GENERATED SCHEMA.YML:&quot; followed by the response.
+#
+# Expected output (simulation):
+#   GENERATED SCHEMA.YML:
+#   version: 2
+#   models:
+#     - name: fct_hotel_summary
+#       description: &gt;
+#         Mart table summarising non-cancelled hotel bookings ...
+#       columns:
+#         - name: hotel_type
+#           description: Hotel category (City Hotel or Resort Hotel).
+#           tests: [not_null]
+#         ...
+#
+# --- starting data ---
+# fct_hotel_summary is built in Task 3.
+# call_llm(system_prompt, user_prompt) is defined in the setup cell.
+system_prompt = &quot;You are a senior analytics engineer writing dbt documentation ...&quot;</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="pager"><a class="btn ghost" href="week-12.html">&larr; Week 12</a><a class="btn ghost" href="week-14.html">Week 14 &rarr;</a></div>
+</main></body></html>

@@ -1,0 +1,2220 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 16 — Airflow</title>
+<link rel="stylesheet" href="style.css"><script>window.SITE_DATASETS = ["datasets/titanic_train.csv"];</script>
+<script src="app.js" defer></script></head>
+<body data-site="python">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Python Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 16 — Airflow</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a><a class="btn ghost" href="#day-6">Day 6</a></div><p class="note">Done this week: <span data-week-count="16" data-size="6"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><p class="note">Cells that need a file other than the Titanic table, a web connection, a database server or a package that is not available in the browser will show an error when run. Read those instead.</p><h2 id="day-1">Day 1 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-1"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D1_Airflow_DAG_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 16  |  DAY 1  |  AIRFLOW DAG STRUCTURE
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Understand what Airflow does and what a DAG represents
+#  2. Write tasks using the TaskFlow API pattern (@dag, @task)
+#  3. Simulate a full DAG run lifecycle in Python
+#
+#  TIME:  ~60 minutes
+#
+#  SIMULATION NOTE
+#  ───────────────
+#  Airflow requires a running server. We simulate it with plain Python
+#  classes and functions that mirror the Airflow API exactly.
+#  REAL MODE code is shown in comments wherever relevant.
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;Apache Airflow tutorial for beginners&quot;
+#  Video: &quot;Write your first DAG in Airflow 3 for beginners&quot; -- Data with Marc
+#         https://www.youtube.com/watch?v=dX6p-EwnkP4
+#         (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+from datetime import datetime, timedelta
+import functools
+
+# ── Simulation layer ──────────────────────────────────────────
+# In real Airflow you import from airflow:
+#   from airflow.decorators import dag, task
+# Here we build equivalent Python classes.
+
+class TaskResult:
+    &quot;&quot;&quot;Holds the outcome of a single task execution.&quot;&quot;&quot;
+    def __init__(self, task_id, status, return_value=None, error=None):
+        self.task_id      = task_id
+        self.status       = status       # &#x27;success&#x27; | &#x27;failed&#x27; | &#x27;skipped&#x27;
+        self.return_value = return_value
+        self.error        = error
+        self.started_at   = datetime.now().isoformat()
+
+    def __repr__(self):
+        return f&#x27;TaskResult({self.task_id}, {self.status})&#x27;
+
+
+def task(func):
+    &quot;&quot;&quot;Decorator that wraps a function as an Airflow-style task.&quot;&quot;&quot;
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        task_id = func.__name__
+        try:
+            result = func(*args, **kwargs)
+            return TaskResult(task_id, &#x27;success&#x27;, return_value=result)
+        except Exception as exc:
+            return TaskResult(task_id, &#x27;failed&#x27;, error=str(exc))
+    wrapper._is_task = True
+    return wrapper
+
+
+print(&#x27;Airflow DAG Structure lesson ready.&#x27;)
+print(&#x27;Simulation layer loaded — @task decorator and TaskResult available.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D1_Airflow_DAG_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — WHAT AIRFLOW DOES
+# ══════════════════════════════════════════════════════════════
+# Apache Airflow is a workflow orchestration platform.
+# It answers: &quot;which tasks run, in what order, on what schedule?&quot;
+#
+# Core concept: the DAG (Directed Acyclic Graph).
+#   Directed:  tasks have a defined execution order (arrows point one way).
+#   Acyclic:   no loops — a task cannot depend on itself or its own output.
+#   Graph:     a set of tasks (nodes) connected by dependencies (edges).
+#
+# A DAG definition has:
+#   dag_id       unique name used in the Airflow UI
+#   schedule     cron expression or preset: &#x27;@daily&#x27;, &#x27;@hourly&#x27;, None (manual)
+#   start_date   first date Airflow considers for scheduling
+#   catchup      if True, Airflow runs past missed intervals on startup
+#
+# Airflow does NOT run your code — it schedules and monitors it.
+# The actual computation happens in Workers (separate processes).
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+class DAG:
+    &quot;&quot;&quot;
+    Simulation of an Airflow DAG.
+    In real Airflow: @dag(dag_id=&#x27;...&#x27;, schedule=&#x27;@daily&#x27;, start_date=...)
+    &quot;&quot;&quot;
+    def __init__(self, dag_id, schedule, start_date, catchup=False, description=&#x27;&#x27;):
+        self.dag_id      = dag_id
+        self.schedule    = schedule
+        self.start_date  = start_date
+        self.catchup     = catchup
+        self.description = description
+        self._tasks      = []   # list of (task_id, callable)
+
+    def register(self, task_fn):
+        &quot;&quot;&quot;Register a task function with this DAG.&quot;&quot;&quot;
+        self._tasks.append(task_fn)
+        return task_fn
+
+    def run(self, context=None):
+        &quot;&quot;&quot;
+        Execute all tasks in registration order.
+        Returns a run summary dict.
+        &quot;&quot;&quot;
+        context = context or {}
+        started = datetime.now()
+        results = []
+        xcom    = {}   # shared data store between tasks
+
+        for fn in self._tasks:
+            r = fn(xcom)
+            xcom[r.task_id] = r.return_value
+            results.append(r)
+            if r.status == &#x27;failed&#x27;:
+                break   # stop on first failure (like Airflow default)
+
+        failed = [r for r in results if r.status == &#x27;failed&#x27;]
+        return {
+            &#x27;dag_id&#x27;:           self.dag_id,
+            &#x27;schedule&#x27;:         self.schedule,
+            &#x27;started_at&#x27;:       started.isoformat(),
+            &#x27;completed_at&#x27;:     datetime.now().isoformat(),
+            &#x27;tasks_run&#x27;:        len(results),
+            &#x27;tasks_succeeded&#x27;:  len([r for r in results if r.status == &#x27;success&#x27;]),
+            &#x27;tasks_failed&#x27;:     len(failed),
+            &#x27;status&#x27;:           &#x27;FAILED&#x27; if failed else &#x27;SUCCESS&#x27;,
+            &#x27;errors&#x27;:           [r.error for r in failed],
+        }
+
+# Demonstrate defining a DAG with metadata
+example_dag = DAG(
+    dag_id     = &#x27;daily_sales_report&#x27;,
+    schedule   = &#x27;@daily&#x27;,
+    start_date = datetime(2024, 1, 1),
+    catchup    = False,
+    description= &#x27;Extract sales, transform, load to warehouse&#x27;,
+)
+
+print(f&#x27;DAG id:       {example_dag.dag_id}&#x27;)
+print(f&#x27;Schedule:     {example_dag.schedule}&#x27;)
+print(f&#x27;Start date:   {example_dag.start_date.date()}&#x27;)
+print(f&#x27;Catchup:      {example_dag.catchup}&#x27;)
+print(f&#x27;Description:  {example_dag.description}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D1_Airflow_DAG_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Define three DAG objects with these configurations:
+#
+#   DAG 1: dag_id=&#x27;inventory_sync&#x27;  schedule=&#x27;@hourly&#x27;
+#          start_date=2024-03-01    catchup=False
+#
+#   DAG 2: dag_id=&#x27;monthly_close&#x27;   schedule=&#x27;0 6 1 * *&#x27;  (cron: 6am on the 1st)
+#          start_date=2024-01-01    catchup=True
+#
+#   DAG 3: dag_id=&#x27;manual_backfill&#x27; schedule=None  (manual trigger only)
+#          start_date=2024-06-01    catchup=False
+#
+# Print for each DAG: dag_id, schedule, catchup (aligned in a table).
+#
+# Expected output:
+#   dag_id              schedule        catchup
+#   inventory_sync      @hourly         False
+#   monthly_close       0 6 1 * *       True
+#   manual_backfill     None            False
+#
+# --- starting data ---
+dag1_config = {&#x27;dag_id&#x27;: &#x27;inventory_sync&#x27;,  &#x27;schedule&#x27;: &#x27;@hourly&#x27;,    &#x27;start_date&#x27;: datetime(2024, 3, 1),  &#x27;catchup&#x27;: False}
+dag2_config = {&#x27;dag_id&#x27;: &#x27;monthly_close&#x27;,   &#x27;schedule&#x27;: &#x27;0 6 1 * *&#x27;, &#x27;start_date&#x27;: datetime(2024, 1, 1),  &#x27;catchup&#x27;: True}
+dag3_config = {&#x27;dag_id&#x27;: &#x27;manual_backfill&#x27;, &#x27;schedule&#x27;: None,         &#x27;start_date&#x27;: datetime(2024, 6, 1),  &#x27;catchup&#x27;: False}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D1_Airflow_DAG_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — TASKFLOW API: @dag AND @task DECORATORS
+# ══════════════════════════════════════════════════════════════
+# The TaskFlow API (Airflow 2.0+) uses Python decorators.
+# Instead of using Operators (PythonOperator, BashOperator),
+# you write plain Python functions and decorate them with @task.
+#
+# In real Airflow:
+#   from airflow.decorators import dag, task
+#
+#   @dag(dag_id=&#x27;my_pipeline&#x27;, schedule=&#x27;@daily&#x27;, start_date=datetime(2024,1,1))
+#   def my_pipeline():
+#       @task
+#       def extract(): return [1, 2, 3]
+#
+#       @task
+#       def transform(data): return [x * 2 for x in data]
+#
+#       transformed = transform(extract())
+#   my_pipeline()
+#
+# Key rules for @task functions:
+#   - Return a value to pass it downstream (XCom push happens automatically)
+#   - Accept one argument to receive upstream output (XCom pull)
+#   - Keep tasks small — each does ONE thing
+#   - No side effects between tasks (tasks are isolated)
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+import pandas as pd
+
+# Build a 3-task ETL DAG using our simulation layer
+etl_dag = DAG(
+    dag_id     = &#x27;etl_example&#x27;,
+    schedule   = &#x27;@daily&#x27;,
+    start_date = datetime(2024, 1, 1),
+)
+
+@etl_dag.register
+@task
+def extract(xcom):
+    &quot;&quot;&quot;Pull raw rows from source (simulated).&quot;&quot;&quot;
+    raw = [
+        {&#x27;order_id&#x27;: 1, &#x27;product&#x27;: &#x27;Widget A&#x27;, &#x27;amount&#x27;:  120.50},
+        {&#x27;order_id&#x27;: 2, &#x27;product&#x27;: &#x27;Widget B&#x27;, &#x27;amount&#x27;:   85.00},
+        {&#x27;order_id&#x27;: 3, &#x27;product&#x27;: &#x27;Widget A&#x27;, &#x27;amount&#x27;:  210.00},
+    ]
+    print(f&#x27;  extract: pulled {len(raw)} rows&#x27;)
+    return raw
+
+@etl_dag.register
+@task
+def transform(xcom):
+    &quot;&quot;&quot;Apply business rules to the raw rows.&quot;&quot;&quot;
+    raw = xcom.get(&#x27;extract&#x27;, [])
+    df  = pd.DataFrame(raw)
+    df[&#x27;amount_gbp&#x27;] = (df[&#x27;amount&#x27;] * 0.79).round(2)
+    df[&#x27;loaded_at&#x27;]  = datetime.now().date().isoformat()
+    print(f&#x27;  transform: converted {len(df)} rows to GBP&#x27;)
+    return df.to_dict(&#x27;records&#x27;)
+
+@etl_dag.register
+@task
+def load(xcom):
+    &quot;&quot;&quot;Write transformed rows to destination (simulated).&quot;&quot;&quot;
+    rows = xcom.get(&#x27;transform&#x27;, [])
+    print(f&#x27;  load: wrote {len(rows)} rows to warehouse&#x27;)
+    return {&#x27;rows_loaded&#x27;: len(rows)}
+
+# Run the DAG
+import json
+summary = etl_dag.run()
+print()
+print(json.dumps(summary, indent=2))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D1_Airflow_DAG_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Build a 3-task DAG called &#x27;payroll_pipeline&#x27; with schedule &#x27;@weekly&#x27;.
+# Tasks:
+#   extract_payroll  -- returns a list of 4 employee dicts
+#                       keys: emp_id, name, hours_worked, hourly_rate
+#   calc_payroll     -- reads from xcom, computes gross_pay = hours * rate,
+#                       returns list of dicts {emp_id, name, gross_pay}
+#   load_payroll     -- prints each employee&#x27;s name and gross_pay,
+#                       returns {&#x27;rows_loaded&#x27;: N}
+#
+# Register all 3 tasks to the DAG, then call dag.run() and print the summary.
+#
+# Expected output:
+#   extract_payroll: pulled 4 rows
+#   calc_payroll: computed gross pay for 4 employees
+#   load_payroll:
+#     Alice   $1440.00
+#     Bob     $1200.00
+#     Carol   $1680.00
+#     Dave    $960.00
+#   {&quot;dag_id&quot;: &quot;payroll_pipeline&quot;, ... &quot;status&quot;: &quot;SUCCESS&quot;}
+#
+# --- starting data ---
+payroll_raw = [
+    {&#x27;emp_id&#x27;: 1, &#x27;name&#x27;: &#x27;Alice&#x27;, &#x27;hours_worked&#x27;: 40, &#x27;hourly_rate&#x27;: 36.0},
+    {&#x27;emp_id&#x27;: 2, &#x27;name&#x27;: &#x27;Bob&#x27;,   &#x27;hours_worked&#x27;: 40, &#x27;hourly_rate&#x27;: 30.0},
+    {&#x27;emp_id&#x27;: 3, &#x27;name&#x27;: &#x27;Carol&#x27;, &#x27;hours_worked&#x27;: 40, &#x27;hourly_rate&#x27;: 42.0},
+    {&#x27;emp_id&#x27;: 4, &#x27;name&#x27;: &#x27;Dave&#x27;,  &#x27;hours_worked&#x27;: 40, &#x27;hourly_rate&#x27;: 24.0},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D1_Airflow_DAG_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — DAG RUN LIFECYCLE
+# ══════════════════════════════════════════════════════════════
+# Each time Airflow triggers a DAG it creates a DAG Run.
+# A DAG Run moves through these states:
+#
+#   queued     -&gt; Airflow has scheduled the run, waiting for a free worker slot
+#   running    -&gt; at least one task is executing right now
+#   success    -&gt; all tasks completed with status &#x27;success&#x27;
+#   failed     -&gt; at least one task finished with status &#x27;failed&#x27;
+#   up_for_retry -&gt; task failed, retries remain, will be re-queued
+#
+# Each Task Instance inside a DAG Run has its own state:
+#   scheduled  -&gt; waiting for dependencies to clear
+#   running    -&gt; executing right now
+#   success    -&gt; finished without exception
+#   failed     -&gt; raised an exception
+#   skipped    -&gt; upstream returned False (ShortCircuit, BranchOperator)
+#   upstream_failed -&gt; a dependency failed so this task never ran
+#
+# The run_id in Airflow encodes the trigger time:
+#   scheduled__2024-01-15T06:00:00+00:00
+#   manual__2024-01-15T08:32:11+00:00
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+def simulate_lifecycle(dag, inject_failure_at=None):
+    &quot;&quot;&quot;
+    Simulate a DAG run printing state transitions at each step.
+    inject_failure_at: task index (0-based) to force a failure for demo.
+    &quot;&quot;&quot;
+    print(f&#x27;[queued]   DAG run for &quot;{dag.dag_id}&quot; is queued&#x27;)
+    print(f&#x27;[running]  Starting DAG run&#x27;)
+
+    xcom    = {}
+    results = []
+    for i, fn in enumerate(dag._tasks):
+        task_id = fn.__wrapped__.__name__ if hasattr(fn, &#x27;__wrapped__&#x27;) else fn.__name__
+        if inject_failure_at is not None and i == inject_failure_at:
+            r = TaskResult(task_id, &#x27;failed&#x27;, error=&#x27;Simulated failure&#x27;)
+            print(f&#x27;  [failed]   task: {task_id}  error: {r.error}&#x27;)
+            results.append(r)
+            # remaining tasks become upstream_failed
+            for remaining in dag._tasks[i+1:]:
+                rid = remaining.__wrapped__.__name__ if hasattr(remaining, &#x27;__wrapped__&#x27;) else remaining.__name__
+                print(f&#x27;  [upstream_failed] task: {rid}&#x27;)
+            break
+        else:
+            r = fn(xcom)
+            xcom[r.task_id] = r.return_value
+            results.append(r)
+            print(f&#x27;  [success]  task: {r.task_id}&#x27;)
+
+    dag_status = &#x27;success&#x27; if all(r.status == &#x27;success&#x27; for r in results) else &#x27;failed&#x27;
+    print(f&#x27;[{dag_status}]   DAG run complete&#x27;)
+    return dag_status
+
+# Success run
+print(&#x27;--- Normal run ---&#x27;)
+simulate_lifecycle(etl_dag)
+
+print()
+
+# Failure at task index 1 (transform)
+print(&#x27;--- Run with failure at transform ---&#x27;)
+simulate_lifecycle(etl_dag, inject_failure_at=1)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D1_Airflow_DAG_Structure.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Use simulate_lifecycle() to run the payroll_pipeline DAG you built
+# in Exercise 2 twice:
+#
+#   Run 1: normal run (no injected failure).
+#   Run 2: inject a failure at task index 1 (calc_payroll).
+#
+# For Run 2, also print which tasks were marked &#x27;upstream_failed&#x27;
+# (they are printed inside simulate_lifecycle already).
+#
+# After both runs print a comparison dict:
+#   {
+#     &#x27;run_1&#x27;: &#x27;success&#x27;,
+#     &#x27;run_2&#x27;: &#x27;failed&#x27;,
+#   }
+#
+# Expected output:
+#   --- Run 1: normal ---
+#   [queued] ...
+#   [success] DAG run complete
+#
+#   --- Run 2: inject failure at calc_payroll ---
+#   [queued] ...
+#   [upstream_failed] task: load_payroll
+#   [failed] DAG run complete
+#
+#   {&#x27;run_1&#x27;: &#x27;success&#x27;, &#x27;run_2&#x27;: &#x27;failed&#x27;}
+#
+# --- starting data ---
+# payroll_pipeline DAG defined in Exercise 2 above</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-2">Day 2 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-2"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D2_Airflow_XCom_Sensors.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 16  |  DAY 2  |  AIRFLOW XCOM AND SENSORS
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Pass data between tasks using XCom push/pull
+#  2. Write sensors that wait for an external condition
+#  3. Model task dependencies using upstream/downstream relationships
+#
+#  TIME:  ~60 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;Airflow XCom tutorial&quot;
+#  Video: &quot;Airflow XCom for Beginners - All you have to know in 10 mins&quot; -- Data with Marc
+#         https://www.youtube.com/watch?v=8veO7-SN5ZY
+#         (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+from datetime import datetime
+import time
+import functools
+
+# ── Reusable simulation layer (same as Day 1) ─────────────────
+class TaskResult:
+    def __init__(self, task_id, status, return_value=None, error=None):
+        self.task_id      = task_id
+        self.status       = status
+        self.return_value = return_value
+        self.error        = error
+
+    def __repr__(self):
+        return f&#x27;TaskResult({self.task_id}, {self.status})&#x27;
+
+
+def task(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        task_id = func.__name__
+        try:
+            result = func(*args, **kwargs)
+            return TaskResult(task_id, &#x27;success&#x27;, return_value=result)
+        except Exception as exc:
+            return TaskResult(task_id, &#x27;failed&#x27;, error=str(exc))
+    wrapper._is_task = True
+    return wrapper
+
+
+print(&#x27;Airflow XCom and Sensors lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D2_Airflow_XCom_Sensors.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — XCOM: PASSING DATA BETWEEN TASKS
+# ══════════════════════════════════════════════════════════════
+# XCom (Cross-Communication) is Airflow&#x27;s mechanism for tasks to
+# share small amounts of data with each other.
+#
+# How it works:
+#   task_a returns a value            --&gt; Airflow stores it as xcom_push
+#   task_b receives task_a&#x27;s result   --&gt; Airflow retrieves it as xcom_pull
+#
+# In real Airflow (TaskFlow API):
+#   @task
+#   def extract(): return {&#x27;rows&#x27;: 42}         # auto push
+#
+#   @task
+#   def load(data): print(data[&#x27;rows&#x27;])         # auto pull
+#
+#   load(extract())   # wire them together
+#
+# Without TaskFlow (old API):
+#   ti.xcom_push(key=&#x27;row_count&#x27;, value=42)
+#   ti.xcom_pull(task_ids=&#x27;extract&#x27;, key=&#x27;row_count&#x27;)
+#
+# XCom size limit:
+#   Data is stored in the Airflow metadata database (Postgres/MySQL).
+#   Keep XCom values small (&lt; 48 KB). For large DataFrames use:
+#     - MinIO / S3 path returned as a string
+#     - Custom XCom backend (Airflow 2.x supports this)
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+class XComStore:
+    &quot;&quot;&quot;
+    Simulation of Airflow&#x27;s XCom storage.
+    In real Airflow this is backed by the metadata database.
+    Key pattern: dag_run_id + task_id + key
+    &quot;&quot;&quot;
+    def __init__(self):
+        self._store = {}   # {(task_id, key): value}
+
+    def push(self, task_id, value, key=&#x27;return_value&#x27;):
+        self._store[(task_id, key)] = value
+        print(f&#x27;  xcom_push  task={task_id}  key={key}  value={repr(value)[:60]}&#x27;)
+
+    def pull(self, task_id, key=&#x27;return_value&#x27;):
+        val = self._store.get((task_id, key))
+        print(f&#x27;  xcom_pull  task={task_id}  key={key}  -&gt; {repr(val)[:60]}&#x27;)
+        return val
+
+
+# Wire three tasks: extract -&gt; enrich -&gt; summarise
+xcom = XComStore()
+
+def extract_orders():
+    orders = [{&#x27;id&#x27;: 1, &#x27;amount&#x27;: 100}, {&#x27;id&#x27;: 2, &#x27;amount&#x27;: 250}, {&#x27;id&#x27;: 3, &#x27;amount&#x27;: 75}]
+    xcom.push(&#x27;extract_orders&#x27;, orders)
+
+def enrich_orders():
+    orders = xcom.pull(&#x27;extract_orders&#x27;)
+    for o in orders:
+        o[&#x27;vat&#x27;] = round(o[&#x27;amount&#x27;] * 0.2, 2)
+    xcom.push(&#x27;enrich_orders&#x27;, orders)
+
+def summarise_orders():
+    orders = xcom.pull(&#x27;enrich_orders&#x27;)
+    total  = sum(o[&#x27;amount&#x27;] + o[&#x27;vat&#x27;] for o in orders)
+    xcom.push(&#x27;summarise_orders&#x27;, {&#x27;total_with_vat&#x27;: round(total, 2)})
+    return total
+
+print(&#x27;--- XCom flow ---&#x27;)
+extract_orders()
+enrich_orders()
+total = summarise_orders()
+print(f&#x27;\nFinal total (incl. VAT): {total:.2f}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D2_Airflow_XCom_Sensors.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Simulate an XCom flow between two tasks: fetch_prices and convert_prices.
+#
+#   fetch_prices:
+#     Push a list of 4 product dicts to xcom under key &#x27;prices&#x27;.
+#     Also push the source_currency under key &#x27;currency&#x27;.
+#
+#   convert_prices:
+#     Pull both values from xcom.
+#     Convert each price from USD to EUR (rate: 0.92).
+#     Push the result list under key &#x27;converted&#x27;.
+#     Print each product: &quot;Widget A: $120.00 -&gt; EUR 110.40&quot;
+#
+# Expected output:
+#   xcom_push  task=fetch_prices  key=prices   value=[{&#x27;product&#x27;: &#x27;Widget A&#x27;, ...}]
+#   xcom_push  task=fetch_prices  key=currency  value=&#x27;USD&#x27;
+#   xcom_pull  task=fetch_prices  key=prices    -&gt; ...
+#   xcom_pull  task=fetch_prices  key=currency  -&gt; &#x27;USD&#x27;
+#   Widget A:    $120.00 -&gt; EUR 110.40
+#   Widget B:    $ 85.00 -&gt; EUR  78.20
+#   Widget C:    $210.00 -&gt; EUR 193.20
+#   Widget D:    $ 45.00 -&gt; EUR  41.40
+#   xcom_push  task=convert_prices  key=converted  value=[...]
+#
+# --- starting data ---
+xcom2 = XComStore()
+usd_prices = [
+    {&#x27;product&#x27;: &#x27;Widget A&#x27;, &#x27;price_usd&#x27;: 120.00},
+    {&#x27;product&#x27;: &#x27;Widget B&#x27;, &#x27;price_usd&#x27;:  85.00},
+    {&#x27;product&#x27;: &#x27;Widget C&#x27;, &#x27;price_usd&#x27;: 210.00},
+    {&#x27;product&#x27;: &#x27;Widget D&#x27;, &#x27;price_usd&#x27;:  45.00},
+]
+eur_rate = 0.92</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D2_Airflow_XCom_Sensors.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — SENSORS: WAITING FOR A CONDITION
+# ══════════════════════════════════════════════════════════════
+# A Sensor is a special Airflow task that polls until a condition is True.
+# It blocks downstream tasks until the condition is met.
+#
+# Common built-in sensors:
+#   FileSensor        -- wait until a file appears at a path
+#   S3KeySensor       -- wait until a key appears in S3 / MinIO
+#   HttpSensor        -- wait until an HTTP endpoint returns 200
+#   ExternalTaskSensor -- wait until a task in ANOTHER DAG succeeds
+#   SqlSensor         -- wait until a SQL query returns rows
+#
+# Sensor parameters:
+#   poke_interval  seconds between each check (default 60)
+#   timeout        seconds before sensor times out and raises AirflowSensorTimeout
+#   mode           &#x27;poke&#x27; (holds worker slot) or &#x27;reschedule&#x27; (releases slot)
+#
+# Use mode=&#x27;reschedule&#x27; for sensors that wait longer than a few minutes.
+# This frees the worker slot between checks.
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+class FileSensor:
+    &quot;&quot;&quot;
+    Simulation of Airflow&#x27;s FileSensor.
+    In real Airflow:
+        FileSensor(task_id=&#x27;wait_for_file&#x27;, filepath=&#x27;/data/orders.csv&#x27;,
+                   poke_interval=30, timeout=600, mode=&#x27;reschedule&#x27;)
+    &quot;&quot;&quot;
+    def __init__(self, task_id, filepath, poke_interval=1, timeout=5):
+        self.task_id       = task_id
+        self.filepath      = filepath
+        self.poke_interval = poke_interval
+        self.timeout       = timeout
+
+    def poke(self, available_files):
+        &quot;&quot;&quot;Return True if filepath is in the available_files list.&quot;&quot;&quot;
+        return self.filepath in available_files
+
+    def run(self, file_stream):
+        &quot;&quot;&quot;
+        Poll file_stream (a list of lists, one per tick) until
+        filepath appears or timeout is reached.
+        Returns &#x27;success&#x27; or raises TimeoutError.
+        &quot;&quot;&quot;
+        for tick, available_files in enumerate(file_stream):
+            elapsed = tick * self.poke_interval
+            if elapsed &gt; self.timeout:
+                raise TimeoutError(f&#x27;FileSensor timed out after {self.timeout}s&#x27;)
+            print(f&#x27;  [poke {tick+1}] checking for &quot;{self.filepath}&quot; ... &#x27;, end=&#x27;&#x27;)
+            if self.poke(available_files):
+                print(&#x27;FOUND&#x27;)
+                return &#x27;success&#x27;
+            print(&#x27;not found&#x27;)
+        raise TimeoutError(f&#x27;FileSensor timed out — file never appeared&#x27;)
+
+
+# Simulate: file appears on tick 3
+sensor = FileSensor(task_id=&#x27;wait_for_orders&#x27;, filepath=&#x27;/data/orders_2024-01-15.csv&#x27;)
+
+file_stream = [
+    [&#x27;/data/config.json&#x27;],
+    [&#x27;/data/config.json&#x27;],
+    [&#x27;/data/config.json&#x27;, &#x27;/data/orders_2024-01-15.csv&#x27;],
+]
+
+status = sensor.run(file_stream)
+print(f&#x27;Sensor status: {status}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D2_Airflow_XCom_Sensors.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Write a RowSensor class that polls a list of row counts.
+# It should succeed when the row count exceeds a threshold.
+#
+#   RowSensor(task_id, table, min_rows, poke_interval, timeout)
+#   run(count_stream)   -- count_stream is a list of integers (one per tick)
+#
+# Behaviour:
+#   Each tick: print &quot;[poke N] table has X rows, need Y ... &quot; + READY or waiting
+#   If min_rows reached: return &#x27;success&#x27;
+#   If elapsed &gt; timeout: raise TimeoutError
+#
+# Test it with two scenarios:
+#   Scenario A: row counts [0, 150, 300, 500] with min_rows=400, timeout=10
+#               -&gt; should succeed at tick 4 (500 &gt;= 400)
+#   Scenario B: row counts [0, 100, 200] with min_rows=500, timeout=2
+#               -&gt; should raise TimeoutError
+#
+# Expected output:
+#   [poke 1] raw_orders has 0 rows, need 400 ... waiting
+#   [poke 2] raw_orders has 150 rows, need 400 ... waiting
+#   [poke 3] raw_orders has 300 rows, need 400 ... waiting
+#   [poke 4] raw_orders has 500 rows, need 400 ... READY
+#   Scenario A: success
+#   Scenario B: TimeoutError: RowSensor timed out ...
+#
+# --- starting data ---
+counts_a = [0, 150, 300, 500]
+counts_b = [0, 100, 200]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D2_Airflow_XCom_Sensors.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — TASK DEPENDENCIES
+# ══════════════════════════════════════════════════════════════
+# In Airflow, dependencies define execution order.
+#
+# Three ways to set dependencies:
+#
+#   1. Bitshift operator (most common):
+#        extract &gt;&gt; transform &gt;&gt; load
+#        sensor &gt;&gt; [task_a, task_b]   # fan-out (parallel)
+#        [task_a, task_b] &gt;&gt; merge    # fan-in
+#
+#   2. Explicit methods:
+#        transform.set_upstream(extract)     # same as extract &gt;&gt; transform
+#        transform.set_downstream(load)      # same as transform &gt;&gt; load
+#
+#   3. TaskFlow API (Day 1):
+#        result = transform(extract())       # dependency implied by data flow
+#
+# Trigger rules (what makes a task run):
+#   all_success   (default) -- all parents succeeded
+#   all_done      -- all parents finished, regardless of status
+#   one_success   -- at least one parent succeeded
+#   none_failed   -- no parents failed (skipped is OK)
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+class TaskNode:
+    &quot;&quot;&quot;
+    Simple simulation of an Airflow task node with &gt;&gt; dependency wiring.
+    &quot;&quot;&quot;
+    def __init__(self, task_id, fn):
+        self.task_id    = task_id
+        self.fn         = fn
+        self.upstreams  = []
+        self.downstreams= []
+
+    def __rshift__(self, other):
+        &quot;&quot;&quot;task_a &gt;&gt; task_b — task_b depends on task_a.&quot;&quot;&quot;
+        if isinstance(other, list):
+            for o in other:
+                o.upstreams.append(self)
+                self.downstreams.append(o)
+        else:
+            other.upstreams.append(self)
+            self.downstreams.append(other)
+        return other
+
+    def __repr__(self):
+        ups  = [u.task_id for u in self.upstreams]
+        downs= [d.task_id for d in self.downstreams]
+        return f&#x27;TaskNode({self.task_id}, upstream={ups}, downstream={downs})&#x27;
+
+
+def run_graph(entry_nodes, xcom):
+    &quot;&quot;&quot;Topological execution: run all reachable tasks starting from entry_nodes.&quot;&quot;&quot;
+    from collections import deque
+    visited = set()
+    queue   = deque(entry_nodes)
+    results = {}
+
+    while queue:
+        node = queue.popleft()
+        if node.task_id in visited:
+            continue
+        # Check all upstreams have succeeded
+        if not all(u.task_id in results for u in node.upstreams):
+            queue.append(node)   # re-queue, not ready yet
+            continue
+        visited.add(node.task_id)
+        r = node.fn(xcom)
+        xcom[node.task_id] = r.return_value
+        results[node.task_id] = r
+        print(f&#x27;  [{r.status}]  {node.task_id}&#x27;)
+        for d in node.downstreams:
+            queue.append(d)
+
+    return results
+
+
+# Build a fan-out / fan-in DAG:
+#   extract &gt;&gt; [validate, enrich] &gt;&gt; merge
+@task
+def t_extract(x):  return [&#x27;row1&#x27;, &#x27;row2&#x27;, &#x27;row3&#x27;]
+
+@task
+def t_validate(x): return {&#x27;valid&#x27;: True, &#x27;count&#x27;: len(x.get(&#x27;t_extract&#x27;, []))}
+
+@task
+def t_enrich(x):   return [r + &#x27;_enriched&#x27; for r in x.get(&#x27;t_extract&#x27;, [])]
+
+@task
+def t_merge(x):    return {&#x27;validated&#x27;: x.get(&#x27;t_validate&#x27;), &#x27;enriched&#x27;: x.get(&#x27;t_enrich&#x27;)}
+
+n_extract  = TaskNode(&#x27;t_extract&#x27;,  t_extract)
+n_validate = TaskNode(&#x27;t_validate&#x27;, t_validate)
+n_enrich   = TaskNode(&#x27;t_enrich&#x27;,   t_enrich)
+n_merge    = TaskNode(&#x27;t_merge&#x27;,    t_merge)
+
+n_extract &gt;&gt; [n_validate, n_enrich] &gt;&gt; n_merge
+
+print(&#x27;--- Dependency graph run ---&#x27;)
+results = run_graph([n_extract], xcom={})
+print(&#x27;\nAll nodes:&#x27;)
+for name, r in results.items():
+    print(f&#x27;  {name}: {repr(r.return_value)[:60]}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D2_Airflow_XCom_Sensors.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Build a 4-task DAG where task 3 (load_valid) only runs if
+# task 2 (filter_rows) returns a non-empty list.
+#
+# Tasks:
+#   fetch_data   -- returns a list of 6 order dicts (some with amount=0)
+#   filter_rows  -- filters out rows where amount &lt;= 0,
+#                   returns the filtered list
+#   load_valid   -- runs ONLY if filter_rows result is non-empty,
+#                   prints each order and returns {&#x27;loaded&#x27;: N}
+#   send_report  -- always runs after load_valid,
+#                   prints &quot;Report: N orders loaded&quot;
+#
+# Wire using: fetch_data &gt;&gt; filter_rows &gt;&gt; load_valid &gt;&gt; send_report
+# Then call run_graph([fetch_data_node], xcom={}).
+#
+# To make load_valid conditional: inside the function body,
+# read xcom[&#x27;filter_rows&#x27;] and raise ValueError(&#x27;no rows&#x27;) if empty.
+#
+# Expected output:
+#   [success]  fetch_data
+#   [success]  filter_rows
+#   [success]  load_valid   (with 4 orders printed)
+#   [success]  send_report  Report: 4 orders loaded
+#
+# --- starting data ---
+raw_orders = [
+    {&#x27;order_id&#x27;: 1, &#x27;amount&#x27;: 120.00},
+    {&#x27;order_id&#x27;: 2, &#x27;amount&#x27;:   0.00},
+    {&#x27;order_id&#x27;: 3, &#x27;amount&#x27;:  85.50},
+    {&#x27;order_id&#x27;: 4, &#x27;amount&#x27;: -10.00},
+    {&#x27;order_id&#x27;: 5, &#x27;amount&#x27;: 200.00},
+    {&#x27;order_id&#x27;: 6, &#x27;amount&#x27;:  65.00},
+]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-3">Day 3 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-3"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D3_Airflow_Connections.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 16  |  DAY 3  |  AIRFLOW CONNECTIONS AND HOOKS
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Store and retrieve credentials using the Connections pattern
+#  2. Use Variables for runtime configuration without hard-coding values
+#  3. Build a Hook that wraps a database connection in a typed helper
+#
+#  TIME:  ~60 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;Airflow connections and variables&quot;
+#  Video: &quot;Airflow Tutorial - Variables and Connections | json | how to create | use | example | Best practices&quot; -- SleekData
+#         https://www.youtube.com/watch?v=-fjAchpM4mc
+#         (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+import json
+
+# DuckDB in-memory database (simulates PostgreSQL throughout this lesson)
+con = duckdb.connect(&#x27;:memory:&#x27;)
+con.execute(&quot;&quot;&quot;
+    CREATE TABLE employees (
+        emp_id   INTEGER,
+        name     VARCHAR,
+        dept     VARCHAR,
+        salary   DOUBLE
+    )
+&quot;&quot;&quot;)
+con.execute(&quot;&quot;&quot;
+    INSERT INTO employees VALUES
+        (1, &#x27;Alice&#x27;,   &#x27;Engineering&#x27;, 95000),
+        (2, &#x27;Bob&#x27;,     &#x27;Sales&#x27;,        62000),
+        (3, &#x27;Carol&#x27;,   &#x27;Engineering&#x27;,  88000),
+        (4, &#x27;Dave&#x27;,    &#x27;Finance&#x27;,       71000),
+        (5, &#x27;Eve&#x27;,     &#x27;Sales&#x27;,         58000)
+&quot;&quot;&quot;)
+
+print(&#x27;Airflow Connections and Hooks lesson ready.&#x27;)
+print(&#x27;DuckDB loaded with 5 employee rows.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D3_Airflow_Connections.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — CONNECTIONS: CREDENTIALS OUTSIDE CODE
+# ══════════════════════════════════════════════════════════════
+# A Connection stores everything needed to reach an external system:
+#   host, port, login, password, schema, extra (JSON for advanced options).
+#
+# In Airflow, connections are stored encrypted in the metadata database
+# (or in a secrets backend like HashiCorp Vault or AWS Secrets Manager).
+#
+# In real Airflow, you retrieve a connection like this:
+#   from airflow.hooks.base import BaseHook
+#   conn = BaseHook.get_connection(&#x27;postgres_prod&#x27;)
+#   print(conn.host, conn.port, conn.login)
+#
+# Or via environment variable (Airflow reads AIRFLOW_CONN_&lt;CONN_ID&gt;):
+#   export AIRFLOW_CONN_POSTGRES_PROD=&#x27;postgresql://user:pass@host:5432/mydb&#x27;
+#
+# Supported connection types include:
+#   postgres, mysql, s3, http, google_cloud_platform, slack, ftp ...
+#
+# Key rule: NEVER hard-code credentials in DAG files.
+#           DAG code is often committed to Git.
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+@dataclass
+class Connection:
+    &quot;&quot;&quot;Simulation of an Airflow Connection object.&quot;&quot;&quot;
+    conn_id  : str
+    conn_type: str
+    host     : str
+    port     : int
+    login    : str
+    password : str
+    schema   : str = &#x27;&#x27;
+    extra    : dict = field(default_factory=dict)
+
+    def get_uri(self):
+        return f&#x27;{self.conn_type}://{self.login}:***@{self.host}:{self.port}/{self.schema}&#x27;
+
+
+class ConnectionStore:
+    &quot;&quot;&quot;Simulation of Airflow&#x27;s encrypted connection registry.&quot;&quot;&quot;
+    def __init__(self):
+        self._store = {}
+
+    def add(self, conn):
+        self._store[conn.conn_id] = conn
+
+    def get_connection(self, conn_id):
+        if conn_id not in self._store:
+            raise KeyError(f&#x27;Connection not found: {conn_id}&#x27;)
+        return self._store[conn_id]
+
+
+# Populate the connection store
+store = ConnectionStore()
+store.add(Connection(
+    conn_id  = &#x27;postgres_prod&#x27;,
+    conn_type= &#x27;postgres&#x27;,
+    host     = &#x27;db.prod.internal&#x27;,
+    port     = 5432,
+    login    = &#x27;etl_user&#x27;,
+    password = &#x27;s3cur3p@ss&#x27;,
+    schema   = &#x27;analytics&#x27;,
+))
+store.add(Connection(
+    conn_id  = &#x27;s3_data_lake&#x27;,
+    conn_type= &#x27;s3&#x27;,
+    host     = &#x27;s3.amazonaws.com&#x27;,
+    port     = 443,
+    login    = &#x27;AKIAIOSFODNN7EXAMPLE&#x27;,
+    password = &#x27;wJalrXUtnFEMI/K7MDENG&#x27;,
+    extra    = {&#x27;region&#x27;: &#x27;eu-west-1&#x27;, &#x27;bucket&#x27;: &#x27;my-data-lake&#x27;},
+))
+
+# Retrieve and inspect (password masked in URI)
+for conn_id in [&#x27;postgres_prod&#x27;, &#x27;s3_data_lake&#x27;]:
+    c = store.get_connection(conn_id)
+    print(f&#x27;{c.conn_id:&lt;20}  {c.get_uri()}&#x27;)
+    if c.extra:
+        print(f&#x27;  extra: {c.extra}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D3_Airflow_Connections.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Add 3 more connections to the store:
+#   1. conn_id=&#x27;mysql_reporting&#x27;  type=&#x27;mysql&#x27;     host=&#x27;reports.internal&#x27;
+#      port=3306  login=&#x27;report_reader&#x27;  schema=&#x27;kpi_db&#x27;
+#   2. conn_id=&#x27;slack_alerts&#x27;     type=&#x27;http&#x27;      host=&#x27;hooks.slack.com&#x27;
+#      port=443   login=&#x27;&#x27;  schema=&#x27;&#x27;  extra={&#x27;webhook&#x27;: &#x27;/services/T.../B.../XXX&#x27;}
+#   3. conn_id=&#x27;gcs_archive&#x27;      type=&#x27;google_cloud_platform&#x27;  host=&#x27;storage.googleapis.com&#x27;
+#      port=443   login=&#x27;sa-etl@project.iam.gserviceaccount.com&#x27;  schema=&#x27;&#x27;
+#      extra={&#x27;project&#x27;: &#x27;my-gcp-project&#x27;, &#x27;key_path&#x27;: &#x27;/secrets/sa-key.json&#x27;}
+#
+# Then write a function list_connections(store) that prints a table:
+#   conn_id             type                    host
+#   postgres_prod       postgres                db.prod.internal
+#   ...all 5 connections...
+#
+# Also write validate_connection(store, conn_id) that:
+#   - Returns True if conn_id exists AND login is not empty
+#   - Returns False otherwise (but does not raise)
+#   - Test with: &#x27;postgres_prod&#x27; (True), &#x27;slack_alerts&#x27; (False), &#x27;missing&#x27; (False)
+#
+# Expected output:
+#   conn_id             type                    host
+#   postgres_prod       postgres                db.prod.internal
+#   s3_data_lake        s3                      s3.amazonaws.com
+#   mysql_reporting     mysql                   reports.internal
+#   slack_alerts        http                    hooks.slack.com
+#   gcs_archive         google_cloud_platform   storage.googleapis.com
+#   postgres_prod  -&gt; True
+#   slack_alerts   -&gt; False
+#   missing        -&gt; False
+#
+# --- starting data ---
+# store already has postgres_prod and s3_data_lake from the example above</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D3_Airflow_Connections.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — VARIABLES: RUNTIME CONFIG IN AIRFLOW
+# ══════════════════════════════════════════════════════════════
+# Airflow Variables are key-value pairs stored in the metadata database.
+# Use them for configuration that may change between runs but does not
+# contain credentials (use Connections for secrets).
+#
+# In real Airflow:
+#   from airflow.models import Variable
+#   batch_size = Variable.get(&#x27;batch_size&#x27;, default_var=&#x27;1000&#x27;)
+#   config     = Variable.get(&#x27;pipeline_config&#x27;, deserialize_json=True)
+#
+# Good uses for Variables:
+#   - batch_size, max_retries, alert_email
+#   - feature flags (&#x27;enable_backfill&#x27;: true)
+#   - target environment (&#x27;env&#x27;: &#x27;staging&#x27;)
+#
+# Anti-patterns:
+#   - Storing passwords (use Connections or a secrets backend)
+#   - Storing large datasets (Variable values are small strings)
+#   - Reading Variables at module level (causes issues at parse time)
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+class VariableStore:
+    &quot;&quot;&quot;
+    Simulation of Airflow&#x27;s Variable store.
+    In real Airflow: Variable.get(&#x27;key&#x27;, default_var=&#x27;fallback&#x27;)
+    &quot;&quot;&quot;
+    def __init__(self):
+        self._vars = {}
+
+    def set(self, key, value):
+        # JSON-encode dict/list values, store strings as-is
+        self._vars[key] = json.dumps(value) if not isinstance(value, str) else value
+
+    def get(self, key, default_var=None, deserialize_json=False):
+        raw = self._vars.get(key, default_var)
+        if deserialize_json and raw is not None:
+            try:
+                return json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                return raw
+        return raw
+
+
+vars_store = VariableStore()
+vars_store.set(&#x27;batch_size&#x27;,      &#x27;5000&#x27;)
+vars_store.set(&#x27;alert_email&#x27;,     &#x27;data-team@company.com&#x27;)
+vars_store.set(&#x27;pipeline_config&#x27;, {&#x27;env&#x27;: &#x27;staging&#x27;, &#x27;max_retries&#x27;: 3, &#x27;enable_backfill&#x27;: False})
+
+batch_size = int(vars_store.get(&#x27;batch_size&#x27;, default_var=&#x27;1000&#x27;))
+email      = vars_store.get(&#x27;alert_email&#x27;)
+config     = vars_store.get(&#x27;pipeline_config&#x27;, deserialize_json=True)
+missing    = vars_store.get(&#x27;does_not_exist&#x27;, default_var=&#x27;fallback&#x27;)
+
+print(f&#x27;batch_size:       {batch_size}&#x27;)
+print(f&#x27;alert_email:      {email}&#x27;)
+print(f&#x27;pipeline_config:  {config}&#x27;)
+print(f&#x27;missing key:      {missing}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D3_Airflow_Connections.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Extend vars_store (from the example above) with 3 new variables:
+#   &#x27;lookahead_days&#x27;    -&gt; 7
+#   &#x27;report_targets&#x27;    -&gt; [&#x27;finance@company.com&#x27;, &#x27;ceo@company.com&#x27;]
+#   &#x27;sla_seconds&#x27;       -&gt; {&#x27;extract&#x27;: 120, &#x27;transform&#x27;: 300, &#x27;load&#x27;: 60}
+#
+# Then write a function read_task_config(vars_store, task_name) that:
+#   - Reads &#x27;sla_seconds&#x27; (deserialize_json=True)
+#   - Returns the SLA in seconds for the given task_name
+#   - Returns None if task_name is not in the SLA dict
+#
+# Test with: &#x27;extract&#x27;, &#x27;load&#x27;, &#x27;report&#x27; (not in dict -&gt; None).
+#
+# Also read report_targets as a list and print each email on its own line.
+#
+# Expected output:
+#   lookahead_days: 7
+#   SLA for extract: 120s
+#   SLA for load: 60s
+#   SLA for report: None
+#   report recipients:
+#     finance@company.com
+#     ceo@company.com
+#
+# --- starting data ---
+# vars_store is the VariableStore from the example above (already populated)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D3_Airflow_Connections.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — HOOKS: TYPED CONNECTION HELPERS
+# ══════════════════════════════════════════════════════════════
+# A Hook wraps a Connection and provides typed methods for a specific system.
+# Instead of writing raw connection code, tasks call hook methods.
+#
+# In real Airflow:
+#   from airflow.providers.postgres.hooks.postgres import PostgresHook
+#   hook = PostgresHook(postgres_conn_id=&#x27;postgres_prod&#x27;)
+#   rows = hook.get_records(&#x27;SELECT dept, COUNT(*) FROM employees GROUP BY dept&#x27;)
+#
+# Benefits:
+#   - Credentials never appear in task code
+#   - Common operations (get_records, get_pandas_df, run) reusable
+#   - Connection can be swapped (dev/prod) by changing the conn_id variable
+#
+# Commonly used hooks:
+#   PostgresHook    get_records(), get_pandas_df(), run()
+#   S3Hook          load_file(), download_file(), list_keys()
+#   HttpHook        run(), get_conn()
+#   SlackHook       call_load_endpoint()
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+import pandas as pd
+
+class PostgresHook:
+    &quot;&quot;&quot;
+    Simulation of Airflow&#x27;s PostgresHook.
+    Backed by DuckDB (already populated with employees table).
+
+    In real Airflow:
+        from airflow.providers.postgres.hooks.postgres import PostgresHook
+        hook = PostgresHook(postgres_conn_id=&#x27;postgres_prod&#x27;)
+    &quot;&quot;&quot;
+    def __init__(self, postgres_conn_id, conn_store=None):
+        self.postgres_conn_id = postgres_conn_id
+        # In real Airflow, the hook reads credentials from the connection store
+        if conn_store:
+            c = conn_store.get_connection(postgres_conn_id)
+            print(f&#x27;  [hook] connected via {c.get_uri()}&#x27;)
+
+    def get_records(self, sql, parameters=None):
+        &quot;&quot;&quot;Return a list of tuples (same interface as real PostgresHook).&quot;&quot;&quot;
+        if parameters:
+            result = con.execute(sql, parameters).fetchall()
+        else:
+            result = con.execute(sql).fetchall()
+        return result
+
+    def get_pandas_df(self, sql, parameters=None):
+        &quot;&quot;&quot;Return a DataFrame (same interface as real PostgresHook).&quot;&quot;&quot;
+        if parameters:
+            return con.execute(sql, parameters).df()
+        return con.execute(sql).df()
+
+    def run(self, sql, parameters=None):
+        &quot;&quot;&quot;Execute a statement with no return (INSERT, UPDATE, etc.).&quot;&quot;&quot;
+        if parameters:
+            con.execute(sql, parameters)
+        else:
+            con.execute(sql)
+
+
+hook = PostgresHook(postgres_conn_id=&#x27;postgres_prod&#x27;, conn_store=store)
+
+# get_records: returns list of tuples
+rows = hook.get_records(&#x27;SELECT dept, COUNT(*) FROM employees GROUP BY dept ORDER BY dept&#x27;)
+print(&#x27;\ndept headcount (tuples):&#x27;)
+for dept, count in rows:
+    print(f&#x27;  {dept:&lt;15}  {count}&#x27;)
+
+# get_pandas_df: returns a DataFrame
+df = hook.get_pandas_df(&#x27;SELECT name, salary FROM employees WHERE dept = ? ORDER BY salary DESC&#x27;, [&#x27;Engineering&#x27;])
+print(&#x27;\nEngineering salaries (DataFrame):&#x27;)
+print(df.to_string(index=False))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D3_Airflow_Connections.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Write two tasks that use PostgresHook to build a department salary report.
+#
+#   Task 1: query_dept_summary(hook)
+#     Use hook.get_pandas_df() to query:
+#       SELECT dept,
+#              COUNT(*) AS headcount,
+#              ROUND(AVG(salary), 2) AS avg_salary,
+#              SUM(salary) AS total_salary
+#       FROM employees GROUP BY dept ORDER BY total_salary DESC
+#     Return the DataFrame.
+#
+#   Task 2: format_report(df)
+#     Accept the DataFrame from Task 1.
+#     Print a formatted table:
+#       dept            headcount  avg_salary  total_salary
+#       Engineering     2          91500.00    183000
+#       ...
+#     Also print the company-wide total salary (sum of total_salary column).
+#
+# Call both tasks and print the output.
+#
+# Expected output:
+#   dept             headcount   avg_salary   total_salary
+#   Engineering      2           91500.00     183000
+#   Finance          1           71000.00      71000
+#   Sales            2           60000.00     120000
+#   Company total salary: 374000
+#
+# --- starting data ---
+hook3 = PostgresHook(postgres_conn_id=&#x27;postgres_prod&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D3_Airflow_Connections.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 4 — SECURITY GATE: DAG SECURITY GATE (CIA: C+A)
+# ══════════════════════════════════════════════════════════════
+# Analogy: the data center access badge system — every engineer has a
+# named badge with a role, expired badges are refused, and no one can
+# prop the door open with a rock (shell=True).
+#
+# CIA focus: Confidentiality + Availability — DAG ownership must be
+# declared; connections must not store plaintext default passwords;
+# shell injection in BashOperator tasks must be blocked.
+#
+# Checks:
+#   1. dag_config must have an &#x27;owner&#x27; key — no orphaned DAGs
+#   2. Each connection: password must not be empty or equal the conn_id
+#   3. Tasks with bash_command containing &#x27;{{ ds }}&#x27; and shell=True are flagged
+#
+# EXAMPLE ──────────────────────────────────────────────────────────
+from dataclasses import dataclass, field
+
+
+class MissingOwnerError(Exception):
+    pass
+
+
+class WeakConnectionError(Exception):
+    pass
+
+
+class ShellInjectionRiskError(Exception):
+    pass
+
+
+@dataclass
+class DagSecurityReport:
+    passed: bool
+    violations: list = field(default_factory=list)
+
+
+def dag_security_gate(dag_config: dict, connections: list) -&gt; DagSecurityReport:
+    if &quot;owner&quot; not in dag_config:
+        raise MissingOwnerError(
+            f&quot;DAG &#x27;{dag_config.get(&#x27;dag_id&#x27;, &#x27;?&#x27;)}&#x27; has no owner declared&quot;
+        )
+    for conn in connections:
+        conn_id = conn.get(&quot;conn_id&quot;, &quot;&quot;)
+        password = conn.get(&quot;password&quot;, &quot;&quot;)
+        if password == &quot;&quot; or password == conn_id:
+            raise WeakConnectionError(
+                f&quot;Connection &#x27;{conn_id}&#x27; has empty or default password&quot;
+            )
+    for task in dag_config.get(&quot;tasks&quot;, []):
+        bash_cmd = task.get(&quot;bash_command&quot;, &quot;&quot;)
+        if &quot;{{ ds }}&quot; in bash_cmd and task.get(&quot;shell&quot;) is True:
+            raise ShellInjectionRiskError(
+                f&quot;Task &#x27;{task.get(&#x27;task_id&#x27;)}&#x27; has shell=True + template variable&quot;
+            )
+    return DagSecurityReport(passed=True)
+
+
+# Compliant DAG — passes
+compliant_dag = {
+    &quot;dag_id&quot;: &quot;etl_pipeline&quot;,
+    &quot;owner&quot;: &quot;data-team&quot;,
+    &quot;tasks&quot;: [{&quot;task_id&quot;: &quot;load&quot;, &quot;bash_command&quot;: &quot;python load.py&quot;, &quot;shell&quot;: False}],
+}
+report = dag_security_gate(
+    compliant_dag,
+    [{&quot;conn_id&quot;: &quot;postgres_prod&quot;, &quot;password&quot;: &quot;s3cur3p@ss&quot;}],
+)
+print(f&quot;Compliant DAG: passed={report.passed}&quot;)
+
+# Missing owner — blocked
+try:
+    dag_security_gate({&quot;dag_id&quot;: &quot;orphan_dag&quot;, &quot;tasks&quot;: []}, [])
+except MissingOwnerError as e:
+    print(f&quot;MissingOwnerError: {e}&quot;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D3_Airflow_Connections.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 4
+# ══════════════════════════════════════════════════════════════
+# Three security violations are planted below.
+# Call dag_security_gate() on each scenario, catch the exception,
+# and print the exception class name and message.
+#
+# Expected output:
+#   MissingOwnerError: DAG &#x27;orphaned_pipeline&#x27; has no owner declared
+#   WeakConnectionError: Connection &#x27;s3_backup&#x27; has empty or default password
+#   ShellInjectionRiskError: Task &#x27;run_report&#x27; has shell=True + template variable
+#
+# --- starting data ---
+dag_no_owner = {
+    &quot;dag_id&quot;: &quot;orphaned_pipeline&quot;,
+    &quot;tasks&quot;: [{&quot;task_id&quot;: &quot;load&quot;, &quot;bash_command&quot;: &quot;python load.py&quot;, &quot;shell&quot;: False}]
+}
+connections_weak = [
+    {&quot;conn_id&quot;: &quot;postgres_prod&quot;, &quot;password&quot;: &quot;s3cur3p@ss&quot;},
+    {&quot;conn_id&quot;: &quot;s3_backup&quot;,     &quot;password&quot;: &quot;&quot;},
+]
+dag_with_injection = {
+    &quot;dag_id&quot;: &quot;report_pipeline&quot;, &quot;owner&quot;: &quot;analytics-team&quot;,
+    &quot;tasks&quot;: [
+        {&quot;task_id&quot;: &quot;run_report&quot;,
+         &quot;bash_command&quot;: &quot;python report.py --date {{ ds }}&quot;,
+         &quot;shell&quot;: True}
+    ]
+}
+compliant_conns_16 = [{&quot;conn_id&quot;: &quot;postgres_prod&quot;, &quot;password&quot;: &quot;s3cur3p@ss&quot;}]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-4">Day 4 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-4"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D4_Airflow_Dynamic_Tasks.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 16  |  DAY 4  |  AIRFLOW DYNAMIC TASKS AND ERROR HANDLING
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Use dynamic task mapping to fan out over a list (expand pattern)
+#  2. Choose between parallel and sequential task execution
+#  3. Add retry logic with exponential backoff to a task
+#
+#  TIME:  ~60 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;Airflow dynamic task mapping&quot;
+#  Video: &quot;Dynamic Tasks in Airflow&quot; -- Astronomer (official)
+#         https://www.youtube.com/watch?v=AFAz9JkphVE
+#         (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import random
+import time
+from datetime import datetime
+
+random.seed(42)
+
+print(&#x27;Airflow Dynamic Tasks and Error Handling lesson ready.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D4_Airflow_Dynamic_Tasks.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — DYNAMIC TASK MAPPING: expand()
+# ══════════════════════════════════════════════════════════════
+# Dynamic task mapping (Airflow 2.3+) lets you generate tasks at runtime
+# based on a list that may not be known until the DAG runs.
+#
+# In real Airflow (TaskFlow API):
+#   @task
+#   def process_file(filename: str) -&gt; dict:
+#       ...do something with the file...
+#       return {&#x27;file&#x27;: filename, &#x27;rows&#x27;: 1234}
+#
+#   # Fan out: one task instance per filename
+#   results = process_file.expand(filename=file_list)
+#
+# Each call is an independent Task Instance in the Airflow UI.
+# They can run in parallel (subject to worker slot availability).
+#
+# Airflow also supports partial() to fix some args and expand others:
+#   process_file.partial(mode=&#x27;strict&#x27;).expand(filename=file_list)
+#
+# Use expand() when:
+#   - The list size is determined by upstream data
+#   - Each element can be processed independently
+#   - You want retry at the individual-element level
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+def process_file(filename):
+    &quot;&quot;&quot;
+    Simulate processing one file.
+    In real Airflow this would be decorated with @task.
+    &quot;&quot;&quot;
+    rows = random.randint(100, 5000)
+    size_kb = rows * 0.5
+    print(f&#x27;  processed  {filename:&lt;35}  {rows:&gt;4} rows  ({size_kb:.0f} KB)&#x27;)
+    return {&#x27;file&#x27;: filename, &#x27;rows&#x27;: rows, &#x27;size_kb&#x27;: size_kb}
+
+
+def expand(fn, items):
+    &quot;&quot;&quot;
+    Simulation of Airflow&#x27;s .expand() -- runs fn once per item.
+    In real Airflow: fn.expand(arg=items)
+    Results are collected in order (same as Airflow mapped task results).
+    &quot;&quot;&quot;
+    return [fn(item) for item in items]
+
+
+# Simulate a dynamic file list discovered at runtime
+file_list = [
+    &#x27;sales_2024-01-01.csv&#x27;,
+    &#x27;sales_2024-01-02.csv&#x27;,
+    &#x27;sales_2024-01-03.csv&#x27;,
+    &#x27;sales_2024-01-04.csv&#x27;,
+    &#x27;sales_2024-01-05.csv&#x27;,
+]
+
+print(&#x27;--- expand() over file list ---&#x27;)
+results = expand(process_file, file_list)
+
+total_rows = sum(r[&#x27;rows&#x27;] for r in results)
+total_kb   = sum(r[&#x27;size_kb&#x27;] for r in results)
+print(f&#x27;\nTotal rows processed: {total_rows}&#x27;)
+print(f&#x27;Total data size:      {total_kb:.0f} KB&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D4_Airflow_Dynamic_Tasks.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Write a function validate_region(region) that:
+#   - Simulates validating a sales file for a given region
+#   - Returns a dict: {region, rows_checked, issues_found, status}
+#   - issues_found = random.randint(0, 3) per region
+#   - status = &#x27;PASS&#x27; if issues_found == 0 else &#x27;FAIL&#x27;
+#
+# Use expand() to run validate_region over all 5 regions.
+# Then print a summary table of results.
+#
+# Expected output:
+#   region          rows_checked  issues_found  status
+#   EMEA            4823          0             PASS
+#   AMER            3910          2             FAIL
+#   APAC            1562          0             PASS
+#   LATAM           2341          1             FAIL
+#   MEA             987           0             PASS
+#
+#   Regions passed: 3/5
+#
+# --- starting data ---
+regions = [&#x27;EMEA&#x27;, &#x27;AMER&#x27;, &#x27;APAC&#x27;, &#x27;LATAM&#x27;, &#x27;MEA&#x27;]
+random.seed(99)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D4_Airflow_Dynamic_Tasks.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — PARALLEL VS SEQUENTIAL EXECUTION
+# ══════════════════════════════════════════════════════════════
+# Airflow can run tasks in parallel when they have no dependency on each other.
+# Concurrency is controlled at three levels:
+#
+#   parallelism         global: max concurrent task instances across ALL DAGs
+#   dag max_active_tasks: max concurrent tasks within ONE DAG run
+#   pool slots          logical grouping (e.g. &#x27;db_pool&#x27;: 3 slots max)
+#
+# When to use parallel:
+#   - Independent file processing (different regions, different dates)
+#   - Calls to different APIs with no shared state
+#   - Backfill across many historical dates
+#
+# When to use sequential:
+#   - Task B needs Task A&#x27;s output
+#   - Database writes that must maintain order
+#   - Rate-limited APIs where parallel calls would be throttled
+#
+# Sequential pattern (chain): extract &gt;&gt; transform &gt;&gt; load
+# Parallel pattern (fan-out): extract &gt;&gt; [validate, enrich, profile] &gt;&gt; merge
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+from concurrent.futures import ThreadPoolExecutor
+
+def timed_task(name, duration_ms):
+    &quot;&quot;&quot;Simulate a task that takes duration_ms milliseconds.&quot;&quot;&quot;
+    start = datetime.now()
+    time.sleep(duration_ms / 1000)
+    elapsed = (datetime.now() - start).total_seconds() * 1000
+    return {&#x27;task&#x27;: name, &#x27;duration_ms&#x27;: round(elapsed, 0)}
+
+tasks = [
+    (&#x27;validate_emea&#x27;, 80),
+    (&#x27;validate_amer&#x27;, 90),
+    (&#x27;validate_apac&#x27;, 70),
+]
+
+# Sequential
+seq_start   = datetime.now()
+seq_results = [timed_task(n, d) for n, d in tasks]
+seq_total   = (datetime.now() - seq_start).total_seconds() * 1000
+print(f&#x27;Sequential:  {seq_total:.0f} ms total&#x27;)
+
+# Parallel (threads simulate Airflow workers)
+par_start = datetime.now()
+with ThreadPoolExecutor(max_workers=3) as pool:
+    par_results = list(pool.map(lambda x: timed_task(*x), tasks))
+par_total = (datetime.now() - par_start).total_seconds() * 1000
+print(f&#x27;Parallel:    {par_total:.0f} ms total&#x27;)
+print(f&#x27;Speedup:     {seq_total/par_total:.1f}x&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D4_Airflow_Dynamic_Tasks.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# You have a 4-step pipeline:
+#   Step A: extract_source  (no dependency)
+#   Step B: validate_rows   (depends on A&#x27;s row count &gt; 0)
+#   Step C: load_warehouse  (depends on B passing validation)
+#   Step D: send_alert      (always runs after C, success or fail)
+#
+# Write Python functions for each step (no actual Airflow).
+# Chain them manually: A -&gt; B -&gt; C -&gt; D.
+#
+# Rules:
+#   - extract_source returns a list of dicts (at least 1 row)
+#   - validate_rows raises ValueError(&#x27;no rows to process&#x27;) if list is empty
+#   - load_warehouse prints &#x27;loaded N rows&#x27; and returns {&#x27;status&#x27;: &#x27;ok&#x27;, &#x27;rows&#x27;: N}
+#   - send_alert always prints a summary of the run (success or failure reason)
+#
+# Test with TWO scenarios:
+#   Scenario A: extract returns 3 rows (normal run)
+#   Scenario B: extract returns [] (triggers validate_rows failure)
+#
+# Expected output:
+#   --- Scenario A ---
+#   extract_source: 3 rows
+#   validate_rows: PASS
+#   loaded 3 rows
+#   send_alert: SUCCESS - 3 rows loaded
+#
+#   --- Scenario B ---
+#   extract_source: 0 rows
+#   send_alert: FAILED - no rows to process
+#
+# --- starting data ---
+rows_a = [{&#x27;id&#x27;: 1, &#x27;amount&#x27;: 100}, {&#x27;id&#x27;: 2, &#x27;amount&#x27;: 200}, {&#x27;id&#x27;: 3, &#x27;amount&#x27;: 150}]
+rows_b = []</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D4_Airflow_Dynamic_Tasks.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — ERROR HANDLING: RETRIES AND CALLBACKS
+# ══════════════════════════════════════════════════════════════
+# Airflow tasks can be configured to retry automatically on failure.
+#
+# In real Airflow (Python Operator or @task decorator):
+#   @task(retries=3, retry_delay=timedelta(minutes=5))
+#   def flaky_api_call(): ...
+#
+# Or with exponential backoff:
+#   @task(retries=3, retry_delay=timedelta(seconds=30),
+#         retry_exponential_backoff=True, max_retry_delay=timedelta(minutes=10))
+#   def flaky_api_call(): ...
+#
+# on_failure_callback:
+#   A Python function called when a task fails all retries.
+#   In real Airflow: receives a context dict with dag, task, exception info.
+#
+#   @task(on_failure_callback=alert_slack)
+#   def risky_task(): ...
+#
+#   def alert_slack(context):
+#       error = context[&#x27;exception&#x27;]
+#       send_slack_message(f&#x27;Task failed: {error}&#x27;)
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+def with_retry(fn, max_retries=3, base_delay=0.05):
+    &quot;&quot;&quot;
+    Run fn with exponential backoff retry.
+    Simulation of Airflow&#x27;s retry_exponential_backoff=True.
+    base_delay in seconds (kept tiny for demo speed).
+    &quot;&quot;&quot;
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            result = fn()
+            print(f&#x27;  attempt {attempt}: SUCCESS&#x27;)
+            return result
+        except Exception as exc:
+            last_error = exc
+            delay = base_delay * (2 ** (attempt - 1))
+            print(f&#x27;  attempt {attempt}: FAILED ({exc}) -- retry in {delay:.2f}s&#x27;)
+            time.sleep(delay)
+    raise RuntimeError(f&#x27;Task failed after {max_retries} retries: {last_error}&#x27;)
+
+
+def on_failure_callback(context):
+    print(f&#x27;  [on_failure_callback] task={context[&quot;task&quot;]}  error={context[&quot;error&quot;]}&#x27;)
+
+
+# Task that fails twice then succeeds
+attempt_counter = {&#x27;n&#x27;: 0}
+
+def flaky_api_call():
+    attempt_counter[&#x27;n&#x27;] += 1
+    if attempt_counter[&#x27;n&#x27;] &lt; 3:
+        raise ConnectionError(&#x27;API timeout&#x27;)
+    return {&#x27;status&#x27;: 200, &#x27;records&#x27;: 42}
+
+
+print(&#x27;--- Task with retry ---&#x27;)
+try:
+    result = with_retry(flaky_api_call, max_retries=3, base_delay=0.01)
+    print(f&#x27;  result: {result}&#x27;)
+except RuntimeError as exc:
+    on_failure_callback({&#x27;task&#x27;: &#x27;flaky_api_call&#x27;, &#x27;error&#x27;: str(exc)})</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D4_Airflow_Dynamic_Tasks.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Write a function fetch_inventory(region) that:
+#   - Raises ConnectionError(&#x27;timeout&#x27;) on the first 2 calls for each region
+#   - Succeeds on the 3rd call, returning {&#x27;region&#x27;: region, &#x27;items&#x27;: N}
+#     where N = random.randint(50, 500)
+#
+# Use with_retry(max_retries=3, base_delay=0.01) to call fetch_inventory
+# for each of 3 regions: &#x27;UK&#x27;, &#x27;DE&#x27;, &#x27;FR&#x27;.
+#
+# After all 3 succeed (or fail), print a summary:
+#   region  status   items
+#   UK      success  312
+#   DE      success  178
+#   FR      success  451
+#
+# If a region fails all retries, write &#x27;FAILED&#x27; for its status and 0 for items.
+#
+# Expected output:
+#   --- UK ---
+#   attempt 1: FAILED (timeout) -- retry in 0.01s
+#   attempt 2: FAILED (timeout) -- retry in 0.02s
+#   attempt 3: SUCCESS
+#   (same for DE and FR)
+#   region  status   items
+#   UK      success  312
+#   DE      success  178
+#   FR      success  451
+#
+# --- starting data ---
+target_regions = [&#x27;UK&#x27;, &#x27;DE&#x27;, &#x27;FR&#x27;]
+call_counts = {}   # track per-region attempt count
+random.seed(7)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-5">Day 5 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-5"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D5_Airflow_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 16  |  DAY 5  |  AIRFLOW + dbt INTEGRATION
+# ══════════════════════════════════════════════════════════════
+#
+#  LEARNING OBJECTIVES
+#  ───────────────────
+#  1. Understand why Airflow and dbt are complementary (not competing)
+#  2. Simulate DbtRunOperator triggering a dbt model from an Airflow task
+#  3. Build a full orchestration DAG: ingest -&gt; dbt build -&gt; dbt test -&gt; alert
+#
+#  TIME:  ~60 minutes
+#
+#  YOUTUBE
+#  ───────
+#  Search: &quot;Airflow dbt integration tutorial&quot;
+#  Video: &quot;Get started with dbt and Airflow using Cosmos&quot; -- Astronomer (official)
+#         https://www.youtube.com/watch?v=zVo8Mv_i2Z8
+#         (verified live; kept alongside the search string in case it rots)
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+import pandas as pd
+import json
+import time
+import functools
+from datetime import datetime
+
+# ── Shared simulation layer ───────────────────────────────────
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+def ref(model):         return model
+def source(s, t):       return f&#x27;{s}__{t}&#x27;
+
+def bq_load(df, table, write_disposition=&#x27;WRITE_TRUNCATE&#x27;):
+    tables = [r[0] for r in con.execute(&#x27;SHOW TABLES&#x27;).fetchall()]
+    if write_disposition == &#x27;WRITE_TRUNCATE&#x27; or table not in tables:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {table} AS SELECT * FROM df&#x27;)
+    else:
+        con.execute(f&#x27;INSERT INTO {table} SELECT * FROM df&#x27;)
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {table}&#x27;).fetchone()[0]
+
+def dbt_run(name, sql, materialized=&#x27;view&#x27;):
+    if materialized == &#x27;table&#x27;:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {name} AS {sql}&#x27;)
+    else:
+        con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {name}&#x27;).fetchone()[0]
+
+def dbt_test_not_null(model, col):
+    n = con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {col} IS NULL&#x27;).fetchone()[0]
+    return n == 0
+
+def dbt_test_unique(model, col):
+    n = con.execute(f&quot;&quot;&quot;SELECT COUNT(*) FROM (
+        SELECT {col} FROM {model} GROUP BY {col} HAVING COUNT(*) &gt; 1
+    )&quot;&quot;&quot;).fetchone()[0]
+    return n == 0
+
+def dbt_test_accepted_values(model, col, values):
+    placeholders = &#x27;, &#x27;.join([f&quot;&#x27;{v}&#x27;&quot; for v in values])
+    n = con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {col} NOT IN ({placeholders})&#x27;).fetchone()[0]
+    return n == 0
+
+# ── LLM simulation (same pattern as W15) ─────────────────────
+def call_llm(prompt):
+    &quot;&quot;&quot;
+    SIMULATION: Returns a realistic hardcoded response.
+    REAL MODE (commented):
+        from groq import Groq
+        client = Groq(api_key=os.environ[&#x27;GROQ_API_KEY&#x27;])
+        resp = client.chat.completions.create(
+            model=&#x27;llama3-8b-8192&#x27;,
+            messages=[{&#x27;role&#x27;: &#x27;user&#x27;, &#x27;content&#x27;: prompt}]
+        )
+        return resp.choices[0].message.content
+    &quot;&quot;&quot;
+    if &#x27;error&#x27; in prompt.lower() or &#x27;fail&#x27; in prompt.lower():
+        return (
+            &#x27;The pipeline failed because a dbt model encountered a data quality issue. &#x27;
+            &#x27;The stg_sales model found NULL values in the order_id column, which violates &#x27;
+            &#x27;the not_null contract. Check the raw source table for incomplete records &#x27;
+            &#x27;arriving from the upstream API. Consider adding a pre-load validation step &#x27;
+            &#x27;to reject rows with missing primary keys before they reach the staging layer.&#x27;
+        )
+    return (
+        &#x27;Pipeline completed successfully. All 5 tasks finished without errors. &#x27;
+        &#x27;The dbt staging and mart models materialized correctly, and all schema tests passed. &#x27;
+        &#x27;No action required.&#x27;
+    )
+
+
+print(&#x27;Airflow + dbt Integration lesson ready.&#x27;)
+print(&#x27;DuckDB, dbt simulation, and LLM simulation loaded.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D5_Airflow_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 1 — dbt + AIRFLOW: TWO TOOLS, ONE PIPELINE
+# ══════════════════════════════════════════════════════════════
+# dbt and Airflow solve different problems and work together:
+#
+#   Airflow handles:              dbt handles:
+#   ─────────────────────         ──────────────────────────
+#   WHEN to run (schedule)        WHAT to compute (SQL models)
+#   Data extraction (APIs, DBs)   Transformations (staging, marts)
+#   File movement (S3, GCS)       Data quality tests (schema.yml)
+#   Notifications (Slack, email)  Documentation (dbt docs)
+#   Retry / failure logic         Dependency graph within dbt
+#
+# Typical production pipeline:
+#   1. Airflow extracts from source API -&gt; loads raw table
+#   2. Airflow calls: dbt run --select staging+
+#   3. Airflow calls: dbt test --select staging+
+#   4. Airflow calls: dbt run --select mart+
+#   5. On failure: Airflow on_failure_callback sends alert
+#
+# Two integration patterns:
+#   A. BashOperator / subprocess:
+#        BashOperator(task_id=&#x27;dbt_run&#x27;, bash_command=&#x27;dbt run --profiles-dir .&#x27;)
+#
+#   B. astronomer-cosmos (recommended for large projects):
+#        DbtTaskGroup() maps each dbt model to its own Airflow task
+#        Full lineage visible in Airflow UI
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+# Simulate a DbtRunResult as returned by subprocess / cosmos
+from dataclasses import dataclass
+
+@dataclass
+class DbtRunResult:
+    model         : str
+    status        : str   # &#x27;success&#x27; | &#x27;error&#x27; | &#x27;skip&#x27;
+    rows_affected : int
+    duration_ms   : int
+
+    def to_dict(self):
+        return {
+            &#x27;model&#x27;: self.model, &#x27;status&#x27;: self.status,
+            &#x27;rows_affected&#x27;: self.rows_affected, &#x27;duration_ms&#x27;: self.duration_ms
+        }
+
+
+class DbtRunOperator:
+    &quot;&quot;&quot;
+    Simulation of the Airflow DbtRunOperator (from astronomer-cosmos or similar).
+
+    In real Airflow (BashOperator approach):
+        DbtRunOperator(
+            task_id=&#x27;dbt_run_staging&#x27;,
+            models=[&#x27;stg_sales&#x27;],
+            dbt_bin=&#x27;/usr/local/bin/dbt&#x27;,
+            profiles_dir=&#x27;/opt/airflow/dbt&#x27;,
+        )
+
+    Real subprocess call (BashOperator alternative):
+        import subprocess
+        result = subprocess.run(
+            [&#x27;dbt&#x27;, &#x27;run&#x27;, &#x27;--select&#x27;, model_name, &#x27;--profiles-dir&#x27;, &#x27;.&#x27;],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr)
+    &quot;&quot;&quot;
+    def __init__(self, task_id, model, sql, materialized=&#x27;view&#x27;):
+        self.task_id      = task_id
+        self.model        = model
+        self.sql          = sql
+        self.materialized = materialized
+
+    def execute(self):
+        start = datetime.now()
+        rows  = dbt_run(self.model, self.sql, self.materialized)
+        ms    = int((datetime.now() - start).total_seconds() * 1000)
+        return DbtRunResult(self.model, &#x27;success&#x27;, rows, max(ms, 1))
+
+
+# Load some raw data first
+raw_df = pd.DataFrame([
+    {&#x27;order_id&#x27;: 1, &#x27;region&#x27;: &#x27;EMEA&#x27;, &#x27;amount&#x27;: 1200.0},
+    {&#x27;order_id&#x27;: 2, &#x27;region&#x27;: &#x27;AMER&#x27;, &#x27;amount&#x27;:  850.0},
+    {&#x27;order_id&#x27;: 3, &#x27;region&#x27;: &#x27;EMEA&#x27;, &#x27;amount&#x27;: 2100.0},
+])
+bq_load(raw_df, &#x27;raw__sales&#x27;)
+
+# Simulate DbtRunOperator
+op = DbtRunOperator(
+    task_id     = &#x27;dbt_run_stg_sales&#x27;,
+    model       = &#x27;stg_sales&#x27;,
+    sql         = f&quot;SELECT order_id, UPPER(region) AS region, ROUND(amount, 2) AS amount_usd FROM {source(&#x27;raw&#x27;, &#x27;sales&#x27;)}&quot;,
+)
+result = op.execute()
+print(json.dumps(result.to_dict(), indent=2))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D5_Airflow_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 1
+# ══════════════════════════════════════════════════════════════
+# Write a function run_dbt_model(model, sql, materialized=&#x27;view&#x27;)
+# that internally uses DbtRunOperator and returns a DbtRunResult.
+#
+# Use it to build two models:
+#   stg_payroll:
+#     SELECT emp_id, UPPER(dept) AS department,
+#            salary, ROUND(salary * 0.2, 2) AS tax_withheld
+#     FROM raw__payroll
+#
+#   fct_dept_cost:
+#     SELECT department,
+#            COUNT(*) AS headcount,
+#            SUM(salary) AS total_salary,
+#            SUM(tax_withheld) AS total_tax
+#     FROM stg_payroll GROUP BY department
+#     (materialized=&#x27;table&#x27;)
+#
+# Print the DbtRunResult for each model as JSON.
+#
+# Expected output:
+#   {&quot;model&quot;: &quot;stg_payroll&quot;, &quot;status&quot;: &quot;success&quot;, &quot;rows_affected&quot;: 5, ...}
+#   {&quot;model&quot;: &quot;fct_dept_cost&quot;, &quot;status&quot;: &quot;success&quot;, &quot;rows_affected&quot;: 3, ...}
+#
+# --- starting data ---
+payroll_df = pd.DataFrame([
+    {&#x27;emp_id&#x27;: 1, &#x27;dept&#x27;: &#x27;Engineering&#x27;, &#x27;salary&#x27;: 95000},
+    {&#x27;emp_id&#x27;: 2, &#x27;dept&#x27;: &#x27;Sales&#x27;,        &#x27;salary&#x27;: 62000},
+    {&#x27;emp_id&#x27;: 3, &#x27;dept&#x27;: &#x27;Engineering&#x27;, &#x27;salary&#x27;: 88000},
+    {&#x27;emp_id&#x27;: 4, &#x27;dept&#x27;: &#x27;Finance&#x27;,     &#x27;salary&#x27;: 71000},
+    {&#x27;emp_id&#x27;: 5, &#x27;dept&#x27;: &#x27;Sales&#x27;,        &#x27;salary&#x27;: 58000},
+])
+bq_load(payroll_df, &#x27;raw__payroll&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D5_Airflow_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 2 — DBTRUNOPERATOR: TRIGGER dbt FROM AIRFLOW
+# ══════════════════════════════════════════════════════════════
+# The DbtRunOperator (or BashOperator with dbt CLI) sits inside an
+# Airflow DAG as a regular task. This means Airflow controls:
+#   - When dbt runs (schedule, triggers)
+#   - What happens on failure (retries, callbacks)
+#   - Dependencies before and after (sensors, other tasks)
+#
+# Running dbt from Airflow with subprocess (real code):
+#   import subprocess
+#   cmd = [
+#       &#x27;dbt&#x27;, &#x27;run&#x27;,
+#       &#x27;--select&#x27;, &#x27;stg_sales fct_sales&#x27;,
+#       &#x27;--profiles-dir&#x27;, &#x27;/opt/airflow/dbt&#x27;,
+#       &#x27;--target&#x27;, &#x27;prod&#x27;,
+#   ]
+#   result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+#   # result.returncode == 0 means success
+#   # result.stdout contains dbt&#x27;s log output
+#
+# Using astronomer-cosmos (maps dbt models to Airflow tasks):
+#   from cosmos import DbtTaskGroup, ProjectConfig, ProfileConfig
+#   DbtTaskGroup(
+#       group_id=&#x27;dbt_staging&#x27;,
+#       project_config=ProjectConfig(&#x27;/opt/dbt/my_project&#x27;),
+#       profile_config=ProfileConfig(profile_name=&#x27;my_project&#x27;, target_name=&#x27;prod&#x27;, ...)
+#   )
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+class DbtTestRunner:
+    &quot;&quot;&quot;Simulation of dbt test command run from Airflow.&quot;&quot;&quot;
+
+    def __init__(self):
+        self.tests   = []    # list of (name, fn)
+        self.results = []
+
+    def add_not_null(self, model, col):
+        self.tests.append((f&#x27;{model}.{col}.not_null&#x27;,
+                           lambda m=model, c=col: dbt_test_not_null(m, c)))
+
+    def add_unique(self, model, col):
+        self.tests.append((f&#x27;{model}.{col}.unique&#x27;,
+                           lambda m=model, c=col: dbt_test_unique(m, c)))
+
+    def add_accepted_values(self, model, col, values):
+        self.tests.append((f&#x27;{model}.{col}.accepted_values&#x27;,
+                           lambda m=model, c=col, v=values: dbt_test_accepted_values(m, c, v)))
+
+    def run(self):
+        for name, fn in self.tests:
+            passed = fn()
+            status = &#x27;PASS&#x27; if passed else &#x27;FAIL&#x27;
+            self.results.append({&#x27;test&#x27;: name, &#x27;status&#x27;: status})
+            print(f&#x27;  [{status}]  {name}&#x27;)
+        failed = [r for r in self.results if r[&#x27;status&#x27;] == &#x27;FAIL&#x27;]
+        return len(failed) == 0
+
+
+# Run tests on the stg_sales model created in Concept 1
+tester = DbtTestRunner()
+tester.add_not_null(&#x27;stg_sales&#x27;, &#x27;order_id&#x27;)
+tester.add_unique(&#x27;stg_sales&#x27;, &#x27;order_id&#x27;)
+tester.add_accepted_values(&#x27;stg_sales&#x27;, &#x27;region&#x27;, [&#x27;EMEA&#x27;, &#x27;AMER&#x27;, &#x27;APAC&#x27;, &#x27;LATAM&#x27;])
+
+print(&#x27;--- dbt test ---&#x27;)
+all_passed = tester.run()
+print(f&#x27;\nAll tests passed: {all_passed}&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D5_Airflow_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 2
+# ══════════════════════════════════════════════════════════════
+# Build a 4-task DAG: load_raw -&gt; dbt_run_staging -&gt; dbt_run_mart -&gt; dbt_test_mart
+#
+# Each task is a plain Python function. Chain them sequentially.
+#
+#   load_raw:
+#     Load inventory_df into raw__inventory using bq_load(). Print rows loaded.
+#
+#   dbt_run_staging:
+#     Use DbtRunOperator to create stg_inventory:
+#     SELECT item_id, UPPER(category) AS category,
+#            qty_on_hand, ROUND(unit_cost * qty_on_hand, 2) AS stock_value
+#     FROM raw__inventory
+#
+#   dbt_run_mart:
+#     Use DbtRunOperator (materialized=&#x27;table&#x27;) to create fct_category_stock:
+#     SELECT category, SUM(qty_on_hand) AS total_units,
+#            ROUND(SUM(stock_value), 2) AS total_value
+#     FROM stg_inventory GROUP BY category
+#
+#   dbt_test_mart:
+#     Use DbtTestRunner to run 3 tests on fct_category_stock:
+#       not_null(category), unique(category),
+#       accepted_values(category, [&#x27;Electronics&#x27;,&#x27;Clothing&#x27;,&#x27;Food&#x27;])
+#     Raise RuntimeError(&#x27;dbt tests failed&#x27;) if any test fails.
+#
+# Print a run_report dict at the end: {dag_id, status, tasks_succeeded}.
+#
+# Expected output:
+#   load_raw: 6 rows loaded
+#   dbt_run_staging: {&quot;model&quot;: &quot;stg_inventory&quot;, &quot;status&quot;: &quot;success&quot;, &quot;rows_affected&quot;: 6}
+#   dbt_run_mart: {&quot;model&quot;: &quot;fct_category_stock&quot;, &quot;status&quot;: &quot;success&quot;, &quot;rows_affected&quot;: 3}
+#   [PASS] fct_category_stock.category.not_null
+#   [PASS] fct_category_stock.category.unique
+#   [PASS] fct_category_stock.category.accepted_values
+#   {&quot;dag_id&quot;: &quot;inventory_pipeline&quot;, &quot;status&quot;: &quot;SUCCESS&quot;, &quot;tasks_succeeded&quot;: 4}
+#
+# --- starting data ---
+inventory_df = pd.DataFrame([
+    {&#x27;item_id&#x27;: 1, &#x27;category&#x27;: &#x27;Electronics&#x27;, &#x27;qty_on_hand&#x27;: 120, &#x27;unit_cost&#x27;: 49.99},
+    {&#x27;item_id&#x27;: 2, &#x27;category&#x27;: &#x27;Clothing&#x27;,    &#x27;qty_on_hand&#x27;: 350, &#x27;unit_cost&#x27;:  9.99},
+    {&#x27;item_id&#x27;: 3, &#x27;category&#x27;: &#x27;Electronics&#x27;, &#x27;qty_on_hand&#x27;:  80, &#x27;unit_cost&#x27;: 129.99},
+    {&#x27;item_id&#x27;: 4, &#x27;category&#x27;: &#x27;Food&#x27;,         &#x27;qty_on_hand&#x27;: 500, &#x27;unit_cost&#x27;:  2.49},
+    {&#x27;item_id&#x27;: 5, &#x27;category&#x27;: &#x27;Clothing&#x27;,    &#x27;qty_on_hand&#x27;: 200, &#x27;unit_cost&#x27;: 24.99},
+    {&#x27;item_id&#x27;: 6, &#x27;category&#x27;: &#x27;Food&#x27;,         &#x27;qty_on_hand&#x27;: 800, &#x27;unit_cost&#x27;:  1.19},
+])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D5_Airflow_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  CONCEPT 3 — FULL ORCHESTRATION: INGEST -&gt; dbt -&gt; TEST -&gt; ALERT
+# ══════════════════════════════════════════════════════════════
+# The production pattern for Airflow + dbt pipelines:
+#
+#   1. Sensor: wait for upstream data to land
+#   2. Ingest: extract + load raw table (Python)
+#   3. dbt build: staging models (WRITE_TRUNCATE)
+#   4. dbt build: mart models (WRITE_TRUNCATE)
+#   5. dbt test: schema tests (not_null, unique, accepted_values)
+#   6a. On success: notify stakeholders
+#   6b. On failure: call LLM with error context, post plain-English explanation to Slack
+#
+# on_failure_callback in real Airflow:
+#   def alert_on_failure(context):
+#       error_msg = str(context[&#x27;exception&#x27;])
+#       dag_id    = context[&#x27;dag&#x27;].dag_id
+#       task_id   = context[&#x27;task&#x27;].task_id
+#       explanation = call_llm(f&#x27;Airflow task {task_id} in {dag_id} failed: {error_msg}&#x27;)
+#       SlackHook().post_message(channel=&#x27;#data-alerts&#x27;, text=explanation)
+#
+# EXAMPLE ──────────────────────────────────────────────────────
+
+def on_failure_callback(context):
+    &quot;&quot;&quot;
+    Called when any task in the DAG fails all retries.
+    Sends plain-English explanation via LLM.
+    &quot;&quot;&quot;
+    prompt = (
+        f&#x27;Airflow pipeline failed.\n&#x27;
+        f&#x27;DAG: {context[&quot;dag_id&quot;]}\n&#x27;
+        f&#x27;Task: {context[&quot;task_id&quot;]}\n&#x27;
+        f&#x27;Error: {context[&quot;error&quot;]}\n&#x27;
+        f&#x27;Explain what went wrong and suggest a fix in 3 sentences.&#x27;
+    )
+    explanation = call_llm(prompt)
+    print(f&#x27;\n[LLM alert]\n{explanation}&#x27;)
+
+
+# Full orchestration run example
+run_report = {&#x27;dag_id&#x27;: &#x27;sales_orchestration&#x27;, &#x27;steps&#x27;: [], &#x27;status&#x27;: &#x27;PENDING&#x27;}
+
+try:
+    # Step 1: ingest
+    sales_df = pd.DataFrame([
+        {&#x27;order_id&#x27;: 10, &#x27;region&#x27;: &#x27;EMEA&#x27;, &#x27;amount&#x27;: 980.0},
+        {&#x27;order_id&#x27;: 11, &#x27;region&#x27;: &#x27;AMER&#x27;, &#x27;amount&#x27;: 1450.0},
+        {&#x27;order_id&#x27;: 12, &#x27;region&#x27;: &#x27;APAC&#x27;, &#x27;amount&#x27;:  620.0},
+    ])
+    n = bq_load(sales_df, &#x27;raw__sales2&#x27;)
+    run_report[&#x27;steps&#x27;].append({&#x27;step&#x27;: &#x27;ingest&#x27;, &#x27;rows&#x27;: n, &#x27;status&#x27;: &#x27;ok&#x27;})
+    print(f&#x27;ingest: {n} rows&#x27;)
+
+    # Step 2: dbt staging
+    op_stg = DbtRunOperator(&#x27;dbt_stg&#x27;, &#x27;stg_sales2&#x27;,
+                            &#x27;SELECT order_id, region, ROUND(amount, 2) AS revenue FROM raw__sales2&#x27;)
+    r_stg  = op_stg.execute()
+    run_report[&#x27;steps&#x27;].append({&#x27;step&#x27;: &#x27;dbt_staging&#x27;, **r_stg.to_dict()})
+    print(f&#x27;dbt staging: {r_stg.rows_affected} rows&#x27;)
+
+    # Step 3: dbt mart
+    op_mart = DbtRunOperator(&#x27;dbt_mart&#x27;, &#x27;fct_sales2&#x27;,
+                             &#x27;SELECT region, SUM(revenue) AS total FROM stg_sales2 GROUP BY region&#x27;,
+                             materialized=&#x27;table&#x27;)
+    r_mart  = op_mart.execute()
+    run_report[&#x27;steps&#x27;].append({&#x27;step&#x27;: &#x27;dbt_mart&#x27;, **r_mart.to_dict()})
+    print(f&#x27;dbt mart: {r_mart.rows_affected} rows&#x27;)
+
+    # Step 4: dbt test
+    tester2 = DbtTestRunner()
+    tester2.add_not_null(&#x27;stg_sales2&#x27;, &#x27;order_id&#x27;)
+    tester2.add_unique(&#x27;stg_sales2&#x27;, &#x27;order_id&#x27;)
+    all_ok = tester2.run()
+    if not all_ok:
+        raise RuntimeError(&#x27;dbt tests failed&#x27;)
+    run_report[&#x27;steps&#x27;].append({&#x27;step&#x27;: &#x27;dbt_test&#x27;, &#x27;status&#x27;: &#x27;ok&#x27;})
+
+    run_report[&#x27;status&#x27;] = &#x27;SUCCESS&#x27;
+
+except Exception as exc:
+    run_report[&#x27;status&#x27;] = &#x27;FAILED&#x27;
+    on_failure_callback({&#x27;dag_id&#x27;: &#x27;sales_orchestration&#x27;, &#x27;task_id&#x27;: &#x27;unknown&#x27;, &#x27;error&#x27;: str(exc)})
+
+print()
+print(json.dumps(run_report, indent=2))</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D5_Airflow_dbt_Integration.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  EXERCISE 3
+# ══════════════════════════════════════════════════════════════
+# Extend the orchestration from Concept 3 to include a deliberate
+# failure scenario so the on_failure_callback is triggered.
+#
+# Build a pipeline for the bookings data:
+#   1. Ingest bookings_df into raw__bookings (use bq_load)
+#   2. dbt staging: stg_bookings
+#        SELECT booking_id, hotel, revenue,
+#               UPPER(country) AS country
+#        FROM raw__bookings
+#   3. dbt test on stg_bookings:
+#        not_null(booking_id), unique(booking_id),
+#        accepted_values(country, [&#x27;GB&#x27;, &#x27;US&#x27;, &#x27;DE&#x27;, &#x27;FR&#x27;])
+#   4. If tests fail: call on_failure_callback with a descriptive context dict
+#   5. Print the final run_report.
+#
+# The bookings_df below has a deliberately bad country code (&#x27;XX&#x27;)
+# so the accepted_values test will FAIL.
+# The on_failure_callback should print the LLM explanation.
+#
+# Expected output:
+#   ingest: 4 rows
+#   dbt staging: 4 rows
+#   [PASS] stg_bookings.booking_id.not_null
+#   [PASS] stg_bookings.booking_id.unique
+#   [FAIL] stg_bookings.country.accepted_values
+#
+#   [LLM alert]
+#   The pipeline failed because a dbt model encountered a data quality issue ...
+#
+#   {&quot;dag_id&quot;: &quot;bookings_pipeline&quot;, &quot;status&quot;: &quot;FAILED&quot;, ...}
+#
+# --- starting data ---
+bookings_df = pd.DataFrame([
+    {&#x27;booking_id&#x27;: 1, &#x27;hotel&#x27;: &#x27;Grand&#x27;,  &#x27;revenue&#x27;: 320.0, &#x27;country&#x27;: &#x27;GB&#x27;},
+    {&#x27;booking_id&#x27;: 2, &#x27;hotel&#x27;: &#x27;Plaza&#x27;,  &#x27;revenue&#x27;: 450.0, &#x27;country&#x27;: &#x27;US&#x27;},
+    {&#x27;booking_id&#x27;: 3, &#x27;hotel&#x27;: &#x27;Grand&#x27;,  &#x27;revenue&#x27;: 180.0, &#x27;country&#x27;: &#x27;XX&#x27;},   # bad value
+    {&#x27;booking_id&#x27;: 4, &#x27;hotel&#x27;: &#x27;Budget&#x27;, &#x27;revenue&#x27;:  95.0, &#x27;country&#x27;: &#x27;DE&#x27;},
+])</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><h2 id="day-6">Day 6 — Lesson</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-6"> Mark this day done</label><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D6_Project_Airflow_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  WEEK 16  |  DAY 6  |  PROJECT: SALES AIRFLOW PIPELINE
+# ══════════════════════════════════════════════════════════════
+#
+#  PROJECT BRIEF
+#  ─────────────
+#  Build a complete simulated Airflow DAG for a daily sales pipeline.
+#  The DAG has 5 tasks, runs on &#x27;@daily&#x27;, and includes:
+#    - Data extraction and validation
+#    - BQ load (DuckDB simulation)
+#    - dbt staging and mart models
+#    - dbt schema tests
+#    - LLM-powered on_failure_callback
+#    - Full run_summary report
+#
+#  TIME:  ~90 minutes
+#
+# ══════════════════════════════════════════════════════════════
+import duckdb
+import pandas as pd
+import json
+from datetime import datetime
+
+# ── Shared simulation infrastructure ─────────────────────────
+con = duckdb.connect(&#x27;:memory:&#x27;)
+
+def ref(m): return m
+def source(s, t): return f&#x27;{s}__{t}&#x27;
+
+def bq_load(df, table, write_disposition=&#x27;WRITE_TRUNCATE&#x27;):
+    tables = [r[0] for r in con.execute(&#x27;SHOW TABLES&#x27;).fetchall()]
+    if write_disposition == &#x27;WRITE_TRUNCATE&#x27; or table not in tables:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {table} AS SELECT * FROM df&#x27;)
+    else:
+        con.execute(f&#x27;INSERT INTO {table} SELECT * FROM df&#x27;)
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {table}&#x27;).fetchone()[0]
+
+def dbt_run(name, sql, materialized=&#x27;view&#x27;):
+    if materialized == &#x27;table&#x27;:
+        con.execute(f&#x27;CREATE OR REPLACE TABLE {name} AS {sql}&#x27;)
+    else:
+        con.execute(f&#x27;CREATE OR REPLACE VIEW {name} AS {sql}&#x27;)
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {name}&#x27;).fetchone()[0]
+
+def dbt_test_not_null(model, col):
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {col} IS NULL&#x27;).fetchone()[0] == 0
+
+def dbt_test_unique(model, col):
+    return con.execute(f&quot;&quot;&quot;
+        SELECT COUNT(*) FROM (
+            SELECT {col} FROM {model} GROUP BY {col} HAVING COUNT(*) &gt; 1
+        )&quot;&quot;&quot;).fetchone()[0] == 0
+
+def dbt_test_positive(model, col):
+    return con.execute(f&#x27;SELECT COUNT(*) FROM {model} WHERE {col} &lt;= 0&#x27;).fetchone()[0] == 0
+
+def call_llm(prompt):
+    &quot;&quot;&quot;
+    SIMULATION mode. REAL MODE:
+        from groq import Groq
+        client = Groq(api_key=os.environ[&#x27;GROQ_API_KEY&#x27;])
+        resp = client.chat.completions.create(
+            model=&#x27;llama3-8b-8192&#x27;,
+            messages=[{&#x27;role&#x27;: &#x27;user&#x27;, &#x27;content&#x27;: prompt}]
+        )
+        return resp.choices[0].message.content
+    &quot;&quot;&quot;
+    if &#x27;error&#x27; in prompt.lower() or &#x27;fail&#x27; in prompt.lower():
+        return (
+            &#x27;The sales pipeline failed due to a data quality issue. &#x27;
+            &#x27;One or more dbt schema tests did not pass on the staging model. &#x27;
+            &#x27;Check the raw source data for NULL order IDs or negative revenue values &#x27;
+            &#x27;and apply a pre-load filter before the next run.&#x27;
+        )
+    return (
+        &#x27;The daily sales pipeline completed without errors. &#x27;
+        &#x27;All 5 tasks succeeded and all dbt tests passed. No action required.&#x27;
+    )
+
+print(&#x27;Week 16 Project: Sales Airflow Pipeline&#x27;)
+print(&#x27;Infrastructure ready. Complete each TASK below.&#x27;)</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D6_Project_Airflow_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 1 — DAG CLASS: sales_pipeline
+# ══════════════════════════════════════════════════════════════
+# Build a DAG class (or use a dict) that represents:
+#   dag_id    = &#x27;sales_pipeline&#x27;
+#   schedule  = &#x27;@daily&#x27;
+#   start_date = 2024-01-01
+#   catchup   = False
+#   max_active_tasks = 5
+#
+# The class must:
+#   - Store the config above
+#   - Accept task registration via dag.register(fn)
+#   - Have a run(on_failure_callback=None) method that:
+#       * Runs registered tasks in order
+#       * Passes xcom dict between tasks
+#       * On any task failure: calls on_failure_callback(context) then stops
+#       * Returns a run_summary dict:
+#           {dag_id, schedule, started_at, completed_at,
+#            tasks_succeeded, tasks_failed, status}
+#
+# Print the DAG config after creating it.
+#
+# Expected output:
+#   DAG: sales_pipeline  schedule: @daily  catchup: False
+#   max_active_tasks: 5   start_date: 2024-01-01</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D6_Project_Airflow_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 2 — TASKS: extract, validate, load
+# ══════════════════════════════════════════════════════════════
+# Write 3 task functions and register them with the DAG.
+#
+# extract_task(xcom):
+#   Return the raw_sales DataFrame below as a list of dicts.
+#   Push result to xcom[&#x27;extract_task&#x27;]. Print &#x27;extracted N rows&#x27;.
+#
+# validate_task(xcom):
+#   Pull rows from xcom[&#x27;extract_task&#x27;].
+#   Check: all order_id not None, all amount &gt; 0, all region in VALID_REGIONS.
+#   If any check fails: raise ValueError with a descriptive message.
+#   Print &#x27;validated N rows (PASS)&#x27; on success.
+#   Return {&#x27;rows&#x27;: N, &#x27;valid&#x27;: True}.
+#
+# load_task(xcom):
+#   Pull rows from xcom[&#x27;extract_task&#x27;].
+#   Convert back to DataFrame, call bq_load to raw__sales.
+#   Print &#x27;loaded N rows to raw__sales&#x27;.
+#   Return {&#x27;table&#x27;: &#x27;raw__sales&#x27;, &#x27;rows&#x27;: N}.
+#
+# --- starting data ---
+raw_sales = pd.DataFrame([
+    {&#x27;order_id&#x27;: 101, &#x27;region&#x27;: &#x27;EMEA&#x27;, &#x27;product&#x27;: &#x27;Widget A&#x27;, &#x27;amount&#x27;: 1200.0},
+    {&#x27;order_id&#x27;: 102, &#x27;region&#x27;: &#x27;AMER&#x27;, &#x27;product&#x27;: &#x27;Widget B&#x27;, &#x27;amount&#x27;:  850.0},
+    {&#x27;order_id&#x27;: 103, &#x27;region&#x27;: &#x27;EMEA&#x27;, &#x27;product&#x27;: &#x27;Widget C&#x27;, &#x27;amount&#x27;: 2100.0},
+    {&#x27;order_id&#x27;: 104, &#x27;region&#x27;: &#x27;APAC&#x27;, &#x27;product&#x27;: &#x27;Widget A&#x27;, &#x27;amount&#x27;:  640.0},
+    {&#x27;order_id&#x27;: 105, &#x27;region&#x27;: &#x27;AMER&#x27;, &#x27;product&#x27;: &#x27;Widget D&#x27;, &#x27;amount&#x27;: 1750.0},
+])
+VALID_REGIONS = [&#x27;EMEA&#x27;, &#x27;AMER&#x27;, &#x27;APAC&#x27;, &#x27;LATAM&#x27;, &#x27;MEA&#x27;]</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D6_Project_Airflow_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 3 — TASKS: dbt_task and test_task
+# ══════════════════════════════════════════════════════════════
+# Write 2 more task functions and register them.
+#
+# dbt_task(xcom):
+#   Run two dbt models:
+#     stg_sales:
+#       SELECT order_id, UPPER(region) AS region, product,
+#              ROUND(amount, 2) AS revenue
+#       FROM raw__sales
+#
+#     fct_monthly_sales:
+#       SELECT region, product,
+#              COUNT(*) AS order_count,
+#              SUM(revenue) AS total_revenue
+#       FROM stg_sales GROUP BY region, product
+#       (materialized=&#x27;table&#x27;)
+#
+#   Return {&#x27;stg_rows&#x27;: N1, &#x27;mart_rows&#x27;: N2}.
+#   Print both row counts.
+#
+# test_task(xcom):
+#   Run 3 dbt tests on stg_sales:
+#     not_null(order_id), unique(order_id), positive(revenue)
+#   If any fail: raise RuntimeError(&#x27;dbt tests failed: &lt;failed test names&gt;&#x27;).
+#   Return {&#x27;tests_run&#x27;: 3, &#x27;tests_failed&#x27;: 0}.
+#   Print [PASS] or [FAIL] for each test.
+#
+# Register both tasks AFTER the 3 from Task 2.</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D6_Project_Airflow_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 4 — on_failure_callback
+# ══════════════════════════════════════════════════════════════
+# Write a function pipeline_failure_callback(context) that:
+#   - Reads context[&#x27;dag_id&#x27;], context[&#x27;task_id&#x27;], context[&#x27;error&#x27;]
+#   - Builds a prompt: &#x27;Pipeline &lt;dag_id&gt; failed at task &lt;task_id&gt;: &lt;error&gt;\n&#x27;
+#                      &#x27;Explain what went wrong and suggest a fix in 3 sentences.&#x27;
+#   - Calls call_llm(prompt)
+#   - Prints &#x27;[ALERT] LLM explanation:&#x27; followed by the LLM response
+#
+# Test it standalone with a synthetic context:
+#   context = {
+#       &#x27;dag_id&#x27;:  &#x27;sales_pipeline&#x27;,
+#       &#x27;task_id&#x27;: &#x27;validate_task&#x27;,
+#       &#x27;error&#x27;:   &#x27;amount &lt;= 0 found in 2 rows&#x27;,
+#   }
+#
+# Expected output:
+#   [ALERT] LLM explanation:
+#   The sales pipeline failed due to a data quality issue ...
+#
+# --- starting data ---
+test_context = {
+    &#x27;dag_id&#x27;:  &#x27;sales_pipeline&#x27;,
+    &#x27;task_id&#x27;: &#x27;validate_task&#x27;,
+    &#x27;error&#x27;:   &#x27;amount &lt;= 0 found in 2 rows&#x27;,
+}</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="code" data-run data-file="/home/pyodide/Curriculum/Week_16_Airflow/W16_D6_Project_Airflow_Pipeline.py"><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># ══════════════════════════════════════════════════════════════
+#  TASK 5 — FULL DAG RUN + RUN SUMMARY
+# ══════════════════════════════════════════════════════════════
+# Call dag.run(on_failure_callback=pipeline_failure_callback).
+# Print the returned run_summary as formatted JSON.
+#
+# Then print the fct_monthly_sales table from DuckDB:
+#   con.execute(&#x27;SELECT * FROM fct_monthly_sales ORDER BY total_revenue DESC&#x27;).df()
+#
+# Expected output:
+#   extracted 5 rows
+#   validated 5 rows (PASS)
+#   loaded 5 rows to raw__sales
+#   dbt stg_sales: 5 rows
+#   dbt fct_monthly_sales: 5 rows
+#   [PASS] stg_sales.order_id.not_null
+#   [PASS] stg_sales.order_id.unique
+#   [PASS] stg_sales.revenue.positive
+#
+#   run_summary:
+#   {
+#     &quot;dag_id&quot;: &quot;sales_pipeline&quot;,
+#     &quot;schedule&quot;: &quot;@daily&quot;,
+#     &quot;started_at&quot;: &quot;...&quot;,
+#     &quot;completed_at&quot;: &quot;...&quot;,
+#     &quot;tasks_succeeded&quot;: 5,
+#     &quot;tasks_failed&quot;: 0,
+#     &quot;status&quot;: &quot;SUCCESS&quot;
+#   }
+#
+#   fct_monthly_sales:
+#     region  product   order_count  total_revenue
+#     AMER    Widget B  ...
+#     ...</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Cells on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><div class="pager"><a class="btn ghost" href="week-15.html">&larr; Week 15</a><a class="btn ghost" href="week-17.html">Week 17 &rarr;</a></div>
+</main></body></html>

