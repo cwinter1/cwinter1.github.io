@@ -1,0 +1,1735 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 28 — Capstone A: Automated Mortgage Underwriting RAG (Part 1 of 2)</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/retrieval-augmented-generation-rag" target="_blank" rel="noopener">How does RAG work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/chunking-strategies-for-rag" target="_blank" rel="noopener">Chunking strategies for RAG<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/how-does-a-reranker-work" target="_blank" rel="noopener">How does a Reranker work?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="28" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 28 — Capstone A: Automated Mortgage Underwriting RAG (Part 1 of 2)</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>6 — Capstones (28-31) — opens Phase 6</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Ingestion through retrieval baseline for an automated mortgage-underwriting RAG system, built against synthetic data shaped like a real on-prem legacy export: a mainframe loan-application extract, scanned appraisal/pay-stub PDFs, section-aware chunking, a vector index, and a hybrid retrieval baseline. Week 29 (not built here) picks this up with LangGraph orchestration, Presidio/guardrails, a Ragas eval gate, and the serving layer.</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Genuinely reused, not reinvented, from five prior weeks, each tagged <code># Reusing X from Week NN Day D Concept M</code> at first use: Week 13's <code>LayoutField</code>/<code>layout_offsets</code>/<code>colspecs_from_layout</code> copybook-to-colspecs machinery and <code>RECFM=FB</code> deblocking (Day 1); Week 08's <code>pdfplumber</code>/<code>reportlab</code> ruled-table extraction and Tesseract-confidence quarantine routing (Day 2); Week 09's <code>chunk_id</code> content-hash and parent/child citation-link shape (Day 3); Week 02's HNSW <code>m</code>/<code>ef_construction</code> sizing heuristics (Day 4); Week 05's trigram/<code>zlib.crc32</code> deterministic embedding stand-in (Days 4-5) and Week 25's <code>MiniCrossEncoder</code> batching/truncation stand-in (Day 5).</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>10-12 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. Package availability checked directly in this sandbox before writing any code: <code>pandas</code>/<code>numpy</code> (already track dependencies) cover Day 1's fixed-width parsing entirely; <code>pdfplumber</code>/<code>reportlab</code> (already track dependencies since Week 08) cover Day 2's table extraction and OCR-routing logic, while <code>unstructured</code> still fails to install here exactly as Week 08 found (<code>langdetect</code>'s setup.py breaks under this sandbox's setuptools) and no Tesseract binary is present, so <code>partition_pdf</code>/<code>pytesseract</code> stay REAL MODE reference syntax throughout. Day 3 is pure stdlib plus <code>hashlib</code>. Day 4 is the one genuine new finding this week: unlike Week 02 (which found no live Postgres and stayed at HNSW-sizing arithmetic only), this sandbox turns out to have a local PostgreSQL 16 cluster (<code>pg_lsclusters</code> showed it installed, merely not started) and <code>apt-get install postgresql-16-pgvector</code> installs the real pgvector 0.6.0 server extension cleanly and fast — confirmed directly by starting the cluster, running <code>CREATE EXTENSION vector</code>, and connecting with the already-installed <code>psycopg2</code>/<code>pgvector</code> Python packages. Day 4's HNSW index build, upsert, and idempotent-reprocessing blocks therefore run against a genuine local Postgres+pgvector instance, not a simulation — the first week in this track able to do that. Day 5's BM25 math is pure <code>numpy</code> (Week 05's pattern; <code>rank_bm25</code> is still not installed, confirmed again); its reranking stage reuses Week 25's finding that <code>sentence-transformers</code>' <code>CrossEncoder</code> class imports fine but downloading real checkpoint weights from <code>huggingface.co</code> is blocked by this sandbox's egress proxy, so the second-stage reranker is Week 25's own hand-rolled <code>MiniCrossEncoder</code> stand-in, executed for real.</td>
+</tr>
+</tbody>
+</table>
+<p>No prior week's Architecture Decision is reused here; this week's is new and opens Phase 6.</p>
+<p>Weeks 1-27 built individual pieces of a production RAG stack one at a time: retrieval math,
+chunking strategy, index tuning, reranking, evaluation. A capstone's whole point is proving
+those pieces click together against one real, messy problem end to end. Mortgage underwriting
+is that problem: a loan file is not one clean document, it is a mainframe application record, a
+scanned appraisal, a pay stub, a credit report, and a title search, each shaped by whatever
+system originally produced it — and an underwriter (or an underwriting assistant) needs to ask
+a question like &quot;what is the appraised value on loan LN0000001?&quot; and get back a cited, correct
+answer regardless of which of those five source formats the answer lives in. This week builds
+ingestion through a frozen retrieval baseline; Week 29 builds the decision layer on top of it.</p>
+<hr />
+<h2 id="day-1">Day 1 — Legacy Loan Export Ingestion</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="28-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=BlbJ6y2H5ao" target="_blank" rel="noopener"><b>COBOL Copybooks to SQL Server in 4 Minutes</b><small>John Dee · 4:17</small></a></li><li><a href="https://www.youtube.com/watch?v=sTXr73fqybc" target="_blank" rel="noopener"><b>Python pandas read_csv // Load a CSV into pandas from a file or URL // index_col, na_values, nrows</b><small>Kimberly Fessel · 13:43</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=COBOL%20copybook%20fixed%20width%20EBCDIC%20parsing%20python%20pandas" target="_blank" rel="noopener">Search YouTube: COBOL copybook fixed width EBCDIC parsing python pandas</a></p></div>
+<hr />
+<h3>Concept 1 — A <code>LOAN-APPLICATION-RECORD</code> Copybook, Turned Into <code>colspecs</code></h3>
+<p>A mainframe loan-origination system does not export JSON or CSV — it exports a fixed-width
+extract whose only real documentation is the COBOL copybook that defines the record's byte
+layout. The mechanics of turning that copybook into <code>pandas.read_fwf</code>'s <code>colspecs</code> argument —
+walking each elementary <code>PIC</code> clause and accumulating byte offsets — are reused directly from
+Week 13 Day 1/2 rather than rebuilt: same <code>LayoutField</code> shape, same <code>colspecs_from_layout</code>
+derivation, applied here to a mortgage-specific record instead of Week 13's banking-account one.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing LayoutField / colspecs_from_layout from Week 13 Day 1 Concept 2 and
+# Day 2 Concept 1, applied to a new copybook for this week&#x27;s loan extract.
+import dataclasses
+import re
+
+@dataclasses.dataclass
+class LayoutField:
+    level: int
+    name: str
+    pic: str  # None for group items (no PIC clause)
+
+def pic_length(pic):
+    if pic is None:
+        return 0
+    if pic.startswith(&quot;X(&quot;):
+        return int(pic[2:-1])
+    m = re.match(r&quot;^9\((\d+)\)(?:V9\((\d+)\)|V(9+))?$&quot;, pic)
+    if not m:
+        raise ValueError(f&quot;unhandled PIC clause: {pic}&quot;)
+    int_digits = int(m.group(1))
+    if m.group(2) is not None:
+        dec_digits = int(m.group(2))
+    elif m.group(3) is not None:
+        dec_digits = len(m.group(3))
+    else:
+        dec_digits = 0
+    return int_digits + dec_digits
+
+def layout_offsets(fields):
+    offset = 0
+    out = []
+    for f in fields:
+        if f.pic is None:
+            continue
+        length = pic_length(f.pic)
+        out.append((f.name, offset, offset + length, length))
+        offset += length
+    return out, offset
+
+def colspecs_from_layout(fields):
+    offsets, lrecl = layout_offsets(fields)
+    names = [n for n, _s, _e, _l in offsets]
+    colspecs = [(s, e) for _n, s, e, _l in offsets]
+    return names, colspecs, lrecl
+
+# 01 LOAN-APPLICATION-RECORD.
+#    05 LOAN-ID           PIC X(10).
+#    05 BORROWER-SSN      PIC X(9).
+#    05 BORROWER-NAME     PIC X(30).
+#    05 LOAN-AMOUNT       PIC 9(9)V99.
+#    05 PROPERTY-STATE    PIC X(2).
+#    05 APP-DATE          PIC X(8).
+#    05 LOAN-STATUS       PIC X(1).
+#    05 FILLER            PIC X(6).
+loan_application_fields = [
+    LayoutField(1, &quot;LOAN-APPLICATION-RECORD&quot;, None),
+    LayoutField(5, &quot;LOAN-ID&quot;, &quot;X(10)&quot;),
+    LayoutField(5, &quot;BORROWER-SSN&quot;, &quot;X(9)&quot;),
+    LayoutField(5, &quot;BORROWER-NAME&quot;, &quot;X(30)&quot;),
+    LayoutField(5, &quot;LOAN-AMOUNT&quot;, &quot;9(9)V99&quot;),
+    LayoutField(5, &quot;PROPERTY-STATE&quot;, &quot;X(2)&quot;),
+    LayoutField(5, &quot;APP-DATE&quot;, &quot;X(8)&quot;),
+    LayoutField(5, &quot;LOAN-STATUS&quot;, &quot;X(1)&quot;),
+    LayoutField(5, &quot;FILLER&quot;, &quot;X(6)&quot;),
+]
+
+loan_names, loan_colspecs, LOAN_LRECL = colspecs_from_layout(loan_application_fields)
+print(f&quot;field names: {loan_names}&quot;)
+print(f&quot;colspecs:    {loan_colspecs}&quot;)
+print(f&quot;LRECL:       {LOAN_LRECL}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>field names: [&#x27;LOAN-ID&#x27;, &#x27;BORROWER-SSN&#x27;, &#x27;BORROWER-NAME&#x27;, &#x27;LOAN-AMOUNT&#x27;, &#x27;PROPERTY-STATE&#x27;, &#x27;APP-DATE&#x27;, &#x27;LOAN-STATUS&#x27;, &#x27;FILLER&#x27;]
+colspecs:    [(0, 10), (10, 19), (19, 49), (49, 60), (60, 62), (62, 70), (70, 71), (71, 77)]
+LRECL:       77
+</code></pre><p>Every offset falls out of accumulating each field's byte length in copybook order — nobody
+hand-typed <code>(19, 49)</code> for <code>BORROWER-NAME</code>, it is <code>19</code> (where <code>BORROWER-SSN</code> ended) plus its own
+<code>30</code> bytes. That is the property that matters: regenerate <code>colspecs</code> from the copybook whenever
+the copybook changes, never maintain a second, independent offset table by hand.</p>
+<p><strong>Exercise:</strong>
+Build the same derivation for a second record this week's pipeline also ingests,
+<code>APPRAISAL-RECORD</code>: <code>APPRAISAL-ID PIC X(9)</code>, <code>LOAN-ID PIC X(10)</code>,
+<code>APPRAISED-VALUE PIC 9(9)V99</code>, <code>APPRAISAL-DATE PIC X(8)</code>, <code>FILLER PIC X(4)</code>.</p>
+<p><strong>Starting point:</strong> The <code>LayoutField</code> dataclass and <code>colspecs_from_layout</code> function from this
+concept's Example, with a new <code>appraisal_record_fields</code> list built from the five fields above.</p>
+<p>Expected output (actually run):</p>
+<pre><code>field names: [&#x27;APPRAISAL-ID&#x27;, &#x27;LOAN-ID&#x27;, &#x27;APPRAISED-VALUE&#x27;, &#x27;APPRAISAL-DATE&#x27;, &#x27;FILLER&#x27;]
+colspecs:    [(0, 9), (9, 19), (19, 30), (30, 38), (38, 42)]
+LRECL:       42
+</code></pre><hr />
+<h3>Concept 2 — <code>RECFM=FB</code> Deblocking and <code>pandas.read_fwf</code></h3>
+<p>The loan extract, like Week 13's, is <code>RECFM=FB</code> — fixed-block, no line terminator anywhere in
+the file. A record boundary is purely a byte count: after <code>LRECL</code> bytes the next record starts,
+with nothing to search for, so the very first parsing step is confirming the raw stream's total
+length is an exact multiple of <code>LRECL</code> before trusting any field offset downstream.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing validate_and_deblock from Week 13 Day 2 Concept 2, applied to the
+# LOAN-APPLICATION-RECORD layout built in Concept 1 above.
+import io
+import pandas as pd
+
+def make_loan_record(loan_id, ssn, name, amount_cents, state, app_date, status):
+    amount_str = str(amount_cents).zfill(11)  # 9(9)V99 = 11 digit positions
+    row = (loan_id.ljust(10) + ssn.ljust(9) + name.ljust(30) + amount_str
+           + state.ljust(2) + app_date.ljust(8) + status.ljust(1) + &quot;&quot;.ljust(6))
+    assert len(row) == LOAN_LRECL, f&quot;record is {len(row)} bytes, expected {LOAN_LRECL}&quot;
+    return row
+
+records = [
+    make_loan_record(&quot;LN0000001&quot;, &quot;123456789&quot;, &quot;MARIA GONZALEZ&quot;, 45000000, &quot;TX&quot;, &quot;20260115&quot;, &quot;A&quot;),
+    make_loan_record(&quot;LN0000002&quot;, &quot;234567890&quot;, &quot;JAMES OKAFOR&quot;, 32500000, &quot;CA&quot;, &quot;20260118&quot;, &quot;P&quot;),
+    make_loan_record(&quot;LN0000003&quot;, &quot;345678901&quot;, &quot;WEI CHEN&quot;, 61000000, &quot;NY&quot;, &quot;20260122&quot;, &quot;A&quot;),
+]
+raw_fb_stream = &quot;&quot;.join(records)
+print(f&quot;raw FB stream length: {len(raw_fb_stream)} bytes, no separators present&quot;)
+
+def validate_and_deblock(raw_stream, lrecl):
+    if len(raw_stream) % lrecl != 0:
+        raise ValueError(
+            f&quot;stream length {len(raw_stream)} is not a multiple of LRECL {lrecl} &quot;
+            &quot;-- truncated or misconfigured extract, refuse to guess record boundaries&quot;
+        )
+    return [raw_stream[i:i + lrecl] for i in range(0, len(raw_stream), lrecl)]
+
+deblocked = validate_and_deblock(raw_fb_stream, LOAN_LRECL)
+print(f&quot;deblocked into {len(deblocked)} records of {LOAN_LRECL} bytes each&quot;)
+
+buf = io.StringIO(&quot;\n&quot;.join(deblocked))
+df = pd.read_fwf(buf, colspecs=loan_colspecs, names=loan_names, dtype=str, keep_default_na=False)
+print(df.to_string(index=False))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>raw FB stream length: 231 bytes, no separators present
+deblocked into 3 records of 77 bytes each
+  LOAN-ID BORROWER-SSN  BORROWER-NAME LOAN-AMOUNT PROPERTY-STATE APP-DATE LOAN-STATUS FILLER
+LN0000001    123456789 MARIA GONZALEZ 00045000000             TX 20260115           A       
+LN0000002    234567890   JAMES OKAFOR 00032500000             CA 20260118           P       
+LN0000003    345678901       WEI CHEN 00061000000             NY 20260122           A       
+</code></pre><p><strong>Exercise:</strong>
+Build three <code>APPRAISAL-RECORD</code> rows using the <code>appraisal_record_fields</code> colspecs from Concept
+1's exercise, deblock them, and load them with <code>pandas.read_fwf</code>.</p>
+<p><strong>Starting point:</strong> The <code>validate_and_deblock</code> function from this concept's Example, plus a new
+<code>make_appraisal_record(appraisal_id, loan_id, value_cents, app_date)</code> builder following the same
+<code>ljust</code>/<code>zfill</code> pattern, called for <code>(&quot;APR000001&quot;, &quot;LN0000001&quot;, 47200000, &quot;20260120&quot;)</code> and
+<code>(&quot;APR000002&quot;, &quot;LN0000002&quot;, 33800000, &quot;20260123&quot;)</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>raw FB stream length: 84 bytes, no separators present
+deblocked into 2 records of 42 bytes each
+APPRAISAL-ID   LOAN-ID APPRAISED-VALUE APPRAISAL-DATE FILLER
+   APR000001 LN0000001     00047200000       20260120       
+   APR000002 LN0000002     00033800000       20260123       
+</code></pre><hr />
+<h3>Concept 3 — EBCDIC-to-UTF-8 Transcode, Trailing-Space Padding, and <code>LOW-VALUES</code></h3>
+<p>A real mainframe extract is not ASCII text — it is EBCDIC bytes, and each field must be
+transcoded with <code>bytes.decode(&quot;cp037&quot;)</code> (or <code>cp500</code>) before it means anything as a string. Two
+more raw-byte realities show up at the same step. <code>PIC X(n)</code> fields are always padded with
+trailing EBCDIC spaces (<code>0x40</code>) out to their declared length, so decoding without trimming that
+padding leaves every alphanumeric field carrying invisible trailing whitespace. And a field that
+was never populated on a mainframe — a draft record whose downstream fields have not been keyed
+yet — is not written as EBCDIC spaces at all, it is written as <code>LOW-VALUES</code>: every byte <code>0x00</code>.
+Decoding a <code>LOW-VALUES</code> field as text does not raise an error, it silently returns a string of
+NUL characters, which is exactly the kind of corrupted-looking value item 1 of this track's
+known-issues log warns against trusting without checking — the fix is detecting <code>LOW-VALUES</code>
+before decoding and treating it as an explicit missing-value sentinel, not as text.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def is_low_values(raw_bytes):
+    &quot;&quot;&quot;LOW-VALUES: every byte 0x00 -- a field the mainframe never populated,
+    not EBCDIC-encoded text of any kind.&quot;&quot;&quot;
+    return all(b == 0x00 for b in raw_bytes)
+
+def decode_field(raw_bytes, codepage=&quot;cp037&quot;):
+    if is_low_values(raw_bytes):
+        return None
+    return raw_bytes.decode(codepage).rstrip()  # trim trailing EBCDIC-space padding
+
+populated_name = &quot;MARIA GONZALEZ&quot;.ljust(30).encode(&quot;cp037&quot;)
+draft_name = bytes(30)  # LOW-VALUES: uninitialized on a draft (not-yet-keyed) application
+
+print(f&quot;populated BORROWER-NAME decodes as: {decode_field(populated_name)!r}&quot;)
+print(f&quot;all-LOW-VALUES BORROWER-NAME decodes as: {decode_field(draft_name)!r}&quot;)
+
+loan_id_ebcdic = &quot;LN0000004&quot;.ljust(10).encode(&quot;cp037&quot;)
+print(f&quot;LOAN-ID field raw bytes (cp037): {loan_id_ebcdic.hex()}&quot;)
+print(f&quot;LOAN-ID decoded and trimmed: {decode_field(loan_id_ebcdic)!r}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>populated BORROWER-NAME decodes as: &#x27;MARIA GONZALEZ&#x27;
+all-LOW-VALUES BORROWER-NAME decodes as: None
+LOAN-ID field raw bytes (cp037): d3d5f0f0f0f0f0f0f440
+LOAN-ID decoded and trimmed: &#x27;LN0000004&#x27;
+</code></pre><p>The <code>LOAN-ID</code> field's raw bytes end in <code>40</code> — EBCDIC space, the real padding byte, decoded and
+then stripped by <code>rstrip()</code> — while <code>draft_name</code>'s all-zero bytes never reach <code>.decode()</code> at all,
+because <code>is_low_values</code> catches them first and returns the explicit <code>None</code> sentinel instead of a
+string of NULs that would otherwise pass every downstream <code>isinstance(x, str)</code> check silently.</p>
+<p><strong>Exercise:</strong>
+Apply <code>decode_field</code> to a populated <code>PROPERTY-STATE</code> field (<code>&quot;TX&quot;</code>), an all-<code>LOW-VALUES</code>
+<code>BORROWER-SSN</code> field (9 bytes — a co-borrower stub record where the SSN has not been collected
+yet), and a populated <code>APP-DATE</code> field (<code>&quot;20260301&quot;</code>), printing each result the same way the
+Example does.</p>
+<p><strong>Starting point:</strong> The <code>is_low_values</code>/<code>decode_field</code> functions from this concept's Example.
+<code>populated_state = &quot;TX&quot;.ljust(2).encode(&quot;cp037&quot;)</code>, <code>missing_ssn = bytes(9)</code>,
+<code>app_date_ebcdic = &quot;20260301&quot;.ljust(8).encode(&quot;cp037&quot;)</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>populated PROPERTY-STATE decodes as: &#x27;TX&#x27;
+all-LOW-VALUES BORROWER-SSN decodes as: None
+APP-DATE field raw bytes (cp037): f2f0f2f6f0f3f0f1
+APP-DATE decoded and trimmed: &#x27;20260301&#x27;
+</code></pre><hr />
+<h3>Concept 4 — A Landing-Zone Manifest, Reconciled Against the Extract's Own Trailer Record</h3>
+<p>A real mainframe batch extract does not end after its last data record — it ends with a
+<strong>trailer record</strong>, a summary row the source system writes with its own idea of how many records
+it sent and what they should sum to (here, a total loan amount). The landing zone's job before
+anything downstream touches the file is reconciling what was actually parsed against what the
+trailer claims, because a truncated transfer (a network blip mid-copy, a job that died partway)
+produces a file that still parses cleanly record-by-record — <code>validate_and_deblock</code> from Concept
+2 would not catch it if the truncation happened to land on a clean <code>LRECL</code> boundary — and only a
+trailer-vs-parsed reconciliation surfaces the gap.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+@dataclasses.dataclass
+class LandingManifest:
+    file_name: str
+    record_count: int
+    control_total_amount_cents: int
+    trailer_record_count: int
+    trailer_control_total_cents: int
+
+    def reconcile(self):
+        count_ok = self.record_count == self.trailer_record_count
+        total_ok = self.control_total_amount_cents == self.trailer_control_total_cents
+        return count_ok and total_ok
+
+def build_manifest(file_name, parsed_amounts_cents, trailer_count, trailer_total_cents):
+    return LandingManifest(
+        file_name=file_name,
+        record_count=len(parsed_amounts_cents),
+        control_total_amount_cents=sum(parsed_amounts_cents),
+        trailer_record_count=trailer_count,
+        trailer_control_total_cents=trailer_total_cents,
+    )
+
+amounts = [45000000, 32500000, 61000000]  # from Concept 2&#x27;s three parsed loan records
+good_manifest = build_manifest(
+    &quot;LOAN_EXTRACT_20260301.DAT&quot;, amounts, trailer_count=3, trailer_total_cents=sum(amounts)
+)
+print(f&quot;manifest reconciles (matches trailer): {good_manifest.reconcile()}&quot;)
+
+bad_manifest = build_manifest(
+    &quot;LOAN_EXTRACT_20260302.DAT&quot;, amounts, trailer_count=4, trailer_total_cents=sum(amounts)
+)
+print(f&quot;manifest reconciles (truncated extract, trailer says 4 records): {bad_manifest.reconcile()}&quot;)
+print(f&quot;  parsed {bad_manifest.record_count} records, trailer declared {bad_manifest.trailer_record_count}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>manifest reconciles (matches trailer): True
+manifest reconciles (truncated extract, trailer says 4 records): False
+  parsed 3 records, trailer declared 4
+</code></pre><p><strong>Exercise:</strong>
+Build a manifest for the two <code>APPRAISAL-RECORD</code> values from Concept 2's exercise
+(<code>47200000</code>, <code>33800000</code> cents), first against a trailer that agrees on both count and total,
+then against a trailer with the correct count but a control total off by exactly $1.00
+(<code>sum + 100</code> cents) — the failure mode a single mis-keyed digit on the mainframe side produces.</p>
+<p><strong>Starting point:</strong> The <code>build_manifest</code> function from this concept's Example, with
+<code>appraisal_values = [47200000, 33800000]</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>manifest reconciles (matches trailer): True
+manifest reconciles (count OK, control total off by $1.00): False
+  parsed control total 81000000, trailer declared 81000100
+</code></pre><p>A count-only check would have passed the second case — both files have exactly two records — so
+the control-total comparison is the one that actually catches a single corrupted digit in a
+<code>LOAN-AMOUNT</code> field, which is precisely the kind of silent, low-frequency corruption a manifest
+exists to catch before it reaches an underwriting decision.</p>
+<hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy:</strong> The copybook is the only real documentation of a mainframe loan-origination record's
+shape — there is no schema registry, no OpenAPI spec, nothing but a <code>.cpy</code> file the mainframe
+team maintains (or, worse, a <code>.cpy</code> file nobody has updated in three years while the actual
+record layout has drifted). Every downstream concept this week depends on <code>colspecs</code> derived
+correctly from that one document.</p>
+<p><strong>Compliance:</strong> A loan-application extract carries SSNs and loan amounts — regulated PII and
+financial data from the moment the raw bytes land, before any masking or access control has been
+applied. The landing zone's manifest is also the first audit artifact a regulator would ask for:
+proof of exactly how many records entered the pipeline and what they summed to, checked against
+the source system's own trailer record, not a number the pipeline computed and trusted on faith.</p>
+<p><strong>What breaks in production:</strong> A copybook is updated to widen <code>LOAN-AMOUNT</code> by one digit (a
+larger jumbo-loan product line launches) and the extraction pipeline's <code>colspecs</code> table is not
+regenerated — every field after <code>LOAN-AMOUNT</code> silently shifts by one byte, and <code>PROPERTY-STATE</code>
+starts reading a slice of <code>APP-DATE</code> instead. The manifest's control-total reconciliation is the
+one check in this pipeline that would actually catch this immediately (the sum of a shifted,
+garbled <code>LOAN-AMOUNT</code> column will not match the trailer's real total), rather than it surfacing
+three weeks later as underwriting decisions made against the wrong state code.</p>
+<hr />
+<h2 id="day-2">Day 2 — Layout-Aware Document Parsing</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="28-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=JrbPltpOVJk" target="_blank" rel="noopener"><b>STOP Fighting Messy PDFs! Unstructured.io is the RAG Preprocessing Tool Every AI Developer NEEDS</b><small>STARP AI · 6:49</small></a></li><li><a href="https://www.youtube.com/watch?v=xPRzfYwYUmc" target="_blank" rel="noopener"><b>Document OCR &amp; Extraction for RAG - UnstructuredIO Tutorial</b><small>M&amp;M Tech · 10:28</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=unstructured.io%20partition_pdf%20hi_res%20table%20extraction%20OCR%20fallback" target="_blank" rel="noopener">Search YouTube: unstructured.io partition_pdf hi_res table extraction OCR fallback</a></p></div>
+<hr />
+<h3>Concept 1 — Ruled-Table Extraction Into Structured Rows, Not Flattened Text</h3>
+<p>An appraisal report's comparable-sales grid is exactly the kind of content a naive text
+extractor destroys — reading it as a flat wall of text loses which sale price belongs to
+which comp address. <code>unstructured</code>'s real <code>partition_pdf(..., infer_table_structure=True)</code>
+solves this by detecting the ruled grid and returning each <code>Table</code> element's
+<code>metadata.text_as_html</code> as real cells, but — the same finding Week 08 made and confirmed
+again for this week — <code>unstructured</code> still fails to install cleanly in this sandbox
+(<code>langdetect</code>'s <code>setup.py</code> breaks under this environment's setuptools). <code>pdfplumber</code>'s
+<code>extract_tables()</code> does the identical structural job — finding the grid's vector lines and
+reading the text bounded by each cell — and installs and runs cleanly here, so it stands in
+for the genuinely-executable core of this concept while <code>partition_pdf</code> itself stays REAL
+MODE reference syntax.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing the build_table_pdf/extract_tables pattern from Week 08 Day 2 Concept 1,
+# applied to an appraisal comparable-sales grid instead of a claims loss run.
+import io
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+import pdfplumber
+
+def build_comp_grid_pdf(rows, col_widths):
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    row_height = 22
+    x0 = 60
+    y0 = height - 90
+    n_rows = len(rows)
+    xs = [x0]
+    for w in col_widths:
+        xs.append(xs[-1] + w)
+    table_width = sum(col_widths)
+    c.setLineWidth(0.75)
+    for xline in xs:
+        c.line(xline, y0, xline, y0 - row_height * n_rows)
+    for r in range(n_rows + 1):
+        yline = y0 - row_height * r
+        c.line(x0, yline, x0 + table_width, yline)
+    c.setFont(&quot;Helvetica-Bold&quot;, 9)
+    for j, cell in enumerate(rows[0]):
+        c.drawString(xs[j] + 3, y0 - 15, cell)
+    c.setFont(&quot;Helvetica&quot;, 9)
+    for r, row in enumerate(rows[1:], start=1):
+        for j, cell in enumerate(row):
+            c.drawString(xs[j] + 3, y0 - row_height * r - 15, cell)
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf
+
+comp_rows = [
+    [&quot;Comp #&quot;, &quot;Address&quot;, &quot;Sale Price&quot;, &quot;Sale Date&quot;],
+    [&quot;1&quot;, &quot;412 Elm St&quot;, &quot;$468,000&quot;, &quot;2026-01-10&quot;],
+    [&quot;2&quot;, &quot;88 Birch Ave&quot;, &quot;$451,500&quot;, &quot;2025-12-02&quot;],
+    [&quot;3&quot;, &quot;230 Maple Dr&quot;, &quot;$472,900&quot;, &quot;2026-01-22&quot;],
+]
+comp_pdf = build_comp_grid_pdf(comp_rows, col_widths=[45, 110, 75, 80])
+with pdfplumber.open(comp_pdf) as pdf:
+    tables = pdf.pages[0].extract_tables()
+print(f&quot;tables found: {len(tables)}&quot;)
+for row in tables[0]:
+    print(row)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>tables found: 1
+[&#x27;Comp #&#x27;, &#x27;Address&#x27;, &#x27;Sale Price&#x27;, &#x27;Sale Date&#x27;]
+[&#x27;1&#x27;, &#x27;412 Elm St&#x27;, &#x27;$468,000&#x27;, &#x27;2026-01-10&#x27;]
+[&#x27;2&#x27;, &#x27;88 Birch Ave&#x27;, &#x27;$451,500&#x27;, &#x27;2025-12-02&#x27;]
+[&#x27;3&#x27;, &#x27;230 Maple Dr&#x27;, &#x27;$472,900&#x27;, &#x27;2026-01-22&#x27;]
+</code></pre><p><strong>REAL MODE — requires the Unstructured.io library:</strong> the equivalent real call is
+<code>partition_pdf(filename=&quot;appraisal.pdf&quot;, strategy=&quot;hi_res&quot;, infer_table_structure=True)</code>,
+after which the returned <code>Table</code> element's <code>el.metadata.text_as_html</code> holds an HTML
+<code>&lt;table&gt;</code> string with the same four rows.</p>
+<p><strong>Exercise:</strong>
+Extend the comp grid to 5 rows and 5 columns by adding an <code>&quot;Adjustment&quot;</code> column and a 4th
+comparable-sale row, then confirm the extracted table's shape is exactly <code>(5, 5)</code> before
+printing it.</p>
+<p><strong>Starting point:</strong> The <code>build_comp_grid_pdf(rows, col_widths)</code> function from this concept's
+Example, called with a <code>rows</code> list carrying the extra column and row, and
+<code>col_widths=[40, 95, 65, 65, 65]</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>table shape OK: 5 rows x 5 cols
+[&#x27;Comp #&#x27;, &#x27;Address&#x27;, &#x27;Sale Price&#x27;, &#x27;Sale Date&#x27;, &#x27;Adjustment&#x27;]
+[&#x27;1&#x27;, &#x27;412 Elm St&#x27;, &#x27;$468,000&#x27;, &#x27;2026-01-10&#x27;, &#x27;+$2,500&#x27;]
+[&#x27;2&#x27;, &#x27;88 Birch Ave&#x27;, &#x27;$451,500&#x27;, &#x27;2025-12-02&#x27;, &#x27;-$1,000&#x27;]
+[&#x27;3&#x27;, &#x27;230 Maple Dr&#x27;, &#x27;$472,900&#x27;, &#x27;2026-01-22&#x27;, &#x27;+$0&#x27;]
+[&#x27;4&#x27;, &#x27;17 Cedar Ln&#x27;, &#x27;$459,000&#x27;, &#x27;2026-01-05&#x27;, &#x27;+$3,200&#x27;]
+</code></pre><hr />
+<h3>Concept 2 — Routing an Image-Only Page to OCR Instead of Direct Extraction</h3>
+<p>A loan file mixes digitally generated pages (the appraisal report itself, born as a PDF) with
+scanned or faxed pages (a pay stub a borrower photographed and uploaded). The two look
+identical to a human; a digitally generated page has a real text layer, and a scanned page is
+purely pixels — <code>extract_text()</code> on a scanned page returns an empty or near-empty string, not
+an error. Counting extractable characters per page is the cheapest correct routing signal:
+below a small threshold, the page has no text layer at all and must go through OCR instead of
+direct extraction.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing needs_ocr from Week 08 Day 3 Concept 1, applied to a mixed loan
+# file (digital appraisal page, scanned pay-stub page) instead of claim forms.
+import io
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.utils import ImageReader
+from PIL import Image, ImageDraw
+import pdfplumber
+
+def render_text_as_image(text_lines, size=(620, 160)):
+    &quot;&quot;&quot;Render text into a raster image -- the way a scanned or
+    photographed pay stub actually arrives: pixels only, no text layer.&quot;&quot;&quot;
+    img = Image.new(&quot;L&quot;, size, color=255)
+    draw = ImageDraw.Draw(img)
+    y = 10
+    for line in text_lines:
+        draw.text((10, y), line, fill=0)
+        y += 22
+    return img
+
+def build_mixed_loan_file_pdf():
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    c.setFont(&quot;Helvetica&quot;, 11)
+    c.drawString(72, height - 100, &quot;Appraisal report LN0000001: comparable sales grid on page 1.&quot;)
+    c.showPage()
+    img = render_text_as_image([
+        &quot;PAY STUB - ACME LOGISTICS INC&quot;,
+        &quot;Employee: MARIA GONZALEZ&quot;,
+        &quot;Gross Pay: $4,850.00   Pay Period: 2026-01-15&quot;,
+    ])
+    c.drawImage(ImageReader(img), 72, height - 260, width=350, height=90)
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf
+
+def needs_ocr(page, min_chars=20):
+    text = page.extract_text() or &quot;&quot;
+    return len(text.strip()) &lt; min_chars, len(text.strip())
+
+mixed_pdf = build_mixed_loan_file_pdf()
+with pdfplumber.open(mixed_pdf) as pdf:
+    for i, page in enumerate(pdf.pages, start=1):
+        route_to_ocr, char_count = needs_ocr(page)
+        route = &quot;OCR fallback&quot; if route_to_ocr else &quot;direct text extraction&quot;
+        print(f&quot;page {i}: extractable_chars={char_count:&gt;3}  route -&gt; {route}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>page 1: extractable_chars= 60  route -&gt; direct text extraction
+page 2: extractable_chars=  0  route -&gt; OCR fallback
+</code></pre><p><strong>Exercise:</strong>
+Build a three-page loan file: page 1 the appraisal comp grid, page 2 a digital credit-report
+summary (also a real text layer), page 3 a scanned pay stub. Confirm all three pages route
+correctly.</p>
+<p><strong>Starting point:</strong> The <code>render_text_as_image</code>/<code>needs_ocr</code> functions from this concept's
+Example, plus a new <code>build_three_page_loan_file_pdf()</code> following the same pattern, with page 2
+drawing <code>&quot;Credit report summary LN0000003: page 2, digital text layer.&quot;</code> as real text and page
+3 rendering a pay stub for <code>&quot;WEI CHEN&quot;</code> (<code>&quot;Gross Pay: $5,120.00   Pay Period: 2026-01-22&quot;</code>) as
+an image.</p>
+<p>Expected output (actually run):</p>
+<pre><code>page 1: extractable_chars= 60  route -&gt; direct text extraction
+page 2: extractable_chars= 60  route -&gt; direct text extraction
+page 3: extractable_chars=  0  route -&gt; OCR fallback
+</code></pre><hr />
+<h3>Concept 3 — Per-Word OCR Confidence as the Quarantine Signal</h3>
+<p>Once a page is routed to OCR, <code>pytesseract.image_to_data(...)</code>'s real output carries a
+per-word confidence score (0-100) alongside each recognized word — the routing signal for
+whether to accept the OCR result or send the page to a quarantine queue for a human to key in
+by hand. Two independent thresholds matter for a pay stub: a low <em>average</em> confidence across
+the page catches broadly poor scan quality, while a single very-low-confidence word — even on
+an otherwise clean page — can be exactly the gross-pay figure underwriting will compute
+debt-to-income ratio from, and that one field must not be silently wrong.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing route_ocr_result from Week 08 Day 3 Concept 3, applied to pay-stub
+# OCR words instead of claim-form words.
+import dataclasses
+
+@dataclasses.dataclass
+class OcrWord:
+    text: str
+    confidence: float
+
+def route_ocr_result(words, mean_floor=75.0, hard_floor=40.0):
+    &quot;&quot;&quot;Quarantine instead of silently accepting a partial OCR result.&quot;&quot;&quot;
+    if not words:
+        return &quot;quarantine&quot;, &quot;no words recognized&quot;
+    confidences = [w.confidence for w in words]
+    mean_conf = sum(confidences) / len(confidences)
+    min_conf = min(confidences)
+    if min_conf &lt; hard_floor:
+        return &quot;quarantine&quot;, f&quot;a word scored {min_conf:.0f} (&lt; hard floor {hard_floor:.0f})&quot;
+    if mean_conf &lt; mean_floor:
+        return &quot;quarantine&quot;, f&quot;mean confidence {mean_conf:.1f} (&lt; floor {mean_floor:.1f})&quot;
+    return &quot;accept&quot;, f&quot;mean confidence {mean_conf:.1f}&quot;
+
+pay_stub_pages = {
+    &quot;paystub_clean&quot;: [OcrWord(&quot;GROSS&quot;, 96), OcrWord(&quot;PAY&quot;, 94), OcrWord(&quot;$4,850.00&quot;, 91)],
+    &quot;paystub_smudged_amount&quot;: [OcrWord(&quot;GROSS&quot;, 95), OcrWord(&quot;PAY&quot;, 92), OcrWord(&quot;$4,85O.OO&quot;, 33)],
+    &quot;paystub_faded_fax&quot;: [OcrWord(&quot;GR0SS&quot;, 66), OcrWord(&quot;PAv&quot;, 59), OcrWord(&quot;$4,85O.O0&quot;, 57)],
+}
+for page_id, words in pay_stub_pages.items():
+    decision, reason = route_ocr_result(words)
+    print(f&quot;{page_id:&lt;24} -&gt; {decision:&lt;10} ({reason})&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>paystub_clean            -&gt; accept     (mean confidence 93.7)
+paystub_smudged_amount   -&gt; quarantine (a word scored 33 (&lt; hard floor 40))
+paystub_faded_fax        -&gt; quarantine (mean confidence 60.7 (&lt; floor 75.0))
+</code></pre><p><strong>Exercise:</strong>
+Add a fourth page, <code>paystub_single_bad_field</code> (<code>OcrWord(&quot;GROSS&quot;, 98)</code>, <code>OcrWord(&quot;PAY&quot;, 96)</code>,
+<code>OcrWord(&quot;$4,85O.OO&quot;, 47)</code>), and tighten <code>hard_floor</code> to <code>50.0</code>. Confirm which of all four pages
+now quarantine and why.</p>
+<p><strong>Starting point:</strong> The <code>route_ocr_result(words, mean_floor=75.0, hard_floor=40.0)</code> function
+and <code>pay_stub_pages</code> dict from this concept's Example, extended with the new page, each called
+with <code>hard_floor=50.0</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>paystub_clean            -&gt; accept     (mean confidence 93.7)
+paystub_smudged_amount   -&gt; quarantine (a word scored 33 (&lt; hard floor 50))
+paystub_faded_fax        -&gt; quarantine (mean confidence 60.7 (&lt; floor 75.0))
+paystub_single_bad_field -&gt; quarantine (a word scored 47 (&lt; hard floor 50))
+</code></pre><hr />
+<h3>Concept 4 — A Quarantine Queue, Not a Silent Drop</h3>
+<p>Concepts 2 and 3 each make a per-page routing decision in isolation; a real ingestion pipeline
+needs to make that decision for every page of every document and record the ones it could not
+trust, rather than either raising an unhandled exception (which stops the whole batch) or
+silently omitting the page (which produces an underwriting file that looks complete but is
+missing exactly the field a human needed to check by hand). A quarantine queue is the third
+option: route each page, and for anything that fails the confidence floors, log a structured
+entry a human reviewer can act on instead of the pipeline either crashing or lying by omission.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+@dataclasses.dataclass
+class QuarantineEntry:
+    doc_id: str
+    page_no: int
+    reason: str
+
+class QuarantineQueue:
+    def __init__(self):
+        self._entries = []
+
+    def add(self, doc_id, page_no, reason):
+        self._entries.append(QuarantineEntry(doc_id, page_no, reason))
+
+    def __len__(self):
+        return len(self._entries)
+
+    def for_doc(self, doc_id):
+        return [e for e in self._entries if e.doc_id == doc_id]
+
+def triage_page(doc_id, page_no, extractable_chars, ocr_words, queue,
+                 min_chars=20, mean_floor=75.0, hard_floor=40.0):
+    &quot;&quot;&quot;One page&#x27;s routing decision: enough text -&gt; direct extraction;
+    otherwise OCR, and OCR below the confidence floors -&gt; quarantine
+    instead of a silently-dropped or silently-wrong field.&quot;&quot;&quot;
+    if extractable_chars &gt;= min_chars:
+        return &quot;direct_extraction&quot;
+    decision, reason = route_ocr_result(ocr_words, mean_floor=mean_floor, hard_floor=hard_floor)
+    if decision == &quot;quarantine&quot;:
+        queue.add(doc_id, page_no, reason)
+        return &quot;quarantine&quot;
+    return &quot;ocr_accepted&quot;
+
+queue = QuarantineQueue()
+pages_to_triage = [
+    (&quot;LN0000001&quot;, 1, 56, []),
+    (&quot;LN0000001&quot;, 2, 0, pay_stub_pages[&quot;paystub_clean&quot;]),
+    (&quot;LN0000002&quot;, 1, 0, pay_stub_pages[&quot;paystub_smudged_amount&quot;]),
+    (&quot;LN0000002&quot;, 2, 0, pay_stub_pages[&quot;paystub_faded_fax&quot;]),
+]
+for doc_id, page_no, chars, words in pages_to_triage:
+    outcome = triage_page(doc_id, page_no, chars, words, queue)
+    print(f&quot;{doc_id} page {page_no}: {outcome}&quot;)
+
+print(f&quot;\nquarantine queue length: {len(queue)}&quot;)
+for entry in queue.for_doc(&quot;LN0000002&quot;):
+    print(f&quot;  LN0000002 page {entry.page_no}: {entry.reason}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>LN0000001 page 1: direct_extraction
+LN0000001 page 2: ocr_accepted
+LN0000002 page 1: quarantine
+LN0000002 page 2: quarantine
+
+quarantine queue length: 2
+  LN0000002 page 1: a word scored 33 (&lt; hard floor 40)
+  LN0000002 page 2: mean confidence 60.7 (&lt; floor 75.0)
+</code></pre><p>Loan <code>LN0000001</code> clears both pages and proceeds; loan <code>LN0000002</code> has both pages logged with a
+reason a reviewer can act on, and the pipeline itself never raised or halted — it kept moving
+through every other document in the batch while flagging exactly the two pages that need eyes
+on them.</p>
+<p><strong>Exercise:</strong>
+Triage three pages for a new document, <code>LN0000003</code>: page 1 (60 extractable chars, no OCR
+words), page 2 (63 extractable chars, no OCR words), page 3 (0 extractable chars, using the
+<code>paystub_faded_fax</code> OCR words from Concept 3). Report each page's outcome and the resulting
+queue length.</p>
+<p><strong>Starting point:</strong> The <code>QuarantineQueue</code>/<code>triage_page</code> functions from this concept's Example,
+with a fresh <code>queue2 = QuarantineQueue()</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>LN0000003 page 1: direct_extraction
+LN0000003 page 2: direct_extraction
+LN0000003 page 3: quarantine
+quarantine queue length: 1
+  LN0000003 page 3: mean confidence 60.7 (&lt; floor 75.0)
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy:</strong> A loan file's supporting documents rarely arrive in one clean format — an appraisal
+comes back from the appraiser as a born-digital PDF, a pay stub arrives as a borrower's phone
+photo, a bank statement might be a fax forwarded from a branch. The same document type can even
+show up both ways across different borrowers, so the pipeline cannot assume format from the
+document type alone; it has to detect it per page, the way Concept 2's <code>needs_ocr</code> does.</p>
+<p><strong>Compliance:</strong> A quarantined page is not a failure to hide — it is the honest record that a
+specific field (a gross-pay figure, an appraised value) could not be trusted automatically, and
+an underwriting decision made from an unreviewed low-confidence OCR read is exactly the kind of
+gap a fair-lending audit would flag. The quarantine queue's entries, tied to <code>doc_id</code>/<code>page_no</code>,
+are themselves an artifact worth keeping: proof a human reviewed the specific pages that needed
+review, not just that the pipeline &quot;ran.&quot;</p>
+<p><strong>What breaks in production:</strong> A borrower uploads a pay stub as a heavily compressed JPEG
+screenshot of a screenshot; OCR confidence comes back mediocre but not quite below the floor —
+<code>mean_floor=75.0</code> accepts a 76.2 read that gets the gross-pay figure's last digit wrong. No
+threshold catches every error; the floors bound the <em>rate</em> of unreviewed bad reads, they do not
+eliminate it, which is why Day 5's retrieval baseline still needs citations back to the exact
+source page (Concept 3, Day 3) rather than treating any accepted OCR text as ground truth.</p>
+<hr />
+<h2 id="day-3">Day 3 — Underwriting Chunking and Metadata</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="28-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=pIGRwMjhMaQ" target="_blank" rel="noopener"><b>Chunking Strategies in RAG: Optimising Data for Advanced AI Responses</b><small>Mervin Praison · 14:02</small></a></li><li><a href="https://www.youtube.com/watch?v=-hsaiU6fmtQ" target="_blank" rel="noopener"><b>RAG Chunking Strategies [Top 11] | Semantic Chunking to LLM Chunking | Learn RAG from Scratch</b><small>FreeBirds Crew - Data Science and GenAI · 26:11</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=semantic%20chunking%20strategy%20document%20metadata%20schema%20RAG" target="_blank" rel="noopener">Search YouTube: semantic chunking strategy document metadata schema RAG</a></p></div>
+<hr />
+<h3>Concept 1 — Splitting a Loan File on Its Own Document-Type Sections</h3>
+<p>A single mortgage loan file is not one document, it is a bundle: income verification,
+appraisal, credit report, title search — each written by a different party, in a different
+voice, about a different fact pattern. Splitting on the loan file's own ALL-CAPS section
+headers (the way each source document is conventionally labeled when it lands, digitally or
+after Day 2's parsing) gives every chunk boundary a document-type boundary already drawn by
+the file itself — never a chunk that straddles an income-verification sentence and an
+appraisal sentence.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing split_on_headings from Week 09 Day 2 Concept 1, applied to a
+# mortgage loan file&#x27;s own document-type sections instead of an insurance
+# policy&#x27;s coverage/exclusions sections.
+import re
+
+def split_on_headings(text, heading_pattern=r&quot;^[A-Z][A-Z0-9 /&amp;\-]{3,60}$&quot;):
+    lines = text.split(&quot;\n&quot;)
+    sections = []
+    current_heading = None
+    current_body = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and re.match(heading_pattern, stripped):
+            if current_heading is not None:
+                sections.append((current_heading, &quot;\n&quot;.join(current_body).strip()))
+            current_heading = stripped
+            current_body = []
+        else:
+            current_body.append(line)
+    if current_heading is not None:
+        sections.append((current_heading, &quot;\n&quot;.join(current_body).strip()))
+    return sections
+
+loan_file_text = &quot;&quot;&quot;INCOME VERIFICATION
+
+Borrower Maria Gonzalez, employed by Acme Logistics Inc. Gross monthly income $9,700.00
+based on the most recent two pay stubs and a signed verification-of-employment letter.
+
+APPRAISAL SUMMARY
+
+Subject property at 412 Elm St appraised at $468,000 using three comparable sales within
+one mile, sold within the last six months. Appraiser: R. Fine, license #APR-4021.
+
+CREDIT REPORT SUMMARY
+
+Tri-merge credit report shows a FICO score of 742. Two open revolving accounts, one auto
+loan in good standing, no delinquencies in the last 24 months.
+
+TITLE SEARCH SUMMARY
+
+Preliminary title report shows clear title, no liens or encumbrances of record. One prior
+deed of trust from 2018 fully reconveyed as of 2023.&quot;&quot;&quot;
+
+sections = split_on_headings(loan_file_text)
+for heading, body in sections:
+    print(f&quot;[{heading}] ({len(body)} chars)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>[INCOME VERIFICATION] (174 chars)
+[APPRAISAL SUMMARY] (170 chars)
+[CREDIT REPORT SUMMARY] (151 chars)
+[TITLE SEARCH SUMMARY] (142 chars)
+</code></pre><p><strong>Exercise:</strong>
+Split a second loan file, for borrower James Okafor (self-employed, FICO 701, an HOA lien
+noted on title), into its four document-type sections.</p>
+<p><strong>Starting point:</strong> The <code>split_on_headings</code> function from this concept's Example, with a new
+<code>loan_file_text_2</code> string carrying the same four ALL-CAPS section headers
+(<code>INCOME VERIFICATION</code>, <code>APPRAISAL SUMMARY</code>, <code>CREDIT REPORT SUMMARY</code>, <code>TITLE SEARCH SUMMARY</code>)
+around different loan content.</p>
+<p>Expected output (actually run):</p>
+<pre><code>[INCOME VERIFICATION] (212 chars)
+[APPRAISAL SUMMARY] (175 chars)
+[CREDIT REPORT SUMMARY] (172 chars)
+[TITLE SEARCH SUMMARY] (160 chars)
+</code></pre><hr />
+<h3>Concept 2 — Metadata Schema: <code>loan_id</code>, <code>doc_type</code>, <code>page_no</code>, <code>effective_date</code></h3>
+<p>A chunk's text alone cannot answer &quot;which loan, which document type, which page, as of when.&quot;
+<code>build_chunk_record</code> attaches exactly those four fields to every chunk, and derives <code>chunk_id</code>
+as a content hash — but which fields go INTO that hash is a real design decision, not a detail:
+only fields present in the hash input make two otherwise-identical chunks distinct. Leaving
+<code>page_no</code> out of the hash (as this concept deliberately does, to make the consequence visible)
+means the same section text re-appearing at a different page number collides on <code>chunk_id</code> — a
+real risk if the same clause is repeated verbatim across an amended and original document.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing the build_chunk_record content-hash pattern from Week 09 Day 4
+# Concept 1, restructured around this week&#x27;s own metadata schema
+# (loan_id/doc_type/page_no/effective_date) instead of an insurance
+# policy&#x27;s parent_doc_id/section_path.
+import hashlib
+
+DOC_TYPE_BY_HEADING = {
+    &quot;INCOME VERIFICATION&quot;: &quot;income&quot;,
+    &quot;APPRAISAL SUMMARY&quot;: &quot;appraisal&quot;,
+    &quot;CREDIT REPORT SUMMARY&quot;: &quot;credit&quot;,
+    &quot;TITLE SEARCH SUMMARY&quot;: &quot;title&quot;,
+}
+
+def build_chunk_record(text, loan_id, doc_type, page_no, effective_date, chunk_index):
+    chunk_id = hashlib.sha256(
+        f&quot;{loan_id}:{doc_type}:{chunk_index}:{effective_date}:{text}&quot;.encode()
+    ).hexdigest()[:16]
+    return {
+        &quot;chunk_id&quot;: chunk_id,
+        &quot;loan_id&quot;: loan_id,
+        &quot;doc_type&quot;: doc_type,
+        &quot;page_no&quot;: page_no,
+        &quot;effective_date&quot;: effective_date,
+        &quot;chunk_index&quot;: chunk_index,
+        &quot;text&quot;: text,
+    }
+
+chunks = []
+for idx, (heading, body) in enumerate(sections):
+    record = build_chunk_record(
+        text=body, loan_id=&quot;LN0000001&quot;, doc_type=DOC_TYPE_BY_HEADING[heading],
+        page_no=idx + 1, effective_date=&quot;2026-01-22&quot;, chunk_index=idx,
+    )
+    chunks.append(record)
+
+for record in chunks:
+    print(f&quot;{record[&#x27;chunk_id&#x27;]}  loan_id={record[&#x27;loan_id&#x27;]}  doc_type={record[&#x27;doc_type&#x27;]:&lt;9}  &quot;
+          f&quot;page_no={record[&#x27;page_no&#x27;]}  effective_date={record[&#x27;effective_date&#x27;]}&quot;)
+
+same_text_diff_page = build_chunk_record(
+    text=chunks[1][&quot;text&quot;], loan_id=&quot;LN0000001&quot;, doc_type=&quot;appraisal&quot;,
+    page_no=99, effective_date=&quot;2026-01-22&quot;, chunk_index=1,
+)
+print(f&quot;\nsame text, different page_no -&gt; same chunk_id: &quot;
+      f&quot;{chunks[1][&#x27;chunk_id&#x27;] == same_text_diff_page[&#x27;chunk_id&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>a6201610d6898a98  loan_id=LN0000001  doc_type=income     page_no=1  effective_date=2026-01-22
+33dbebbc75b3830b  loan_id=LN0000001  doc_type=appraisal  page_no=2  effective_date=2026-01-22
+b668d3af87d8b552  loan_id=LN0000001  doc_type=credit     page_no=3  effective_date=2026-01-22
+d4c3a354a95caeaa  loan_id=LN0000001  doc_type=title      page_no=4  effective_date=2026-01-22
+
+same text, different page_no -&gt; same chunk_id: True
+</code></pre><p><code>page_no</code> is stored on every record and available to a citation lookup (Concept 3), but it is
+not part of what makes <code>chunk_id</code> unique — the <code>True</code> above is the concrete demonstration of
+that design choice, not a bug the Example is hiding.</p>
+<p><strong>Exercise:</strong>
+Build chunk records for the four sections of Exercise 1's <code>loan_file_text_2</code> (<code>loan_id</code>
+<code>&quot;LN0000002&quot;</code>, <code>effective_date</code> <code>&quot;2026-01-25&quot;</code>), then confirm whether a chunk built from
+<code>chunks2[2]</code>'s exact text/<code>doc_type</code>/<code>chunk_index</code> but a <em>different</em> <code>loan_id</code>
+(<code>&quot;LN0000001&quot;</code>) produces the same <code>chunk_id</code> as <code>chunks2[2]</code> — and state whether that's the
+correct behavior for two chunks that belong to two different loans.</p>
+<p><strong>Starting point:</strong> The <code>build_chunk_record</code> function and <code>DOC_TYPE_BY_HEADING</code> dict from this
+concept's Example, with <code>sections2</code> from Exercise 1.</p>
+<p>Expected output (actually run):</p>
+<pre><code>70a269d7af9b964a  loan_id=LN0000002  doc_type=income     page_no=1  effective_date=2026-01-25
+c89d886362580a95  loan_id=LN0000002  doc_type=appraisal  page_no=2  effective_date=2026-01-25
+c6b595a8ff1c211a  loan_id=LN0000002  doc_type=credit     page_no=3  effective_date=2026-01-25
+001d0a5be00aa35c  loan_id=LN0000002  doc_type=title      page_no=4  effective_date=2026-01-25
+
+same text/doc_type/chunk_index, different loan_id -&gt; same chunk_id: False
+</code></pre><p>Unlike <code>page_no</code>, <code>loan_id</code> IS part of the hash input, so it correctly distinguishes two
+otherwise-identical chunks that belong to two different loans — exactly the collision <code>page_no</code>
+being left out of the hash does not protect against, and exactly the field that most needs to,
+since a chunk cited against the wrong loan is a far more serious error than one cited against
+the wrong page of the right loan.</p>
+<hr />
+<h3>Concept 3 — Parent-Child Links From Chunk Back to Source Page</h3>
+<p>Every chunk needs a way back to the exact page it came from — not for storage bookkeeping, but
+because Day 5's retrieval demo has to answer &quot;cited source page,&quot; and that answer only exists if
+each chunk carries a real, resolvable pointer to its parent page's own record. <code>cite_chunk</code>
+looks that pointer up by the same <code>(loan_id, doc_type, page_no)</code> key <code>build_chunk_record</code>
+already attaches to every chunk, and returns an explicit &quot;unavailable&quot; result rather than
+guessing when the key does not resolve to anything stored.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+@dataclasses.dataclass
+class SourcePage:
+    loan_id: str
+    doc_type: str
+    page_no: int
+    full_text: str
+
+pages = {
+    (r[&quot;loan_id&quot;], r[&quot;doc_type&quot;], r[&quot;page_no&quot;]): SourcePage(
+        r[&quot;loan_id&quot;], r[&quot;doc_type&quot;], r[&quot;page_no&quot;], r[&quot;text&quot;]
+    )
+    for r in chunks
+}
+
+def cite_chunk(chunk_record, pages_index):
+    key = (chunk_record[&quot;loan_id&quot;], chunk_record[&quot;doc_type&quot;], chunk_record[&quot;page_no&quot;])
+    page = pages_index.get(key)
+    if page is None:
+        return f&quot;[citation unavailable: {key}]&quot;
+    return f&quot;loan {page.loan_id}, {page.doc_type} section, page {page.page_no}&quot;
+
+for record in chunks:
+    print(f&quot;chunk {record[&#x27;chunk_id&#x27;]} cites: {cite_chunk(record, pages)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>chunk a6201610d6898a98 cites: loan LN0000001, income section, page 1
+chunk 33dbebbc75b3830b cites: loan LN0000001, appraisal section, page 2
+chunk b668d3af87d8b552 cites: loan LN0000001, credit section, page 3
+chunk d4c3a354a95caeaa cites: loan LN0000001, title section, page 4
+</code></pre><p><strong>Exercise:</strong>
+Build a <code>pages2</code> index for <code>chunks2</code> (from Concept 2's exercise) and print each chunk's
+citation, then build a copy of <code>chunks2[0]</code> with <code>page_no</code> changed to <code>99</code> (a page that was
+never stored) and print what <code>cite_chunk</code> returns for it.</p>
+<p><strong>Starting point:</strong> The <code>SourcePage</code>/<code>cite_chunk</code> from this concept's Example, plus <code>chunks2</code>
+from Concept 2's exercise.</p>
+<p>Expected output (actually run):</p>
+<pre><code>chunk 70a269d7af9b964a cites: loan LN0000002, income section, page 1
+chunk c89d886362580a95 cites: loan LN0000002, appraisal section, page 2
+chunk c6b595a8ff1c211a cites: loan LN0000002, credit section, page 3
+chunk 001d0a5be00aa35c cites: loan LN0000002, title section, page 4
+chunk with page_no=99 (never stored) cites: [citation unavailable: (&#x27;LN0000002&#x27;, &#x27;income&#x27;, 99)]
+</code></pre><hr />
+<h3>Concept 4 — A Chunk Audit Table, Reconciling Chunks Per Source Document</h3>
+<p>Chunking can fail silently in a way that looks identical to a loan with no title issues to
+report: zero chunks. If Day 2's parsing quarantined the title-search page instead of extracting
+it, the chunker simply never sees any title-section text and produces zero <code>doc_type=&quot;title&quot;</code>
+chunks — indistinguishable, from the chunk store alone, from a title report that was parsed
+fine and just had a short, unremarkable summary. A chunk audit table, built the same way Day 1's
+manifest reconciled parsed records against a trailer's declared count, makes that failure
+visible: for every expected <code>doc_type</code>, a chunk count of zero is flagged, not silently accepted.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from collections import Counter
+
+def build_chunk_audit(chunks, expected_doc_types):
+    counts = Counter(c[&quot;doc_type&quot;] for c in chunks)
+    rows = []
+    for doc_type in expected_doc_types:
+        n = counts.get(doc_type, 0)
+        rows.append({&quot;doc_type&quot;: doc_type, &quot;chunk_count&quot;: n, &quot;status&quot;: &quot;ok&quot; if n &gt; 0 else &quot;MISSING&quot;})
+    return rows
+
+expected = [&quot;income&quot;, &quot;appraisal&quot;, &quot;credit&quot;, &quot;title&quot;]
+audit = build_chunk_audit(chunks, expected)
+for row in audit:
+    print(f&quot;{row[&#x27;doc_type&#x27;]:&lt;10} chunks={row[&#x27;chunk_count&#x27;]}  status={row[&#x27;status&#x27;]}&quot;)
+
+chunks_missing_title = [c for c in chunks if c[&quot;doc_type&quot;] != &quot;title&quot;]
+audit2 = build_chunk_audit(chunks_missing_title, expected)
+print()
+for row in audit2:
+    print(f&quot;{row[&#x27;doc_type&#x27;]:&lt;10} chunks={row[&#x27;chunk_count&#x27;]}  status={row[&#x27;status&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>income     chunks=1  status=ok
+appraisal  chunks=1  status=ok
+credit     chunks=1  status=ok
+title      chunks=1  status=ok
+
+income     chunks=1  status=ok
+appraisal  chunks=1  status=ok
+credit     chunks=1  status=ok
+title      chunks=0  status=MISSING
+</code></pre><p><strong>Exercise:</strong>
+Run <code>build_chunk_audit</code> against <code>chunks2</code> (Concept 2's exercise) with the <code>credit</code> document
+filtered out entirely, simulating a credit-report page that Day 2's quarantine caught and never
+reached the chunker.</p>
+<p><strong>Starting point:</strong> The <code>build_chunk_audit</code> function and <code>expected</code> list from this concept's
+Example, with <code>chunks2_missing_credit = [c for c in chunks2 if c[&quot;doc_type&quot;] != &quot;credit&quot;]</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>income     chunks=1  status=ok
+appraisal  chunks=1  status=ok
+credit     chunks=0  status=MISSING
+title      chunks=1  status=ok
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy:</strong> A loan file's four document types were never authored to be read together — the
+appraisal follows USPAP formatting conventions, the credit report follows the tri-merge
+bureaus' own layout, the title report follows the title company's template. Section-aware
+chunking's ALL-CAPS-heading heuristic works here only because Day 2's parsing already
+normalized each source into a consistent per-section text block; without that normalization
+step, four differently-formatted documents would need four different heading heuristics, not
+one.</p>
+<p><strong>Compliance:</strong> <code>loan_id</code> on every chunk is what makes a per-loan access-control boundary
+possible at retrieval time — an underwriter working loan <code>LN0000002</code> should never have a query
+accidentally surface a chunk from <code>LN0000001</code>'s credit report, and the metadata schema is the
+only thing standing between &quot;the vector index returns whatever is semantically similar&quot; and
+&quot;the vector index returns whatever is semantically similar AND belongs to this loan.&quot;</p>
+<p><strong>What breaks in production:</strong> The chunk audit table catches a document type with zero chunks,
+but not a document type with implausibly few — a credit report that should chunk into three or
+four sections (accounts, inquiries, public records, score history) but a parsing regression
+collapses into one giant undifferentiated block. The audit's <code>status=&quot;ok&quot;</code> at <code>chunk_count=1</code>
+looks identical whether that one chunk is a clean single-section report or a garbled merge of
+everything; a production version needs a per-<code>doc_type</code> expected-range check, not just a
+nonzero check, to catch that class of degradation.</p>
+<hr />
+<h2 id="day-4">Day 4 — Embed and Index in pgvector</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="28-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=6pRQ6_aHR8E" target="_blank" rel="noopener"><b>pgvector HNSW vs IVFFlat Indexing: Cut Latency and Cost in Python</b><small>Professor Py: Information Retrieval with Python · 7:57</small></a></li><li><a href="https://www.youtube.com/watch?v=qvocxIyGeAI" target="_blank" rel="noopener"><b>I Asked pgvector for 10 Results. It Returned 0.</b><small>Ground Truth · 11:31</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=pgvector%20HNSW%20index%20tuning%20ef_search%20upsert%20embeddings%20postgres" target="_blank" rel="noopener">Search YouTube: pgvector HNSW index tuning ef_search upsert embeddings postgres</a></p></div>
+<hr />
+<h3>Concept 1 — Batch Embedding With Bounded Concurrency and Retry-With-Backoff</h3>
+<p>Embedding every chunk from a loan file one call at a time, sequentially, wastes the time a real
+embedding API spends waiting on I/O rather than compute — but firing every chunk's call at once
+with no limit can overwhelm the API's own rate limits. Bounded concurrency (a fixed-size worker
+pool) gets the overlap without the flood, and because any individual call can fail transiently,
+each one needs its own retry-with-backoff rather than letting one flaky call fail the whole
+batch.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing the trigram/zlib.crc32 deterministic embedding stand-in from
+# Week 05 Day 2 Concept 1, applied to loan-chunk text instead of claim text.
+import time
+import zlib
+import numpy as np
+from concurrent.futures import ThreadPoolExecutor
+
+DIM = 32
+
+def trigrams(text):
+    t = &quot;  &quot; + text.lower() + &quot;  &quot;
+    return [t[i:i+3] for i in range(len(t) - 2)]
+
+def embed(text, dim=DIM):
+    vec = np.zeros(dim)
+    for gram in trigrams(text):
+        seed = zlib.crc32(gram.encode(&quot;utf-8&quot;))
+        rng = np.random.default_rng(seed)
+        vec += rng.normal(size=dim)
+    norm = np.linalg.norm(vec)
+    return vec / norm if norm &gt; 0 else vec
+
+class FlakyEmbeddingCalls:
+    &quot;&quot;&quot;Deterministic stand-in for a real embedding API that fails the
+    first N calls for a given text before succeeding -- no real
+    randomness, so this reproduces identically across repeated runs.&quot;&quot;&quot;
+    def __init__(self, fail_first_n_calls_for=None):
+        self.fail_first_n_calls_for = fail_first_n_calls_for or {}
+        self._call_counts = {}
+
+    def call(self, text):
+        n = self._call_counts.get(text, 0)
+        self._call_counts[text] = n + 1
+        fail_count = self.fail_first_n_calls_for.get(text, 0)
+        if n &lt; fail_count:
+            raise ConnectionError(f&quot;embedding API transient failure (attempt {n + 1})&quot;)
+        return embed(text)
+
+def embed_with_retry(client, text, max_attempts=4, base_delay=0.0):
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return client.call(text)
+        except ConnectionError:
+            if attempt == max_attempts:
+                raise
+            time.sleep(base_delay)  # real backoff: base_delay * 2 ** (attempt - 1)
+    raise RuntimeError(&quot;unreachable&quot;)
+
+def embed_batch(texts, client, max_workers=4):
+    &quot;&quot;&quot;Bounded-concurrency batch embedding: at most max_workers texts in
+    flight at once, each with its own retry-with-backoff.&quot;&quot;&quot;
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        return list(pool.map(lambda t: embed_with_retry(client, t), texts))
+
+texts = [
+    &quot;Gross monthly income $9,700.00 based on two pay stubs.&quot;,
+    &quot;Subject property appraised at $468,000 using three comparable sales.&quot;,
+    &quot;Tri-merge credit report shows a FICO score of 742.&quot;,
+    &quot;Preliminary title report shows clear title, no liens of record.&quot;,
+]
+client = FlakyEmbeddingCalls(fail_first_n_calls_for={texts[1]: 2, texts[3]: 1})
+vectors = embed_batch(texts, client, max_workers=2)
+print(f&quot;embedded {len(vectors)} texts, each dim={len(vectors[0])}&quot;)
+for t, calls in client._call_counts.items():
+    print(f&quot;  &#x27;{t[:40]}...&#x27; took {calls} call(s)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>embedded 4 texts, each dim=32
+  &#x27;Gross monthly income $9,700.00 based on ...&#x27; took 1 call(s)
+  &#x27;Subject property appraised at $468,000 u...&#x27; took 3 call(s)
+  &#x27;Tri-merge credit report shows a FICO sco...&#x27; took 1 call(s)
+  &#x27;Preliminary title report shows clear tit...&#x27; took 2 call(s)
+</code></pre><p>The appraisal chunk's two injected failures cost it 3 total calls (2 failures + 1 success),
+and the title chunk's one injected failure costs it 2 — <code>embed_batch</code> never raised, because
+<code>embed_with_retry</code> absorbed each transient failure before the caller ever saw it.</p>
+<p><strong>Exercise:</strong>
+Batch-embed two new chunks — one failing 3 times before succeeding, one succeeding on the
+first attempt — at <code>max_workers=3</code>, and report each one's call count.</p>
+<p><strong>Starting point:</strong> The <code>FlakyEmbeddingCalls</code>/<code>embed_batch</code> from this concept's Example, with
+<code>texts_ex1 = [&quot;Loan status is active, no conditions outstanding as of this review.&quot;, &quot;Two co-borrowers listed on the application, both W-2 employees.&quot;]</code> and
+<code>client_ex1 = FlakyEmbeddingCalls(fail_first_n_calls_for={texts_ex1[0]: 3, texts_ex1[1]: 0})</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>embedded 2 texts, each dim=32
+  &#x27;Loan status is active, no conditions out...&#x27; took 4 call(s)
+  &#x27;Two co-borrowers listed on the applicati...&#x27; took 1 call(s)
+</code></pre><hr />
+<h3>Concept 2 — HNSW <code>m</code>/<code>ef_construction</code> for This Corpus, <code>ef_search</code> at Query Time</h3>
+<p>This sandbox turns out to have a genuine local PostgreSQL 16 instance (found while writing this
+week — see the Metadata table above), and <code>apt-get install postgresql-16-pgvector</code> installs the
+real pgvector 0.6.0 server extension cleanly. The sizing question from Week 02 Day 2 — HNSW
+below a row-count threshold, IVFFlat at or above it — still applies to decide <code>m</code>, but this
+week that decision drives a real <code>CREATE INDEX ... USING hnsw</code> against a real table, not just an
+estimate. <code>hnsw.ef_search</code> is a session-level setting read at query time, not baked into the
+index: a higher value trades query latency for a more thorough graph traversal.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing the HNSW-vs-IVFFlat sizing heuristic from Week 02 Day 2 Concept 1;
+# unlike Week 02, this week has a genuine local Postgres+pgvector instance
+# to build the index against for real (see the week&#x27;s Metadata table).
+import hashlib
+import psycopg2
+from pgvector.psycopg2 import register_vector
+
+def index_build_plan(rows, dim, m, hnsw_row_threshold=5_000_000):
+    if rows &lt; hnsw_row_threshold:
+        est_mem_gb = (rows * dim * 4 * 2) / 1e9  # HNSW ~2x raw vector bytes
+        return {&quot;index_type&quot;: &quot;hnsw&quot;, &quot;m&quot;: m, &quot;estimated_mem_gb&quot;: round(est_mem_gb, 6)}
+    lists = int(rows / 1000) if rows &lt;= 1_000_000 else int(rows ** 0.5)
+    return {&quot;index_type&quot;: &quot;ivfflat&quot;, &quot;lists&quot;: lists}
+
+CORPUS_ROWS = 4  # this week&#x27;s demo corpus; a real underwriting index is far larger
+plan = index_build_plan(CORPUS_ROWS, dim=DIM, m=16)
+print(f&quot;index build plan for {CORPUS_ROWS} rows: {plan}&quot;)
+
+conn = psycopg2.connect(host=&quot;127.0.0.1&quot;, dbname=&quot;postgres&quot;, user=&quot;postgres&quot;, password=&quot;postgres&quot;)
+conn.autocommit = True  # every statement commits immediately -- no idle-in-
+                         # transaction session left holding a lock behind it,
+                         # which matters because this block re-runs against
+                         # the SAME live server on a repeated execution.
+register_vector(conn)
+cur = conn.cursor()
+cur.execute(&quot;DROP TABLE IF EXISTS loan_chunk_vectors;&quot;)
+cur.execute(f&quot;&quot;&quot;
+    CREATE TABLE loan_chunk_vectors (
+        chunk_id text PRIMARY KEY,
+        loan_id text NOT NULL,
+        doc_type text NOT NULL,
+        content_hash text NOT NULL,
+        text text NOT NULL,
+        embedding vector({DIM})
+    );
+&quot;&quot;&quot;)
+for i, (text, vec) in enumerate(zip(texts, vectors)):
+    chunk_id = f&quot;CH{i:03d}&quot;
+    content_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
+    cur.execute(
+        &quot;INSERT INTO loan_chunk_vectors (chunk_id, loan_id, doc_type, content_hash, text, embedding) &quot;
+        &quot;VALUES (%s, %s, %s, %s, %s, %s)&quot;,
+        (chunk_id, &quot;LN0000001&quot;, [&quot;income&quot;, &quot;appraisal&quot;, &quot;credit&quot;, &quot;title&quot;][i], content_hash, text, vec),
+    )
+conn.commit()
+
+cur.execute(
+    f&quot;CREATE INDEX idx_loan_chunk_vectors_hnsw ON loan_chunk_vectors &quot;
+    f&quot;USING hnsw (embedding vector_cosine_ops) WITH (m = {plan[&#x27;m&#x27;]}, ef_construction = 64);&quot;
+)
+conn.commit()
+cur.execute(&quot;SELECT count(*) FROM pg_indexes WHERE indexname = &#x27;idx_loan_chunk_vectors_hnsw&#x27;;&quot;)
+print(f&quot;HNSW index created: {cur.fetchone()[0] == 1}&quot;)
+
+cur.execute(&quot;SET hnsw.ef_search = 40;&quot;)
+query_vec = embed(&quot;what is the appraised value on this loan&quot;)
+cur.execute(
+    &quot;SELECT chunk_id, doc_type FROM loan_chunk_vectors ORDER BY embedding &lt;=&gt; %s LIMIT 2;&quot;,
+    (query_vec,),
+)
+print(&quot;top-2 nearest chunks to the appraisal query:&quot;, cur.fetchall())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>index build plan for 4 rows: {&#x27;index_type&#x27;: &#x27;hnsw&#x27;, &#x27;m&#x27;: 16, &#x27;estimated_mem_gb&#x27;: 1e-06}
+HNSW index created: True
+top-2 nearest chunks to the appraisal query: [(&#x27;CH001&#x27;, &#x27;appraisal&#x27;), (&#x27;CH000&#x27;, &#x27;income&#x27;)]
+</code></pre><p>The <code>&lt;=&gt;</code> operator is pgvector's real cosine-distance operator, run against a genuine HNSW index
+in a real Postgres server — not a simulated ranking — and correctly surfaces the appraisal
+chunk first for an appraisal-shaped query.</p>
+<p><strong>Exercise:</strong>
+Compute <code>index_build_plan</code> for a 6,000,000-row corpus (past the HNSW threshold), then query the
+live index from the Example at <code>hnsw.ef_search=1</code> and again at <code>hnsw.ef_search=40</code>, comparing
+the top-4 results.</p>
+<p><strong>Starting point:</strong> The <code>index_build_plan</code> function and the live <code>cur</code>/<code>loan_chunk_vectors</code>
+table from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>index build plan for 6,000,000 rows: {&#x27;index_type&#x27;: &#x27;ivfflat&#x27;, &#x27;lists&#x27;: 2449}
+top-4 nearest chunks with hnsw.ef_search=1: [(&#x27;CH000&#x27;, &#x27;income&#x27;), (&#x27;CH001&#x27;, &#x27;appraisal&#x27;), (&#x27;CH002&#x27;, &#x27;credit&#x27;), (&#x27;CH003&#x27;, &#x27;title&#x27;)]
+top-4 nearest chunks with hnsw.ef_search=40: [(&#x27;CH000&#x27;, &#x27;income&#x27;), (&#x27;CH001&#x27;, &#x27;appraisal&#x27;), (&#x27;CH002&#x27;, &#x27;credit&#x27;), (&#x27;CH003&#x27;, &#x27;title&#x27;)]
+</code></pre><p>At <code>rows &gt;= 5,000,000</code> the sizing heuristic switches to IVFFlat's <code>lists = sqrt(rows)</code> regime.
+On this week's 4-row demo corpus, <code>ef_search=1</code> and <code>ef_search=40</code> return the identical
+top-4 ordering (all 4 rows, correctly ranked either way) — the graph is small enough that a
+minimal search budget already finds everything; <code>ef_search</code> only starts trading recall for
+latency once a corpus is large enough that a low budget can genuinely miss a true nearest
+neighbor.</p>
+<hr />
+<h3>Concept 3 — Idempotent Upsert Keyed on Content Hash</h3>
+<p>Re-running an ingestion pipeline over the same loan file — after a crash, a retry, a scheduled
+re-sync — must not duplicate rows for chunks that have not actually changed. <code>content_hash</code>
+(the SHA-256 of the chunk's own text, already used as part of Day 3's <code>chunk_id</code>) is the key an
+upsert checks: <code>INSERT ... ON CONFLICT (chunk_id) DO UPDATE</code> only actually writes when the
+incoming content hash differs from what is already stored, so a re-run over unchanged content
+is a genuine no-op at the storage layer, not merely &quot;doesn't error.&quot;</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def upsert_chunk(cur, chunk_id, loan_id, doc_type, text, vec):
+    content_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
+    cur.execute(
+        &quot;&quot;&quot;
+        INSERT INTO loan_chunk_vectors (chunk_id, loan_id, doc_type, content_hash, text, embedding)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (chunk_id) DO UPDATE SET
+            content_hash = EXCLUDED.content_hash,
+            text = EXCLUDED.text,
+            embedding = EXCLUDED.embedding
+        WHERE loan_chunk_vectors.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+        RETURNING (xmax = 0) AS was_insert;
+        &quot;&quot;&quot;,
+        (chunk_id, loan_id, doc_type, content_hash, text, vec),
+    )
+    row = cur.fetchone()
+    return &quot;inserted&quot; if row and row[0] else (&quot;updated&quot; if row else &quot;unchanged&quot;)
+
+cur.execute(&quot;SELECT count(*) FROM loan_chunk_vectors;&quot;)
+print(f&quot;rows before re-run: {cur.fetchone()[0]}&quot;)
+
+outcome_same_text = upsert_chunk(cur, &quot;CH000&quot;, &quot;LN0000001&quot;, &quot;income&quot;, texts[0], vectors[0])
+conn.commit()
+print(f&quot;re-upserting CH000 with IDENTICAL text: {outcome_same_text}&quot;)
+
+new_income_text = &quot;Gross monthly income $9,850.00 after a raise, per updated pay stubs.&quot;
+new_vec = embed(new_income_text)
+outcome_changed_text = upsert_chunk(cur, &quot;CH000&quot;, &quot;LN0000001&quot;, &quot;income&quot;, new_income_text, new_vec)
+conn.commit()
+print(f&quot;re-upserting CH000 with CHANGED text: {outcome_changed_text}&quot;)
+
+cur.execute(&quot;SELECT count(*) FROM loan_chunk_vectors;&quot;)
+print(f&quot;rows after both re-runs (should still be {len(texts)}, upsert never duplicates): {cur.fetchone()[0]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>rows before re-run: 4
+re-upserting CH000 with IDENTICAL text: unchanged
+re-upserting CH000 with CHANGED text: updated
+rows after both re-runs (should still be 4, upsert never duplicates): 4
+</code></pre><p><code>ON CONFLICT</code>'s <code>RETURNING (xmax = 0)</code> is a real Postgres trick — <code>xmax</code> is <code>0</code> only on a row
+this exact statement just inserted, never on one it updated via the conflict path — used here to
+tell &quot;inserted,&quot; &quot;updated,&quot; and &quot;unchanged&quot; (the <code>WHERE</code> clause skipped the write entirely)
+apart from Python without a second round-trip query.</p>
+<p><strong>Exercise:</strong>
+Upsert a brand-new chunk <code>CH999</code> (never seen before) once, then upsert it again with the
+identical text, and confirm the table still holds exactly one row for it.</p>
+<p><strong>Starting point:</strong> The <code>upsert_chunk</code> function and the live <code>cur</code> from this concept's Example,
+with <code>text = &quot;Brand-new title chunk, never seen before.&quot;</code>, <code>loan_id=&quot;LN0000002&quot;</code>,
+<code>doc_type=&quot;title&quot;</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>first upsert of never-before-seen CH999: inserted
+repeat upsert of CH999, same text: unchanged
+row count for CH999 (should be 1, not 2): 1
+</code></pre><hr />
+<h3>Concept 4 — Incremental Re-Embed When a Document Version Is Replaced</h3>
+<p>A loan file's appraisal is sometimes revised — a second review adjusts the value, a corrected
+credit pull replaces an earlier one. The chunk's identity (<code>chunk_id</code>, same <code>loan_id</code>/<code>doc_type</code>
+slot) stays the same across that revision; only its content changes. Concept 3's upsert already
+handles this correctly by construction — a changed <code>content_hash</code> triggers a real write — this
+concept makes the version-replacement case explicit by reading the prior text back before
+re-embedding, so the change is auditable rather than just silently applied.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def reembed_document_version(cur, chunk_id, loan_id, doc_type, new_text, new_effective_date):
+    &quot;&quot;&quot;A replaced document version keeps the same chunk_id but genuinely
+    new text -- read the old text back first so the version change is
+    auditable, then let the upsert (Concept 3) do the real re-embed.&quot;&quot;&quot;
+    cur.execute(&quot;SELECT text FROM loan_chunk_vectors WHERE chunk_id = %s;&quot;, (chunk_id,))
+    row = cur.fetchone()
+    old_text = row[0] if row else None
+    new_vec = embed(new_text)
+    outcome = upsert_chunk(cur, chunk_id, loan_id, doc_type, new_text, new_vec)
+    return old_text, outcome
+
+old_text, outcome = reembed_document_version(
+    cur, &quot;CH001&quot;, &quot;LN0000001&quot;, &quot;appraisal&quot;,
+    &quot;Revised appraisal, second review: subject property now appraised at $471,000.&quot;,
+    new_effective_date=&quot;2026-02-01&quot;,
+)
+conn.commit()
+print(f&quot;appraisal chunk before revision: {old_text!r}&quot;)
+print(f&quot;re-embed outcome: {outcome}&quot;)
+cur.execute(&quot;SELECT text FROM loan_chunk_vectors WHERE chunk_id = %s;&quot;, (&quot;CH001&quot;,))
+print(f&quot;appraisal chunk after revision:  {cur.fetchone()[0]!r}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>appraisal chunk before revision: &#x27;Subject property appraised at $468,000 using three comparable sales.&#x27;
+re-embed outcome: updated
+appraisal chunk after revision:  &#x27;Revised appraisal, second review: subject property now appraised at $471,000.&#x27;
+</code></pre><p><strong>Exercise:</strong>
+Replace the credit chunk (<code>CH002</code>) with an updated credit pull's text, reporting the text
+before and after the revision and the re-embed outcome.</p>
+<p><strong>Starting point:</strong> The <code>reembed_document_version</code> function from this concept's Example, with
+<code>new_text = &quot;Updated credit pull: FICO score now 758 after two trade lines paid off.&quot;</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>credit chunk before revision: &#x27;Tri-merge credit report shows a FICO score of 742.&#x27;
+re-embed outcome: updated
+credit chunk after revision:  &#x27;Updated credit pull: FICO score now 758 after two trade lines paid off.&#x27;
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy:</strong> A production BFSI vector store rarely gets to assume a clean initial load — it
+inherits documents that arrive in waves as a loan progresses through underwriting (initial
+application, then appraisal, then a revised appraisal, then a corrected credit pull weeks
+later), and every one of those waves has to land through the same idempotent upsert path, never
+a special-cased &quot;first load&quot; script that only gets tested once.</p>
+<p><strong>Compliance:</strong> The <code>content_hash</code>-gated upsert is also an audit control: a chunk whose stored
+<code>content_hash</code> never changes is provable evidence nothing about that fact was silently altered
+between two points in time, which matters when an underwriting decision several weeks later is
+challenged and someone needs to confirm the appraised value the model saw was the one actually
+on file, not a since-corrected figure retroactively applied without a trace.</p>
+<p><strong>What breaks in production:</strong> <code>ON CONFLICT (chunk_id)</code> protects against exact-key collisions,
+but Day 3's own finding stands: <code>page_no</code> is not part of <code>chunk_id</code>'s hash, so a chunk whose
+underlying page shifts (Day 1's copybook-drift scenario, Day 2's re-OCR after a quarantine
+review) can upsert into the wrong existing row if its <code>chunk_id</code> happens to still match on
+<code>loan_id</code>/<code>doc_type</code>/<code>chunk_index</code>/<code>effective_date</code> alone. The idempotent-upsert guarantee this
+concept demonstrates is only as strong as the key it's keyed on.</p>
+<hr />
+<h2 id="day-5">Day 5 — Underwriting Retrieval Baseline</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="28-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=lYxGYXjfrNI" target="_blank" rel="noopener"><b>Advanced RAG 03 - Hybrid Search BM25 &amp; Ensembles</b><small>Sam Witteveen · 6:47</small></a></li><li><a href="https://www.youtube.com/watch?v=XvKiTfd6Xvo" target="_blank" rel="noopener"><b>The Complete Guide to Hybrid Search in RAG (BM25 + Embeddings + Reranker)</b><small>Dave Ebbelaar · 59:18</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=hybrid%20BM25%20vector%20search%20reranking%20baseline%20evaluation%20RAG" target="_blank" rel="noopener">Search YouTube: hybrid BM25 vector search reranking baseline evaluation RAG</a></p></div>
+<hr />
+<p>This day's four concepts share one small corpus: the eight income/appraisal/credit/title
+chunks for loans <code>LN0000001</code> and <code>LN0000002</code> built in Day 3 Concepts 1-2 (reused verbatim as
+<code>CORPUS</code>, a list of <code>{loan_id, doc_type, page_no, text}</code> dicts).</p>
+<h3>Concept 1 — Hybrid BM25 + Vector So Exact Loan Numbers Still Resolve</h3>
+<p>A dense-embedding-only retriever is trained to place semantically similar text near each
+other — an exact identifier like <code>LN0000002</code> is not a semantic concept, and Week 05 Day 2
+already measured this failure directly for insurance policy numbers. The same failure shows up
+here: a query naming a specific loan's appraisal can retrieve the WRONG loan's chunk under
+vector search alone, because &quot;appraised value&quot; and a generic loan-shaped identifier both read
+as similar text regardless of which specific loan number is present. BM25's exact-token
+matching (Week 05 Day 1) resolves the identifier correctly where the embedding alone does not;
+RRF fusion (Week 05 Day 3) combines both signals without needing either system's raw scores to
+be comparable.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing tokenize/bm25_score/idf from Week 05 Day 1 Concept 1 and the
+# trigram/crc32 embedding stand-in + ranks_of/RRF from Week 05 Day 2-3 and
+# Week 28 Day 4 Concept 1, applied to this week&#x27;s loan-chunk CORPUS
+# (Day 3 Concepts 1-2) instead of an insurance-policy corpus.
+import re
+import zlib
+import numpy as np
+
+CORPUS = [
+    {&quot;loan_id&quot;: &quot;LN0000001&quot;, &quot;doc_type&quot;: &quot;income&quot;, &quot;page_no&quot;: 1,
+     &quot;text&quot;: &quot;Borrower Maria Gonzalez, employed by Acme Logistics Inc. Gross monthly income $9,700.00 based on the most recent two pay stubs and a signed verification-of-employment letter.&quot;},
+    {&quot;loan_id&quot;: &quot;LN0000001&quot;, &quot;doc_type&quot;: &quot;appraisal&quot;, &quot;page_no&quot;: 2,
+     &quot;text&quot;: &quot;Subject property at 412 Elm St appraised at $468,000 using three comparable sales within one mile, sold within the last six months. Appraiser: R. Fine, license #APR-4021.&quot;},
+    {&quot;loan_id&quot;: &quot;LN0000001&quot;, &quot;doc_type&quot;: &quot;credit&quot;, &quot;page_no&quot;: 3,
+     &quot;text&quot;: &quot;Tri-merge credit report shows a FICO score of 742. Two open revolving accounts, one auto loan in good standing, no delinquencies in the last 24 months.&quot;},
+    {&quot;loan_id&quot;: &quot;LN0000001&quot;, &quot;doc_type&quot;: &quot;title&quot;, &quot;page_no&quot;: 4,
+     &quot;text&quot;: &quot;Preliminary title report shows clear title, no liens or encumbrances of record. One prior deed of trust from 2018 fully reconveyed as of 2023.&quot;},
+    {&quot;loan_id&quot;: &quot;LN0000002&quot;, &quot;doc_type&quot;: &quot;income&quot;, &quot;page_no&quot;: 1,
+     &quot;text&quot;: &quot;Borrower James Okafor, self-employed, owner of Okafor Consulting LLC. Two years of tax returns and a CPA-prepared profit and loss statement showing average monthly income of $8,100.00 over the trailing 24 months.&quot;},
+    {&quot;loan_id&quot;: &quot;LN0000002&quot;, &quot;doc_type&quot;: &quot;appraisal&quot;, &quot;page_no&quot;: 2,
+     &quot;text&quot;: &quot;Subject property at 88 Birch Ave appraised at $451,500. Appraiser noted a detached garage adds functional utility but no measurable value adjustment versus the comparable set.&quot;},
+    {&quot;loan_id&quot;: &quot;LN0000002&quot;, &quot;doc_type&quot;: &quot;credit&quot;, &quot;page_no&quot;: 3,
+     &quot;text&quot;: &quot;Tri-merge credit report shows a FICO score of 701. One 30-day-late payment on a retail credit card 14 months ago, otherwise a clean payment history across four trade lines.&quot;},
+    {&quot;loan_id&quot;: &quot;LN0000002&quot;, &quot;doc_type&quot;: &quot;title&quot;, &quot;page_no&quot;: 4,
+     &quot;text&quot;: &quot;Title search shows one active HOA lien of $340 for unpaid dues, to be paid off at closing from seller proceeds per the purchase contract&#x27;s title cure provision.&quot;},
+]
+
+def tokenize(text):
+    return re.findall(r&quot;[a-z0-9]+(?:-[a-z0-9]+)*&quot;, text.lower())
+
+# loan_id is folded into the indexed text, the way a real chunk&#x27;s metadata
+# header would be prepended before embedding/indexing (Day 3&#x27;s contextual
+# header pattern, reused from Week 09 Day 4 Concept 2).
+docs_text = [c[&quot;text&quot;] + &quot; loan &quot; + c[&quot;loan_id&quot;] for c in CORPUS]
+tokens = [tokenize(d) for d in docs_text]
+N = len(CORPUS)
+doc_lens = np.array([len(t) for t in tokens])
+avgdl = doc_lens.mean()
+df = {}
+for t in tokens:
+    for w in set(t):
+        df[w] = df.get(w, 0) + 1
+
+def idf(term):
+    n = df.get(term, 0)
+    return np.log(1 + (N - n + 0.5) / (n + 0.5))
+
+def bm25_score(query_terms, doc_tokens, doc_len, k1=1.5, b=0.75):
+    counts = {}
+    for w in doc_tokens:
+        counts[w] = counts.get(w, 0) + 1
+    score = 0.0
+    for term in query_terms:
+        if term not in counts:
+            continue
+        f = counts[term]
+        num = f * (k1 + 1)
+        denom = f + k1 * (1 - b + b * doc_len / avgdl)
+        score += idf(term) * (num / denom)
+    return score
+
+def bm25_rank(query_text):
+    q = tokenize(query_text)
+    scores = np.array([bm25_score(q, t, doc_lens[i]) for i, t in enumerate(tokens)])
+    return scores, np.argsort(-scores)
+
+DIM = 32
+
+def trigrams(text):
+    t = &quot;  &quot; + text.lower() + &quot;  &quot;
+    return [t[i:i+3] for i in range(len(t) - 2)]
+
+def embed(text, dim=DIM):
+    vec = np.zeros(dim)
+    for gram in trigrams(text):
+        seed = zlib.crc32(gram.encode(&quot;utf-8&quot;))
+        rng = np.random.default_rng(seed)
+        vec += rng.normal(size=dim)
+    norm = np.linalg.norm(vec)
+    return vec / norm if norm &gt; 0 else vec
+
+doc_vecs = np.array([embed(d) for d in docs_text])
+
+def vector_rank(query_text):
+    q = embed(query_text)
+    scores = doc_vecs @ q
+    return scores, np.argsort(-scores)
+
+def ranks_of(scores):
+    order = np.argsort(-scores)
+    r = np.zeros(len(scores), dtype=int)
+    for pos, doc in enumerate(order):
+        r[doc] = pos + 1
+    return r
+
+def hybrid_rrf_rank(query_text, k=60):
+    bm25_scores, _ = bm25_rank(query_text)
+    vec_scores, _ = vector_rank(query_text)
+    bm25_r = ranks_of(bm25_scores)
+    vec_r = ranks_of(vec_scores)
+    rrf = 1.0 / (k + bm25_r) + 1.0 / (k + vec_r)
+    return rrf, np.argsort(-rrf)
+
+query = &quot;what is the appraised value for LN0000002&quot;
+_, bm25_order = bm25_rank(query)
+_, vec_order = vector_rank(query)
+_, hybrid_order = hybrid_rrf_rank(query)
+
+def describe(order):
+    return [(int(i), CORPUS[i][&quot;loan_id&quot;], CORPUS[i][&quot;doc_type&quot;]) for i in order[:3]]
+
+print(f&quot;query: {query!r}&quot;)
+print(&quot;bm25   top-3:&quot;, describe(bm25_order))
+print(&quot;vector top-3:&quot;, describe(vec_order))
+print(&quot;hybrid top-3:&quot;, describe(hybrid_order))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>query: &#x27;what is the appraised value for LN0000002&#x27;
+bm25   top-3: [(5, &#x27;LN0000002&#x27;, &#x27;appraisal&#x27;), (7, &#x27;LN0000002&#x27;, &#x27;title&#x27;), (1, &#x27;LN0000001&#x27;, &#x27;appraisal&#x27;)]
+vector top-3: [(3, &#x27;LN0000001&#x27;, &#x27;title&#x27;), (2, &#x27;LN0000001&#x27;, &#x27;credit&#x27;), (5, &#x27;LN0000002&#x27;, &#x27;appraisal&#x27;)]
+hybrid top-3: [(5, &#x27;LN0000002&#x27;, &#x27;appraisal&#x27;), (7, &#x27;LN0000002&#x27;, &#x27;title&#x27;), (2, &#x27;LN0000001&#x27;, &#x27;credit&#x27;)]
+</code></pre><p>Vector search alone demotes the actually-correct chunk (doc 5, <code>LN0000002</code>'s appraisal) to
+3rd place — its top pick is <code>LN0000001</code>'s title chunk, the wrong loan entirely. BM25's exact
+match on the <code>ln0000002</code> token puts the correct chunk first, and hybrid inherits that correct
+top-1 from BM25's contribution to the RRF sum.</p>
+<p><strong>Exercise:</strong>
+Run the same three-way comparison for <code>&quot;what is the credit score on loan LN0000001&quot;</code>.</p>
+<p><strong>Starting point:</strong> The <code>bm25_rank</code>/<code>vector_rank</code>/<code>hybrid_rrf_rank</code>/<code>describe</code> functions from
+this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>query: &#x27;what is the credit score on loan LN0000001&#x27;
+bm25   top-3: [(6, &#x27;LN0000002&#x27;, &#x27;credit&#x27;), (2, &#x27;LN0000001&#x27;, &#x27;credit&#x27;), (0, &#x27;LN0000001&#x27;, &#x27;income&#x27;)]
+vector top-3: [(2, &#x27;LN0000001&#x27;, &#x27;credit&#x27;), (6, &#x27;LN0000002&#x27;, &#x27;credit&#x27;), (7, &#x27;LN0000002&#x27;, &#x27;title&#x27;)]
+hybrid top-3: [(2, &#x27;LN0000001&#x27;, &#x27;credit&#x27;), (6, &#x27;LN0000002&#x27;, &#x27;credit&#x27;), (1, &#x27;LN0000001&#x27;, &#x27;appraisal&#x27;)]
+</code></pre><p>Here BM25 ALONE gets the wrong loan's credit chunk at rank 1 — the identifier token
+<code>ln0000001</code> is common enough across this small corpus (it appears in all four of that loan's
+chunks) that it does not dominate BM25's score the way a rarer identifier would, and the
+generic word &quot;credit&quot; carries real weight too. Vector search happens to get this particular
+query right on its own. Hybrid fusion recovers the correct top-1 either way, which is the
+actual argument for combining the two systems rather than trusting either one alone: each has
+a real, different failure mode, and RRF is not &quot;BM25 always wins,&quot; it is &quot;whichever system
+gets a given query right, the other's contribution to the fused rank rarely drags the fused
+result all the way back down.&quot;</p>
+<hr />
+<h3>Concept 2 — BGE Reranker as the Second Stage</h3>
+<p>The first stage's job (Concept 1) is recall — get every plausibly relevant chunk into a
+manageable candidate set. The second stage's job is precision — re-score that small candidate
+set with a model that can afford to look at the query and each candidate together, rather than
+independently. <code>bge-reranker-v2-m3</code>'s real checkpoint download is blocked in this sandbox
+(Week 25's own confirmed finding: <code>httpx.ProxyError: 403 Forbidden</code> against
+<code>huggingface.co</code>), so this reuses Week 25's <code>MiniCrossEncoder</code> stand-in, which reproduces the
+real <code>CrossEncoder.predict(pairs, batch_size=...)</code> batching contract without needing the
+blocked download.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing MiniCrossEncoder from Week 25 Day 2 Concept 1 verbatim.
+class MiniCrossEncoder:
+    def __init__(self, max_length=512):
+        self.max_length = max_length
+        self.truncated_count = 0
+
+    def _score_pair(self, query, doc):
+        q_toks = query.lower().split()
+        d_toks = doc.lower().split()
+        if len(d_toks) &gt; self.max_length:
+            d_toks = d_toks[:self.max_length]
+            self.truncated_count += 1
+        overlap = len(set(q_toks) &amp; set(d_toks))
+        return overlap / (len(set(q_toks)) or 1)
+
+    def predict(self, pairs, batch_size=8, show_progress_bar=False):
+        scores = []
+        batch_count = 0
+        for start in range(0, len(pairs), batch_size):
+            batch = pairs[start:start + batch_size]
+            batch_count += 1
+            scores.extend(self._score_pair(q, d) for q, d in batch)
+        return scores, batch_count
+
+def rerank(query, candidate_indices, model, top_k=3):
+    pairs = [(query, CORPUS[i][&quot;text&quot;]) for i in candidate_indices]
+    scores, _ = model.predict(pairs, batch_size=4)
+    order = np.argsort(-np.array(scores))
+    return [candidate_indices[i] for i in order[:top_k]]
+
+model = MiniCrossEncoder(max_length=512)
+top6_hybrid = hybrid_order[:6].tolist()
+reranked = rerank(query, top6_hybrid, model, top_k=3)
+print(f&quot;hybrid top-6 candidates fed to reranker: &quot;
+      f&quot;{[(int(i), CORPUS[i][&#x27;loan_id&#x27;], CORPUS[i][&#x27;doc_type&#x27;]) for i in top6_hybrid]}&quot;)
+print(f&quot;reranked top-3: {[(int(i), CORPUS[i][&#x27;loan_id&#x27;], CORPUS[i][&#x27;doc_type&#x27;]) for i in reranked]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>hybrid top-6 candidates fed to reranker: [(5, &#x27;LN0000002&#x27;, &#x27;appraisal&#x27;), (7, &#x27;LN0000002&#x27;, &#x27;title&#x27;), (2, &#x27;LN0000001&#x27;, &#x27;credit&#x27;), (4, &#x27;LN0000002&#x27;, &#x27;income&#x27;), (3, &#x27;LN0000001&#x27;, &#x27;title&#x27;), (1, &#x27;LN0000001&#x27;, &#x27;appraisal&#x27;)]
+reranked top-3: [(5, &#x27;LN0000002&#x27;, &#x27;appraisal&#x27;), (7, &#x27;LN0000002&#x27;, &#x27;title&#x27;), (1, &#x27;LN0000001&#x27;, &#x27;appraisal&#x27;)]
+</code></pre><p>The correct chunk (doc 5) stays first; the reranker promotes doc 1 (<code>LN0000001</code>'s appraisal —
+lexically close to the query's &quot;appraised value&quot; wording) ahead of doc 2 (a credit chunk with
+no lexical overlap at all), which is exactly the kind of query-aware re-scoring a first-stage
+retriever's independent document encoding cannot do.</p>
+<p><strong>Exercise:</strong>
+Rerank the hybrid top-6 candidates for <code>&quot;what is the borrower's credit history for loan LN0000002&quot;</code> down to a top-4.</p>
+<p><strong>Starting point:</strong> The <code>rerank</code>/<code>MiniCrossEncoder</code> from this concept's Example, with
+<code>query_ex2 = &quot;what is the borrower's credit history for loan LN0000002&quot;</code> and
+<code>top6_ex2 = hybrid_rrf_rank(query_ex2)[1][:6].tolist()</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>hybrid top-6 candidates fed to reranker: [(7, &#x27;LN0000002&#x27;, &#x27;title&#x27;), (2, &#x27;LN0000001&#x27;, &#x27;credit&#x27;), (6, &#x27;LN0000002&#x27;, &#x27;credit&#x27;), (4, &#x27;LN0000002&#x27;, &#x27;income&#x27;), (3, &#x27;LN0000001&#x27;, &#x27;title&#x27;), (0, &#x27;LN0000001&#x27;, &#x27;income&#x27;)]
+reranked top-4: [(2, &#x27;LN0000001&#x27;, &#x27;credit&#x27;), (7, &#x27;LN0000002&#x27;, &#x27;title&#x27;), (6, &#x27;LN0000002&#x27;, &#x27;credit&#x27;), (4, &#x27;LN0000002&#x27;, &#x27;income&#x27;)]
+</code></pre><hr />
+<h3>Concept 3 — A 30-Question Underwriting Query Set, Frozen as the Baseline</h3>
+<p>A retrieval system's quality claim is only real if it is measured against a fixed query set
+with known-correct answers, the same way Week 26 required a golden set before trusting any
+eval number. This concept builds that set programmatically — 4 document types x 2 loans x 4
+question templates per type gives 32 candidate questions, frozen to the first 30 — with each
+question's single correct chunk recorded, then measures <code>recall@3</code> and <code>MRR</code> (both reused
+from Week 05 Day 5 Concept 2) for three systems: BM25 alone, hybrid RRF, and hybrid plus
+reranking. This is the frozen baseline Week 29's eval gate will compare future changes
+against.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing mrr()/recall_at_k() from Week 05 Day 5 Concept 2.
+def mrr(order, rel):
+    for i, doc in enumerate(order):
+        if rel.get(int(doc), 0) &gt; 0:
+            return 1.0 / (i + 1)
+    return 0.0
+
+def recall_at_k(order, rel, k):
+    relevant = set(rel.keys())
+    if not relevant:
+        return 0.0
+    return len(set(int(x) for x in order[:k]) &amp; relevant) / len(relevant)
+
+QUERY_TEMPLATES = {
+    &quot;income&quot;: [
+        &quot;what is the borrower&#x27;s monthly income on loan {loan_id}&quot;,
+        &quot;how much does the borrower on loan {loan_id} earn&quot;,
+        &quot;what does loan {loan_id}&#x27;s income verification show&quot;,
+        &quot;employment income details for loan {loan_id}&quot;,
+    ],
+    &quot;appraisal&quot;: [
+        &quot;what is the appraised value on loan {loan_id}&quot;,
+        &quot;what did the appraiser find for loan {loan_id}&quot;,
+        &quot;comparable sales used in the appraisal for loan {loan_id}&quot;,
+        &quot;what is the property value on loan {loan_id}&quot;,
+    ],
+    &quot;credit&quot;: [
+        &quot;what is the credit score on loan {loan_id}&quot;,
+        &quot;what is the borrower&#x27;s credit history for loan {loan_id}&quot;,
+        &quot;any delinquencies on loan {loan_id}&#x27;s credit report&quot;,
+        &quot;what is the FICO score for loan {loan_id}&quot;,
+    ],
+    &quot;title&quot;: [
+        &quot;are there any liens on loan {loan_id}&quot;,
+        &quot;is title clear on loan {loan_id}&quot;,
+        &quot;what does the title search show for loan {loan_id}&quot;,
+        &quot;any encumbrances of record on loan {loan_id}&quot;,
+    ],
+}
+LOAN_IDS = [&quot;LN0000001&quot;, &quot;LN0000002&quot;]
+
+_all_queries = []
+for doc_type, templates in QUERY_TEMPLATES.items():
+    for loan_id in LOAN_IDS:
+        for template in templates:
+            relevant_idx = next(
+                i for i, c in enumerate(CORPUS) if c[&quot;loan_id&quot;] == loan_id and c[&quot;doc_type&quot;] == doc_type
+            )
+            _all_queries.append({&quot;text&quot;: template.format(loan_id=loan_id), &quot;relevant_idx&quot;: relevant_idx})
+
+QUERY_SET = _all_queries[:30]  # 4 doc_types x 2 loans x 4 templates = 32 candidates,
+                                # frozen to the first 30 for a round query-set size
+print(f&quot;query set size: {len(QUERY_SET)}&quot;)
+
+def evaluate_system(query_set, rank_fn, k=3):
+    recalls, rrs = [], []
+    for q in query_set:
+        order = rank_fn(q[&quot;text&quot;])
+        rel = {q[&quot;relevant_idx&quot;]: 1}
+        recalls.append(recall_at_k(order, rel, k))
+        rrs.append(mrr(order, rel))
+    return {&quot;recall&quot;: round(float(np.mean(recalls)), 4), &quot;mrr&quot;: round(float(np.mean(rrs)), 4)}
+
+def bm25_only_order(query_text):
+    _, order = bm25_rank(query_text)
+    return order
+
+def hybrid_order_fn(query_text):
+    _, order = hybrid_rrf_rank(query_text)
+    return order
+
+def hybrid_rerank_order_fn(query_text):
+    _, h_order = hybrid_rrf_rank(query_text)
+    top6 = h_order[:6].tolist()
+    return rerank(query_text, top6, MiniCrossEncoder(max_length=512), top_k=6)
+
+BASELINE = {
+    &quot;bm25_only&quot;: evaluate_system(QUERY_SET, bm25_only_order),
+    &quot;hybrid_rrf&quot;: evaluate_system(QUERY_SET, hybrid_order_fn),
+    &quot;hybrid_reranked&quot;: evaluate_system(QUERY_SET, hybrid_rerank_order_fn),
+}
+for system, metrics in BASELINE.items():
+    print(f&quot;{system:&lt;16} recall@3={metrics[&#x27;recall&#x27;]:.4f}  mrr={metrics[&#x27;mrr&#x27;]:.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>query set size: 30
+bm25_only        recall@3=0.9333  mrr=0.7317
+hybrid_rrf       recall@3=0.9333  mrr=0.7417
+hybrid_reranked  recall@3=0.9000  mrr=0.6750
+</code></pre><p><code>hybrid_reranked</code> measures slightly BELOW <code>hybrid_rrf</code> here — a genuine, disclosed result, not
+a bug: <code>MiniCrossEncoder</code>'s hand-rolled word-overlap scoring is Week 25's own confirmed stand-in
+for the real cross-attention model, not <code>bge-reranker-v2-m3</code> itself, and a bag-of-words overlap
+heuristic can genuinely mis-rank a small, lexically similar corpus like this one's — exactly
+the reason this baseline is recorded honestly rather than reported only where the intended
+ordering (BM25 &lt; hybrid &lt; hybrid+rerank) happened to hold. <code>hybrid_rrf</code> is this week's
+recommended production baseline for that reason; <code>hybrid_reranked</code>'s numbers are real and
+frozen too, ready to be replaced once a real reranker checkpoint is reachable.</p>
+<p><strong>Exercise:</strong>
+Recompute the same three-system comparison at <code>k=1</code> instead of <code>k=3</code> (i.e., <code>recall@1</code>,
+which only credits a system whose single top result is the correct chunk).</p>
+<p><strong>Starting point:</strong> The <code>evaluate_system</code>/<code>bm25_only_order</code>/<code>hybrid_order_fn</code>/
+<code>hybrid_rerank_order_fn</code> functions and <code>QUERY_SET</code> from this concept's Example, each called
+with <code>k=1</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>bm25_only        recall@1=0.5333  mrr=0.7317
+hybrid_rrf       recall@1=0.5667  mrr=0.7417
+hybrid_reranked  recall@1=0.4667  mrr=0.6750
+</code></pre><p><code>MRR</code> is unchanged from the Example (it only ever looks at the first relevant hit's rank,
+regardless of <code>k</code>); <code>recall@1</code> drops sharply for all three systems versus <code>recall@3</code>, which is
+the expected shape — getting the single correct chunk into the very top spot is strictly
+harder than getting it into the top three, and the relative ordering between systems (hybrid
+RRF best, reranked worst on this toy corpus) holds at both cutoffs.</p>
+<hr />
+<h3>Concept 4 — A Retrieval Demo Returning Cited Source Pages</h3>
+<p>An underwriter (or the underwriting assistant Week 29 builds on top of this baseline) needs
+more than a ranked list of text — every result has to say exactly where it came from, the same
+citation shape Day 3 Concept 3 built for a single loan file's own chunks. <code>retrieve_and_cite</code>
+ties this week's full pipeline together: hybrid retrieval, reranking, then a citation string
+for each final result.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def cite(idx):
+    c = CORPUS[idx]
+    return f&quot;loan {c[&#x27;loan_id&#x27;]}, {c[&#x27;doc_type&#x27;]} section, page {c[&#x27;page_no&#x27;]}&quot;
+
+def retrieve_and_cite(query_text, top_k=3):
+    _, h_order = hybrid_rrf_rank(query_text)
+    top6 = h_order[:6].tolist()
+    final = rerank(query_text, top6, MiniCrossEncoder(max_length=512), top_k=top_k)
+    results = []
+    for idx in final:
+        results.append({&quot;loan_id&quot;: CORPUS[idx][&quot;loan_id&quot;], &quot;doc_type&quot;: CORPUS[idx][&quot;doc_type&quot;],
+                         &quot;citation&quot;: cite(idx), &quot;excerpt&quot;: CORPUS[idx][&quot;text&quot;][:60] + &quot;...&quot;})
+    return results
+
+demo_query = &quot;what is the credit score on loan LN0000001&quot;
+for rank, result in enumerate(retrieve_and_cite(demo_query, top_k=3), start=1):
+    print(f&quot;rank {rank}: {result[&#x27;citation&#x27;]}&quot;)
+    print(f&quot;          \&quot;{result[&#x27;excerpt&#x27;]}\&quot;&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>rank 1: loan LN0000001, credit section, page 3
+          &quot;Tri-merge credit report shows a FICO score of 742. Two open ...&quot;
+rank 2: loan LN0000002, credit section, page 3
+          &quot;Tri-merge credit report shows a FICO score of 701. One 30-da...&quot;
+rank 3: loan LN0000001, income section, page 1
+          &quot;Borrower Maria Gonzalez, employed by Acme Logistics Inc. Gro...&quot;
+</code></pre><p>Rank 1 is the correct chunk with a full citation an underwriter (or a downstream LangGraph
+node in Week 29) can trace back to an exact page — never a bare answer with no way to check
+where it came from.</p>
+<p><strong>Exercise:</strong>
+Run <code>retrieve_and_cite</code> for <code>&quot;are there any liens on loan LN0000002&quot;</code> at <code>top_k=2</code>.</p>
+<p><strong>Starting point:</strong> The <code>cite</code>/<code>retrieve_and_cite</code> functions from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>rank 1: loan LN0000001, title section, page 4
+          &quot;Preliminary title report shows clear title, no liens or encu...&quot;
+rank 2: loan LN0000002, credit section, page 3
+          &quot;Tri-merge credit report shows a FICO score of 701. One 30-da...&quot;
+</code></pre><p>Neither result is the actually-correct chunk (<code>LN0000002</code>'s title section, doc 7) — on this
+tiny 8-document corpus, a lien-focused query without the loan number spelled out clearly
+enough in a way BM25's tokenizer favors slips past both stages. This is an honest baseline
+failure case, not a hidden one: it is exactly the kind of miss the 30-question query set
+above exists to catch in aggregate (this specific query is not one of the 30, but its failure
+mode — a query where the loan identifier is present but not lexically dominant — is the same
+one Concept 1's exercise already surfaced for BM25 alone), and a production system would need
+either a larger corpus, a tuned tokenizer, or a query-rewriting step (Week 24's territory) to
+close gaps like it.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy:</strong> An underwriter's real question is almost never phrased as a clean, complete
+sentence with the loan number spelled out — it is closer to a half-remembered fragment typed
+into a search box, or a verbal question relayed through a call. The 30-question set's
+templated phrasing is a reasonable first baseline, not a claim that real underwriter queries
+look this tidy; Week 29's eval gate is the place a wider, messier query set would need to grow
+into.</p>
+<p><strong>Compliance:</strong> The frozen baseline recorded here (<code>recall@3</code>/<code>MRR</code> per system) is itself a
+compliance artifact, not just an engineering one — it is the documented evidence that this
+retrieval stack was measured against a real, versioned query set before any underwriting
+decision was ever built on top of it. A future regression (a re-indexed corpus, a swapped
+embedding model) has something concrete to be checked against, the same discipline Week 27
+wired into CI for this track's earlier RAG systems.</p>
+<p><strong>What breaks in production:</strong> This week's corpus is eight chunks from two loans; a real
+underwriting index holds millions of chunks across hundreds of thousands of loans, and both
+BM25's <code>idf</code> weighting and the reranker's candidate pool assumptions behave differently at
+that scale — a <code>top6</code> reranking window that comfortably covers &quot;the right answer is probably
+in here&quot; on eight documents is almost certainly too narrow once every loan's four document
+types multiply out across a real portfolio. Week 29 will need to revisit the candidate-pool
+size, not just re-run this exact pipeline at scale unchanged.</p>
+<hr />
+<h2>Architecture Decision — Week 28</h2>
+<p><strong>Choosing between:</strong> batch ingestion of the legacy loan export vs. streaming it record-by-record
+as the mainframe writes it; and, separately, quarantine-and-continue vs. best-effort parsing for
+document pages that fail Day 2's confidence floors.</p>
+<p><strong>Batch vs. streaming ingestion.</strong> The mainframe loan-origination system this week's Day 1 models
+produces a <code>RECFM=FB</code> extract as a single, complete nightly file with its own trailer record —
+there is no per-record stream to tap into even if streaming were preferred; the source system's
+own export boundary is the file. Batch ingestion (read the whole file, validate the trailer's
+control total against what was actually parsed, then load) fits that boundary exactly: Day 1's
+<code>LandingManifest</code> reconciliation is a whole-file operation by construction, and it can only run
+once the complete file has landed — a streaming pipeline that started emitting parsed records
+before the trailer arrived would have nothing to reconcile against until the stream's very last
+message, at which point any per-record decision already made downstream cannot be un-made
+cheaply. <strong>Rule of thumb:</strong> batch when the source system's own natural unit of delivery is a
+complete file with an end-of-file control record (a nightly mainframe extract, a daily bureau
+file); move to streaming (Week 30's Kafka-based customer-query intake is the contrasting case in
+this same phase) only when the source itself is genuinely a continuous, boundary-free stream of
+individual events with no equivalent trailer to reconcile against.</p>
+<p><strong>Quarantine-and-continue vs. best-effort parsing.</strong> Day 2's OCR confidence floors route a page
+either to acceptance or to a quarantine queue — never to a best-effort &quot;accept it anyway, flag it
+as low-confidence&quot; middle path that keeps the pipeline's output looking complete. That choice
+costs real throughput: every quarantined page is a document an underwriter's file is missing
+until a human keys it in by hand, and Day 2's own &quot;what breaks in production&quot; note already shows
+the floors do not catch every bad read, only the worst ones. The alternative — accepting every
+OCR result and merely tagging low-confidence ones with a score — would keep the pipeline moving,
+but it pushes the actual trust decision onto whatever reads the tag downstream, and Day 4's
+content-hash-keyed upsert has no way to represent &quot;this field is provisionally uncertain,&quot; only
+&quot;this field's content changed or it didn't.&quot; <strong>Rule of thumb:</strong> quarantine-and-continue when a
+wrong value in the specific field at stake (an appraised value, a gross-pay figure) would
+propagate into a financial decision with no further human check between the parse and the
+decision — exactly mortgage underwriting's shape; best-effort-with-a-confidence-tag is the right
+call only when a downstream consumer genuinely will check that tag before acting on the field,
+which this week's pipeline does not yet build (Week 29's guardrail/decision layer is where that
+check would have to live if this track later wanted to relax the quarantine gate).</p>
+<p>This closes Week 28. Week 29 (not built here) picks up from this week's frozen retrieval
+baseline with LangGraph orchestration, Presidio-based PII masking and NeMo Guardrails rails,
+a Ragas eval gate over a 50-case golden loan set, and the serving/hand-off layer — Phase 6's
+Capstone A finishes there.</p>
+<hr />
+<div class="pager"><a class="btn ghost" href="week-27.html">&larr; Week 27</a><a class="btn ghost" href="week-29.html">Week 29 &rarr;</a></div>
+</main></body></html>

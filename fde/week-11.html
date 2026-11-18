@@ -1,0 +1,954 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 11 — Incremental Embedding Updates</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/how-does-an-embedding-cache-work" target="_blank" rel="noopener">How does an Embedding Cache work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/what-are-embeddings" target="_blank" rel="noopener">What are Embeddings?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="11" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 11 — Incremental Embedding Updates</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>2 — Advanced AI Data Pipelines / DataPrep for LLMs</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Expert</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 06's content-hash point-id pattern and idempotent-upsert framing; Week 07's <code>UseCase</code>/<code>freshness_gate</code> staleness contract; comfort with Python dataclasses and <code>hashlib</code>. No live vector database needed — every example below runs on plain dicts standing in for a real store.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>6–8 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. Every mechanic this week is pure Python/<code>hashlib</code>/<code>numpy</code> arithmetic over toy in-memory stores standing in for a real vector database — nothing here needs a live service. Following the Week 04–07 precedent, this week ships as a depth file only; every code block below was actually executed and its output pasted, not invented.</td>
+</tr>
+</tbody>
+</table>
+<p>Weeks 01–07 built the index; this week keeps it honest after the first load. A vector
+index is not a write-once artifact — the documents behind it keep changing, the
+embedding model behind it eventually changes too, and neither event is optional to
+handle. This week is about the four questions that follow directly from that: how do
+you know a document actually changed (Day 1), what happens when the <em>model</em> changes
+instead of the data (Day 2), how do you cut over to a rebuilt index without an outage
+(Day 3), and how do you know the index has fallen behind before a user notices (Day 4)
+— closing with the job that ties all four together (Day 5). Week 06 already built the
+content-hash point-id pattern for idempotent Kafka upserts; this week reuses and
+extends that same hash, now as the mechanism that decides whether to re-embed at all,
+not just how to write safely once you have.</p>
+<hr />
+<h2 id="day-1">Day 1 — Content Hashing for Change Detection</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="11-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=k6E17WxZBJk" target="_blank" rel="noopener"><b>ETL Incremental Data Load Approach Using DLT | Source Change Detection | Load New &amp; Change Data</b><small>BI Insights Inc · 5:11</small></a></li><li><a href="https://www.youtube.com/watch?v=glcjrvhHLCU" target="_blank" rel="noopener"><b>CocoIndex: Incremental Data Layer for AI Agents (Rust + Python)</b><small>Prism Labs · 8:03</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=content%20hash%20change%20detection%20incremental%20pipeline%20python" target="_blank" rel="noopener">Search YouTube: content hash change detection incremental pipeline python</a></p></div>
+<hr />
+<h3>Concept 1 — Normalize Before You Hash</h3>
+<p>A raw byte-for-byte hash of a document's text is the wrong comparison. Two exports of
+the exact same claim note commonly differ in whitespace, casing, or a trailing
+boilerplate footer stamped on by whatever system last touched the file — none of which
+is a real content change, and none of which should burn an embedding call. Hash the
+<em>normalized</em> text: whitespace collapsed, lowercased, and any known boilerplate stripped.</p>
+<p>The normalization function is itself a piece of pipeline logic that has to be versioned
+and reused consistently — if the ingest job and the drift-detection job normalize
+differently, they will disagree about what &quot;changed&quot; means.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+import re
+
+def normalize_for_hash(text):
+    &quot;&quot;&quot;Lowercase, collapse whitespace, strip a trailing boilerplate footer.
+    Two documents that differ only in these ways are the same content for
+    re-embedding purposes -- hashing the raw bytes would treat them as changed
+    and burn an embedding call for no real difference.&quot;&quot;&quot;
+    text = re.sub(r&quot;\s+&quot;, &quot; &quot;, text.strip().lower())
+    text = re.sub(r&quot;this document is confidential.*$&quot;, &quot;&quot;, text).strip()
+    return text
+
+def content_hash(text):
+    return hashlib.sha256(normalize_for_hash(text).encode(&quot;utf-8&quot;)).hexdigest()
+
+doc_a = &quot;Policy POL-88213 covers water damage up to $50,000.\n\nThis document is confidential and intended for internal use only.&quot;
+doc_b = &quot;policy pol-88213   covers water damage up to $50,000.  \nThis document is confidential and intended for internal use only. v2 stamp&quot;
+doc_c = &quot;Policy POL-88213 covers water damage up to $75,000.\n\nThis document is confidential and intended for internal use only.&quot;
+
+print(&quot;hash(a):&quot;, content_hash(doc_a)[:16])
+print(&quot;hash(b):&quot;, content_hash(doc_b)[:16])
+print(&quot;hash(c):&quot;, content_hash(doc_c)[:16])
+print(&quot;a == b (whitespace/case/footer differ only):&quot;, content_hash(doc_a) == content_hash(doc_b))
+print(&quot;a == c (real content differs):&quot;, content_hash(doc_a) == content_hash(doc_c))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>hash(a): f9970289672ea95c
+hash(b): f9970289672ea95c
+hash(c): 5526191056f95de1
+a == b (whitespace/case/footer differ only): True
+a == c (real content differs): False
+</code></pre><p><strong>Exercise:</strong>
+Build 5 near-duplicate text pairs where each pair differs only in whitespace, case, or
+the trailing boilerplate footer used above. Hash each pair two ways — once with plain
+<code>hashlib.sha256</code> on the raw text, once with <code>content_hash</code> — and count how many pairs
+each method incorrectly flags as changed.</p>
+<p><strong>Starting point:</strong> The <code>normalize_for_hash</code>/<code>content_hash</code> functions from this concept's Example, and 5 pairs of near-duplicate strings varying only in whitespace, case, or footer text.</p>
+<p>Expected output: raw hashing flags most or all of the 5 pairs as changed (this run
+measured 4 of 5), while normalized hashing flags 0 of 5 — every pair really was the same
+content once the cosmetic differences are normalized away.</p>
+<hr />
+<h3>Concept 2 — Chunk-Level Hashes Find the Change, Document-Level Hashes Only Find <em>That</em> Something Changed</h3>
+<p>A document-level hash tells you a policy changed somewhere. It does not tell you which
+of its 40 chunks actually changed, so acting on it alone means re-embedding the whole
+document — exactly the full-reindex cost this week exists to avoid. Hash each chunk
+independently and you localize the change: only the chunks whose hash moved need a new
+embedding call, and every other chunk's existing vector is still correct and reusable.</p>
+<p>The cost of chunk-level hashing is bookkeeping — you now store one hash per chunk
+instead of one per document — and that cost is worth it the moment a document has more
+than a handful of chunks.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def split_into_chunks(text, size=60):
+    words = text.split()
+    chunks = []
+    cur = []
+    cur_len = 0
+    for w in words:
+        cur.append(w)
+        cur_len += len(w) + 1
+        if cur_len &gt;= size:
+            chunks.append(&quot; &quot;.join(cur))
+            cur, cur_len = [], 0
+    if cur:
+        chunks.append(&quot; &quot;.join(cur))
+    return chunks
+
+policy_v1 = (
+    &quot;Section 1. Coverage. This policy covers water damage to the insured &quot;
+    &quot;premises up to the stated limit. Section 2. Exclusions. Flood damage &quot;
+    &quot;arising from a named storm is excluded unless a flood endorsement is &quot;
+    &quot;attached. Section 3. Deductible. The deductible is five hundred dollars &quot;
+    &quot;per occurrence, applied before any payout is calculated.&quot;
+)
+policy_v2 = (
+    &quot;Section 1. Coverage. This policy covers water damage to the insured &quot;
+    &quot;premises up to the stated limit. Section 2. Exclusions. Flood damage &quot;
+    &quot;arising from a named storm is excluded unless a flood endorsement is &quot;
+    &quot;attached. Section 3. Deductible. The deductible is one thousand dollars &quot;
+    &quot;per occurrence, applied before any payout is calculated.&quot;
+)
+
+chunks_v1 = split_into_chunks(policy_v1)
+chunks_v2 = split_into_chunks(policy_v2)
+doc_hash_v1 = content_hash(policy_v1)
+doc_hash_v2 = content_hash(policy_v2)
+chunk_hashes_v1 = [content_hash(c) for c in chunks_v1]
+chunk_hashes_v2 = [content_hash(c) for c in chunks_v2]
+
+print(f&quot;number of chunks: {len(chunks_v1)}&quot;)
+print(&quot;document-level hash changed:&quot;, doc_hash_v1 != doc_hash_v2)
+changed_chunks = [i for i, (h1, h2) in enumerate(zip(chunk_hashes_v1, chunk_hashes_v2)) if h1 != h2]
+print(f&quot;chunk-level hashes changed at index: {changed_chunks} of {len(chunks_v1)} chunks&quot;)
+print(f&quot;re-embed needed at document granularity : {len(chunks_v1)} chunks&quot;)
+print(f&quot;re-embed needed at chunk granularity     : {len(changed_chunks)} chunk(s)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>number of chunks: 6
+document-level hash changed: True
+chunk-level hashes changed at index: [4] of 6 chunks
+re-embed needed at document granularity : 6 chunks
+re-embed needed at chunk granularity     : 1 chunk(s)
+</code></pre><p><strong>Exercise:</strong>
+Edit <code>policy_v2</code> again so that two separate sections change (the deductible amount in
+Section 3, and the flood exclusion wording in Section 2), leaving Section 1 untouched.
+Recompute the chunk-level diff and report exactly which chunk indices need re-embedding.</p>
+<p><strong>Starting point:</strong> The <code>split_into_chunks</code>/chunk-hashing code from this concept's Example, and <code>policy_v2</code> edited so both Section 2 and Section 3 differ from <code>policy_v1</code>.</p>
+<p>Expected output: exactly two changed chunk indices — the one covering the edited
+Section 2 text and the one covering the edited Section 3 text — with every chunk
+belonging only to the untouched Section 1 reported unchanged.</p>
+<hr />
+<h3>Concept 3 — Storing <code>source_hash</code> Beside the Vector</h3>
+<p>The hash only pays off once it is stored next to the embedding it corresponds to, so a
+sync job can compare &quot;what's the hash of this chunk right now&quot; against &quot;what hash did
+we embed last time&quot; before deciding whether to call the embedding API at all. This is
+the same idea Week 06 used for the point-id hash, applied one step earlier in the
+pipeline: there, the hash made a duplicate delivery a harmless no-op at write time; here,
+it makes an unchanged document a skipped embedding call before any write is attempted.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+class VectorIndexRow:
+    def __init__(self, chunk_id, source_hash, embedding, model_id):
+        self.chunk_id = chunk_id
+        self.source_hash = source_hash
+        self.embedding = embedding
+        self.model_id = model_id
+
+def fake_embed(text, dim=8, seed=None):
+    rng = np.random.default_rng(seed if seed is not None else abs(hash(text)) % (2**32))
+    return rng.normal(size=dim).round(4)
+
+index = {}
+embed_calls = 0
+
+def sync_document(doc_id, chunks, model_id=&quot;embed-v1&quot;):
+    global embed_calls
+    n_reused, n_embedded = 0, 0
+    for i, chunk_text in enumerate(chunks):
+        chunk_id = f&quot;{doc_id}::chunk{i}&quot;
+        h = content_hash(chunk_text)
+        existing = index.get(chunk_id)
+        if existing is not None and existing.source_hash == h and existing.model_id == model_id:
+            n_reused += 1
+            continue
+        embed_calls += 1
+        n_embedded += 1
+        index[chunk_id] = VectorIndexRow(chunk_id, h, fake_embed(chunk_text), model_id)
+    return n_reused, n_embedded
+
+r1 = sync_document(&quot;POL-88213&quot;, chunks_v1)
+print(f&quot;first sync : reused={r1[0]}  embedded={r1[1]}  total embed calls so far={embed_calls}&quot;)
+r2 = sync_document(&quot;POL-88213&quot;, chunks_v1)
+print(f&quot;re-sync, no change : reused={r2[0]}  embedded={r2[1]}  total embed calls so far={embed_calls}&quot;)
+r3 = sync_document(&quot;POL-88213&quot;, chunks_v2)
+print(f&quot;re-sync after edit : reused={r3[0]}  embedded={r3[1]}  total embed calls so far={embed_calls}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>first sync : reused=0  embedded=6  total embed calls so far=6
+re-sync, no change : reused=6  embedded=0  total embed calls so far=6
+re-sync after edit : reused=5  embedded=1  total embed calls so far=7
+</code></pre><p><strong>Exercise:</strong>
+Call <code>sync_document</code> a fourth time with <code>model_id=&quot;embed-v2&quot;</code> on the unchanged
+<code>chunks_v2</code> chunks. Explain, using the <code>existing.model_id == model_id</code> check in the
+Example, why every chunk gets re-embedded even though none of the text changed.</p>
+<p><strong>Starting point:</strong> The <code>sync_document</code> function and <code>index</code> dict from this concept's Example, called once more with the same <code>chunks_v2</code> but <code>model_id=&quot;embed-v2&quot;</code>.</p>
+<p>Expected output: all 6 chunks re-embedded (<code>n_reused=0</code>, <code>n_embedded=6</code>), because the
+stored rows all carry <code>model_id=&quot;embed-v1&quot;</code> and the guard requires both the hash <em>and</em>
+the model id to match — an unchanged document under a new model is not a cache hit.
+This is exactly the seam Day 2 builds on.</p>
+<hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> A nightly extract off an on-prem policy admin system frequently
+re-writes every row's <code>last_modified</code> timestamp on every extract run, whether or not the
+row's actual content changed — a batch-job artifact, not a real edit. A pipeline that
+trusts <code>last_modified</code> for change detection re-embeds the entire corpus every night;
+content hashing is what actually detects a real change under that constraint.</p>
+<p><strong>Compliance angle:</strong> A <code>source_hash</code> column recorded beside every embedding is exactly
+the evidence a &quot;why was this record re-processed&quot; audit question needs — it lets you
+show precisely which chunks changed and when, rather than asserting a re-embed happened
+for a good reason with nothing to back it.</p>
+<p><strong>What breaks in production:</strong> Two teams normalize differently before hashing — one
+strips a footer, the other doesn't — and their change-detection jobs quietly disagree
+about which documents changed. <code>normalize_for_hash</code> has to live in one shared library,
+not be reimplemented per job.</p>
+<hr />
+<h2 id="day-2">Day 2 — Embedding Versioning and Migration</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="11-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=PgkkINpxk-4" target="_blank" rel="noopener"><b>Question 8: How Can You Safely Migrate Embeddings With Minimal Downtime?</b><small>Learn Agentic AI · 33:19</small></a></li><li><a href="https://www.youtube.com/watch?v=djp4205tHGU" target="_blank" rel="noopener"><b>How to choose an embedding model</b><small>Weaviate vector database · 4:04</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=embedding%20model%20migration%20reindex%20versioning%20vector%20database" target="_blank" rel="noopener">Search YouTube: embedding model migration reindex versioning vector database</a></p></div>
+<hr />
+<h3>Concept 1 — <code>model_id</code> and <code>dim</code> as First-Class Columns</h3>
+<p>Vectors from two different embedding models are not comparable, even at the same
+dimension — they were produced by different projections of meaning into vector space,
+and a cosine score between them means nothing. The only safe practice is to record which
+model produced a vector, and its dimension, as real columns on the stored record, and to
+refuse any operation that would mix vectors carrying different <code>model_id</code> values inside
+one comparison.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class EmbeddingRecord:
+    chunk_id: str
+    model_id: str
+    dim: int
+    vector: tuple
+
+def make_record(chunk_id, model_id, dim, vector):
+    if len(vector) != dim:
+        raise ValueError(f&quot;{chunk_id}: vector has {len(vector)} components, dim says {dim}&quot;)
+    return EmbeddingRecord(chunk_id, model_id, dim, tuple(vector))
+
+rec_v1 = make_record(&quot;POL-88213::chunk0&quot;, &quot;embed-v1&quot;, 4, [0.1, 0.2, 0.3, 0.4])
+rec_v2 = make_record(&quot;POL-88213::chunk0&quot;, &quot;embed-v2-1536d&quot;, 6, [0.11, 0.22, 0.31, 0.4, 0.5, 0.6])
+print(rec_v1)
+print(rec_v2)
+print(&quot;comparable across model_id/dim:&quot;, rec_v1.model_id == rec_v2.model_id and rec_v1.dim == rec_v2.dim)
+
+try:
+    make_record(&quot;bad&quot;, &quot;embed-v2&quot;, 8, [0.1, 0.2])
+except ValueError as e:
+    print(&quot;rejected mismatched vector:&quot;, e)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>EmbeddingRecord(chunk_id=&#x27;POL-88213::chunk0&#x27;, model_id=&#x27;embed-v1&#x27;, dim=4, vector=(0.1, 0.2, 0.3, 0.4))
+EmbeddingRecord(chunk_id=&#x27;POL-88213::chunk0&#x27;, model_id=&#x27;embed-v2-1536d&#x27;, dim=6, vector=(0.11, 0.22, 0.31, 0.4, 0.5, 0.6))
+comparable across model_id/dim: False
+rejected mismatched vector: bad: vector has 2 components, dim says 8
+</code></pre><p><strong>Exercise:</strong>
+Write <code>query_collection(records, model_id, dim)</code> that raises a <code>ValueError</code> naming every
+record whose <code>model_id</code> or <code>dim</code> disagrees with the requested collection, and returns an
+&quot;OK&quot; message otherwise. Call it once on a clean list of same-model records and once on a
+list mixing <code>rec_v1</code> and <code>rec_v2</code>.</p>
+<p><strong>Starting point:</strong> The <code>EmbeddingRecord</code>/<code>make_record</code> code from this concept's Example, plus <code>rec_v1</code> and <code>rec_v2</code>, plus a second <code>embed-v1</code> record built the same way as <code>rec_v1</code>.</p>
+<p>Expected output: the clean list returns an &quot;OK&quot; message; the mixed list raises,
+naming <code>POL-88213::chunk0</code> (the <code>rec_v2</code> entry) as the record that does not match the
+requested <code>model_id='embed-v1', dim=4</code>.</p>
+<hr />
+<h3>Concept 2 — Dual-Write During a Model Change</h3>
+<p>The moment you decide to move to a new embedding model, you have two options for the
+transition: cut over instantly (and lose the ability to compare or roll back), or write
+every new/changed chunk to <em>both</em> the old and the new model's collection while the
+migration is in flight. Dual-write is more expensive — every embedding call happens
+twice, against two different models — but it is the only way to have a fully populated
+new collection to evaluate before committing to it, without a service outage in between.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+import numpy as np
+
+def fake_embed(text, dim, model_tag):
+    &quot;&quot;&quot;Deterministic stand-in for a real embedding call, built as a hashed
+    bag-of-words vector so it actually carries word-overlap signal (unlike pure
+    random noise) -- close enough to a real embedding&#x27;s behaviour that two
+    different model_tags still largely agree on *which* documents are similar,
+    while producing vectors of different width that are not directly comparable
+    across model_tag (a different hash salt per model, exactly like two real
+    embedding models are two different, non-interchangeable projections).&quot;&quot;&quot;
+    vec = np.zeros(dim)
+    for word in text.lower().split():
+        h = int(hashlib.sha256(f&quot;{model_tag}|{word}&quot;.encode()).hexdigest(), 16)
+        idx = h % dim
+        sign = 1.0 if (h // dim) % 2 == 0 else -1.0
+        vec[idx] += sign
+    norm = np.linalg.norm(vec)
+    return (vec / norm if norm &gt; 0 else vec).round(4).tolist()
+
+collection_v1 = {}
+collection_v2 = {}
+
+def dual_write(chunk_id, text):
+    collection_v1[chunk_id] = make_record(chunk_id, &quot;embed-v1&quot;, 16, fake_embed(text, 16, &quot;embed-v1&quot;))
+    collection_v2[chunk_id] = make_record(chunk_id, &quot;embed-v2&quot;, 24, fake_embed(text, 24, &quot;embed-v2&quot;))
+
+texts = {
+    &quot;POL-1::chunk0&quot;: &quot;Water damage covered up to policy limit.&quot;,
+    &quot;POL-2::chunk0&quot;: &quot;Flood damage excluded without endorsement.&quot;,
+    &quot;POL-3::chunk0&quot;: &quot;Deductible five hundred dollars per occurrence.&quot;,
+    &quot;POL-4::chunk0&quot;: &quot;Total loss settlement paid within thirty days.&quot;,
+    &quot;POL-5::chunk0&quot;: &quot;Named-storm exclusion applies to this endorsement.&quot;,
+    &quot;POL-6::chunk0&quot;: &quot;Renewal premium increased by four percent.&quot;,
+    &quot;POL-7::chunk0&quot;: &quot;Subrogation rights reserved against third party.&quot;,
+    &quot;POL-8::chunk0&quot;: &quot;Umbrella policy extends liability coverage.&quot;,
+}
+for cid, t in texts.items():
+    dual_write(cid, t)
+
+print(f&quot;collection_v1 size={len(collection_v1)} (model_id={next(iter(collection_v1.values())).model_id})&quot;)
+print(f&quot;collection_v2 size={len(collection_v2)} (model_id={next(iter(collection_v2.values())).model_id})&quot;)
+print(&quot;both collections stay fully populated and searchable during the migration window.&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>collection_v1 size=8 (model_id=embed-v1)
+collection_v2 size=8 (model_id=embed-v2)
+both collections stay fully populated and searchable during the migration window.
+</code></pre><p><strong>Exercise:</strong>
+Write <code>dual_write_checked(chunk_id, text, v1_store, v2_store, simulate_v2_failure)</code> that
+always writes to <code>v1_store</code> but skips the <code>v2_store</code> write when
+<code>simulate_v2_failure=True</code>. Then write <code>check_dual_write_parity(v1_store, v2_store)</code>
+returning the chunk ids present in one store but not the other. Run the 8 chunks above
+through it with the <code>v2</code> write simulated as failed for exactly one chunk.</p>
+<p><strong>Starting point:</strong> The <code>texts</code> dict from this concept's Example, and the <code>fake_embed</code>/<code>make_record</code> helpers, with one chunk id chosen to simulate a v2 write failure.</p>
+<p>Expected output: <code>check_dual_write_parity</code> reports exactly one chunk id present only in
+<code>v1_store</code> (the one whose v2 write was simulated as failed) and none present only in
+<code>v2_store</code> — dual-write drift is something you can detect and reconcile, not something
+that fails silently, as long as you actually run the parity check.</p>
+<hr />
+<h3>Concept 3 — A Shadow Index Gets Scored Before It Gets Trusted</h3>
+<p>Having a fully populated new-model collection is not the same as having a <em>good</em> new
+collection. Before any cutover, run the same fixed query set from Week 01 Day 5 against
+both collections and measure how much the new model's top-k results agree with the old
+model's — the &quot;shadow index&quot; is evaluated exactly like an ANN configuration change,
+against a real metric, with a real gate. A migration that skips this step finds out
+whether the new model was any good only after users are already searching it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def cosine(a, b):
+    a, b = np.array(a), np.array(b)
+    return float((a @ b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+def search(store, query_vec, k=2):
+    scored = [(cid, cosine(rec.vector, query_vec)) for cid, rec in store.items()]
+    scored.sort(key=lambda x: -x[1])
+    return [cid for cid, _ in scored[:k]]
+
+query_texts = [
+    &quot;water damage claim&quot;,
+    &quot;flood exclusion question&quot;,
+    &quot;premium renewal notice&quot;,
+    &quot;liability coverage extension&quot;,
+]
+
+def recall_at_k(results_a, results_b, k):
+    return len(set(results_a[:k]) &amp; set(results_b[:k])) / k
+
+K = 3
+overlaps = []
+for q in query_texts:
+    qv1 = fake_embed(q, 16, &quot;embed-v1&quot;)
+    qv2 = fake_embed(q, 24, &quot;embed-v2&quot;)
+    top_v1 = search(collection_v1, qv1, k=K)
+    top_v2 = search(collection_v2, qv2, k=K)
+    overlaps.append(recall_at_k(top_v1, top_v2, K))
+    print(f&quot;query={q!r:32}  top_v1={top_v1}  top_v2={top_v2}  overlap@{K}={overlaps[-1]:.2f}&quot;)
+mean_overlap = sum(overlaps) / len(overlaps)
+print(f&quot;mean overlap@{K} across query set: {mean_overlap:.2f}&quot;)
+
+CUTOVER_THRESHOLD = 0.8
+decision = &quot;CUTOVER APPROVED&quot; if mean_overlap &gt;= CUTOVER_THRESHOLD else &quot;HOLD -- shadow index not ready&quot;
+print(f&quot;decision at threshold {CUTOVER_THRESHOLD}: {decision}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>query=&#x27;water damage claim&#x27;              top_v1=[&#x27;POL-1::chunk0&#x27;, &#x27;POL-3::chunk0&#x27;, &#x27;POL-6::chunk0&#x27;]  top_v2=[&#x27;POL-2::chunk0&#x27;, &#x27;POL-1::chunk0&#x27;, &#x27;POL-5::chunk0&#x27;]  overlap@3=0.33
+query=&#x27;flood exclusion question&#x27;        top_v1=[&#x27;POL-2::chunk0&#x27;, &#x27;POL-6::chunk0&#x27;, &#x27;POL-5::chunk0&#x27;]  top_v2=[&#x27;POL-7::chunk0&#x27;, &#x27;POL-2::chunk0&#x27;, &#x27;POL-5::chunk0&#x27;]  overlap@3=0.67
+query=&#x27;premium renewal notice&#x27;          top_v1=[&#x27;POL-6::chunk0&#x27;, &#x27;POL-5::chunk0&#x27;, &#x27;POL-1::chunk0&#x27;]  top_v2=[&#x27;POL-6::chunk0&#x27;, &#x27;POL-1::chunk0&#x27;, &#x27;POL-2::chunk0&#x27;]  overlap@3=0.67
+query=&#x27;liability coverage extension&#x27;    top_v1=[&#x27;POL-8::chunk0&#x27;, &#x27;POL-7::chunk0&#x27;, &#x27;POL-4::chunk0&#x27;]  top_v2=[&#x27;POL-8::chunk0&#x27;, &#x27;POL-2::chunk0&#x27;, &#x27;POL-3::chunk0&#x27;]  overlap@3=0.33
+mean overlap@3 across query set: 0.50
+decision at threshold 0.8: HOLD -- shadow index not ready
+</code></pre><p><strong>Exercise:</strong>
+On this same toy corpus and query set, lower <code>CUTOVER_THRESHOLD</code> to <code>0.4</code> and re-run the
+decision. Then, separately, explain in one sentence why a <code>HOLD</code> verdict on a toy corpus
+of 8 documents does not mean the real embed-v2 model is bad — what would you need on top
+of this harness before trusting either verdict on a real migration.</p>
+<p><strong>Starting point:</strong> The <code>overlaps</code>/<code>mean_overlap</code> values from this concept's Example, and <code>CUTOVER_THRESHOLD = 0.4</code>.</p>
+<p>Expected output: at <code>0.4</code> the decision flips to <code>CUTOVER APPROVED</code> since
+<code>mean_overlap=0.50 &gt;= 0.4</code>. The one-sentence answer: at 8 documents and 4 queries the
+measurement has essentially no statistical power — a real gate needs hundreds of real
+queries and a corpus large enough that &quot;overlap&quot; reflects genuine ranking agreement
+rather than a handful of toy documents splitting a coin flip.</p>
+<hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> A model upgrade decided by a vendor contract renewal, not by
+engineering choice, is a common real trigger — the embedding provider deprecates the old
+endpoint on a fixed date, and the migration has to complete inside that window regardless
+of how ready the shadow index evaluation says the new model is.</p>
+<p><strong>Compliance angle:</strong> <code>model_id</code> on every stored vector is what lets you answer &quot;which
+model retrieved the source material behind this AI-generated answer&quot; months after the
+fact — exactly the kind of provenance EU AI Act Article 11 documentation duties expect,
+and it only works if the column was populated from day one, not backfilled after the
+question is asked.</p>
+<p><strong>What breaks in production:</strong> A migration script that overwrites the old collection's
+vectors in place with new-model vectors under the same <code>model_id</code> string as before.
+Nothing errors — the collection simply now contains two model spaces silently mixed
+together, and every query from that point on returns rankings measuring nothing.</p>
+<hr />
+<h2 id="day-3">Day 3 — Zero-Downtime Reindex Strategies</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="11-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=e4ZH1kwBjRc" target="_blank" rel="noopener"><b>Elasticsearch Reindexing in Production | Zero-Downtime Migration with Aliases &amp; Reindex API</b><small>8bit systems · 7:47</small></a></li><li><a href="https://www.youtube.com/watch?v=23EghFNQdj4" target="_blank" rel="noopener"><b>What is Blue Green Deployment?</b><small>Telusko · 6:50</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=zero%20downtime%20reindex%20alias%20blue%20green%20vector%20search" target="_blank" rel="noopener">Search YouTube: zero downtime reindex alias blue green vector search</a></p></div>
+<hr />
+<h3>Concept 1 — An Alias Is the Only Thing a Reader Should Ever Know About</h3>
+<p>Readers should query a name, never a specific collection. Building the point of
+indirection in up front — an alias that maps a stable name to whichever concrete
+collection is currently live — turns &quot;cut over to the rebuilt index&quot; into a single
+pointer update instead of a coordinated change across every caller.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>collections = {
+    &quot;claims_v1&quot;: {&quot;chunk_a&quot;: &quot;vec-a-v1&quot;, &quot;chunk_b&quot;: &quot;vec-b-v1&quot;},
+    &quot;claims_v2&quot;: {&quot;chunk_a&quot;: &quot;vec-a-v2&quot;, &quot;chunk_b&quot;: &quot;vec-b-v2&quot;, &quot;chunk_c&quot;: &quot;vec-c-v2&quot;},
+}
+alias = {&quot;claims_search&quot;: &quot;claims_v1&quot;}
+
+def resolve(alias_name):
+    return collections[alias[alias_name]]
+
+def swap_alias(alias_name, new_target):
+    if new_target not in collections:
+        raise KeyError(f&quot;cannot point alias at unknown collection {new_target!r}&quot;)
+    old = alias[alias_name]
+    alias[alias_name] = new_target
+    return old, new_target
+
+print(&quot;reads before swap:&quot;, resolve(&quot;claims_search&quot;))
+old, new = swap_alias(&quot;claims_search&quot;, &quot;claims_v2&quot;)
+print(f&quot;alias swapped: {old} -&gt; {new}&quot;)
+print(&quot;reads after swap :&quot;, resolve(&quot;claims_search&quot;))
+print(&quot;no reader changed a single line of query code -- only the alias target moved.&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>reads before swap: {&#x27;chunk_a&#x27;: &#x27;vec-a-v1&#x27;, &#x27;chunk_b&#x27;: &#x27;vec-b-v1&#x27;}
+alias swapped: claims_v1 -&gt; claims_v2
+reads after swap : {&#x27;chunk_a&#x27;: &#x27;vec-a-v2&#x27;, &#x27;chunk_b&#x27;: &#x27;vec-b-v2&#x27;, &#x27;chunk_c&#x27;: &#x27;vec-c-v2&#x27;}
+no reader changed a single line of query code -- only the alias target moved.
+</code></pre><p><strong>Exercise:</strong>
+Write <code>rollback(alias_name, history)</code> that pops the previous target off a <code>history</code> list
+and restores the alias to it. Push <code>&quot;claims_v1&quot;</code> onto <code>history</code> before the swap above,
+perform the swap, then call <code>rollback</code> and confirm reads are served from <code>claims_v1</code>
+again.</p>
+<p><strong>Starting point:</strong> The <code>alias</code>/<code>swap_alias</code> code from this concept's Example, and <code>history = [&quot;claims_v1&quot;]</code> recorded just before calling <code>swap_alias</code>.</p>
+<p>Expected output: after <code>rollback</code>, <code>resolve(&quot;claims_search&quot;)</code> returns the original
+<code>claims_v1</code> contents again — a rollback is the identical alias-swap mechanism run in
+reverse, not a separate recovery procedure.</p>
+<hr />
+<h3>Concept 2 — A Throttled Backfill Worker Fed by a Queue</h3>
+<p>Rebuilding a collection from scratch means re-embedding every chunk, and doing that as
+fast as possible is exactly how you exhaust an embedding API's rate limit or starve every
+other consumer of it. A backfill worker instead pulls fixed-size batches off a queue at a
+throttled rate, and its progress is itself a piece of state — how many batches are done,
+how many remain — that a reader can check without touching the collection being built.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def build_backfill_queue(source_ids, batch_size):
+    return [source_ids[i:i + batch_size] for i in range(0, len(source_ids), batch_size)]
+
+def run_backfill(queue, embed_cost_ms_per_item, rate_limit_batches_per_tick):
+    ticks = 0
+    processed = 0
+    log = []
+    i = 0
+    while i &lt; len(queue):
+        this_tick_batches = queue[i:i + rate_limit_batches_per_tick]
+        for batch in this_tick_batches:
+            processed += len(batch)
+        log.append((ticks, processed))
+        i += rate_limit_batches_per_tick
+        ticks += 1
+    total_ms = processed * embed_cost_ms_per_item
+    return ticks, processed, total_ms, log
+
+source_ids = [f&quot;claim-{i:04d}&quot; for i in range(1, 251)]
+queue = build_backfill_queue(source_ids, batch_size=25)
+print(f&quot;queue has {len(queue)} batches of up to 25 items each ({len(source_ids)} total ids)&quot;)
+
+ticks, processed, total_ms, log = run_backfill(queue, embed_cost_ms_per_item=40, rate_limit_batches_per_tick=2)
+print(f&quot;backfill finished in {ticks} ticks, processed {processed} items, &quot;
+      f&quot;estimated embed time {total_ms/1000:.1f}s&quot;)
+print(&quot;progress checkpoints (tick, cumulative processed):&quot;, log)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>queue has 10 batches of up to 25 items each (250 total ids)
+backfill finished in 5 ticks, processed 250 items, estimated embed time 10.0s
+progress checkpoints (tick, cumulative processed): [(0, 50), (1, 100), (2, 150), (3, 200), (4, 250)]
+</code></pre><p><strong>Exercise:</strong>
+Write <code>resumable_backfill(queue, start_batch_index, rate_limit_batches_per_tick)</code> that
+starts from a given batch index instead of 0, simulate a crash after 4 batches have
+already completed, and confirm the resumed run plus the pre-crash work together cover
+every id in <code>source_ids</code> exactly once.</p>
+<p><strong>Starting point:</strong> The <code>queue</code>/<code>source_ids</code> values from this concept's Example, with <code>CRASH_AFTER_BATCHES = 4</code> naming how many batches completed before the simulated crash.</p>
+<p>Expected output: 100 ids already indexed before the crash (4 batches x 25), the resumed
+run processes the remaining 150, the union of both covers all 250 source ids, and no id
+is counted twice — the checkpoint is what makes &quot;resume&quot; mean &quot;continue&quot; rather than
+&quot;restart&quot;.</p>
+<hr />
+<h3>Concept 3 — Reads Stay Served Throughout the Rebuild</h3>
+<p>Put Concepts 1 and 2 together and the shape of a real zero-downtime reindex falls out:
+the alias keeps serving the <em>old</em> collection while the backfill worker populates the
+<em>new</em> one in the background, and only once the backfill reports complete does the alias
+move. At every point before that, a reader gets a complete, correct (if slightly stale)
+answer from the old collection — never a partial answer from a collection still being
+built.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class ReindexRun:
+    target_collection: str
+    total_batches: int
+    completed_batches: int = 0
+    status: str = &quot;running&quot;
+
+    def checkpoint(self, n_batches_done):
+        self.completed_batches += n_batches_done
+        if self.completed_batches &gt;= self.total_batches:
+            self.status = &quot;ready_for_cutover&quot;
+        return self.progress_pct()
+
+    def progress_pct(self):
+        return round(100 * self.completed_batches / self.total_batches, 1)
+
+run = ReindexRun(target_collection=&quot;claims_v3&quot;, total_batches=10)
+serving_from = &quot;claims_v2&quot;
+for step in (3, 3, 4):
+    pct = run.checkpoint(step)
+    print(f&quot;backfill progress: {pct}%  status={run.status}  reads still served from={serving_from}&quot;)
+
+if run.status == &quot;ready_for_cutover&quot;:
+    print(f&quot;cutover: reads now served from {run.target_collection}; old collection {serving_from} kept until confirmed stable&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>backfill progress: 30.0%  status=running  reads still served from=claims_v2
+backfill progress: 60.0%  status=running  reads still served from=claims_v2
+backfill progress: 100.0%  status=ready_for_cutover  reads still served from=claims_v2
+cutover: reads now served from claims_v3; old collection claims_v2 kept until confirmed stable
+</code></pre><p><strong>Exercise:</strong>
+Modify the checkpoint loop so the last step only completes 3 of the remaining 4 batches
+(i.e. steps <code>(3, 3, 3)</code> totaling 9 of 10). Confirm <code>status</code> stays <code>&quot;running&quot;</code> and that no
+cutover message prints, then add one final <code>checkpoint(1)</code> call and confirm cutover
+happens on that call instead.</p>
+<p><strong>Starting point:</strong> A fresh <code>ReindexRun(target_collection=&quot;claims_v3&quot;, total_batches=10)</code> and the step sequence <code>(3, 3, 3)</code> followed by one more <code>checkpoint(1)</code> call.</p>
+<p>Expected output: after <code>(3, 3, 3)</code> the run reports 90.0% and <code>status=&quot;running&quot;</code>, with no
+cutover printed; the following <code>checkpoint(1)</code> call brings it to 100.0% and flips
+<code>status</code> to <code>&quot;ready_for_cutover&quot;</code>, at which point the cutover message prints — the
+collection is only ever declared ready at the exact batch count, never early.</p>
+<hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> On a shared on-prem vector store, the backfill's embedding calls and
+the throttle protecting the shared enterprise API quota are the same constraint Week 06
+Day 4 measured — the backfill worker's <code>rate_limit_batches_per_tick</code> has to respect that
+same shared budget, not just what the reindex job could theoretically sustain alone.</p>
+<p><strong>Compliance angle:</strong> The alias-swap moment is a natural point to record a change-log
+entry — old collection, new collection, backfill duration, and the shadow-index score
+that justified the cutover — turning &quot;we reindexed&quot; into a reviewable event rather than
+an unannounced change to what a downstream model retrieves.</p>
+<p><strong>What breaks in production:</strong> A cutover triggered by a backfill job that reports
+&quot;complete&quot; based on batch count alone, without verifying every batch actually succeeded.
+A batch that silently failed mid-run still counts toward &quot;done&quot;, and the new collection
+goes live missing exactly the chunks that failed — which Day 4's reconciliation count is
+built to catch.</p>
+<hr />
+<h2 id="day-4">Day 4 — Staleness Detection and Freshness SLAs</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="11-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=Avpqmr2SAYM" target="_blank" rel="noopener"><b>dbt Source Freshness: Ensuring Reliable and Timely Data in Your Pipeline</b><small>Scalefree · 4:23</small></a></li><li><a href="https://www.youtube.com/watch?v=jLeOBaI1a8c" target="_blank" rel="noopener"><b>Your Pipeline Finished, But the Report Is Stale | Pipeline 20</b><small>Learners Dream · 6:17</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=data%20freshness%20SLA%20staleness%20monitoring%20pipeline" target="_blank" rel="noopener">Search YouTube: data freshness SLA staleness monitoring pipeline</a></p></div>
+<hr />
+<h3>Concept 1 — A Freshness Metric Emitted Per Source System</h3>
+<p>Staleness is a simple, honest measurement: how long has the index been behind the
+source's last known change, measured right now. If the index was written after the
+source's last change, staleness is zero — the index is caught up. If not, staleness
+grows every second the gap goes unaddressed, and it has to be computed per source
+system, because different sources land on wildly different schedules.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import datetime as dt
+
+def staleness_seconds(source_changed_at, indexed_at, now):
+    if indexed_at &gt;= source_changed_at:
+        return 0.0
+    return (now - source_changed_at).total_seconds()
+
+NOW = dt.datetime(2026, 9, 5, 9, 0, 0, tzinfo=dt.timezone.utc)
+sources = [
+    (&quot;claims_core_mssql&quot;, dt.datetime(2026, 9, 5, 8, 40, tzinfo=dt.timezone.utc), dt.datetime(2026, 9, 5, 8, 58, tzinfo=dt.timezone.utc)),
+    (&quot;policy_admin_oracle&quot;, dt.datetime(2026, 9, 5, 4, 10, tzinfo=dt.timezone.utc), dt.datetime(2026, 9, 4, 23, 0, tzinfo=dt.timezone.utc)),
+    (&quot;agent_notes_api&quot;, dt.datetime(2026, 9, 5, 8, 59, tzinfo=dt.timezone.utc), dt.datetime(2026, 9, 5, 9, 0, tzinfo=dt.timezone.utc)),
+]
+for name, changed_at, indexed_at in sources:
+    s = staleness_seconds(changed_at, indexed_at, NOW)
+    print(f&quot;{name:22} staleness={s:8.0f}s  ({s/60:6.1f} min)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>claims_core_mssql      staleness=       0s  (   0.0 min)
+policy_admin_oracle    staleness=   17400s  ( 290.0 min)
+agent_notes_api        staleness=       0s  (   0.0 min)
+</code></pre><p><strong>Exercise:</strong>
+Add a fourth source, <code>core_banking_cobol</code>, whose last source change was at
+<code>2026-09-03 02:00 UTC</code> and whose last index write was at <code>2026-09-02 02:00 UTC</code> (i.e. the
+index write happened <em>before</em> the change it should have captured, and nothing has run
+since). Write <code>emit_freshness_metrics(sources, now)</code> returning a <code>{name: staleness}</code> dict
+for all four sources, and report which source is worst.</p>
+<p><strong>Starting point:</strong> The <code>sources</code> list and <code>staleness_seconds</code> function from this concept's Example, with the <code>core_banking_cobol</code> tuple appended.</p>
+<p>Expected output: <code>core_banking_cobol</code> reports roughly 198,000 seconds stale (about 55
+hours), the clear worst offender of the four — an index write that predates the change
+it was meant to capture behaves exactly like no re-index having happened at all.</p>
+<hr />
+<h3>Concept 2 — Alert Thresholds Tied to a Written Staleness Budget</h3>
+<p>The same staleness number means something completely different to two different
+downstream use cases. Week 07 Day 4 introduced <code>UseCase</code> and <code>freshness_gate</code> to filter
+individual records by a per-use-case staleness budget at read time; reused here, the same
+<code>UseCase.max_staleness_seconds</code> becomes the threshold an <em>alert</em> fires against at the
+source-system level, closing the loop between &quot;here is the budget we promised&quot; and &quot;here
+is whether we are inside it right now.&quot;</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing UseCase from Week 07 Day 4 Concept 3, re-grounded here as a staleness
+# *budget* an alert fires against, rather than a per-record read-time filter.
+from dataclasses import dataclass
+
+@dataclass
+class UseCase:
+    name: str
+    max_staleness_seconds: int
+
+def freshness_alert(source_name, staleness, use_case):
+    if staleness &gt; use_case.max_staleness_seconds:
+        return f&quot;ALERT: {source_name} is {staleness:.0f}s stale, budget for {use_case.name} is {use_case.max_staleness_seconds}s&quot;
+    return f&quot;OK: {source_name} within budget for {use_case.name}&quot;
+
+metrics = {
+    &quot;claims_core_mssql&quot;: 0.0,
+    &quot;policy_admin_oracle&quot;: 17400.0,
+    &quot;agent_notes_api&quot;: 0.0,
+    &quot;core_banking_cobol&quot;: 198000.0,
+}
+fraud_alert_use_case = UseCase(&quot;fraud_alert_retrieval&quot;, max_staleness_seconds=300)
+policy_lookup_use_case = UseCase(&quot;policy_lookup_retrieval&quot;, max_staleness_seconds=86400)
+
+for name, staleness in metrics.items():
+    print(freshness_alert(name, staleness, fraud_alert_use_case))
+print(&quot;---&quot;)
+for name, staleness in metrics.items():
+    print(freshness_alert(name, staleness, policy_lookup_use_case))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>OK: claims_core_mssql within budget for fraud_alert_retrieval
+ALERT: policy_admin_oracle is 17400s stale, budget for fraud_alert_retrieval is 300s
+OK: agent_notes_api within budget for fraud_alert_retrieval
+ALERT: core_banking_cobol is 198000s stale, budget for fraud_alert_retrieval is 300s
+---
+OK: claims_core_mssql within budget for policy_lookup_retrieval
+OK: policy_admin_oracle within budget for policy_lookup_retrieval
+OK: agent_notes_api within budget for policy_lookup_retrieval
+ALERT: core_banking_cobol is 198000s stale, budget for policy_lookup_retrieval is 86400s
+</code></pre><p><strong>Exercise:</strong>
+Write <code>count_alerts(metrics, use_case)</code> returning how many sources breach a given
+use case's budget, and call it for both <code>fraud_alert_use_case</code> and
+<code>policy_lookup_use_case</code> against the same <code>metrics</code> dict above.</p>
+<p><strong>Starting point:</strong> The <code>metrics</code> dict and both <code>UseCase</code> instances from this concept's Example.</p>
+<p>Expected output: <code>count_alerts</code> reports 2 of 4 sources breaching the 300-second fraud
+budget and 1 of 4 breaching the 86,400-second policy-lookup budget — identical staleness
+figures, genuinely different verdicts, because the acceptable lag is a property of the
+use case, not of the source system.</p>
+<hr />
+<h3>Concept 3 — Orphaned Vectors Left Behind by Source Deletes</h3>
+<p>Staleness so far assumes the source record still exists somewhere, just not yet
+reflected in the index. The opposite failure is just as real: a source record gets
+deleted, and nothing ever tells the vector index to remove the chunks that used to belong
+to it. Those chunks are now orphans — searchable, retrievable, and referring to a claim
+or policy that no longer exists in the system of record. Finding them means comparing the
+live set of source ids against the set of document ids the index actually holds.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>source_ids_now = {&quot;CLM-1001&quot;, &quot;CLM-1002&quot;, &quot;CLM-1004&quot;, &quot;CLM-1005&quot;}
+indexed_chunk_ids = {
+    &quot;CLM-1001::chunk0&quot;, &quot;CLM-1001::chunk1&quot;,
+    &quot;CLM-1002::chunk0&quot;,
+    &quot;CLM-1003::chunk0&quot;,   # CLM-1003 was deleted at source, never removed from the index
+    &quot;CLM-1004::chunk0&quot;,
+}
+
+def find_orphans(indexed_chunk_ids, source_ids_now):
+    return sorted({cid for cid in indexed_chunk_ids if cid.split(&quot;::&quot;)[0] not in source_ids_now})
+
+orphans = find_orphans(indexed_chunk_ids, source_ids_now)
+print(&quot;orphaned chunk ids (source record no longer exists):&quot;, orphans)
+print(f&quot;orphan rate: {len(orphans)}/{len(indexed_chunk_ids)} indexed chunks&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>orphaned chunk ids (source record no longer exists): [&#x27;CLM-1003::chunk0&#x27;]
+orphan rate: 1/5 indexed chunks
+</code></pre><p><strong>Exercise:</strong>
+Write <code>reconcile(source_ids_now, indexed_chunk_ids)</code> returning two sorted lists: document
+ids present in the source but never indexed at all, and document ids present in the
+index whose source record is gone (orphaned). Run it on the data above and report both
+lists alongside a one-line summary.</p>
+<p><strong>Starting point:</strong> The <code>source_ids_now</code>/<code>indexed_chunk_ids</code> sets from this concept's Example.</p>
+<p>Expected output: one document id (<code>CLM-1005</code>) reported missing from the index — it exists
+at source but was never indexed — and one document id (<code>CLM-1003</code>) reported orphaned,
+out of 4 live source documents. Two distinct failure modes, one reconciliation pass.</p>
+<hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> A source-system delete on an on-prem mainframe is frequently a soft
+delete — a status flag flips rather than the row disappearing — and a naive &quot;row missing
+from a nightly extract&quot; orphan check misses it entirely, because the row is still there,
+just flagged inactive. The reconciliation logic has to know each source system's actual
+delete semantics, not assume a uniform one.</p>
+<p><strong>Compliance angle:</strong> An orphaned vector for a deleted claim is a live data-retention
+problem, not just a housekeeping one — if the source system deleted the record to honor a
+retention or right-to-erasure obligation, a surviving searchable vector defeats that
+deletion. Orphan reconciliation is part of making a deletion actually complete.</p>
+<p><strong>What breaks in production:</strong> Staleness alerts are wired up, watched closely for the
+first month, and then the alert channel gets muted during an unrelated incident and never
+unmuted. A staleness monitor nobody is actually reading is functionally the same as having
+none, and it is worse than having none if its presence is what let the &quot;we monitor this&quot;
+box get checked.</p>
+<hr />
+<h2 id="day-5">Day 5 — Building the Incremental Update Job</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="11-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=G6A0T7B-ZsI" target="_blank" rel="noopener"><b>Index freshness &amp; incremental re-embedding — Explained in Detail</b><small>software-engineer-blog · 7:31</small></a></li><li><a href="https://www.youtube.com/watch?v=fhAiW1yvQkg" target="_blank" rel="noopener"><b>IngestionPipeline Cuts Re-Embedding to Zero in LlamaIndex</b><small>Yash Jain · 9:59</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=incremental%20indexing%20pipeline%20only%20re-embed%20changed%20documents" target="_blank" rel="noopener">Search YouTube: incremental indexing pipeline only re-embed changed documents</a></p></div>
+<hr />
+<h3>Concept 1 — Diff Source Against Stored Hashes, Re-Embed Only What Changed</h3>
+<p>Everything from Days 1–4 comes together in one job: for every document in the source,
+compute its current content hash, compare it against the hash stored from the last run,
+and only call the embedding API for documents whose hash actually moved (or that are
+brand new). Everything else is skipped, cheaply, by a dictionary lookup.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+import re
+import random
+
+def normalize_for_hash(text):
+    return re.sub(r&quot;\s+&quot;, &quot; &quot;, text.strip().lower())
+
+def content_hash(text):
+    return hashlib.sha256(normalize_for_hash(text).encode(&quot;utf-8&quot;)).hexdigest()
+
+random.seed(42)
+TOPICS = [
+    &quot;water damage kitchen ceiling upstairs pipe burst&quot;,
+    &quot;rear-end collision intersection bumper damage&quot;,
+    &quot;theft laptop jewelry vehicle parking lot&quot;,
+    &quot;flood exclusion named storm endorsement required&quot;,
+    &quot;total loss settlement thirty day payout window&quot;,
+    &quot;subrogation rights reserved third party claim&quot;,
+    &quot;deductible five hundred dollars per occurrence&quot;,
+    &quot;renewal premium increase four percent notice&quot;,
+    &quot;umbrella policy extends liability coverage limit&quot;,
+    &quot;fire damage detached garage smoke contamination&quot;,
+]
+CORPUS_SIZE = 400
+corpus = {f&quot;CLM-{i:05d}&quot;: f&quot;{TOPICS[i % len(TOPICS)]} case reference {i}&quot; for i in range(CORPUS_SIZE)}
+
+# Simulated prior run&#x27;s stored hashes -- the state the incremental job diffs against.
+stored_hashes = {doc_id: content_hash(text) for doc_id, text in corpus.items()}
+
+# One day&#x27;s real-world change volume: a small number of documents actually changed.
+changed_ids = random.sample(list(corpus.keys()), k=12)
+today_corpus = dict(corpus)
+for cid in changed_ids:
+    today_corpus[cid] = today_corpus[cid] + &quot; amended endorsement attached&quot;
+
+def diff_against_stored_hashes(today_corpus, stored_hashes):
+    changed, unchanged, new = [], [], []
+    for doc_id, text in today_corpus.items():
+        h = content_hash(text)
+        if doc_id not in stored_hashes:
+            new.append(doc_id)
+        elif stored_hashes[doc_id] != h:
+            changed.append(doc_id)
+        else:
+            unchanged.append(doc_id)
+    return changed, unchanged, new
+
+changed, unchanged, new = diff_against_stored_hashes(today_corpus, stored_hashes)
+print(f&quot;corpus size: {len(today_corpus)}&quot;)
+print(f&quot;changed: {len(changed)}   unchanged: {len(unchanged)}   new: {len(new)}&quot;)
+print(&quot;changed ids match the injected edits:&quot;, sorted(changed) == sorted(changed_ids))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>corpus size: 400
+changed: 12   unchanged: 388   new: 0
+changed ids match the injected edits: True
+</code></pre><p><strong>Exercise:</strong>
+Add 5 brand-new documents to <code>today_corpus</code> (ids <code>CLM-00400</code> through <code>CLM-00404</code>, not
+present in <code>stored_hashes</code>) alongside the 12 already-changed ones, and re-run the diff.
+Confirm the new ids are correctly classified separately from the changed ones.</p>
+<p><strong>Starting point:</strong> <code>today_corpus</code> and <code>stored_hashes</code> from this concept's Example, extended with 5 new document ids not present in <code>stored_hashes</code>.</p>
+<p>Expected output: 12 changed, 388 unchanged, and exactly 5 new — the 5 new ids are
+reported separately from the 12 edited ones because they were never in <code>stored_hashes</code>
+at all, a genuinely different case from &quot;existing document, different hash.&quot;</p>
+<hr />
+<h3>Concept 2 — Delete-Then-Upsert vs In-Place Update, Per Store</h3>
+<p>Not every vector store updates an existing point the same way. Some (older collection
+APIs without a native upsert) require deleting the old point before the new one can be
+written; others (pgvector via <code>ON CONFLICT</code>, Qdrant's native upsert, modern Milvus) update
+in place by primary key with no separate delete step. The two converge on the same final
+state, but delete-then-upsert opens a brief window where a concurrent read for that exact
+id can miss — a window in-place update never has.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>index_delete_then_upsert = {doc_id: {&quot;hash&quot;: h, &quot;vector&quot;: f&quot;vec::{doc_id}::v1&quot;} for doc_id, h in stored_hashes.items()}
+index_in_place = dict(index_delete_then_upsert)
+
+def fake_embed_id(doc_id, text):
+    return f&quot;vec::{doc_id}::{content_hash(text)[:6]}&quot;
+
+def apply_delete_then_upsert(index, doc_id, text):
+    if doc_id in index:
+        del index[doc_id]
+    index[doc_id] = {&quot;hash&quot;: content_hash(text), &quot;vector&quot;: fake_embed_id(doc_id, text)}
+
+def apply_in_place_update(index, doc_id, text):
+    index[doc_id] = {&quot;hash&quot;: content_hash(text), &quot;vector&quot;: fake_embed_id(doc_id, text)}
+
+for cid in changed_ids:
+    apply_delete_then_upsert(index_delete_then_upsert, cid, today_corpus[cid])
+    apply_in_place_update(index_in_place, cid, today_corpus[cid])
+
+print(f&quot;index size after delete-then-upsert path: {len(index_delete_then_upsert)} (should equal {CORPUS_SIZE})&quot;)
+print(f&quot;index size after in-place update path   : {len(index_in_place)} (should equal {CORPUS_SIZE})&quot;)
+both_agree = all(index_delete_then_upsert[cid][&quot;hash&quot;] == index_in_place[cid][&quot;hash&quot;] for cid in changed_ids)
+print(&quot;both paths converge to the same stored hash per changed id:&quot;, both_agree)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>index size after delete-then-upsert path: 400 (should equal 400)
+index size after in-place update path   : 400 (should equal 400)
+both paths converge to the same stored hash per changed id: True
+</code></pre><p><strong>Exercise:</strong>
+Write <code>count_momentary_misses(index_before_batch, ids_to_update, strategy)</code> that, for
+<code>strategy=&quot;delete_then_upsert&quot;</code>, counts one potential read-miss window per updated id
+(a delete followed by a re-insert), and for <code>strategy=&quot;in_place&quot;</code> counts zero. Run it for
+both strategies over <code>changed_ids</code>.</p>
+<p><strong>Starting point:</strong> <code>index_delete_then_upsert</code>, <code>index_in_place</code>, and <code>changed_ids</code> from this concept's Example.</p>
+<p>Expected output: <code>delete_then_upsert</code> reports 12 potential momentary-miss windows (one
+per updated id), <code>in_place</code> reports 0 — the same final data, a real difference in how
+safe the update is to run against a store that is being read from concurrently.</p>
+<hr />
+<h3>Concept 3 — Verifying Counts and Measuring the Spend Saved</h3>
+<p>The job is only trustworthy once you can show the source and the index agree on
+membership after it runs, and once you can put a number on what skipping unchanged
+documents actually saved. Both come nearly free once Concepts 1 and 2 exist: the count
+check is a set-equality comparison, and the cost saved is the ratio of what you actually
+embedded against what a full reindex would have embedded.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>COST_PER_EMBED_CALL_USD = 0.0001  # illustrative flat per-chunk embedding cost
+
+def run_incremental_job(today_corpus, stored_hashes, cost_per_call):
+    changed, unchanged, new = diff_against_stored_hashes(today_corpus, stored_hashes)
+    to_embed = changed + new
+    new_hashes = dict(stored_hashes)
+    for doc_id in to_embed:
+        new_hashes[doc_id] = content_hash(today_corpus[doc_id])
+    return {
+        &quot;embedded&quot;: len(to_embed),
+        &quot;skipped&quot;: len(unchanged),
+        &quot;total&quot;: len(today_corpus),
+        &quot;cost_usd&quot;: round(len(to_embed) * cost_per_call, 6),
+        &quot;new_hashes&quot;: new_hashes,
+    }
+
+full_reindex_cost = round(len(today_corpus) * COST_PER_EMBED_CALL_USD, 6)
+result = run_incremental_job(today_corpus, stored_hashes, COST_PER_EMBED_CALL_USD)
+savings_pct = round(100 * (1 - result[&quot;cost_usd&quot;] / full_reindex_cost), 1)
+
+print(f&quot;full reindex would embed all {len(today_corpus)} chunks, cost=${full_reindex_cost}&quot;)
+print(f&quot;incremental job embedded {result[&#x27;embedded&#x27;]}, skipped {result[&#x27;skipped&#x27;]}, cost=${result[&#x27;cost_usd&#x27;]}&quot;)
+print(f&quot;embedding spend saved vs full reindex: {savings_pct}%&quot;)
+
+def verify_counts(today_corpus, new_hashes):
+    return set(today_corpus) == set(new_hashes)
+
+print(&quot;source vs index count reconciliation after the run:&quot;, verify_counts(today_corpus, result[&quot;new_hashes&quot;]))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>full reindex would embed all 400 chunks, cost=$0.04
+incremental job embedded 12, skipped 388, cost=$0.0012
+embedding spend saved vs full reindex: 97.0%
+source vs index count reconciliation after the run: True
+</code></pre><p><strong>Exercise:</strong>
+Run <code>run_incremental_job</code> a second time immediately, this time passing <code>result[&quot;new_hashes&quot;]</code>
+from the first run as the <code>stored_hashes</code> argument, with no further edits to
+<code>today_corpus</code>. Compare the <code>embedded</code> count and <code>cost_usd</code> between the two runs.</p>
+<p><strong>Starting point:</strong> <code>today_corpus</code>, <code>stored_hashes</code>, and <code>COST_PER_EMBED_CALL_USD</code> from this concept's Example, plus <code>result</code> from the first run.</p>
+<p>Expected output: the first run embeds 12 chunks at $0.0012; the second run, with nothing
+changed since the first run's hashes were stored, embeds 0 chunks at $0.0 — an
+incremental job's steady-state cost, once caught up, is genuinely zero until the source
+changes again.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> &quot;The source&quot; is rarely one clean feed — a real claims corpus is
+assembled from a nightly MSSQL extract, an intraday adjuster-notes API, and an
+occasional manual CSV correction, each on its own schedule. The incremental job's
+<code>stored_hashes</code> dict has to be keyed consistently across all three, or a document that
+changed in one feed but not another gets silently missed.</p>
+<p><strong>Compliance angle:</strong> The savings-percentage figure this job produces is not just a cost
+metric — it is evidence, alongside the reconciliation check, that the pipeline processed
+exactly the records that changed and nothing else, which is precisely the kind of
+declared, reproducible processing record a documentation-obligation audit asks for.</p>
+<p><strong>What breaks in production:</strong> The incremental job runs fine for months, quietly assuming
+<code>stored_hashes</code> never gets corrupted or reset. The day someone truncates that table by
+accident, every document in the corpus reads as &quot;new,&quot; and the next run silently becomes
+a full reindex — at full cost, with no warning, on whatever schedule the job normally
+runs on unattended.</p>
+<hr />
+<h2>Architecture Decision — Week 11</h2>
+<p><strong>Choosing between:</strong> full periodic reindex vs. incremental (diff-and-patch) updates vs.
+dual-write during a migration.</p>
+<p><strong>Rule of thumb:</strong> run incremental updates as the default steady-state job — Day 5's
+measurement showed a 97% embedding-spend reduction against a full reindex on a corpus
+where only 3% of documents actually changed, and that ratio only improves as the corpus
+grows while daily change volume stays roughly flat. Fall back to a full periodic reindex
+only when the incremental job's own precondition breaks — the stored-hash table is lost
+or suspected corrupted, the chunking strategy itself changes (Week 09's boundaries move,
+so every existing chunk id is stale by definition), or a scheduled reconciliation
+(Day 4) finds drift too large to trust incremental patching to close safely. Reach for
+dual-write only for the one case it actually solves — a change of embedding <em>model</em>,
+where old and new vectors are never comparable in the same index regardless of how
+current either one is — and treat it as a bounded-duration migration state, not a
+steady-state pattern: it doubles embedding cost for as long as it runs, and it exists
+solely to populate a shadow index that a real evaluation, not a deadline, should be what
+authorizes cutting over.</p>
+<div class="pager"><a class="btn ghost" href="week-10.html">&larr; Week 10</a><a class="btn ghost" href="week-12.html">Week 12 &rarr;</a></div>
+</main></body></html>

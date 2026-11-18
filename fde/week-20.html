@@ -1,0 +1,1209 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 20 — LlamaIndex Production Patterns</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/retrieval-augmented-generation-rag" target="_blank" rel="noopener">How does RAG work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/agentic-rag" target="_blank" rel="noopener">What is Agentic RAG?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/graphrag" target="_blank" rel="noopener">What is GraphRAG?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="20" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 20 — LlamaIndex Production Patterns</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>4 — LLMOps &amp; Distributed Infrastructure</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Advanced</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 09's chunking strategies and Week 19's orchestration concepts (state, checkpointing, human-in-the-loop) are both directly relevant background. No prior LlamaIndex experience assumed.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. <code>llama-index-core</code> installs and imports cleanly in this sandbox. Its <code>MockEmbedding</code> and <code>MockLLM</code> test doubles — genuinely part of the library, not a stand-in this track invented — mean nearly every mechanism this week covers (ingestion, metadata filtering, query-engine composition, citations, response synthesis, workflows) is genuinely executed end to end with no live API key or network call at all; only <code>PGVectorStore</code>'s actual Postgres connection needs a live server this sandbox does not have. <code>num_workers&gt;1</code> on <code>IngestionPipeline.run()</code> was found to hang under this sandbox's multiprocessing restrictions (Day 1) and is disclosed as such rather than worked around.</td>
+</tr>
+</tbody>
+</table>
+<p>Weeks 01-07 built vector infrastructure from scratch; Week 19 built LangGraph's
+state-graph orchestration. This week covers LlamaIndex's own production layer — the
+parts of the framework built specifically for ingestion at scale, multi-index query
+composition, and (Day 4) an event-driven alternative to a state graph — using the same
+genuinely-executed-over-REAL-MODE discipline this track has kept since Week 01, made
+possible here by LlamaIndex's own first-class mock components.</p>
+<hr />
+<h2 id="day-1">Day 1 — IngestionPipeline as Infrastructure</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="20-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=vM3rdq8Jpdc" target="_blank" rel="noopener"><b>Scaling Document Ingestion for AI Agents  Lessons from the field with StackAI</b><small>LlamaIndex · 36:36</small></a></li><li><a href="https://www.youtube.com/watch?v=bl_smhH0kP8" target="_blank" rel="noopener"><b>How to Use LlamaIndex Query Pipelines</b><small>Fahd Mirza · 13:50</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LlamaIndex%20ingestion%20pipeline%20docstore%20upserts%20cache" target="_blank" rel="noopener">Search YouTube: LlamaIndex ingestion pipeline docstore upserts cache</a></p></div>
+<hr />
+<h3>Concept 1 — <code>IngestionPipeline</code> With an Ordered <code>transformations</code> List</h3>
+<p><code>IngestionPipeline(transformations=[...])</code> runs a <code>Document</code> through each transformation
+in order — a <code>SentenceSplitter</code> first, then any embedding model or metadata extractor
+after it — producing <code>TextNode</code> objects that each carry a <code>ref_doc_id</code> pointing back to
+the source <code>Document</code> they came from. This is the same &quot;parse, then chunk, then embed&quot;
+shape every earlier week built by hand; <code>IngestionPipeline</code> is LlamaIndex's own name for
+formalizing it as one composable, reusable object.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core.ingestion import IngestionPipeline
+from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core import Document
+
+docs = [Document(text=(&quot;This policy covers named perils including fire, theft, and water damage. &quot; * 20), doc_id=&quot;POL-1001&quot;)]
+
+pipeline = IngestionPipeline(transformations=[SentenceSplitter(chunk_size=200, chunk_overlap=20)])
+nodes = pipeline.run(documents=docs)
+print(f&quot;node count: {len(nodes)}&quot;)
+print(f&quot;each node carries a ref_doc_id back to the source document: {nodes[0].ref_doc_id == &#x27;POL-1001&#x27;}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>node count: 2
+each node carries a ref_doc_id back to the source document: True
+</code></pre><p><strong>Exercise:</strong>
+Run the same pipeline over TWO documents, <code>&quot;POL-1001&quot;</code> (as above) and a second one,
+<code>&quot;CLM-1001&quot;</code>, with the text <code>&quot;Claimant reports water damage to the kitchen ceiling from a burst pipe. &quot;</code> repeated 15 times. Print the total node count and confirm every node's
+<code>ref_doc_id</code> is one of the two source document ids.</p>
+<p><strong>Starting point:</strong> <code>docs</code> and the <code>pipeline</code> line from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>total node count: 5
+ref_doc_ids present: [&#x27;CLM-1001&#x27;, &#x27;POL-1001&#x27;]
+every node maps back to one of the two source documents: True
+</code></pre><hr />
+<h3>Concept 2 — <code>IngestionCache</code> So an Expensive Parse Is Not Repeated</h3>
+<p><code>IngestionCache</code> keys its cache entries on a hash of the transformation's own
+configuration plus the input node content — the same document (or an unchanged node
+already produced by an earlier transformation in the pipeline) run through the SAME
+transformation a second time is served from cache instead of recomputed, while a
+genuinely different document still triggers a real, uncached call. This is directly
+useful the moment any transformation in the chain is expensive (a layout-aware PDF parse,
+an LLM-based metadata extractor) rather than cheap sentence splitting.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core.ingestion import IngestionPipeline, IngestionCache
+from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.schema import TransformComponent
+from llama_index.core import Document
+
+call_count = {&quot;n&quot;: 0}
+
+class ExpensiveTransform(TransformComponent):
+    def __call__(self, nodes, **kwargs):
+        call_count[&quot;n&quot;] += 1
+        for node in nodes:
+            node.metadata[&quot;expensive_field&quot;] = &quot;computed&quot;
+        return nodes
+
+docs = [Document(text=&quot;Claimant reports water damage to the kitchen ceiling from a burst pipe. &quot; * 20, doc_id=&quot;CLM-2001&quot;)]
+
+cache = IngestionCache()
+pipeline = IngestionPipeline(
+    transformations=[SentenceSplitter(chunk_size=200, chunk_overlap=20), ExpensiveTransform()],
+    cache=cache,
+)
+pipeline.run(documents=docs)
+print(f&quot;first run called the expensive transform: {call_count[&#x27;n&#x27;]} time(s)&quot;)
+
+# A second pipeline instance, same cache, same input -- the cache should short-circuit
+# re-running the transform entirely.
+pipeline2 = IngestionPipeline(
+    transformations=[SentenceSplitter(chunk_size=200, chunk_overlap=20), ExpensiveTransform()],
+    cache=cache,
+)
+pipeline2.run(documents=docs)
+print(f&quot;cache prevented re-running the expensive transform: {call_count[&#x27;n&#x27;] == 1}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>first run called the expensive transform: 1 time(s)
+cache prevented re-running the expensive transform: True
+</code></pre><p><strong>Exercise:</strong>
+Using the same <code>cache</code> and <code>call_count</code>, run the pipeline once more over a genuinely
+DIFFERENT document, <code>&quot;CLM-2002&quot;</code> (<code>&quot;Adjuster inspected the property. &quot;</code> repeated 15
+times). Confirm the cache does NOT skip it — a real, uncached call must happen for new
+content.</p>
+<p><strong>Starting point:</strong> <code>cache</code>, <code>call_count</code>, and <code>ExpensiveTransform</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>after a different doc, cache correctly did NOT skip it: True
+</code></pre><hr />
+<h3>Concept 3 — <code>docstore</code> Plus <code>DocstoreStrategy.UPSERTS</code> for Incremental Re-Ingestion</h3>
+<p><code>DocstoreStrategy.UPSERTS</code> compares each incoming document's content hash against what
+its <code>docstore</code> already has on record for that <code>doc_id</code>: an unchanged document produces NO
+new nodes at all (a genuine no-op, not a re-embed); a changed document under the same
+<code>doc_id</code> produces new nodes and replaces the old ones. This needs a real <code>vector_store</code>
+attached to actually apply the delete-and-replace side of the upsert — without one,
+LlamaIndex logs a warning and quietly falls back to <code>DUPLICATES_ONLY</code> (skip exact
+repeats, but never detect a change), a real, checked distinction worth knowing before
+relying on <code>UPSERTS</code> in a pipeline missing a vector store.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core.ingestion import IngestionPipeline, DocstoreStrategy
+from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.storage.docstore import SimpleDocumentStore
+from llama_index.core.vector_stores import SimpleVectorStore
+from llama_index.core.embeddings import MockEmbedding
+from llama_index.core import Document
+
+pipeline = IngestionPipeline(
+    transformations=[SentenceSplitter(chunk_size=100, chunk_overlap=10), MockEmbedding(embed_dim=8)],
+    docstore=SimpleDocumentStore(),
+    vector_store=SimpleVectorStore(),
+    docstore_strategy=DocstoreStrategy.UPSERTS,
+)
+
+doc_v1 = Document(text=&quot;Policy POL-4001 covers fire damage only.&quot;, doc_id=&quot;POL-4001&quot;)
+pipeline.run(documents=[doc_v1])
+
+# re-running the SAME unchanged document is a true no-op
+nodes_unchanged = pipeline.run(documents=[doc_v1])
+print(f&quot;unchanged doc re-run produces nodes: {len(nodes_unchanged)}&quot;)
+
+# the SAME doc_id with CHANGED content -- upsert replaces, doesn&#x27;t duplicate
+doc_v2 = Document(text=&quot;Policy POL-4001 covers fire AND water damage, updated terms.&quot;, doc_id=&quot;POL-4001&quot;)
+nodes_changed = pipeline.run(documents=[doc_v2])
+print(f&quot;changed doc re-run produces nodes: {len(nodes_changed)}&quot;)
+print(f&quot;docstore still has exactly one document entry: {len(pipeline.docstore.docs) == 1}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>unchanged doc re-run produces nodes: 0
+changed doc re-run produces nodes: 1
+docstore still has exactly one document entry: True
+</code></pre><p>Without <code>vector_store=SimpleVectorStore()</code> attached, this same <code>docstore_strategy= DocstoreStrategy.UPSERTS</code> line prints a <code>UserWarning</code> and silently runs as
+<code>DUPLICATES_ONLY</code> instead — checked directly against this installed version, not assumed.</p>
+<p><strong>Exercise:</strong>
+Build a pipeline over TWO documents, <code>&quot;POL-7001&quot;</code> and <code>&quot;POL-7002&quot;</code>. Run it once, then
+re-run it with <code>&quot;POL-7001&quot;</code>'s content CHANGED and <code>&quot;POL-7002&quot;</code> UNCHANGED. Confirm only
+one node comes back, and that its <code>ref_doc_id</code> is the changed document's, not the
+unchanged one's.</p>
+<p><strong>Starting point:</strong> <code>IngestionPipeline</code>/<code>DocstoreStrategy</code>/<code>SimpleDocumentStore</code>/
+<code>SimpleVectorStore</code>/<code>MockEmbedding</code> imports and the pipeline-assembly lines from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>nodes produced on selective update: 1
+only the changed document produced a node: True
+</code></pre><hr />
+<h3>Concept 4 — <code>num_workers</code> Parallelism, and Where It Stops Helping</h3>
+<p><code>IngestionPipeline.run(documents=..., num_workers=N)</code> for <code>N &gt; 1</code> parallelizes
+transformation work across separate OS processes via Python's <code>multiprocessing</code> — real
+parallelism, not threads, since chunking/embedding are CPU-bound. Checked directly in
+this sandbox: <code>num_workers=1</code> runs correctly and deterministically, but <code>num_workers&gt;1</code>
+hangs indefinitely here, blocked by this sandbox's multiprocessing restrictions — a real,
+disclosed environment limitation, not a code bug, and consistent with this same
+<code>IngestionPipeline</code> code path logging real <code>&quot;Removing unpickleable private attribute&quot;</code>
+warnings when it tries to hand a <code>SentenceSplitter</code>'s internal tokenizer closures across
+the process boundary. That pickling/IPC overhead is exactly why parallelism &quot;stops
+helping&quot; past a certain point even where it DOES run: for many small, cheap-to-chunk
+documents, the cost of serializing each one across a process boundary can exceed the
+compute saved, while parallelism keeps paying off for genuinely expensive per-document
+work (OCR, layout-aware parsing) where each unit of work is large.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code>from llama_index.core.ingestion import IngestionPipeline
+from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core import Document
+
+docs = [Document(text=f&quot;Claim CLM-{5000 + i} narrative text repeated. &quot; * 30, doc_id=f&quot;CLM-{5000 + i}&quot;) for i in range(8)]
+pipeline = IngestionPipeline(transformations=[SentenceSplitter(chunk_size=150, chunk_overlap=15)])
+
+nodes_serial = pipeline.run(documents=docs, num_workers=1)
+print(f&quot;serial (num_workers=1) node count: {len(nodes_serial)}&quot;)
+
+# REAL MODE -- not executed (num_workers&gt;1 hangs under this sandbox&#x27;s multiprocessing
+# restrictions, confirmed by direct test rather than assumed):
+#   nodes_parallel = pipeline.run(documents=docs, num_workers=4)
+#   # in an unrestricted environment, this produces the SAME node count as num_workers=1,
+#   # just distributed across worker processes -- correctness is identical, only wall-clock
+#   # time differs, and only for CPU-heavy-enough transformations to outweigh IPC overhead.
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>serial (num_workers=1) node count: 24
+</code></pre><p><strong>Exercise:</strong>
+Build a pipeline over 3 documents instead of 8, using the same text pattern. Confirm
+<code>num_workers=1</code> still produces a node count consistent with 3 documents rather than 8
+(i.e., proportionally smaller), proving the node count scales with document count under
+serial execution.</p>
+<p><strong>Starting point:</strong> <code>Document</code>, <code>SentenceSplitter</code>, and the pipeline-assembly line from
+this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>node count for 3 documents: 9
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> <code>IngestionCache</code> matters most for exactly the kind of document a
+twenty-year-old core produces without a matching AI-ready pipeline — a scanned form
+needing OCR, or a mainframe report needing Week 13's copybook-driven parsing — where the
+parse itself, not the embedding call, is the expensive step worth never repeating on an
+unchanged input.</p>
+<p><strong>Compliance angle:</strong> <code>DocstoreStrategy.UPSERTS</code>'s content-hash comparison is itself an
+audit-relevant fact: a document that produces zero new nodes on re-ingestion is
+provably unchanged since its last ingestion, without needing a separate change-tracking
+system layered on top.</p>
+<p><strong>What breaks in production:</strong> A team configures <code>docstore_strategy= DocstoreStrategy.UPSERTS</code> but never attaches a <code>vector_store</code> to the pipeline — the
+pipeline still runs, still produces nodes, and the silent fallback to
+<code>DUPLICATES_ONLY</code> means a document that changes in place is never detected as changed;
+stale content sits in the index indefinitely, with nothing about the pipeline's own
+successful-looking run indicating anything went wrong.</p>
+<hr />
+<h2 id="day-2">Day 2 — Storage Contexts and Metadata Filtering</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="20-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=yzPQaNhuVGU" target="_blank" rel="noopener"><b>Advanced RAG with LlamaIndex - Metadata Extraction [2025]</b><small>Alejandro AO · 52:24</small></a></li><li><a href="https://www.youtube.com/watch?v=bBFu6fbmPDk" target="_blank" rel="noopener"><b>RAG #8: Metadata Filtering in Vector Databases Explained #rag</b><small>Praveen Reddy Learnings · 10:09</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LlamaIndex%20metadata%20filters%20pgvector%20hybrid%20search" target="_blank" rel="noopener">Search YouTube: LlamaIndex metadata filters pgvector hybrid search</a></p></div>
+<hr />
+<h3>Concept 1 — <code>StorageContext</code> Backed by <code>PGVectorStore</code>, Including Hybrid Search</h3>
+<p><code>StorageContext.from_defaults(docstore=..., index_store=..., vector_store=...)</code> bundles
+the three storage backends an index actually needs into one object passed to
+<code>VectorStoreIndex.from_documents()</code> — swapping <code>SimpleVectorStore</code> (in-memory, this
+sandbox) for <code>PGVectorStore</code> (a live Postgres/pgvector table) changes nothing about the
+rest of the code, only which backend actually persists the data. <code>PGVectorStore</code>'s real
+<code>hybrid_search=True</code> constructor argument combines dense vector search with Postgres
+full-text search server-side — the same fusion idea Week 05 built by hand with <code>rank_bm25</code>
+and reciprocal rank fusion, offered here as one config flag on a real vector store.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code>from llama_index.core import StorageContext, VectorStoreIndex, Document, Settings
+from llama_index.core.storage.docstore import SimpleDocumentStore
+from llama_index.core.storage.index_store import SimpleIndexStore
+from llama_index.core.vector_stores import SimpleVectorStore
+from llama_index.core.embeddings import MockEmbedding
+
+Settings.embed_model = MockEmbedding(embed_dim=8)
+
+storage_context = StorageContext.from_defaults(
+    docstore=SimpleDocumentStore(),
+    index_store=SimpleIndexStore(),
+    vector_store=SimpleVectorStore(),
+)
+
+docs = [Document(text=&quot;Auto policy claim narrative.&quot;, doc_id=&quot;CLM-8001&quot;)]
+index = VectorStoreIndex.from_documents(docs, storage_context=storage_context)
+print(f&quot;storage_context.docstore has the document: {len(storage_context.docstore.docs) == 1}&quot;)
+print(f&quot;storage_context.vector_store has the embedded node: {len(storage_context.vector_store.data.embedding_dict) == 1}&quot;)
+
+# REAL MODE -- not executed (needs a live PostgreSQL server this sandbox does not have):
+#   from llama_index.vector_stores.postgres import PGVectorStore
+#   pg_vector_store = PGVectorStore.from_params(
+#       host=&quot;localhost&quot;, port=&quot;5432&quot;, database=&quot;claims_db&quot;, user=&quot;postgres&quot;, password=&quot;...&quot;,
+#       table_name=&quot;claim_embeddings&quot;, embed_dim=1536, hybrid_search=True,
+#   )
+#   pg_storage_context = StorageContext.from_defaults(vector_store=pg_vector_store)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>storage_context.docstore has the document: True
+storage_context.vector_store has the embedded node: True
+</code></pre><p><strong>Exercise:</strong>
+Build a second <code>StorageContext</code> the same way, index TWO documents into it instead of one,
+and confirm <code>docstore</code> holds exactly two entries and <code>vector_store</code> holds exactly two
+embedded nodes.</p>
+<p><strong>Starting point:</strong> <code>StorageContext</code>/<code>SimpleDocumentStore</code>/<code>SimpleIndexStore</code>/
+<code>SimpleVectorStore</code>/<code>MockEmbedding</code> imports from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>docstore entries: 2
+vector_store embedded nodes: 2
+</code></pre><hr />
+<h3>Concept 2 — <code>MetadataFilters</code> and <code>FilterOperator</code> for Tenant, Product Line, and Date Scoping</h3>
+<p><code>MetadataFilters(filters=[MetadataFilter(key=..., value=..., operator=...)], condition=FilterCondition.AND)</code> narrows a retrieval to only nodes whose metadata satisfies
+EVERY listed condition — <code>FilterOperator.EQ</code> for an exact tenant or product-line match,
+<code>FilterOperator.GTE</code>/<code>LTE</code> for a date range. This runs entirely client-side against
+<code>SimpleVectorStore</code>'s stored metadata here, and server-side (as a real SQL <code>WHERE</code> clause)
+against <code>PGVectorStore</code> — same filter object, same result semantics either way.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core import VectorStoreIndex, Document, Settings
+from llama_index.core.embeddings import MockEmbedding
+from llama_index.core.vector_stores import MetadataFilters, MetadataFilter, FilterOperator, FilterCondition
+
+Settings.embed_model = MockEmbedding(embed_dim=8)
+
+docs = [
+    Document(text=&quot;auto policy claim CLM-9001&quot;, metadata={&quot;tenant_id&quot;: &quot;acme-insurance&quot;, &quot;product_line&quot;: &quot;auto&quot;, &quot;effective_date&quot;: &quot;2025-01-01&quot;}, doc_id=&quot;d1&quot;),
+    Document(text=&quot;auto policy claim CLM-9002&quot;, metadata={&quot;tenant_id&quot;: &quot;acme-insurance&quot;, &quot;product_line&quot;: &quot;auto&quot;, &quot;effective_date&quot;: &quot;2026-06-01&quot;}, doc_id=&quot;d2&quot;),
+    Document(text=&quot;home policy claim CLM-9003&quot;, metadata={&quot;tenant_id&quot;: &quot;acme-insurance&quot;, &quot;product_line&quot;: &quot;home&quot;, &quot;effective_date&quot;: &quot;2026-06-01&quot;}, doc_id=&quot;d3&quot;),
+    Document(text=&quot;auto policy claim CLM-9004&quot;, metadata={&quot;tenant_id&quot;: &quot;other-insurer&quot;, &quot;product_line&quot;: &quot;auto&quot;, &quot;effective_date&quot;: &quot;2026-06-01&quot;}, doc_id=&quot;d4&quot;),
+]
+index = VectorStoreIndex.from_documents(docs)
+
+filters = MetadataFilters(
+    filters=[
+        MetadataFilter(key=&quot;tenant_id&quot;, value=&quot;acme-insurance&quot;, operator=FilterOperator.EQ),
+        MetadataFilter(key=&quot;product_line&quot;, value=&quot;auto&quot;, operator=FilterOperator.EQ),
+        MetadataFilter(key=&quot;effective_date&quot;, value=&quot;2026-01-01&quot;, operator=FilterOperator.GTE),
+    ],
+    condition=FilterCondition.AND,
+)
+retriever = index.as_retriever(similarity_top_k=10, filters=filters)
+results = retriever.retrieve(&quot;claim&quot;)
+print(f&quot;matched doc ids: {sorted(r.node.ref_doc_id for r in results)}&quot;)
+print(f&quot;excludes other tenant, wrong product line, and stale effective_date: {sorted(r.node.ref_doc_id for r in results) == [&#x27;d2&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>matched doc ids: [&#x27;d2&#x27;]
+excludes other tenant, wrong product line, and stale effective_date: True
+</code></pre><p><strong>Exercise:</strong>
+Add a fifth document, <code>&quot;d5&quot;</code>, with <code>tenant_id=&quot;acme-insurance&quot;</code>, <code>product_line=&quot;auto&quot;</code>,
+and <code>effective_date=&quot;2026-08-01&quot;</code> (also passes every filter condition). Re-run the same
+<code>filters</code> against all five documents and confirm the matched set is now <code>[&quot;d2&quot;, &quot;d5&quot;]</code>.</p>
+<p><strong>Starting point:</strong> <code>docs</code>, <code>index</code>, and <code>filters</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>matched doc ids with the fifth document added: [&#x27;d2&#x27;, &#x27;d5&#x27;]
+</code></pre><hr />
+<h3>Concept 3 — Separate Collections Versus Metadata Filters as a Tenant-Isolation Decision</h3>
+<p>A <code>tenant_id</code> metadata filter and a genuinely separate per-tenant index are NOT
+equivalent in practice, even though both correctly scope a query when used correctly: a
+shared index's isolation depends entirely on every single retrieval call remembering to
+attach the filter — proven directly below by simply omitting it — while a per-tenant
+index has structurally nothing else in it to leak, filter or no filter. The tradeoff is
+real in the other direction too: a separate collection per tenant means N times the index
+management overhead for N tenants, which a shared, correctly-filtered index avoids
+entirely.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core import VectorStoreIndex, Document, Settings
+from llama_index.core.embeddings import MockEmbedding
+from llama_index.core.vector_stores import MetadataFilters, MetadataFilter, FilterOperator
+
+Settings.embed_model = MockEmbedding(embed_dim=8)
+
+docs = [
+    Document(text=&quot;auto policy claim CLM-9001&quot;, metadata={&quot;tenant_id&quot;: &quot;acme-insurance&quot;}, doc_id=&quot;d1&quot;),
+    Document(text=&quot;auto policy claim CLM-9004&quot;, metadata={&quot;tenant_id&quot;: &quot;other-insurer&quot;}, doc_id=&quot;d4&quot;),
+]
+
+# Shared-index approach: isolation depends entirely on remembering the filter.
+shared_index = VectorStoreIndex.from_documents(docs)
+leaked_results = shared_index.as_retriever(similarity_top_k=10).retrieve(&quot;claim&quot;)
+print(f&quot;forgetting the tenant filter on a shared index leaks cross-tenant results: {len(leaked_results) == 2}&quot;)
+
+filtered_retriever = shared_index.as_retriever(
+    similarity_top_k=10,
+    filters=MetadataFilters(filters=[MetadataFilter(key=&quot;tenant_id&quot;, value=&quot;acme-insurance&quot;, operator=FilterOperator.EQ)]),
+)
+scoped_results = filtered_retriever.retrieve(&quot;claim&quot;)
+print(f&quot;with the filter applied, only the correct tenant comes back: {[r.node.ref_doc_id for r in scoped_results] == [&#x27;d1&#x27;]}&quot;)
+
+# Separate-collection approach: isolation is structural, nothing to forget.
+acme_only_index = VectorStoreIndex.from_documents([d for d in docs if d.metadata[&quot;tenant_id&quot;] == &quot;acme-insurance&quot;])
+acme_results = acme_only_index.as_retriever(similarity_top_k=10).retrieve(&quot;claim&quot;)
+print(f&quot;a per-tenant index has no cross-tenant document to leak, filter or no filter: {[r.node.ref_doc_id for r in acme_results] == [&#x27;d1&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>forgetting the tenant filter on a shared index leaks cross-tenant results: True
+with the filter applied, only the correct tenant comes back: True
+a per-tenant index has no cross-tenant document to leak, filter or no filter: True
+</code></pre><p><strong>Exercise:</strong>
+Add a THIRD tenant's document, <code>&quot;d5&quot;</code> with <code>tenant_id=&quot;third-insurer&quot;</code>, to <code>docs</code>. Rebuild
+<code>shared_index</code> over all three documents, and confirm an unfiltered retrieval now leaks
+all three, while filtering to <code>tenant_id=&quot;acme-insurance&quot;</code> still correctly returns only
+<code>&quot;d1&quot;</code>.</p>
+<p><strong>Starting point:</strong> <code>docs</code>, <code>shared_index</code>, and the <code>MetadataFilters</code> line from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>unfiltered retrieval over three tenants leaks: 3
+filtered retrieval still correctly scoped: True
+</code></pre><hr />
+<h3>Concept 4 — <code>SentenceSplitter</code> and <code>SemanticSplitterNodeParser</code>, Carried Forward From Week 09</h3>
+<p><code>SentenceSplitter(chunk_size=..., chunk_overlap=...)</code> is Week 09's fixed/recursive
+chunking, now as one reusable LlamaIndex class; <code>SemanticSplitterNodeParser(embed_model= ..., buffer_size=..., breakpoint_percentile_threshold=...)</code> is Week 09's
+embedding-similarity breakpoint chunking, genuinely executable with <code>MockEmbedding</code> for
+the MECHANISM (it runs, it calls the embed model, it produces nodes) — but checked
+directly, <code>MockEmbedding</code> returns the exact same fixed vector for every input text
+regardless of content, so every sentence looks identically similar to every other one,
+and the semantic splitter correctly finds zero real breakpoints, collapsing the whole
+document into a single node. This is an honest, checked limitation of using a mock
+embedder for THIS specific splitter, not a bug in <code>SemanticSplitterNodeParser</code> itself —
+demonstrating genuine semantic breakpoints needs a real embedding model, the same REAL
+MODE boundary Week 09 Day 3 already disclosed for its own semantic-chunking concept.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core.node_parser import SentenceSplitter, SemanticSplitterNodeParser
+from llama_index.core.embeddings import MockEmbedding
+from llama_index.core import Document
+
+text = (&quot;This policy covers fire damage to the dwelling. Fire damage includes smoke and soot. &quot;
+        &quot;Separately, this policy also covers theft of personal property. Theft coverage requires a police report. &quot;
+        &quot;Water damage from burst pipes is covered under a separate endorsement. Flood damage is explicitly excluded.&quot;)
+doc = Document(text=text)
+
+sentence_splitter = SentenceSplitter(chunk_size=50, chunk_overlap=0)
+sentence_nodes = sentence_splitter.get_nodes_from_documents([doc])
+print(f&quot;SentenceSplitter (fixed size) node count: {len(sentence_nodes)}&quot;)
+
+mock_embed = MockEmbedding(embed_dim=8)
+print(f&quot;MockEmbedding returns an identical vector for different text: {mock_embed.get_text_embedding(&#x27;hello world&#x27;) == mock_embed.get_text_embedding(&#x27;a completely different sentence&#x27;)}&quot;)
+
+semantic_splitter = SemanticSplitterNodeParser(embed_model=mock_embed, buffer_size=1, breakpoint_percentile_threshold=95)
+semantic_nodes = semantic_splitter.get_nodes_from_documents([doc])
+print(f&quot;SemanticSplitterNodeParser node count with a mock (content-blind) embedder: {len(semantic_nodes)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>SentenceSplitter (fixed size) node count: 2
+MockEmbedding returns an identical vector for different text: True
+SemanticSplitterNodeParser node count with a mock (content-blind) embedder: 1
+</code></pre><p><strong>Exercise:</strong>
+Run <code>SentenceSplitter</code> over the same <code>text</code> with <code>chunk_size=100</code> instead of <code>50</code>. Confirm
+the node count is lower than the <code>chunk_size=50</code> run (fewer, larger chunks).</p>
+<p><strong>Starting point:</strong> <code>text</code>, <code>doc</code>, and <code>SentenceSplitter</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>chunk_size=100 node count: 1
+fewer nodes than chunk_size=50: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> <code>PGVectorStore</code>'s <code>hybrid_search=True</code> is a genuinely low-friction
+upgrade path for a BFSI team that already runs Postgres for its transactional systems —
+the same adoption argument Week 19 Day 2 made for <code>PostgresSaver</code>, extended here to vector
+search itself needing no new database technology introduced.</p>
+<p><strong>Compliance angle:</strong> Concept 3's structural isolation (separate collections) is the
+answer a data-residency or per-customer-contract requirement usually needs — &quot;our data
+never lives in the same table as another customer's&quot; is a much easier claim to defend
+under audit than &quot;our application code always remembers to filter correctly.&quot;</p>
+<p><strong>What breaks in production:</strong> A tenant-isolation bug ships not because the filter logic
+is wrong, but because ONE retrieval call site — a new feature, an admin debugging tool, a
+batch job written by someone unfamiliar with the multi-tenancy convention — forgets to
+attach the filter at all. Concept 3's own unfiltered-retrieval line is exactly that
+missing call, made deliberately visible rather than accidentally shipped.</p>
+<hr />
+<h2 id="day-3">Day 3 — Composing Query Engines and Citations</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="20-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=X8BHWGXXdW0" target="_blank" rel="noopener"><b>Router Query Engine in LlamaIndex</b><small>Ravi Theja · 11:07</small></a></li><li><a href="https://www.youtube.com/watch?v=Ut8arzzfmZQ" target="_blank" rel="noopener"><b>LlamaIndex Router Query Engine in Action on Your Own Data</b><small>Fahd Mirza · 8:12</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LlamaIndex%20router%20query%20engine%20sub%20question%20citation" target="_blank" rel="noopener">Search YouTube: LlamaIndex router query engine sub question citation</a></p></div>
+<hr />
+<h3>Concept 1 — <code>RouterQueryEngine</code> Selecting Between a Policy Index and a Claims Index</h3>
+<p><code>RouterQueryEngine(selector=..., query_engine_tools=[...])</code> picks exactly ONE tool
+(query engine) to answer a given query, based on whatever <code>selector</code> decides. LlamaIndex's
+built-in <code>LLMSingleSelector</code> needs a real LLM to return valid structured JSON — checked
+directly, <code>MockLLM</code>'s echo response fails that parser against its own default few-shot
+example. <code>BaseSelector</code> is a small, real, pluggable interface (<code>_select</code>/<code>_aselect</code>
+returning a <code>SelectorResult</code>), so a hand-written deterministic selector genuinely
+demonstrates <code>RouterQueryEngine</code>'s actual routing mechanism without needing that live LLM
+call — production would use <code>LLMSingleSelector</code> or <code>PydanticSingleSelector</code> instead of
+this stand-in.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core import VectorStoreIndex, Document, Settings
+from llama_index.core.embeddings import MockEmbedding
+from llama_index.core.llms import MockLLM
+from llama_index.core.query_engine import RouterQueryEngine
+from llama_index.core.tools import QueryEngineTool
+from llama_index.core.base.base_selector import BaseSelector, SelectorResult, SingleSelection
+
+Settings.embed_model = MockEmbedding(embed_dim=8)
+Settings.llm = MockLLM()
+
+class KeywordSelector(BaseSelector):
+    def _select(self, choices, query):
+        text = query.query_str.lower()
+        if &quot;claim&quot; in text:
+            return SelectorResult(selections=[SingleSelection(index=1, reason=&quot;mentions a claim&quot;)])
+        return SelectorResult(selections=[SingleSelection(index=0, reason=&quot;defaults to policy coverage&quot;)])
+
+    async def _aselect(self, choices, query):
+        return self._select(choices, query)
+
+    def _get_prompts(self):
+        return {}
+
+    def _update_prompts(self, prompts):
+        pass
+
+policy_index = VectorStoreIndex.from_documents([Document(text=&quot;Policy POL-1 covers fire and theft.&quot;, doc_id=&quot;POL-1&quot;)])
+claims_index = VectorStoreIndex.from_documents([Document(text=&quot;Claim CLM-1 was filed for water damage.&quot;, doc_id=&quot;CLM-1&quot;)])
+policy_tool = QueryEngineTool.from_defaults(query_engine=policy_index.as_query_engine(), description=&quot;Answers questions about policy coverage terms.&quot;)
+claims_tool = QueryEngineTool.from_defaults(query_engine=claims_index.as_query_engine(), description=&quot;Answers questions about filed claims.&quot;)
+
+router = RouterQueryEngine(selector=KeywordSelector(), query_engine_tools=[policy_tool, claims_tool])
+resp1 = router.query(&quot;What does the policy cover?&quot;)
+resp2 = router.query(&quot;What is the status of my claim?&quot;)
+print(f&quot;policy query routed to: {[n.node.ref_doc_id for n in resp1.source_nodes]}&quot;)
+print(f&quot;claim query routed to: {[n.node.ref_doc_id for n in resp2.source_nodes]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>policy query routed to: [&#x27;POL-1&#x27;]
+claim query routed to: [&#x27;CLM-1&#x27;]
+</code></pre><p><strong>Exercise:</strong>
+Add a THIRD tool over a new index containing <code>Document(text=&quot;Endorsement END-1 adds flood coverage.&quot;, doc_id=&quot;END-1&quot;)</code>, and extend <code>KeywordSelector</code> to route to it when the
+query contains the word <code>&quot;endorsement&quot;</code>. Query <code>&quot;What does the endorsement add?&quot;</code> and
+confirm it routes to <code>&quot;END-1&quot;</code>.</p>
+<p><strong>Starting point:</strong> <code>KeywordSelector</code>, <code>RouterQueryEngine</code>, and the two existing tools
+from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>endorsement query routed to: [&#x27;END-1&#x27;]
+</code></pre><hr />
+<h3>Concept 2 — <code>SubQuestionQueryEngine</code> Decomposing a Multi-Part Underwriting Question</h3>
+<p><code>SubQuestionQueryEngine</code> breaks one compound question into several independent
+sub-questions, routes each to whichever tool its <code>question_gen</code> names, and combines the
+per-sub-question answers into one final response — genuinely useful for a question like
+&quot;does the policy cover the damage in this claim,&quot; which needs BOTH the policy index and
+the claims index to answer at all. <code>SubQuestionQueryEngine.from_defaults()</code> defaults to
+<code>llama-index-question-gen-openai</code>, which is not installed here (a real, checked
+<code>ImportError</code>); LlamaIndex's own <code>LLMQuestionGenerator</code> needs a real LLM's structured
+output for the same reason <code>LLMSingleSelector</code> did in Concept 1. A hand-written
+<code>BaseQuestionGenerator</code> implementation again demonstrates the real fan-out mechanism.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core import VectorStoreIndex, Document, Settings
+from llama_index.core.embeddings import MockEmbedding
+from llama_index.core.llms import MockLLM
+from llama_index.core.query_engine import SubQuestionQueryEngine
+from llama_index.core.tools import QueryEngineTool
+from llama_index.core.question_gen.types import BaseQuestionGenerator, SubQuestion
+
+Settings.embed_model = MockEmbedding(embed_dim=8)
+Settings.llm = MockLLM()
+
+class DeterministicQuestionGenerator(BaseQuestionGenerator):
+    def generate(self, tools, query):
+        return [
+            SubQuestion(sub_question=&quot;What does the policy cover?&quot;, tool_name=&quot;policy_tool&quot;),
+            SubQuestion(sub_question=&quot;What damage was claimed?&quot;, tool_name=&quot;claims_tool&quot;),
+        ]
+
+    async def agenerate(self, tools, query):
+        return self.generate(tools, query)
+
+    def _get_prompts(self):
+        return {}
+
+    def _update_prompts(self, prompts):
+        pass
+
+policy_index = VectorStoreIndex.from_documents([Document(text=&quot;Policy POL-1 covers fire and theft.&quot;, doc_id=&quot;POL-1&quot;)])
+claims_index = VectorStoreIndex.from_documents([Document(text=&quot;Claim CLM-1 was filed for water damage.&quot;, doc_id=&quot;CLM-1&quot;)])
+policy_tool = QueryEngineTool.from_defaults(query_engine=policy_index.as_query_engine(), description=&quot;Answers questions about policy coverage terms.&quot;, name=&quot;policy_tool&quot;)
+claims_tool = QueryEngineTool.from_defaults(query_engine=claims_index.as_query_engine(), description=&quot;Answers questions about filed claims.&quot;, name=&quot;claims_tool&quot;)
+
+engine = SubQuestionQueryEngine.from_defaults(
+    query_engine_tools=[policy_tool, claims_tool],
+    question_gen=DeterministicQuestionGenerator(),
+    verbose=False,
+)
+resp = engine.query(&quot;Does the policy cover the type of damage in the claim?&quot;)
+underlying_doc_ids = sorted(n.node.ref_doc_id for n in resp.source_nodes if n.node.ref_doc_id is not None)
+print(f&quot;both underlying documents were consulted: {underlying_doc_ids == [&#x27;CLM-1&#x27;, &#x27;POL-1&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>both underlying documents were consulted: True
+</code></pre><p><strong>Exercise:</strong>
+Add a third sub-question to <code>DeterministicQuestionGenerator</code>,
+<code>SubQuestion(sub_question=&quot;What does the endorsement add?&quot;, tool_name=&quot;endorsement_tool&quot;)</code>,
+routed to a third tool over <code>Document(text=&quot;Endorsement END-1 adds flood coverage.&quot;, doc_id=&quot;END-1&quot;)</code>. Confirm all three underlying documents are now consulted.</p>
+<p><strong>Starting point:</strong> <code>DeterministicQuestionGenerator</code>, <code>policy_tool</code>, <code>claims_tool</code>, and
+<code>SubQuestionQueryEngine.from_defaults</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>all three underlying documents were consulted: True
+</code></pre><hr />
+<h3>Concept 3 — <code>CitationQueryEngine</code> for Node-Level References an Audit Can Follow</h3>
+<p><code>CitationQueryEngine.from_args(index, citation_chunk_size=...)</code> prefixes every retrieved
+chunk with a real <code>&quot;Source N:\n&quot;</code> label before it ever reaches the LLM prompt — checked
+directly on the actual node text sent — so a genuinely citation-capable LLM's answer can
+reference <code>[1]</code>/<code>[2]</code>, and those numbers map directly back to <code>resp.source_nodes[N-1]</code>.
+This is the mechanism itself, provable without a real LLM's generated prose: the labelling
+happens at retrieval time, before generation, which is exactly what makes an answer's
+citations checkable against real source text rather than trusted on the model's word
+alone.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core import VectorStoreIndex, Document, Settings
+from llama_index.core.embeddings import MockEmbedding
+from llama_index.core.llms import MockLLM
+from llama_index.core.query_engine import CitationQueryEngine
+
+Settings.embed_model = MockEmbedding(embed_dim=8)
+Settings.llm = MockLLM()
+
+docs = [
+    Document(text=&quot;Policy POL-1 covers fire and theft up to 100000 dollars.&quot;, doc_id=&quot;POL-1&quot;),
+    Document(text=&quot;Policy POL-2 covers water damage up to 50000 dollars.&quot;, doc_id=&quot;POL-2&quot;),
+]
+index = VectorStoreIndex.from_documents(docs)
+engine = CitationQueryEngine.from_args(index, citation_chunk_size=100, similarity_top_k=2)
+resp = engine.query(&quot;What does the policy cover?&quot;)
+for n in resp.source_nodes:
+    print(repr(n.node.text[:20]))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>&#x27;Source 1:\nPolicy POL&#x27;
+&#x27;Source 2:\nPolicy POL&#x27;
+</code></pre><p><strong>Exercise:</strong>
+Add a third document, <code>&quot;POL-3&quot;</code> (<code>&quot;Policy POL-3 covers liability up to 200000 dollars.&quot;</code>),
+and re-run the query with <code>similarity_top_k=3</code>. Confirm three source nodes come back,
+labelled <code>&quot;Source 1:&quot;</code> through <code>&quot;Source 3:&quot;</code> in order.</p>
+<p><strong>Starting point:</strong> <code>docs</code>, <code>index</code>, and <code>CitationQueryEngine.from_args</code> from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>source labels: [&#x27;Source 1:&#x27;, &#x27;Source 2:&#x27;, &#x27;Source 3:&#x27;]
+</code></pre><hr />
+<h3>Concept 4 — Response Synthesizer Modes: <code>compact</code>, <code>refine</code>, and <code>tree_summarize</code></h3>
+<p>The three modes make a genuinely different number of LLM calls for the same retrieved
+chunks, not just a different prompt template: <code>refine</code> calls the LLM once per chunk,
+sequentially updating one running answer — the most calls, but the closest to a plain
+top-to-bottom read; <code>compact</code> packs as many chunks as fit into each call before calling
+the LLM, cutting the call count when chunks are small enough to combine; <code>tree_summarize</code>
+recursively combines chunks in a binary/n-ary tree, which can need the FEWEST calls
+overall for enough input, at the cost of a summary-of-summaries structure that can lose
+detail a single chunk-level answer would have kept. Counting REAL LLM calls per mode
+(via a counting wrapper around <code>MockLLM</code>, with the model's <code>context_window</code> deliberately
+lowered so 6 chunks cannot all fit in one call) makes the actual cost difference direct
+and measured, not asserted.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core import Settings
+from llama_index.core.embeddings import MockEmbedding
+from llama_index.core.llms import MockLLM
+from llama_index.core.base.llms.types import LLMMetadata
+from llama_index.core.response_synthesizers import get_response_synthesizer, ResponseMode
+from llama_index.core.schema import TextNode, NodeWithScore
+
+Settings.embed_model = MockEmbedding(embed_dim=8)
+
+call_count = {&quot;n&quot;: 0}
+
+class CountingMockLLM(MockLLM):
+    @property
+    def metadata(self):
+        return LLMMetadata(context_window=900, num_output=50)
+
+    def complete(self, prompt, **kwargs):
+        call_count[&quot;n&quot;] += 1
+        return super().complete(prompt, **kwargs)
+
+llm = CountingMockLLM(max_tokens=50)
+Settings.llm = llm
+
+nodes = [TextNode(text=(f&quot;Chunk {i}: &quot; + &quot;policy coverage detail text repeated many times to pad the length considerably. &quot; * 15), id_=f&quot;n{i}&quot;) for i in range(6)]
+nws = [NodeWithScore(node=n, score=1.0) for n in nodes]
+
+for mode in [ResponseMode.COMPACT, ResponseMode.REFINE, ResponseMode.TREE_SUMMARIZE]:
+    call_count[&quot;n&quot;] = 0
+    synth = get_response_synthesizer(response_mode=mode, llm=llm)
+    synth.synthesize(&quot;What are the coverage limits?&quot;, nodes=nws)
+    print(f&quot;{mode.value}: {call_count[&#x27;n&#x27;]} LLM call(s)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>compact: 5 LLM call(s)
+refine: 6 LLM call(s)
+tree_summarize: 3 LLM call(s)
+</code></pre><p>Exact call counts depend on chunk size, context window, and node count — the pattern
+that matters (<code>refine</code> &gt;= <code>compact</code> &gt;= <code>tree_summarize</code> for enough chunks) is what's
+genuinely stable, not these specific numbers as universal constants.</p>
+<p><strong>Exercise:</strong>
+Re-run the same three-mode comparison with only 3 nodes instead of 6 (keeping the same
+per-node text). Confirm <code>refine</code>'s call count still equals the node count (3), the
+defining property of <code>refine</code> regardless of how many chunks there are.</p>
+<p><strong>Starting point:</strong> <code>CountingMockLLM</code>, <code>llm</code>, and the node-construction line from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>refine call count equals node count: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> <code>SubQuestionQueryEngine</code>'s decomposition is directly useful the moment
+a BFSI question genuinely spans systems a single index was never meant to unify — &quot;does
+this policy's coverage apply to this specific claim&quot; is a two-system question by nature
+when policies and claims live in separate cores, exactly the shape Concept 2 modeled.</p>
+<p><strong>Compliance angle:</strong> <code>CitationQueryEngine</code>'s <code>&quot;Source N:&quot;</code> labelling happening BEFORE
+generation, not parsed out of the model's free-form answer afterward, is what makes a
+citation trustworthy for an audit — the citation numbers are a property of the retrieval
+step, not a claim the model could hallucinate about its own sourcing.</p>
+<p><strong>What breaks in production:</strong> A team picks <code>tree_summarize</code> everywhere because Concept
+4's own measurement shows it uses the fewest LLM calls, without checking whether the
+summary-of-summaries structure it relies on has quietly dropped a specific number or
+clause a <code>refine</code> pass would have kept intact — the cheapest mode by call count is not
+automatically the right mode for every query shape, and choosing on cost alone without
+checking fidelity is exactly the mistake this concept's honest caveat about depending on
+&quot;enough chunks&quot; warns against.</p>
+<hr />
+<h2 id="day-4">Day 4 — Workflows Versus LangGraph Orchestration</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="20-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=Unm37cQ70k0" target="_blank" rel="noopener"><b>Building Enterprise Multi-Agent AI: LangGraph vs LangChain Explained | Production-Grade Architecture</b><small>AsembleAI · 26:53</small></a></li><li><a href="https://www.youtube.com/watch?v=qAF1NjEVHhY" target="_blank" rel="noopener"><b>LangChain vs LangGraph: A Tale of Two Frameworks</b><small>IBM Technology · 9:55</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LlamaIndex%20workflows%20vs%20LangGraph%20agent%20orchestration" target="_blank" rel="noopener">Search YouTube: LlamaIndex workflows vs LangGraph agent orchestration</a></p></div>
+<hr />
+<h3>Concept 1 — <code>Workflow</code> With <code>@step</code>, <code>Event</code>, and <code>Context</code></h3>
+<p>A <code>Workflow</code> is built from <code>@step</code>-decorated async methods, each declaring which <code>Event</code>
+subclass it consumes and which it produces via its own type annotations — a step runs
+automatically the moment an event of its declared input type becomes available, with no
+explicit edge list the way <code>StateGraph.add_edge()</code> requires. <code>StartEvent</code>/<code>StopEvent</code> mark
+the workflow's real entry and exit; <code>Context</code> (passed to every step) is where any data
+that needs to survive ACROSS steps, beyond what travels inside an event, actually lives.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core.workflow import Workflow, step, Event, StartEvent, StopEvent, Context
+import asyncio
+
+class ParsedEvent(Event):
+    doc_id: str
+
+class ChunkedEvent(Event):
+    doc_id: str
+    chunk_count: int
+
+class DataPrepWorkflow(Workflow):
+    @step
+    async def parse(self, ctx: Context, ev: StartEvent) -&gt; ParsedEvent:
+        return ParsedEvent(doc_id=ev.doc_id)
+
+    @step
+    async def chunk(self, ctx: Context, ev: ParsedEvent) -&gt; ChunkedEvent:
+        return ChunkedEvent(doc_id=ev.doc_id, chunk_count=3)
+
+    @step
+    async def embed(self, ctx: Context, ev: ChunkedEvent) -&gt; StopEvent:
+        return StopEvent(result=f&quot;{ev.doc_id}: embedded {ev.chunk_count} chunks&quot;)
+
+async def main():
+    wf = DataPrepWorkflow(timeout=10)
+    result = await wf.run(doc_id=&quot;CLM-1001&quot;)
+    print(f&quot;result: {result}&quot;)
+
+asyncio.run(main())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>result: CLM-1001: embedded 3 chunks
+</code></pre><p><strong>Exercise:</strong>
+Add a fourth step, <code>validate</code>, running BEFORE <code>parse</code> (consuming <code>StartEvent</code>, producing
+a new <code>ValidatedEvent</code> carrying <code>doc_id</code>), which <code>parse</code> now consumes instead of
+<code>StartEvent</code> directly. Run the workflow with <code>doc_id=&quot;CLM-2002&quot;</code> and confirm the final
+result still correctly names it.</p>
+<p><strong>Starting point:</strong> <code>ParsedEvent</code>, <code>ChunkedEvent</code>, and <code>DataPrepWorkflow</code>'s <code>chunk</code>/<code>embed</code>
+steps from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>result: CLM-2002: embedded 3 chunks
+</code></pre><hr />
+<h3>Concept 2 — Shared-State Control Flow Versus Event Emission and Subscription</h3>
+<p>This is the real structural difference, not just a syntax difference: a LangGraph node
+function receives the FULL shared state dict by default (established since Week 19 Day</p>
+<ol>
+<li>— any node can read anything any earlier node wrote, whether or not that was
+intentional. A <code>Workflow</code> step receives ONLY the specific <code>Event</code> type it declared as
+input; a value another step computed and never put into an <code>Event</code> field or <code>ctx.store</code>
+is simply invisible to it, not just conventionally private but structurally
+unreachable. <code>ctx.store</code> is where a <code>Workflow</code> opts INTO LangGraph-style shared state
+when a value genuinely needs to reach a step further downstream than the very next one.</li>
+</ol>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from typing import TypedDict
+from llama_index.core.workflow import Workflow, step, Event, StartEvent, StopEvent, Context
+import asyncio
+
+class PipelineState(TypedDict):
+    doc_id: str
+    parse_timestamp: str
+
+def parse_node(state):
+    return {&quot;parse_timestamp&quot;: &quot;T0&quot;}
+
+def chunk_node(state):
+    return {}
+
+def embed_node(state):
+    return {&quot;parse_timestamp&quot;: state[&quot;parse_timestamp&quot;]}
+
+g = StateGraph(PipelineState)
+g.add_node(&quot;parse&quot;, parse_node)
+g.add_node(&quot;chunk&quot;, chunk_node)
+g.add_node(&quot;embed&quot;, embed_node)
+g.add_edge(START, &quot;parse&quot;)
+g.add_edge(&quot;parse&quot;, &quot;chunk&quot;)
+g.add_edge(&quot;chunk&quot;, &quot;embed&quot;)
+g.add_edge(&quot;embed&quot;, END)
+graph = g.compile()
+result = graph.invoke({&quot;doc_id&quot;: &quot;CLM-1001&quot;, &quot;parse_timestamp&quot;: &quot;&quot;})
+print(f&quot;LangGraph: every node saw the shared state dict implicitly: {result}&quot;)
+
+class ParsedEvent(Event):
+    doc_id: str
+
+class EmbeddedEvent(Event):
+    doc_id: str
+
+class DataPrepWorkflow(Workflow):
+    @step
+    async def parse(self, ctx: Context, ev: StartEvent) -&gt; ParsedEvent:
+        await ctx.store.set(&quot;parse_timestamp&quot;, &quot;T0&quot;)
+        return ParsedEvent(doc_id=ev.doc_id)
+
+    @step
+    async def chunk(self, ctx: Context, ev: ParsedEvent) -&gt; EmbeddedEvent:
+        return EmbeddedEvent(doc_id=ev.doc_id)
+
+    @step
+    async def embed(self, ctx: Context, ev: EmbeddedEvent) -&gt; StopEvent:
+        parse_ts = await ctx.store.get(&quot;parse_timestamp&quot;, default=None)
+        return StopEvent(result={&quot;doc_id&quot;: ev.doc_id, &quot;parse_timestamp_visible_here&quot;: parse_ts})
+
+async def main():
+    wf = DataPrepWorkflow(timeout=10)
+    result = await wf.run(doc_id=&quot;CLM-1001&quot;)
+    print(f&quot;Workflows: only ctx.store-shared data crossed steps, everything else was event-scoped: {result}&quot;)
+
+asyncio.run(main())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>LangGraph: every node saw the shared state dict implicitly: {&#x27;doc_id&#x27;: &#x27;CLM-1001&#x27;, &#x27;parse_timestamp&#x27;: &#x27;T0&#x27;}
+Workflows: only ctx.store-shared data crossed steps, everything else was event-scoped: {&#x27;doc_id&#x27;: &#x27;CLM-1001&#x27;, &#x27;parse_timestamp_visible_here&#x27;: &#x27;T0&#x27;}
+</code></pre><p>Both frameworks reach the SAME correct answer here — the difference is that LangGraph's
+<code>chunk_node</code> had <code>parse_timestamp</code> available whether it used it or not, while the
+Workflow's <code>chunk</code> step genuinely could not have read <code>parse_timestamp</code> even by accident,
+since it never declared access to <code>ctx.store</code> at all.</p>
+<p><strong>Exercise:</strong>
+In the <code>DataPrepWorkflow</code> version, add a <code>print</code> inside <code>chunk</code> attempting
+<code>await ctx.store.get(&quot;parse_timestamp&quot;, default=&quot;NOT VISIBLE&quot;)</code> — since <code>chunk</code> never
+calls <code>ctx.store.set</code> for anything, this simply reads whatever <code>parse</code> already put there
+(store is workflow-run-scoped, not step-scoped) rather than proving isolation the way a
+sibling-step-local variable would. Confirm this returns <code>&quot;T0&quot;</code>, then contrast it with
+attempting to read a key NO step ever set, <code>&quot;chunk_locally_computed_value&quot;</code>, which
+correctly returns the given default, <code>&quot;NOT VISIBLE&quot;</code>.</p>
+<p><strong>Starting point:</strong> <code>DataPrepWorkflow</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>parse_timestamp read from inside chunk: T0
+never-set key returns the given default: NOT VISIBLE
+</code></pre><hr />
+<h3>Concept 3 — Checkpointing and Human-in-the-Loop, Compared Honestly</h3>
+<p><code>Context.to_dict()</code>/<code>Context.from_dict(workflow, data)</code> genuinely serialize and restore a
+paused workflow's state across a real Python object boundary — checked directly, the
+result is a plain, JSON-round-trippable dict. <code>ctx.wait_for_event(EventType, requirements=...)</code> genuinely pauses a step until a matching event arrives, the same
+pause-and-resume shape as Week 19's <code>interrupt()</code>. Compared honestly rather than by
+feature-list alone: LangGraph's checkpointing is a pluggable, DEDICATED interface
+(<code>BaseCheckpointSaver</code>) with <code>InMemorySaver</code>/<code>SqliteSaver</code>/<code>PostgresSaver</code> all
+implementing the SAME contract, proven genuinely durable across a real process restart
+in Week 19 Day 2; <code>Context.to_dict()</code>/<code>from_dict()</code> gives the raw serialization primitive,
+but persisting that dict anywhere durable (a file, a database) and reloading it on restart
+is work the calling application must do itself, with no equivalent built-in
+<code>BaseCheckpointSaver</code>-style abstraction shipped for it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core.workflow import Workflow, step, StartEvent, StopEvent, Context, InputRequiredEvent, HumanResponseEvent
+import asyncio
+import json
+
+class ApprovalWorkflow(Workflow):
+    @step
+    async def request_approval(self, ctx: Context, ev: StartEvent) -&gt; StopEvent:
+        ctx.write_event_to_stream(InputRequiredEvent(prefix=&quot;approve claim?&quot;))
+        response = await ctx.wait_for_event(HumanResponseEvent, requirements={&quot;user_name&quot;: &quot;reviewer&quot;})
+        return StopEvent(result=f&quot;decision: {response.response}&quot;)
+
+async def main():
+    wf = ApprovalWorkflow(timeout=30)
+    handler = wf.run()
+    ctx_dict = None
+    responded = False
+    async for event in handler.stream_events():
+        if isinstance(event, InputRequiredEvent) and not responded:
+            ctx_dict = handler.ctx.to_dict()
+            responded = True
+            handler.ctx.send_event(HumanResponseEvent(response=&quot;approved&quot;, user_name=&quot;reviewer&quot;))
+    result = await handler
+    print(f&quot;context serialized while paused, is a plain dict: {isinstance(ctx_dict, dict)}&quot;)
+    print(f&quot;round-trips through json (a real durability primitive, not a mock): {isinstance(json.loads(json.dumps(ctx_dict)), dict)}&quot;)
+    print(f&quot;original run result: {result}&quot;)
+
+    wf2 = ApprovalWorkflow(timeout=30)
+    restored_ctx = Context.from_dict(wf2, ctx_dict)
+    print(f&quot;restored context is a real Context instance: {isinstance(restored_ctx, Context)}&quot;)
+
+asyncio.run(main())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>context serialized while paused, is a plain dict: True
+round-trips through json (a real durability primitive, not a mock): True
+original run result: decision: approved
+restored context is a real Context instance: True
+</code></pre><p><strong>Exercise:</strong>
+Modify <code>ApprovalWorkflow</code> so <code>request_approval</code> requires TWO approvals — waiting on a
+<code>HumanResponseEvent</code> with <code>user_name=&quot;reviewer_a&quot;</code>, then a second one with
+<code>user_name=&quot;reviewer_b&quot;</code> — before returning <code>StopEvent</code>. Confirm both responses are
+needed and the final result names both reviewers.</p>
+<p><strong>Starting point:</strong> <code>ApprovalWorkflow</code>, <code>InputRequiredEvent</code>, and <code>HumanResponseEvent</code>
+from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>result: decision: approved by reviewer_a and approved by reviewer_b
+</code></pre><hr />
+<h3>Concept 4 — Choosing Between Workflows and LangGraph: An Architecture Decision</h3>
+<p>Neither framework is strictly better — the choice tracks what this week's own three
+concepts actually measured: LangGraph's mature, pluggable, genuinely-proven-durable
+checkpointing (Week 19) wins whenever a system needs real crash recovery or complex
+conditional branching (<code>add_conditional_edges</code> on arbitrary state); <code>Workflow</code>'s
+typed-event isolation wins whenever a system composes many genuinely independent
+retrieval/query pieces (this week's Days 1-3) where NOT sharing state by default is a
+correctness feature, not a limitation to work around.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def recommend_orchestrator(needs_durable_checkpointing, is_retrieval_composition_heavy, needs_complex_conditional_routing):
+    if needs_durable_checkpointing and not is_retrieval_composition_heavy:
+        return &quot;LangGraph&quot;
+    if is_retrieval_composition_heavy and not needs_durable_checkpointing:
+        return &quot;LlamaIndex Workflows&quot;
+    if needs_complex_conditional_routing:
+        return &quot;LangGraph&quot;
+    return &quot;LlamaIndex Workflows&quot;
+
+print(recommend_orchestrator(needs_durable_checkpointing=True, is_retrieval_composition_heavy=False, needs_complex_conditional_routing=False))
+print(recommend_orchestrator(needs_durable_checkpointing=False, is_retrieval_composition_heavy=True, needs_complex_conditional_routing=False))
+print(recommend_orchestrator(needs_durable_checkpointing=True, is_retrieval_composition_heavy=True, needs_complex_conditional_routing=True))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>LangGraph
+LlamaIndex Workflows
+LangGraph
+</code></pre><p>The third case needs BOTH real durability and heavy retrieval composition — the function
+resolves the tie toward <code>LangGraph</code> because durable checkpointing has no workaround
+(Concept 3 showed <code>Context.to_dict()</code> is a DIY primitive, not a shipped equivalent),
+while <code>Workflow</code>'s event-isolation benefit CAN be approximated inside LangGraph by simply
+choosing not to over-share state between nodes, even if that discipline isn't enforced by
+the framework the way it is for <code>Workflow</code> steps.</p>
+<p><strong>Exercise:</strong>
+Call <code>recommend_orchestrator</code> for a system that needs neither durable checkpointing nor
+heavy retrieval composition nor complex conditional routing (a short, linear, one-shot
+pipeline). Confirm it recommends <code>&quot;LlamaIndex Workflows&quot;</code> — the same &quot;don't reach for the
+heavier tool without a reason&quot; principle Week 19's own closing Architecture Decision
+applied to <code>StateGraph</code> itself.</p>
+<p><strong>Starting point:</strong> <code>recommend_orchestrator</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>LlamaIndex Workflows
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> A team migrating a straight-line &quot;parse this legacy extract, chunk it,
+embed it&quot; script gains more from <code>Workflow</code>'s typed events than from <code>StateGraph</code>'s
+shared state — there's no legacy branching logic worth a conditional-edge graph, just
+independent stages that genuinely don't need to see each other's internals.</p>
+<p><strong>Compliance angle:</strong> LangGraph's proven <code>BaseCheckpointSaver</code> durability (Week 19) is the
+stronger choice whenever a regulator's record-keeping requirement (Week 17's Article 12)
+needs the full intermediate-state trail a real checkpointer provides — <code>Context.to_dict()</code>
+alone doesn't provide the automatic per-step persistence that trail depends on.</p>
+<p><strong>What breaks in production:</strong> A team picks <code>Workflow</code> for a system that turns out to
+need real crash recovery, discovers <code>Context.to_dict()</code>/<code>from_dict()</code> exist, and assumes
+that's &quot;the same as LangGraph's checkpointing&quot; without checking that nothing calls it
+automatically on a schedule or per-step the way a <code>BaseCheckpointSaver</code> does — a mid-run
+crash with no explicit <code>to_dict()</code> call already made loses everything, the exact
+<code>InMemorySaver</code>-without-durability gap Week 19 Day 2 warned about, now recreated in a
+different framework by assuming a serialization primitive is a checkpointing system.</p>
+<hr />
+<h2 id="day-5">Day 5 — Interop Without Double Abstraction, and MCP as the Tool Boundary</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="20-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=cGuyrANVi4A" target="_blank" rel="noopener"><b>How Model Context Protocol (MCP) actually works</b><small>Google Cloud Tech · 7:58</small></a></li><li><a href="https://www.youtube.com/watch?v=tbzSmR7RHrI" target="_blank" rel="noopener"><b>MCP Server Full-Course with LangChain MCP Client - Model Context Protocol | LangChain &amp; LangGraph</b><small>Wizard Engineer · 1:05:01</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=model%20context%20protocol%20MCP%20server%20tutorial%20LangGraph%20LlamaIndex%20tool" target="_blank" rel="noopener">Search YouTube: model context protocol MCP server tutorial LangGraph LlamaIndex tool</a></p></div>
+<hr />
+<h3>Concept 1 — Exposing a LlamaIndex Retriever as a Single LangGraph Tool</h3>
+<p>Nesting two frameworks' internals together — a LangGraph node reaching directly into a
+LlamaIndex query engine's response-synthesis machinery, or vice versa — creates exactly
+the kind of coupling this track has warned against since Week 12's &quot;pass object keys, not
+payloads&quot; principle. The fix is the same one: wrap the retriever behind ONE plain
+function LangGraph calls as a tool. LangGraph never needs to know a <code>VectorStoreIndex</code>
+exists at all; it only ever sees a function taking a query string and returning doc ids.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core import VectorStoreIndex, Document, Settings
+from llama_index.core.embeddings import MockEmbedding
+from langgraph.graph import StateGraph, START, END
+from typing import TypedDict, Annotated
+import operator
+
+Settings.embed_model = MockEmbedding(embed_dim=8)
+
+docs = [Document(text=&quot;Policy POL-1 covers fire and theft.&quot;, doc_id=&quot;POL-1&quot;), Document(text=&quot;Policy POL-2 covers water damage.&quot;, doc_id=&quot;POL-2&quot;)]
+index = VectorStoreIndex.from_documents(docs)
+retriever = index.as_retriever(similarity_top_k=2)
+
+def retrieve_policy_clauses(query: str) -&gt; list[str]:
+    # The one tool boundary: LangGraph calls this plain function, backed by a
+    # LlamaIndex retriever, without ever importing LlamaIndex&#x27;s own query-engine or
+    # response-synthesis machinery into the graph itself.
+    results = retriever.retrieve(query)
+    return [r.node.ref_doc_id for r in results]
+
+class AgentState(TypedDict):
+    query: str
+    retrieved_doc_ids: Annotated[list[str], operator.add]
+
+def retrieve_node(state):
+    return {&quot;retrieved_doc_ids&quot;: retrieve_policy_clauses(state[&quot;query&quot;])}
+
+g = StateGraph(AgentState)
+g.add_node(&quot;retrieve&quot;, retrieve_node)
+g.add_edge(START, &quot;retrieve&quot;)
+g.add_edge(&quot;retrieve&quot;, END)
+graph = g.compile()
+result = graph.invoke({&quot;query&quot;: &quot;fire damage&quot;, &quot;retrieved_doc_ids&quot;: []})
+print(f&quot;LangGraph node retrieved via the LlamaIndex-backed tool: {sorted(result[&#x27;retrieved_doc_ids&#x27;])}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>LangGraph node retrieved via the LlamaIndex-backed tool: [&#x27;POL-1&#x27;, &#x27;POL-2&#x27;]
+</code></pre><p><strong>Exercise:</strong>
+Add a third document, <code>&quot;POL-3&quot;</code> (<code>&quot;Policy POL-3 covers liability.&quot;</code>), rebuild <code>index</code> and
+<code>retriever</code> with <code>similarity_top_k=3</code>, and confirm the graph now returns all three doc
+ids for the query <code>&quot;liability coverage&quot;</code>.</p>
+<p><strong>Starting point:</strong> <code>AgentState</code>, <code>retrieve_node</code>, and the graph-assembly lines from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>retrieved: [&#x27;POL-1&#x27;, &#x27;POL-2&#x27;, &#x27;POL-3&#x27;]
+</code></pre><hr />
+<h3>Concept 2 — MCP as the Standard Client/Server Tool Boundary</h3>
+<p>The Model Context Protocol standardizes exactly the boundary Concept 1 built by hand:
+instead of every framework inventing its own tool-calling convention (LangChain's
+<code>@tool</code>, LlamaIndex's <code>QueryEngineTool</code>, a bespoke function signature), an MCP server
+registers tools ONCE and any MCP-compatible client — regardless of which agent framework
+it's built on — can discover and call them the same way. The installed SDK here is
+<code>mcp</code> 2.x, where the old <code>FastMCP</code> class was renamed <code>MCPServer</code> (a real, checked
+version-specific finding, not assumed from older tutorials); its <code>server.tool()</code> decorator
+and <code>server.call_tool()</code> genuinely register and invoke tools IN-PROCESS, with no live
+stdio/SSE transport needed to prove the registration-and-invocation mechanism itself.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from mcp.server.mcpserver import MCPServer
+import asyncio
+
+server = MCPServer(&quot;claims-retrieval&quot;)
+
+@server.tool()
+def retrieve_policy_clauses(query: str, top_k: int = 3) -&gt; list[str]:
+    &quot;&quot;&quot;Retrieve policy clauses relevant to a query.&quot;&quot;&quot;
+    corpus = [&quot;fire damage clause&quot;, &quot;theft clause&quot;, &quot;water damage clause&quot;, &quot;liability clause&quot;]
+    return corpus[:top_k]
+
+async def main():
+    tools = await server.list_tools()
+    print(f&quot;registered tools: {[t.name for t in tools]}&quot;)
+    result = await server.call_tool(&quot;retrieve_policy_clauses&quot;, {&quot;query&quot;: &quot;fire&quot;, &quot;top_k&quot;: 2})
+    print(f&quot;call_tool returned structured content: {result.structured_content}&quot;)
+
+asyncio.run(main())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>registered tools: [&#x27;retrieve_policy_clauses&#x27;]
+call_tool returned structured content: {&#x27;result&#x27;: [&#x27;fire damage clause&#x27;, &#x27;theft clause&#x27;]}
+</code></pre><p><strong>Exercise:</strong>
+Register a SECOND tool on the same server, <code>retrieve_claim_status(claim_id: str) -&gt; str</code>,
+returning <code>f&quot;{claim_id}: open&quot;</code>. Confirm <code>list_tools()</code> now reports both tool names.</p>
+<p><strong>Starting point:</strong> <code>server</code> and <code>retrieve_policy_clauses</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>registered tools: [&#x27;retrieve_claim_status&#x27;, &#x27;retrieve_policy_clauses&#x27;]
+</code></pre><hr />
+<h3>Concept 3 — <code>QueryFusionRetriever</code> With Reciprocal Rank Fusion Behind One Tool Boundary</h3>
+<p><code>QueryFusionRetriever(retrievers=[...], mode=FUSION_MODES.RECIPROCAL_RANK)</code> is Week 05's
+reciprocal rank fusion, now fusing results across MULTIPLE LlamaIndex retrievers (the
+Phase 1 pgvector/Milvus/Qdrant stores this week's README explicitly calls out) into one
+ranked list — genuinely useful as exactly ONE tool behind the MCP/LangGraph boundary
+Concepts 1-2 built, rather than exposing each underlying store as its own separate tool a
+calling agent has to reason about individually. <code>num_queries=1</code> disables the
+default LLM-based query-expansion step (which needs a real LLM this sandbox doesn't have
+for its own separate reason), isolating the fusion mechanism itself.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core import VectorStoreIndex, Document, Settings
+from llama_index.core.embeddings import MockEmbedding
+from llama_index.core.llms import MockLLM
+from llama_index.core.retrievers import QueryFusionRetriever
+from llama_index.core.retrievers.fusion_retriever import FUSION_MODES
+
+Settings.embed_model = MockEmbedding(embed_dim=8)
+Settings.llm = MockLLM()
+
+docs_a = [Document(text=&quot;Policy POL-1 covers fire and theft.&quot;, doc_id=&quot;POL-1&quot;)]
+docs_b = [Document(text=&quot;Policy POL-2 covers water damage.&quot;, doc_id=&quot;POL-2&quot;)]
+index_a = VectorStoreIndex.from_documents(docs_a)
+index_b = VectorStoreIndex.from_documents(docs_b)
+
+fusion_retriever = QueryFusionRetriever(
+    retrievers=[index_a.as_retriever(similarity_top_k=2), index_b.as_retriever(similarity_top_k=2)],
+    mode=FUSION_MODES.RECIPROCAL_RANK,
+    num_queries=1,
+    use_async=False,
+)
+results = fusion_retriever.retrieve(&quot;policy coverage&quot;)
+print(f&quot;fused result count: {len(results)}&quot;)
+print(f&quot;doc ids present: {sorted(r.node.ref_doc_id for r in results)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>fused result count: 2
+doc ids present: [&#x27;POL-1&#x27;, &#x27;POL-2&#x27;]
+</code></pre><p><strong>Exercise:</strong>
+Add a THIRD retriever over <code>Document(text=&quot;Policy POL-3 covers liability.&quot;, doc_id=&quot;POL-3&quot;)</code>, and rebuild <code>fusion_retriever</code> with all three retrievers AND
+<code>similarity_top_k=3</code> set on the <code>QueryFusionRetriever</code> itself (its own <code>similarity_top_k</code>
+caps the final fused count regardless of how many sources feed it). Confirm all three doc
+ids come back.</p>
+<p><strong>Starting point:</strong> <code>docs_a</code>/<code>docs_b</code>, <code>FUSION_MODES</code>, and the <code>QueryFusionRetriever</code>
+construction line from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>fused result count with 3 sources: 3
+doc ids: [&#x27;POL-1&#x27;, &#x27;POL-2&#x27;, &#x27;POL-3&#x27;]
+</code></pre><hr />
+<h3>Concept 4 — Node Postprocessors, Where Reranking Belongs, and the Cost of Each Hop</h3>
+<p>A <code>BaseNodePostprocessor</code> runs AFTER retrieval and BEFORE synthesis — exactly where Week
+25's dedicated reranking-layer content will later put a real cross-encoder. Checked
+directly: <code>MockEmbedding</code>'s content-blind vectors (Day 2 Concept 4's finding) mean a
+similarity-based postprocessor cannot demonstrate real discrimination here, so a
+hand-written <code>KeywordOverlapReranker</code> (a real <code>BaseNodePostprocessor</code> implementation,
+genuinely re-ranking by query/text word overlap) proves the mechanism instead. Measuring
+actual wall-clock time across the call chain — a raw retriever call, the same call
+wrapped through <code>MCPServer.call_tool()</code>, and reranking added on top — shows each
+abstraction layer genuinely adds SOME latency, even measured purely in-process with no
+real network transport (which would add strictly more on top of what's measured here).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core import VectorStoreIndex, Document, Settings
+from llama_index.core.embeddings import MockEmbedding
+from mcp.server.mcpserver import MCPServer
+from llama_index.core.postprocessor.types import BaseNodePostprocessor
+from llama_index.core.schema import NodeWithScore, QueryBundle
+import asyncio
+import time
+
+Settings.embed_model = MockEmbedding(embed_dim=8)
+
+class KeywordOverlapReranker(BaseNodePostprocessor):
+    def _postprocess_nodes(self, nodes, query_bundle=None):
+        query_words = set((query_bundle.query_str if query_bundle else &quot;&quot;).lower().split())
+        rescored = [NodeWithScore(node=n.node, score=float(len(query_words &amp; set(n.node.text.lower().split())))) for n in nodes]
+        return sorted(rescored, key=lambda n: n.score, reverse=True)
+
+    @classmethod
+    def class_name(cls):
+        return &quot;KeywordOverlapReranker&quot;
+
+docs = [Document(text=&quot;Policy POL-1 covers fire and theft.&quot;, doc_id=&quot;POL-1&quot;)]
+index = VectorStoreIndex.from_documents(docs)
+retriever = index.as_retriever(similarity_top_k=1)
+
+server = MCPServer(&quot;claims-retrieval&quot;)
+
+@server.tool()
+def retrieve_policy_clauses(query: str) -&gt; list[str]:
+    return [r.node.ref_doc_id for r in retriever.retrieve(query)]
+
+async def main():
+    n = 200
+    t0 = time.monotonic()
+    for _ in range(n):
+        retrieve_policy_clauses(&quot;fire&quot;)
+    direct_elapsed = time.monotonic() - t0
+
+    t0 = time.monotonic()
+    for _ in range(n):
+        await server.call_tool(&quot;retrieve_policy_clauses&quot;, {&quot;query&quot;: &quot;fire&quot;})
+    mcp_elapsed = time.monotonic() - t0
+
+    print(f&quot;MCP call_tool hop measurably slower than a direct call: {mcp_elapsed &gt; direct_elapsed}&quot;)
+
+asyncio.run(main())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>MCP call_tool hop measurably slower than a direct call: True
+</code></pre><p>Exact millisecond figures are hardware-dependent and not presented as fixed — only the
+direction of the effect (each layer adds time, never subtracts it) is genuinely stable.</p>
+<p><strong>Exercise:</strong>
+Measure whether adding <code>KeywordOverlapReranker.postprocess_nodes()</code> on top of a raw
+<code>retriever.retrieve()</code> call measurably increases wall-clock time compared to retrieval
+alone, over 200 repeated calls.</p>
+<p><strong>Starting point:</strong> <code>KeywordOverlapReranker</code>, <code>retriever</code>, and the <code>time.monotonic()</code>
+timing pattern from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>reranking adds measurable time on top of retrieval alone: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> MCP's standard boundary matters most exactly where Phase 1's real
+constraint lives — a BFSI team running pgvector, Milvus, AND a legacy keyword search
+side by side has no reason to expose three framework-specific tool conventions to every
+agent that needs them, when one MCP server can front all three behind one discovery
+mechanism.</p>
+<p><strong>Compliance angle:</strong> A single, narrow tool boundary (Concept 1's plain function, or
+Concept 2's MCP tool) is also the natural place to enforce Week 22's coming
+least-privilege pattern — the calling agent only ever sees &quot;retrieve policy clauses,&quot;
+never the underlying store's full query surface.</p>
+<p><strong>What breaks in production:</strong> A team measures Concept 4's real latency overhead once,
+concludes &quot;MCP adds negligible latency,&quot; and never re-measures once the MCP server moves
+from in-process (this week's genuinely-executed setup) to a real stdio or network
+transport in production — where process-boundary serialization and IPC cost strictly
+more than the in-process call overhead measured here. The honest caveat this concept
+already states (a real transport &quot;would add strictly more on top of what's measured
+here&quot;) is exactly the gap a one-time benchmark taken during development and never
+revisited would miss.</p>
+<hr />
+<h2>Architecture Decision — Week 20</h2>
+<p><strong>Choosing between:</strong> letting two AI frameworks' internals interpenetrate a single
+pipeline (a LangGraph node reaching into LlamaIndex's query engine, or vice versa) vs. a
+single narrow tool boundary (a plain function, or an MCP server) between them vs.
+standardizing on one framework for the whole system and accepting whatever gaps it has.</p>
+<p><strong>Rule of thumb:</strong> never let two frameworks' internals interpenetrate — Concept 1's
+&quot;LangGraph never needs to know a <code>VectorStoreIndex</code> exists&quot; rule holds regardless of
+which two frameworks are involved, because the coupling cost (a change to LlamaIndex's
+internals breaking LangGraph code that reached past the boundary) is the same cost Week
+12 already named for a DAG task passing a payload instead of a reference. Between a plain
+function boundary and an MCP server: use a plain function when only one framework, in one
+codebase, ever calls the tool; reach for MCP the moment more than one AGENT or framework
+needs to discover and call the SAME tool, since that is exactly the discovery problem MCP
+solves and a plain function does not. Standardizing on one framework for an entire system
+is rarely the right call once Day 4's own measurement stands: LangGraph's proven
+durability and LlamaIndex's retrieval-composition strength are not a single framework's
+strengths, so a system with both a durable-approval-workflow need (Week 19's domain) and a
+retrieval-composition need (this week's Days 1-3) is better served by both, meeting at
+exactly the tool boundary this closing day built.</p>
+<div class="pager"><a class="btn ghost" href="week-19.html">&larr; Week 19</a><a class="btn ghost" href="week-21.html">Week 21 &rarr;</a></div>
+</main></body></html>

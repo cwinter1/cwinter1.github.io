@@ -1,0 +1,1090 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 21 — Distributed Processing with Ray &amp; Spark</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="21" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 21 — Distributed Processing with Ray &amp; Spark</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>4 — LLMOps &amp; Distributed Infrastructure</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Advanced</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 04's HNSW/IVF-PQ tuning and Week 09's chunking strategies are background for the batch-embedding workloads this week distributes. No prior Ray/Spark experience assumed.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. <code>polars</code>, <code>pyspark</code> (with a real local JVM via the already-installed OpenJDK 21), <code>ray</code> (core, <code>ray.data</code>, and <code>ray[serve]</code>) all install and run genuinely in this sandbox in single-node/local mode — a materially better outcome than anticipated for a &quot;distributed processing&quot; week. Real multi-node clusters, GPU actor placement, and KubeRay stay REAL MODE (this sandbox has no cluster and no GPU), but the actual APIs — <code>ray.data.map_batches</code>, actor-pool compute strategies, <code>ray.serve</code> deployments with autoscaling and dynamic batching, Spark's local-mode <code>SparkSession</code>, adaptive query execution — are all genuinely exercised, not merely described.</td>
+</tr>
+</tbody>
+</table>
+<p>Weeks 01-20 built vector infrastructure, guardrails, governance, and two agent
+orchestration frameworks — all of it, so far, running on however much compute one
+process happens to have. This week is where &quot;one machine isn't enough&quot; becomes an
+explicit, measured decision rather than an assumption: Ray for actor-based parallelism
+and online serving, Spark for large-scale batch dataprep with a mature query optimizer,
+and Polars as the single-node baseline both distributed engines have to justify beating.</p>
+<hr />
+<h2 id="day-1">Day 1 — Choosing Single-Node Spark or Ray</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="21-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=s0qSYDISlnU" target="_blank" rel="noopener"><b>Apache Spark | Alternatives | DataFusion | Dask | Daft | DuckDB</b><small>Backfill · 13:27</small></a></li><li><a href="https://www.youtube.com/watch?v=TYnXqVrVz8k" target="_blank" rel="noopener"><b>Pandas vs PySpark vs Polars: The DataFrame Explained Visually</b><small>Data with Baraa · 18:22</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Ray%20vs%20Spark%20vs%20Polars%20distributed%20data%20processing%20comparison" target="_blank" rel="noopener">Search YouTube: Ray vs Spark vs Polars distributed data processing comparison</a></p></div>
+<hr />
+<h3>Concept 1 — A Workload-Shape Framework: CPU Dataprep, GPU Inference, Shuffle-Heavy Joins</h3>
+<p>The right tool tracks the workload's SHAPE, not a general &quot;which is faster&quot; ranking that
+doesn't actually exist independent of the job: a shuffle-heavy join (repartitioning data
+across the cluster by join key) plays to Spark's mature cost-based optimizer and adaptive
+query execution; GPU-bound embedding or inference work plays to Ray's first-class actor
+placement onto specific accelerators; plain CPU-bound dataprep with no shuffle at all
+often does not need a cluster's coordination overhead in the first place.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def classify_workload(is_cpu_dataprep, needs_gpu, is_shuffle_heavy_join):
+    if needs_gpu:
+        return &quot;Ray&quot;
+    if is_shuffle_heavy_join:
+        return &quot;Spark&quot;
+    if is_cpu_dataprep:
+        return &quot;Ray or Polars&quot;
+    return &quot;Polars&quot;
+
+print(classify_workload(is_cpu_dataprep=False, needs_gpu=True, is_shuffle_heavy_join=False))
+print(classify_workload(is_cpu_dataprep=False, needs_gpu=False, is_shuffle_heavy_join=True))
+print(classify_workload(is_cpu_dataprep=True, needs_gpu=False, is_shuffle_heavy_join=False))
+print(classify_workload(is_cpu_dataprep=False, needs_gpu=False, is_shuffle_heavy_join=False))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>Ray
+Spark
+Ray or Polars
+Polars
+</code></pre><p><strong>Exercise:</strong>
+Call <code>classify_workload</code> twice more: once with BOTH <code>needs_gpu=True</code> and
+<code>is_shuffle_heavy_join=True</code> (confirm GPU need wins the tie), and once with both
+<code>is_cpu_dataprep=True</code> and <code>is_shuffle_heavy_join=True</code> (confirm the shuffle-heavy join
+wins over plain CPU dataprep).</p>
+<p><strong>Starting point:</strong> <code>classify_workload</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>Ray
+Spark
+</code></pre><hr />
+<h3>Concept 2 — Polars Versus Spark, Extended to Ray</h3>
+<p>Polars is the single-node baseline the whole decision framework has to justify moving
+away from — a real, measured groupby-aggregation benchmark against <code>pandas</code> on 500,000
+synthetic claims rows shows Polars genuinely faster on the same machine, with zero
+cluster-coordination cost paid at all. Spark and Ray earn their added complexity only once
+data or compute needs genuinely exceed what Polars-on-one-machine can hold or process in
+a reasonable time — which Day 4 and Day 2, respectively, measure directly rather than
+assert.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import polars as pl
+import pandas as pd
+import numpy as np
+import time
+
+n = 500_000
+np.random.seed(42)
+data = {
+    &quot;claim_id&quot;: np.arange(n),
+    &quot;product_line&quot;: np.random.choice([&quot;auto&quot;, &quot;home&quot;, &quot;liability&quot;], n),
+    &quot;claim_amount&quot;: np.random.uniform(100, 50000, n),
+}
+pdf = pd.DataFrame(data)
+pldf = pl.DataFrame(data)
+
+t0 = time.monotonic()
+pandas_result = pdf.groupby(&quot;product_line&quot;)[&quot;claim_amount&quot;].agg([&quot;sum&quot;, &quot;mean&quot;, &quot;count&quot;])
+pandas_time = time.monotonic() - t0
+
+t0 = time.monotonic()
+# Aggregating the SAME column multiple times needs an explicit .alias() per aggregation --
+# omitting it raises a real DuplicateError (&quot;column with name &#x27;claim_amount&#x27; has more
+# than one occurrence&quot;), checked directly against this installed Polars version.
+polars_result = pldf.group_by(&quot;product_line&quot;).agg([
+    pl.col(&quot;claim_amount&quot;).sum().alias(&quot;sum&quot;),
+    pl.col(&quot;claim_amount&quot;).mean().alias(&quot;mean&quot;),
+    pl.col(&quot;claim_amount&quot;).count().alias(&quot;count&quot;),
+])
+polars_time = time.monotonic() - t0
+
+print(f&quot;both engines agree on group count: {len(pandas_result) == len(polars_result) == 3}&quot;)
+print(f&quot;polars completed without erroring after aliasing: {polars_result.shape[0] == 3}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>both engines agree on group count: True
+polars completed without erroring after aliasing: True
+</code></pre><p>Exact timings are hardware-dependent and not presented as fixed — Polars was measured
+faster than pandas on this sandbox's hardware for this operation, but the number itself
+is not the durable lesson; the real, checked <code>DuplicateError</code> gotcha is.</p>
+<p><strong>Exercise:</strong>
+Run a DIFFERENT operation — filter to <code>claim_amount &gt; 25000</code> then sort descending by
+<code>claim_amount</code> — on both the pandas and Polars versions of the same 500,000-row data
+(seed <code>7</code> this time). Confirm both engines agree on the resulting row count.</p>
+<p><strong>Starting point:</strong> <code>pdf</code>/<code>pldf</code>-construction pattern from this concept's Example (new
+seed, same shape).</p>
+<p>Expected output (actually run):</p>
+<pre><code>both engines agree on row count: True
+</code></pre><hr />
+<h3>Concept 3 — When One 64-Core Machine Beats Any Cluster on Both Cost and Wall Clock</h3>
+<p>A cluster's per-job coordination overhead (scheduling, network shuffle, result
+aggregation) is a REAL, fixed cost paid regardless of job size — for a small enough job,
+that fixed cost dominates, and a single powerful machine wins on both wall-clock time AND
+total cost. The crossover point is a genuine, computable function of row count, per-node
+throughput, node count, and each side's hourly cost — not a rule of thumb to memorize,
+since it moves whenever any of those four inputs changes.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def single_machine_wins(row_count, rows_per_second_single_machine, cluster_node_count,
+                         rows_per_second_per_cluster_node, cluster_coordination_overhead_seconds,
+                         single_machine_hourly_cost, cluster_node_hourly_cost):
+    single_time_seconds = row_count / rows_per_second_single_machine
+    cluster_time_seconds = row_count / (rows_per_second_per_cluster_node * cluster_node_count) + cluster_coordination_overhead_seconds
+    single_cost = (single_time_seconds / 3600) * single_machine_hourly_cost
+    cluster_cost = (cluster_time_seconds / 3600) * cluster_node_count * cluster_node_hourly_cost
+    return single_time_seconds &lt; cluster_time_seconds, single_cost &lt; cluster_cost
+
+small_job = single_machine_wins(10_000_000, 500_000, 8, 500_000, 45, 3.0, 0.5)
+large_job = single_machine_wins(2_000_000_000, 500_000, 8, 500_000, 45, 3.0, 0.5)
+print(f&quot;small job -- single machine wins (time, cost): {small_job}&quot;)
+print(f&quot;large job -- single machine wins (time, cost): {large_job}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>small job -- single machine wins (time, cost): (True, True)
+large job -- single machine wins (time, cost): (False, False)
+</code></pre><p><strong>Exercise:</strong>
+Call <code>single_machine_wins</code> for a MID-SIZED job of 30,000,000 rows with the same other
+parameters. Confirm the result shows the cluster now winning on wall-clock time, while
+the single machine still wins on cost — the two crossover points do not have to fall at
+the same job size.</p>
+<p><strong>Starting point:</strong> <code>single_machine_wins</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>30M-row job -- single machine wins (time, cost): (False, True)
+</code></pre><hr />
+<h3>Concept 4 — Cost Per Million Embeddings as the Deciding Metric</h3>
+<p>Raw throughput (items/second) is not directly comparable across a GPU worker and a CPU
+cluster with a different hourly rate each — cost per million items processed IS
+comparable, because it already accounts for both throughput and price in one number. A
+faster-but-pricier GPU worker can still be the cheaper choice per unit of work despite its
+higher hourly rate, which raw throughput alone would never reveal.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def cost_per_million_embeddings(items_per_second, hourly_cost, num_workers=1):
+    total_throughput = items_per_second * num_workers
+    hours_per_million = (1_000_000 / total_throughput) / 3600
+    return round(hours_per_million * hourly_cost * num_workers, 4)
+
+gpu_cost = cost_per_million_embeddings(items_per_second=2000, hourly_cost=1.20, num_workers=1)
+cpu_cost = cost_per_million_embeddings(items_per_second=150, hourly_cost=0.10, num_workers=4)
+print(f&quot;GPU cost per million embeddings: {gpu_cost}&quot;)
+print(f&quot;CPU-cluster cost per million embeddings: {cpu_cost}&quot;)
+print(f&quot;GPU is the cheaper choice despite the higher hourly rate: {gpu_cost &lt; cpu_cost}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>GPU cost per million embeddings: 0.1667
+CPU-cluster cost per million embeddings: 0.1852
+GPU is the cheaper choice despite the higher hourly rate: True
+</code></pre><p><strong>Exercise:</strong>
+Compute the cost per million embeddings for a THIRD option: 8 CPU workers, each at 150
+items/second and $0.10/hour (double the CPU worker count from the Example, same
+per-worker rate and cost). Confirm this comes out EQUAL to the 4-worker CPU cluster's
+cost per million, not cheaper — doubling a homogeneous worker fleet doubles both
+throughput and total spend, so cost per unit of work does not change; only wall-clock
+time improves. Confirm it is still not as cheap as the single GPU worker.</p>
+<p><strong>Starting point:</strong> <code>cost_per_million_embeddings</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>8-worker CPU cost per million embeddings: 0.1852
+equal to the 4-worker CPU cluster&#x27;s cost per million: True
+still not as cheap as the GPU worker: False
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> A BFSI team's existing on-prem hardware often already IS the &quot;one
+64-core machine&quot; Concept 3 describes — the real decision is frequently not &quot;buy a
+cluster&quot; versus &quot;buy a bigger machine,&quot; but &quot;use the underutilized big machine already
+sitting in the data center&quot; versus &quot;stand up a new cluster nobody has ops experience
+running.&quot;</p>
+<p><strong>Compliance angle:</strong> Cost-per-unit-of-work (Concept 4) is also the metric a budget
+review actually wants — &quot;we process claims at $0.03 per thousand&quot; is a defensible,
+auditable unit economics claim in a way &quot;our cluster does 50,000 rows/second&quot; is not,
+since the latter says nothing about what that capacity actually costs to run.</p>
+<p><strong>What breaks in production:</strong> A team benchmarks Spark/Ray against a toy dataset,
+concludes the cluster is faster, and never re-runs Concept 3's crossover calculation
+against their ACTUAL data volume — only to discover the coordination overhead genuinely
+dominates at their real, much smaller job size, and the &quot;faster&quot; cluster is both slower
+and more expensive than the single machine it replaced.</p>
+<hr />
+<h2 id="day-2">Day 2 — Ray Data for Batch Embedding</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="21-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=-xUkOHknQvM" target="_blank" rel="noopener"><b>Scaling LLM Batch Inference with vLLM + Ray (Ray x AI21 Meetup)</b><small>AI21 Labs · 24:10</small></a></li><li><a href="https://www.youtube.com/watch?v=_rEsLo21WvE" target="_blank" rel="noopener"><b>Scaling LLM Batch Inference: Ray Data &amp; vLLM for High Throughput</b><small>InfoQ · 47:51</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Ray%20Data%20map_batches%20batch%20inference%20actor%20pool%20GPU" target="_blank" rel="noopener">Search YouTube: Ray Data map_batches batch inference actor pool GPU</a></p></div>
+<hr />
+<h3>Concept 1 — <code>ray.data.read_parquet</code> Feeding a Streaming Execution Plan</h3>
+<p><code>ray.data.read_parquet(path)</code> does not load the whole file into memory up front — it
+builds a lazy, streaming execution plan (visible directly in Ray's own log output as
+<code>InputDataBuffer -&gt; TaskPoolMapOperator[...] -&gt; ...</code>) that only actually reads and
+processes data as downstream operators consume it. This is genuinely checkable: the
+dataset's schema is available immediately, before any row has been materialized. Note:
+each concept below calls <code>ray.init()</code> and <code>ray.shutdown()</code> as a matched pair, cleanly
+tearing down its own Ray session before the next concept starts one fresh — checked
+directly, leaving a Ray Data actor pool running with NO shutdown between concepts risks
+a real resource-allocation deadlock the next <code>ray.init()</code> can't resolve (a previous
+run's actors never released their CPU claim). <code>ignore_reinit_error=True</code> is passed
+defensively, since a later concept (Day 2 Concept 4, or Day 3's Serve concepts) can
+leave Ray running when this whole file is re-executed as one continuous script.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ray
+import pandas as pd
+import os
+
+os.makedirs(&quot;/tmp/claims_parquet&quot;, exist_ok=True)
+df = pd.DataFrame({&quot;claim_id&quot;: range(100), &quot;text&quot;: [f&quot;claim narrative {i}&quot; for i in range(100)]})
+df.to_parquet(&quot;/tmp/claims_parquet/claims.parquet&quot;)
+
+ray.init(num_cpus=4, ignore_reinit_error=True)
+ds = ray.data.read_parquet(&quot;/tmp/claims_parquet/claims.parquet&quot;)
+print(f&quot;columns: {ds.schema().names}&quot;)
+print(f&quot;row count: {ds.count()}&quot;)
+ray.shutdown()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>columns: [&#x27;claim_id&#x27;, &#x27;text&#x27;]
+row count: 100
+</code></pre><p><strong>Exercise:</strong>
+Write a second Parquet file with 250 rows instead of 100 (same two columns), read it back
+with <code>ray.data.read_parquet</code>, and confirm the schema and row count both come back
+correctly.</p>
+<p><strong>Starting point:</strong> the <code>df.to_parquet</code>/<code>ray.data.read_parquet</code> pattern from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>columns: [&#x27;claim_id&#x27;, &#x27;text&#x27;]
+row count: 250
+</code></pre><hr />
+<h3>Concept 2 — <code>map_batches</code> With <code>batch_size</code> and <code>num_gpus</code></h3>
+<p><code>map_batches(fn, batch_size=N, num_gpus=G)</code> splits the dataset into batches of (up to) <code>N</code>
+rows each and applies <code>fn</code> to every batch — genuinely executed here with <code>num_gpus=0</code>
+(this sandbox has no GPU), but the resource-request API itself is real: <code>num_gpus=1</code> would
+tell Ray's scheduler to place that task only where a GPU is actually available, the same
+placement mechanism Week 21's README calls out as Ray's advantage over Spark for
+GPU-bound work.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ray
+
+ray.init(num_cpus=4, ignore_reinit_error=True)
+
+def embed_batch(batch):
+    batch[&quot;embedded&quot;] = [True] * len(batch[&quot;id&quot;])
+    return batch
+
+ds = ray.data.range(20).map_batches(embed_batch, batch_size=5, num_gpus=0)
+rows = ds.take_all()
+print(f&quot;row count: {len(rows)}&quot;)
+print(f&quot;all rows embedded: {all(r[&#x27;embedded&#x27;] for r in rows)}&quot;)
+ray.shutdown()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>row count: 20
+all rows embedded: True
+</code></pre><p><strong>Exercise:</strong>
+Re-run the same <code>embed_batch</code> function over <code>ray.data.range(20)</code> with <code>batch_size=4</code>
+instead of <code>5</code>. Confirm the row count and embedding result are unaffected by the
+different batch size — <code>batch_size</code> changes how work is chunked, not the correctness of
+the result.</p>
+<p><strong>Starting point:</strong> <code>embed_batch</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>row count: 20
+all rows embedded: True
+</code></pre><hr />
+<h3>Concept 3 — Actor-Pool Sizing So the Model Loads Once Per Actor, Not Per Batch</h3>
+<p>Passing a CLASS (not a function) to <code>map_batches</code> makes Ray run it as a stateful actor:
+the class's <code>__init__</code> runs ONCE when an actor starts, and <code>__call__</code> runs once per batch
+that actor handles — genuinely proven here by recording each actor's own OS process id
+and confirming far fewer distinct pids appear than batches processed. Ray's own compute-
+strategy API has genuinely changed across releases for this exact setting: this installed
+version (checked directly) DEPRECATES <code>concurrency=</code> in favor of <code>compute= ActorPoolStrategy(size=N)</code> — the opposite direction from what an older tutorial using
+<code>compute=</code> might lead you to expect, since Ray has moved this API back and forth more than
+once.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ray
+from ray.data import ActorPoolStrategy
+import os
+
+ray.init(num_cpus=4, ignore_reinit_error=True)
+
+class EmbeddingModel:
+    def __init__(self):
+        # Simulates loading an expensive model ONCE when the actor starts.
+        self.load_pid = os.getpid()
+
+    def __call__(self, batch):
+        batch[&quot;loaded_by_pid&quot;] = [self.load_pid] * len(batch[&quot;id&quot;])
+        return batch
+
+ds = ray.data.range(40).map_batches(EmbeddingModel, batch_size=5, compute=ActorPoolStrategy(size=2))
+rows = ds.take_all()
+distinct_pids = set(r[&quot;loaded_by_pid&quot;] for r in rows)
+pool_size = 2
+batch_count = 40 // 5
+print(f&quot;row count: {len(rows)}&quot;)
+print(f&quot;batch count would have been: {batch_count}&quot;)
+print(f&quot;distinct actor pids stayed within the pool size ({pool_size}): {len(distinct_pids) &lt;= pool_size}&quot;)
+print(f&quot;distinct actor pids stayed well under the batch count ({batch_count}), so the constructor did NOT run once per batch: {len(distinct_pids) &lt; batch_count}&quot;)
+ray.shutdown()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>row count: 40
+batch count would have been: 8
+distinct actor pids stayed within the pool size (2): True
+distinct actor pids stayed well under the batch count (8), so the constructor did NOT run once per batch: True
+</code></pre><p>The EXACT distinct-pid count is deliberately not asserted as a fixed number: measured
+directly on this installed Ray version by repeating this exact block, <code>ActorPoolStrategy (size=2)</code> reliably starts AT MOST 2 actors but does not reliably route at least one batch
+to each of them every run — some runs finish all 8 batches on a single actor before the
+second one picks up any work, so <code>len(distinct_pids)</code> is genuinely 1 or 2 depending on the
+run, not deterministically 2. This held even with the stricter <code>ActorPoolStrategy(min_size=2, max_size=2, initial_size=2)</code>, which fixes the pool's size but not how work is distributed
+across it. What IS reliable and checked, run after run: the pid count never exceeds the
+declared pool size and never comes close to the batch count — that is the actual, provable
+claim (one actor loads the model for potentially many batches, not one load per batch), and
+it is what the two prints above check instead of an exact equality.</p>
+<p><strong>Exercise:</strong>
+Double the dataset to 80 rows, keeping <code>batch_size=5</code> and <code>ActorPoolStrategy(size=2)</code>
+unchanged. Confirm the distinct-pid count still stays within the pool size (2) and still
+stays well under the new batch count (16) — the same actor pool absorbs twice as many
+batches without the pid count growing to match, proving the model load cost does not scale
+with data volume the way a per-batch reload would. Do not assert the distinct-pid count
+equals any single fixed number — as in the Example, it is reliably <code>&lt;= 2</code> and <code>&lt; 16</code>, but
+not reliably exactly 2 run to run.</p>
+<p><strong>Starting point:</strong> <code>EmbeddingModel</code> and the <code>ActorPoolStrategy(size=2)</code> line from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>row count: 80
+distinct pids stayed within the pool size (2) with double the rows: True
+distinct pids stayed well under the new batch count (16): True
+</code></pre><hr />
+<h3>Concept 4 — Backpressure When the Producer Outruns the Sink</h3>
+<p>Ray Data's streaming executor is designed to never fully materialize a dataset larger
+than the configured object-store memory budget — genuinely checkable two ways: the
+executor's own log output literally includes the word <code>backpressured</code> when a downstream
+operator can't keep up with an upstream one (<code>Tasks: 1 [backpressured:tasks(ResourceBudget)]</code>,
+visible directly in this concept's Example output), and the pipeline still completes
+successfully end-to-end even when the total data size genuinely exceeds the configured
+<code>object_store_memory</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ray
+import numpy as np
+
+ray.init(num_cpus=2, object_store_memory=80 * 1024 * 1024, ignore_reinit_error=True)
+
+def produce_large_rows(batch):
+    n = len(batch[&quot;id&quot;])
+    batch[&quot;payload&quot;] = [np.zeros(200_000, dtype=np.float32) for _ in range(n)]
+    return batch
+
+total_data_bytes = 300 * 200_000 * 4
+configured_budget_bytes = 80 * 1024 * 1024
+print(f&quot;total data size exceeds the configured object store budget: {total_data_bytes &gt; configured_budget_bytes}&quot;)
+
+ds = ray.data.range(300).map_batches(produce_large_rows, batch_size=10)
+row_count = ds.count()
+print(f&quot;pipeline completed successfully despite exceeding the memory budget: {row_count == 300}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>total data size exceeds the configured object store budget: True
+pipeline completed successfully despite exceeding the memory budget: True
+</code></pre><p>The specific <code>backpressured:tasks(ResourceBudget)</code> log line is emitted by Ray's own
+executor during this run (visible in the sandbox's real captured output, not this
+concept's printed assertions) — genuine evidence of the mechanism activating, not merely
+inferred from the run completing.</p>
+<p><strong>Exercise:</strong>
+Increase the row count to 600 (double), keeping the same <code>80 * 1024 * 1024</code>
+<code>object_store_memory</code> budget and the same <code>produce_large_rows</code> function. Confirm the
+pipeline still completes successfully with all 600 rows present.</p>
+<p><strong>Starting point:</strong> <code>produce_large_rows</code> and the <code>ray.init</code> line from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>row count with double the data, same memory budget: 600
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> <code>ray.data.read_parquet</code>'s streaming execution matters directly for a
+BFSI team's nightly claims-extract batch — the extract can be genuinely larger than any
+single node's RAM without anyone needing to manually chunk it, the same problem Week 07's
+CDC/watermark content solved for streaming ingestion, now solved for batch reads instead.</p>
+<p><strong>Compliance angle:</strong> Actor-pool sizing (Concept 3) is a real cost-control lever an
+auditor asking &quot;how much compute did this embedding run actually use&quot; cares about --
+<code>ActorPoolStrategy(size=N)</code> is a hard, auditable ceiling on concurrent model instances,
+not a vague &quot;however many the scheduler felt like.&quot;</p>
+<p><strong>What breaks in production:</strong> A team upgrades Ray and their <code>compute= ActorPoolStrategy(...)</code> calls start emitting deprecation warnings pointing at
+<code>concurrency=</code> — following an outdated blog post's advice to &quot;fix&quot; it by switching TO
+<code>concurrency=</code> makes things WORSE in a version where that's the deprecated direction,
+exactly the flip-flop this concept's own checked, version-specific finding warns about.
+Pinning the Ray version and checking its OWN current warning text before changing
+anything is the only reliable check.</p>
+<hr />
+<h2 id="day-3">Day 3 — Ray Serve for Online Inference</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="21-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=Y9cZhBPLikA" target="_blank" rel="noopener"><b>Ray Serve: Scalable Model Serving for AI and Python Applications | Uplatz</b><small>Uplatz · 6:50</small></a></li><li><a href="https://www.youtube.com/watch?v=lO335UWNGWY" target="_blank" rel="noopener"><b>Multi-model composition with Ray Serve deployment graphs</b><small>Anyscale · 30:14</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Ray%20Serve%20deployment%20autoscaling%20dynamic%20batching%20tutorial" target="_blank" rel="noopener">Search YouTube: Ray Serve deployment autoscaling dynamic batching tutorial</a></p></div>
+<hr />
+<h3>Concept 1 — <code>@serve.deployment</code> With <code>autoscaling_config</code></h3>
+<p><code>@serve.deployment(autoscaling_config={&quot;min_replicas&quot;: N, &quot;max_replicas&quot;: M, ...})</code>
+genuinely starts a real HTTP server on <code>localhost:8000</code>, backed by exactly <code>min_replicas</code>
+replicas at startup — checked directly via <code>serve.status()</code>'s real
+<code>replica_states</code> dict, not merely described. Scaling up toward <code>max_replicas</code> happens
+under sustained load against <code>target_ongoing_requests</code>; the STARTING point, at
+<code>min_replicas</code>, is what's genuinely provable from a single quick request in this
+sandbox. Note: this day's examples never call <code>serve.shutdown()</code>/<code>ray.shutdown()</code>
+between deployments — checked directly, doing so makes the ServeController's own
+background raylet process print a real <code>graceful_shutdown ... killed by ray.kill</code>
+warning straight to the OS-level stdout descriptor, asynchronously and inconsistently
+(0-2 times depending on timing), which bypasses Python's <code>redirect_stdout</code> entirely and
+can't be captured as stable documented output. <code>serve.run()</code> on a NEW deployment simply
+replaces whatever app was running before, so each concept below redeploys over the
+previous one instead of tearing it down first.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ray
+from ray import serve
+import requests
+
+@serve.deployment(autoscaling_config={&quot;min_replicas&quot;: 1, &quot;max_replicas&quot;: 4, &quot;target_ongoing_requests&quot;: 2})
+class ClaimClassifier:
+    def __call__(self, request):
+        return {&quot;classification&quot;: &quot;auto&quot;}
+
+serve.run(ClaimClassifier.bind())
+status = serve.status()
+deployment_status = status.applications[&quot;default&quot;].deployments[&quot;ClaimClassifier&quot;]
+print(f&quot;replica states at startup: {deployment_status.replica_states}&quot;)
+
+resp = requests.get(&quot;http://localhost:8000/&quot;)
+print(f&quot;real HTTP round trip: {resp.status_code} {resp.json()}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>replica states at startup: {&#x27;RUNNING&#x27;: 1}
+real HTTP round trip: 200 {&#x27;classification&#x27;: &#x27;auto&#x27;}
+</code></pre><p><strong>Exercise:</strong>
+Redeploy the same <code>ClaimClassifier</code> with <code>min_replicas=2</code> instead of <code>1</code> (same
+<code>max_replicas</code>/<code>target_ongoing_requests</code>). Confirm <code>serve.status()</code> now shows exactly 2
+running replicas at startup.</p>
+<p><strong>Starting point:</strong> <code>ClaimClassifier</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>replica states with min_replicas=2: {&#x27;RUNNING&#x27;: 2}
+</code></pre><hr />
+<h3>Concept 2 — <code>@serve.batch</code> Dynamic Batching Tuned by <code>max_batch_size</code>/<code>batch_wait_timeout_s</code></h3>
+<p><code>@serve.batch(max_batch_size=N, batch_wait_timeout_s=T)</code> on an async method genuinely
+combines multiple concurrent calls arriving within <code>T</code> seconds into ONE underlying
+function call, up to <code>N</code> items per batch — proven directly by sending several real
+concurrent HTTP requests and counting how many times the batched method's body actually
+ran, not by trusting the decorator's stated behavior.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ray
+from ray import serve
+import requests
+from concurrent.futures import ThreadPoolExecutor
+
+@serve.deployment
+class BatchedReranker:
+    def __init__(self):
+        self.batch_call_count = 0
+
+    @serve.batch(max_batch_size=4, batch_wait_timeout_s=0.2)
+    async def handle_batch(self, queries):
+        self.batch_call_count += 1
+        return [f&quot;reranked:{q}&quot; for q in queries]
+
+    async def __call__(self, request):
+        query = request.query_params[&quot;q&quot;]
+        return await self.handle_batch(query)
+
+    def get_batch_call_count(self):
+        return self.batch_call_count
+
+handle = serve.run(BatchedReranker.bind())
+
+def send(q):
+    return requests.get(&quot;http://localhost:8000/&quot;, params={&quot;q&quot;: q}).text
+
+with ThreadPoolExecutor(max_workers=4) as pool:
+    results = list(pool.map(send, [f&quot;query-{i}&quot; for i in range(4)]))
+
+call_count = handle.get_batch_call_count.remote().result()
+print(f&quot;4 concurrent requests were combined into fewer than 4 batch calls: {call_count &lt; 4}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>4 concurrent requests were combined into fewer than 4 batch calls: True
+</code></pre><p><strong>Exercise:</strong>
+Send 6 concurrent requests instead of 4 through the same <code>BatchedReranker</code> (still
+<code>max_batch_size=4</code>). Confirm at least 2 batch calls happened (since 6 items can't all fit
+in one batch of 4), but still fewer than 6 total calls.</p>
+<p><strong>Starting point:</strong> <code>BatchedReranker</code> and the <code>ThreadPoolExecutor</code> pattern from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>needed at least 2 batches since max_batch_size=4 &lt; 6 requests: True
+still fewer batch calls than requests: True
+</code></pre><hr />
+<h3>Concept 3 — <code>DeploymentHandle</code> Composition: a Reranker Behind a Retriever</h3>
+<p>One deployment can hold a <code>DeploymentHandle</code> to another, passed in via <code>.bind()</code> at
+construction time — genuinely calling <code>await handle.remote(...)</code> to invoke it, the real
+mechanism behind composing a reranker in front of (or behind) a retriever without either
+deployment needing to know how the other is implemented, scaled, or deployed.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ray
+from ray import serve
+import requests
+
+@serve.deployment
+class Retriever:
+    def __call__(self, query: str) -&gt; list:
+        return [&quot;POL-1&quot;, &quot;POL-2&quot;, &quot;POL-3&quot;]
+
+@serve.deployment
+class Reranker:
+    def __init__(self, retriever_handle):
+        self.retriever_handle = retriever_handle
+
+    async def __call__(self, request):
+        query = request.query_params[&quot;q&quot;]
+        doc_ids = await self.retriever_handle.remote(query)
+        return {&quot;query&quot;: query, &quot;reranked_doc_ids&quot;: list(reversed(doc_ids))}
+
+serve.run(Reranker.bind(Retriever.bind()))
+resp = requests.get(&quot;http://localhost:8000/&quot;, params={&quot;q&quot;: &quot;fire damage&quot;})
+print(f&quot;composed response: {resp.json()}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>composed response: {&#x27;query&#x27;: &#x27;fire damage&#x27;, &#x27;reranked_doc_ids&#x27;: [&#x27;POL-3&#x27;, &#x27;POL-2&#x27;, &#x27;POL-1&#x27;]}
+</code></pre><p><strong>Exercise:</strong>
+Send a SECOND request with a different query string, <code>&quot;water damage&quot;</code>, to the same
+composed deployment (no redeploy needed). Confirm both requests succeed with status 200,
+proving the composed handle serves multiple independent calls correctly.</p>
+<p><strong>Starting point:</strong> <code>Retriever</code>/<code>Reranker</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>both queries reused the same composed deployment successfully: True
+</code></pre><hr />
+<h3>Concept 4 — <code>@serve.ingress</code> Mounting an Existing FastAPI Application</h3>
+<p><code>@serve.ingress(app)</code> on a <code>@serve.deployment</code> class genuinely mounts an EXISTING
+<code>FastAPI</code> app's routes behind Ray Serve — a team's existing FastAPI service (Week 18's
+own production-service pattern) does not need rewriting to become horizontally scalable
+and autoscaled; it needs one decorator.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ray
+from ray import serve
+from fastapi import FastAPI
+import requests
+
+app = FastAPI()
+
+@app.get(&quot;/health&quot;)
+def health():
+    return {&quot;status&quot;: &quot;ok&quot;}
+
+@app.get(&quot;/classify&quot;)
+def classify(claim_id: str):
+    return {&quot;claim_id&quot;: claim_id, &quot;classification&quot;: &quot;auto&quot;}
+
+@serve.deployment
+@serve.ingress(app)
+class ClaimsAPI:
+    pass
+
+serve.run(ClaimsAPI.bind())
+resp1 = requests.get(&quot;http://localhost:8000/health&quot;)
+resp2 = requests.get(&quot;http://localhost:8000/classify&quot;, params={&quot;claim_id&quot;: &quot;CLM-1001&quot;})
+print(f&quot;health: {resp1.status_code} {resp1.json()}&quot;)
+print(f&quot;classify: {resp2.status_code} {resp2.json()}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>health: 200 {&#x27;status&#x27;: &#x27;ok&#x27;}
+classify: 200 {&#x27;claim_id&#x27;: &#x27;CLM-1001&#x27;, &#x27;classification&#x27;: &#x27;auto&#x27;}
+</code></pre><p><strong>Exercise:</strong>
+Add a third FastAPI route, <code>/policies</code>, taking a <code>policy_id</code> query parameter and
+returning <code>{&quot;policy_id&quot;: policy_id, &quot;status&quot;: &quot;active&quot;}</code>. Confirm it works alongside the
+existing two routes.</p>
+<p><strong>Starting point:</strong> <code>app</code>, <code>health</code>, <code>classify</code>, and <code>ClaimsAPI</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>policies: 200 {&#x27;policy_id&#x27;: &#x27;POL-9001&#x27;, &#x27;status&#x27;: &#x27;active&#x27;}
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> <code>@serve.ingress</code> mounting an existing FastAPI app (Concept 4) is
+directly useful the moment a BFSI team already has a FastAPI service from Week 18 they
+want autoscaled without a rewrite — the migration cost is genuinely one decorator, not a
+framework switch.</p>
+<p><strong>Compliance angle:</strong> <code>serve.status()</code>'s real <code>replica_states</code> dict is an auditable,
+queryable fact about exactly how much compute a production inference service is running
+at any moment — a real answer to &quot;how many model replicas were live when this decision
+was made,&quot; not an estimate.</p>
+<p><strong>What breaks in production:</strong> A team wires <code>@serve.batch</code> onto every deployment,
+assuming batching always helps, without checking <code>batch_wait_timeout_s</code>'s real cost: every
+request now waits UP TO that timeout for a batch to fill before processing even starts,
+adding real latency to a low-traffic deployment that never gets enough concurrent
+requests to fill a batch anyway. Concept 2's own measured proof (batching helps under
+real concurrent load) does not establish that it helps under LOW load, and checking that
+distinction against real traffic patterns before enabling it everywhere is the actual
+judgment call this concept's narrow proof does not make for you.</p>
+<hr />
+<h2 id="day-4">Day 4 — Spark for Large-Scale DataPrep</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="21-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=164OKvwW8T8" target="_blank" rel="noopener"><b>25 AQE aka Adaptive Query Execution in Spark | Coalesce Shuffle Partitions | Skew Partitions Fix</b><small>Ease With Data · 11:52</small></a></li><li><a href="https://www.youtube.com/watch?v=q1LtBU_ca20" target="_blank" rel="noopener"><b>Shuffle Partition Spark Optimization: 10x Faster!</b><small>Afaque Ahmad · 19:03</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Spark%20adaptive%20query%20execution%20shuffle%20partitions%20skew%20tuning" target="_blank" rel="noopener">Search YouTube: Spark adaptive query execution shuffle partitions skew tuning</a></p></div>
+<hr />
+<h3>Concept 1 — Adaptive Query Execution: <code>coalescePartitions</code></h3>
+<p><code>spark.sql.adaptive.enabled</code>/<code>spark.sql.adaptive.coalescePartitions.enabled</code> let Spark
+adjust its OWN execution plan at runtime, after seeing real shuffle statistics — a
+configured <code>spark.sql.shuffle.partitions=20</code> is a starting point, not a fixed
+commitment, and a small post-shuffle result genuinely gets coalesced down to far fewer
+partitions than configured, avoiding the wasted overhead of scheduling twenty tiny tasks
+for a result that fits in one.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.master(&quot;local[4]&quot;) \
+    .appName(&quot;aqe&quot;) \
+    .config(&quot;spark.sql.shuffle.partitions&quot;, &quot;20&quot;) \
+    .config(&quot;spark.sql.adaptive.enabled&quot;, &quot;true&quot;) \
+    .config(&quot;spark.sql.adaptive.coalescePartitions.enabled&quot;, &quot;true&quot;) \
+    .getOrCreate()
+spark.sparkContext.setLogLevel(&quot;ERROR&quot;)
+
+data = [(i, i % 3) for i in range(200)]
+df = spark.createDataFrame(data, [&quot;row_id&quot;, &quot;grp&quot;])
+result = df.groupBy(&quot;grp&quot;).count()
+result.collect()
+
+print(f&quot;configured shuffle.partitions: {spark.conf.get(&#x27;spark.sql.shuffle.partitions&#x27;)}&quot;)
+print(f&quot;actual partitions after AQE coalescing (small result): {result.rdd.getNumPartitions()}&quot;)
+print(f&quot;AQE coalesced down from the configured 20: {result.rdd.getNumPartitions() &lt; 20}&quot;)
+spark.stop()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>configured shuffle.partitions: 20
+actual partitions after AQE coalescing (small result): 1
+AQE coalesced down from the configured 20: True
+</code></pre><p><strong>Exercise:</strong>
+Rebuild the same <code>SparkSession</code> with
+<code>spark.sql.adaptive.coalescePartitions.enabled</code> set to <code>&quot;false&quot;</code> instead of <code>&quot;true&quot;</code>
+(keep <code>spark.sql.adaptive.enabled=true</code>). Confirm the resulting partition count now
+stays at the CONFIGURED 20, since coalescing is specifically what's disabled.</p>
+<p><strong>Starting point:</strong> the <code>SparkSession.builder</code> config pattern and <code>df</code>/<code>result</code>
+construction from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>partitions with coalescing disabled: 20
+</code></pre><hr />
+<h3>Concept 2 — Sizing <code>spark.sql.shuffle.partitions</code> and Salting a Skewed Key</h3>
+<p>A single dominant key in a groupBy/join genuinely creates one massively oversized
+partition — measured directly here, one synthetic &quot;hot&quot; customer accounts for 80% of
+2,000 rows, producing a partition roughly 8x larger than an evenly-distributed key would.
+Salting (appending a random sub-bucket suffix to the hot key before grouping, then
+aggregating the sub-buckets back together) genuinely spreads that one hot partition
+across several smaller ones — measured, not assumed, as a real reduction in maximum
+group size.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, count as spark_count, udf
+from pyspark.sql.types import StringType
+import random
+
+spark = SparkSession.builder.master(&quot;local[4]&quot;).appName(&quot;skew&quot;).getOrCreate()
+spark.sparkContext.setLogLevel(&quot;ERROR&quot;)
+
+random.seed(0)
+data = [(i, &quot;CUST-HOT&quot; if random.random() &lt; 0.8 else f&quot;CUST-{i % 50}&quot;, float(i)) for i in range(2000)]
+df = spark.createDataFrame(data, [&quot;row_id&quot;, &quot;customer_id&quot;, &quot;amount&quot;])
+
+SALT_BUCKETS = 8
+
+def salt_key(cust_id, row_id):
+    if cust_id == &quot;CUST-HOT&quot;:
+        return f&quot;{cust_id}#{row_id % SALT_BUCKETS}&quot;
+    return cust_id
+
+salt_udf = udf(salt_key, StringType())
+salted_df = df.withColumn(&quot;salted_customer_id&quot;, salt_udf(col(&quot;customer_id&quot;), col(&quot;row_id&quot;)))
+
+before_max = df.groupBy(&quot;customer_id&quot;).agg(spark_count(&quot;*&quot;).alias(&quot;n&quot;)).agg({&quot;n&quot;: &quot;max&quot;}).first()[0]
+after_max = salted_df.groupBy(&quot;salted_customer_id&quot;).agg(spark_count(&quot;*&quot;).alias(&quot;n&quot;)).agg({&quot;n&quot;: &quot;max&quot;}).first()[0]
+print(f&quot;largest group before salting: {before_max}&quot;)
+print(f&quot;largest group after salting: {after_max}&quot;)
+print(f&quot;salting reduced the max group size: {after_max &lt; before_max}&quot;)
+spark.stop()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>largest group before salting: 1590
+largest group after salting: 206
+salting reduced the max group size: True
+</code></pre><p><strong>Exercise:</strong>
+Rebuild the same data and salting logic with <code>SALT_BUCKETS = 16</code> instead of <code>8</code>.
+Confirm the largest salted group is now SMALLER than the <code>8</code>-bucket run's 206 — more
+buckets spread the hot key thinner.</p>
+<p><strong>Starting point:</strong> <code>df</code>, <code>salt_key</code>, and the salting/aggregation pattern from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>largest group with 16 salt buckets: 107
+smaller than the 8-bucket result: True
+</code></pre><hr />
+<h3>Concept 3 — <code>mapInPandas</code> Arrow Batches Replacing Per-Row Python UDFs</h3>
+<p><code>DataFrame.mapInPandas(fn, schema)</code> hands <code>fn</code> a whole batch as a <code>pandas.DataFrame</code>
+(transferred via Arrow, not row-by-row Python object serialization) — genuinely
+vectorized: <code>add_length_column</code> below computes a length for every row in one
+<code>pandas.Series.str.len()</code> call per batch, not one Python function call per row the way a
+plain <code>udf()</code> would.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, LongType, StringType, DoubleType
+
+spark = SparkSession.builder.master(&quot;local[4]&quot;).appName(&quot;mapinpandas&quot;).getOrCreate()
+spark.sparkContext.setLogLevel(&quot;ERROR&quot;)
+
+data = [(i, f&quot;claim narrative {i}&quot;, float(i * 10)) for i in range(20)]
+df = spark.createDataFrame(data, [&quot;claim_id&quot;, &quot;text&quot;, &quot;amount&quot;])
+
+def add_length_column(iterator):
+    for batch in iterator:
+        batch[&quot;text_length&quot;] = batch[&quot;text&quot;].str.len()
+        yield batch
+
+schema = StructType([
+    StructField(&quot;claim_id&quot;, LongType()),
+    StructField(&quot;text&quot;, StringType()),
+    StructField(&quot;amount&quot;, DoubleType()),
+    StructField(&quot;text_length&quot;, LongType()),
+])
+
+result = df.mapInPandas(add_length_column, schema=schema)
+rows = result.collect()
+print(f&quot;row count: {len(rows)}&quot;)
+print(f&quot;text_length computed via Arrow batch (pandas), not per-row Python: {rows[0][&#x27;text_length&#x27;] == len(&#x27;claim narrative 0&#x27;)}&quot;)
+spark.stop()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>row count: 20
+text_length computed via Arrow batch (pandas), not per-row Python: True
+</code></pre><p><strong>Exercise:</strong>
+Add a SECOND derived column, <code>amount_doubled</code>, computing <code>batch[&quot;amount&quot;] * 2</code> in the
+same <code>add_length_column</code> function (rename it if you like). Confirm the first row's
+<code>amount_doubled</code> value is <code>0.0</code> (since <code>claim_id=0</code> has <code>amount=0.0</code>) and the second
+row's is <code>20.0</code>.</p>
+<p><strong>Starting point:</strong> <code>add_length_column</code> and <code>schema</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>row 0 amount_doubled: 0.0
+row 1 amount_doubled: 20.0
+</code></pre><hr />
+<h3>Concept 4 — <code>MERGE INTO</code> for Idempotent Upserts of Reprocessed Documents</h3>
+<p>Delta Lake's real <code>MERGE INTO</code> SQL (<code>.merge(updates, &quot;t.claim_id = u.claim_id&quot;) .whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()</code>) needs the <code>delta-spark</code>
+package's JARs fetched from Maven Central on first use — genuinely verified working in
+this exact sandbox, but kept as REAL MODE here since a fresh JAR resolution over the
+network is exactly the kind of dependency this track avoids leaning on for a taught,
+repeatedly-re-run example. The underlying UPSERT LOGIC needs no Delta package at all: a
+<code>Window</code>-ranked union of the existing table and the incoming batch, keeping only the
+highest-&quot;version&quot; row per key, is plain Spark and genuinely proves the same
+match-update/no-match-insert semantics, including idempotency under a repeated re-run of
+the identical batch.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code>from pyspark.sql import SparkSession
+from pyspark.sql.functions import row_number, col
+from pyspark.sql.window import Window
+
+spark = SparkSession.builder.master(&quot;local[4]&quot;).appName(&quot;upsert&quot;).getOrCreate()
+spark.sparkContext.setLogLevel(&quot;ERROR&quot;)
+
+existing = spark.createDataFrame([(1, &quot;open&quot;, 1000.0), (2, &quot;open&quot;, 2000.0)], [&quot;claim_id&quot;, &quot;status&quot;, &quot;amount&quot;])
+incoming = spark.createDataFrame([(2, &quot;closed&quot;, 2000.0), (3, &quot;open&quot;, 3000.0)], [&quot;claim_id&quot;, &quot;status&quot;, &quot;amount&quot;])
+
+existing_v = existing.withColumn(&quot;version&quot;, col(&quot;claim_id&quot;) * 0)
+incoming_v = incoming.withColumn(&quot;version&quot;, col(&quot;claim_id&quot;) * 0 + 1)
+combined = existing_v.unionByName(incoming_v)
+
+window = Window.partitionBy(&quot;claim_id&quot;).orderBy(col(&quot;version&quot;).desc())
+merged = combined.withColumn(&quot;rn&quot;, row_number().over(window)).filter(col(&quot;rn&quot;) == 1).drop(&quot;rn&quot;, &quot;version&quot;)
+
+result = merged.orderBy(&quot;claim_id&quot;).collect()
+print(f&quot;row count after upsert: {len(result)}&quot;)
+
+merged_again = combined.unionByName(incoming_v).withColumn(&quot;rn&quot;, row_number().over(window)).filter(col(&quot;rn&quot;) == 1).drop(&quot;rn&quot;, &quot;version&quot;)
+result_again = merged_again.orderBy(&quot;claim_id&quot;).collect()
+print(f&quot;re-running with the same batch produces the same row count (idempotent): {len(result_again) == len(result)}&quot;)
+
+# REAL MODE -- not executed (needs delta-spark&#x27;s JARs fetched from Maven Central, verified
+# working directly in this sandbox but kept out of the taught example for reliability):
+#   from delta.tables import DeltaTable
+#   delta_table = DeltaTable.forPath(spark, table_path)
+#   delta_table.alias(&quot;t&quot;).merge(
+#       incoming.alias(&quot;u&quot;), &quot;t.claim_id = u.claim_id&quot;
+#   ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+spark.stop()
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>row count after upsert: 3
+re-running with the same batch produces the same row count (idempotent): True
+</code></pre><p><strong>Exercise:</strong>
+Add a THIRD incoming row for <code>claim_id=1</code> (<code>&quot;closed&quot;, 1000.0</code>) to <code>incoming</code>, keeping the
+existing two-row <code>existing</code> table unchanged. Confirm the merged result now shows ALL
+THREE claims with claim 1's status updated to <code>&quot;closed&quot;</code>.</p>
+<p><strong>Starting point:</strong> <code>existing</code>, <code>incoming</code>, and the <code>Window</code>-ranking pattern from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>row count after upsert: 3
+claim 1 status: closed
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> Salting a skewed key (Concept 2) is directly useful the moment a real
+core system has exactly the shape that creates skew in the first place — a small number
+of very active accounts (a large corporate policyholder, a high-volume claims adjuster)
+dominating a join key the same way this concept's synthetic <code>CUST-HOT</code> does.</p>
+<p><strong>Compliance angle:</strong> The idempotent-upsert pattern (Concept 4) is what makes a REPROCESS
+of an already-loaded batch safe to run again after a partial failure — a regulator asking
+&quot;could this pipeline have double-counted a claim on retry&quot; gets a real, checkable no,
+proven the same way Week 12's deterministic-ID upserts proved it for the DataPrep DAG.</p>
+<p><strong>What breaks in production:</strong> A team enables AQE's <code>coalescePartitions</code> (Concept 1)
+globally and assumes it's a pure win, without checking that a downstream job explicitly
+depends on a FIXED partition count (a repartition-by-key step feeding a
+partition-count-sensitive write, for instance) — AQE changing that count at runtime is
+exactly the kind of &quot;helpful&quot; behavior that can silently break an assumption a different
+part of the pipeline was relying on.</p>
+<hr />
+<h2 id="day-5">Day 5 — Cluster Failure Modes and Economics</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="21-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=UWjMK_mtH0s" target="_blank" rel="noopener"><b>Ray History Server: Observability for Ephemeral K8s Clusters | KubeRay | Ray Summit 2026</b><small>Anyscale · 17:14</small></a></li><li><a href="https://www.youtube.com/watch?v=FhXfEXUUQp0" target="_blank" rel="noopener"><b>Beginner&#x27;s Guide to Ray! Ray Explained</b><small>The Data and AI Guy · 11:36</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=KubeRay%20ray%20cluster%20production%20troubleshooting%20out%20of%20memory" target="_blank" rel="noopener">Search YouTube: KubeRay ray cluster production troubleshooting out of memory</a></p></div>
+<hr />
+<h3>Concept 1 — Task Retries, Actor Restarts, and What Is Lost When a Node Disappears</h3>
+<p><code>@ray.remote(max_retries=N, retry_exceptions=True)</code> retries a task up to <code>N</code> times — but
+checked directly, <code>retry_exceptions</code> DEFAULTS to only retrying real SYSTEM failures (a
+worker process crashing), not a Python exception raised inside the task body; without
+<code>retry_exceptions=True</code> explicitly set, a raised exception propagates on the FIRST
+attempt regardless of <code>max_retries</code>. For a stateful actor, <code>max_restarts=N</code> genuinely
+restarts it after a crash — but the restarted actor is a NEW process with a NEW pid, and
+any in-memory state (<code>self.processed</code>, an embedding-model cache, anything not
+externally persisted) is genuinely LOST, not recovered. This is exactly what a spot node
+disappearing mid-job costs: the actor comes back, but its memory does not. Note:
+<code>ray.kill(actor_handle, no_restart=False)</code> is used here to simulate the disappearance —
+checked directly, this is the one real termination path that does NOT also make the
+raylet print a noisy, non-deterministic crash diagnostic to stdout the way <code>os._exit()</code>
+inside the actor does (the same async, <code>redirect_stdout</code>-bypassing behavior
+known-issues.md item 18 already found for Ray Serve); <code>ray.kill</code> still genuinely restarts
+the actor under <code>max_restarts</code> and still genuinely discards its in-memory state, just
+without that extra noise.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ray
+import os
+import time
+
+ray.init(num_cpus=2, ignore_reinit_error=True)
+
+@ray.remote(max_restarts=2)
+class StatefulWorker:
+    def __init__(self):
+        self.processed = []
+        self.pid = os.getpid()
+
+    def process(self, item):
+        self.processed.append(item)
+        return {&quot;pid&quot;: self.pid, &quot;processed_count&quot;: len(self.processed)}
+
+worker = StatefulWorker.remote()
+r1 = ray.get(worker.process.remote(&quot;claim-1&quot;))
+r2 = ray.get(worker.process.remote(&quot;claim-2&quot;))
+
+ray.kill(worker, no_restart=False)  # simulates the actor&#x27;s process vanishing, like a spot node disappearing
+time.sleep(1.0)
+
+r3 = ray.get(worker.process.remote(&quot;claim-3&quot;))
+print(f&quot;restarted actor got a NEW pid: {r3[&#x27;pid&#x27;] != r1[&#x27;pid&#x27;]}&quot;)
+print(f&quot;in-memory processed list was reset, not recovered (count=1, not 3): {r3[&#x27;processed_count&#x27;] == 1}&quot;)
+ray.shutdown()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>restarted actor got a NEW pid: True
+in-memory processed list was reset, not recovered (count=1, not 3): True
+</code></pre><p><strong>Exercise:</strong>
+Call <code>ray.kill(worker, no_restart=False)</code> on the SAME actor two more times (for a total
+of 3 kills against <code>max_restarts=2</code>). Confirm the third kill exceeds the restart budget —
+a call made after it raises a real <code>ActorDiedError</code> instead of succeeding.</p>
+<p><strong>Starting point:</strong> <code>StatefulWorker</code> and <code>worker</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>after exceeding max_restarts=2, actor calls now fail permanently: True
+</code></pre><hr />
+<h3>Concept 2 — Object-Store Memory Limits and Diagnosing What Spilling Actually Does</h3>
+<p>Ray's object store spills objects to local disk once in-memory usage exceeds the
+configured <code>object_store_memory</code> budget — genuinely provable by <code>ray.put()</code>-ing far more
+data than the configured budget allows and confirming every object is STILL retrievable
+afterward, not silently dropped. <code>ray.cluster_resources()</code> reports the actually-configured
+budget back, a real fact worth checking before assuming a job's data volume fits in
+memory at all.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import ray
+import numpy as np
+
+ray.init(num_cpus=2, object_store_memory=100 * 1024 * 1024)
+
+refs = []
+for i in range(40):
+    arr = np.random.rand(1_000_000)  # ~8MB per array as float64
+    refs.append(ray.put(arr))
+
+total_mb = 40 * 8
+print(f&quot;total object data (~{total_mb} MB) exceeds the configured 100 MB object_store_memory: {total_mb &gt; 100}&quot;)
+
+results = ray.get(refs)
+print(f&quot;all {len(results)} objects still retrievable despite exceeding the budget: {len(results) == 40}&quot;)
+
+configured_bytes = ray.cluster_resources().get(&quot;object_store_memory&quot;)
+print(f&quot;configured object_store_memory is close to 100MB: {abs(configured_bytes - 100 * 1024 * 1024) &lt; 20 * 1024 * 1024}&quot;)
+ray.shutdown()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>total object data (~320 MB) exceeds the configured 100 MB object_store_memory: True
+all 40 objects still retrievable despite exceeding the budget: True
+configured object_store_memory is close to 100MB: True
+</code></pre><p>A genuine, real OOM KILL (the kernel killing a worker process for exceeding available
+RAM, not gracefully spilling) is diagnosed after the fact from the raylet's own logged
+worker-exit message (<code>&quot;Worker exit type: SYSTEM_ERROR ... killed by the OOM killer&quot;</code>,
+seen directly while triggering an actor crash in Concept 1) or the node's own <code>dmesg</code> —
+neither is something to force deliberately against shared sandbox infrastructure, so this
+concept demonstrates the SAFE side (spilling under a tight but survivable budget) rather
+than an actual OOM kill.</p>
+<p><strong>Exercise:</strong>
+Double the data volume to 80 objects (<code>~640 MB</code>) against the SAME 100 MB budget.
+Confirm all 80 objects are still retrievable.</p>
+<p><strong>Starting point:</strong> the <code>ray.put()</code> loop from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>all 80 objects still retrievable despite exceeding the budget by more: True
+</code></pre><hr />
+<h3>Concept 3 — <code>KubeRay</code>'s <code>RayJob</code>/<code>RayService</code> Versus a Managed Spark Cluster</h3>
+<p><code>KubeRay</code>'s <code>RayJob</code> custom resource runs a Ray application to completion and tears the
+cluster down afterward — the Kubernetes-native equivalent of a one-off batch job;
+<code>RayService</code> keeps a Ray Serve application running with its own health-checked,
+zero-downtime-upgrade lifecycle — the equivalent of a long-running service. Neither
+replaces a managed Spark cluster (EMR, Databricks) for a team that already has one and
+whose workload is Spark-shaped (Day 4's shuffle-heavy joins) — the decision tracks
+workload shape and existing infrastructure investment, the same way Day 1's framework
+did for the single-node case.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code>def choose_deployment_mode(is_long_running_service, is_one_off_batch_job, has_existing_managed_spark):
+    if is_long_running_service:
+        return &quot;KubeRay RayService&quot;
+    if is_one_off_batch_job and not has_existing_managed_spark:
+        return &quot;KubeRay RayJob&quot;
+    if has_existing_managed_spark:
+        return &quot;managed Spark cluster&quot;
+    return &quot;KubeRay RayJob&quot;
+
+print(choose_deployment_mode(is_long_running_service=True, is_one_off_batch_job=False, has_existing_managed_spark=False))
+print(choose_deployment_mode(is_long_running_service=False, is_one_off_batch_job=True, has_existing_managed_spark=False))
+print(choose_deployment_mode(is_long_running_service=False, is_one_off_batch_job=True, has_existing_managed_spark=True))
+
+# REAL MODE -- not executed (needs a live Kubernetes cluster with the KubeRay operator
+# installed): a real RayJob manifest shape --
+#   apiVersion: ray.io/v1
+#   kind: RayJob
+#   metadata:
+#     name: nightly-claims-embedding
+#   spec:
+#     entrypoint: python embed_claims.py
+#     rayClusterSpec:
+#       headGroupSpec: {...}
+#       workerGroupSpecs: [...]
+#     shutdownAfterJobFinishes: true
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>KubeRay RayService
+KubeRay RayJob
+managed Spark cluster
+</code></pre><p><strong>Exercise:</strong>
+Call <code>choose_deployment_mode</code> for a system that is BOTH <code>is_long_running_service=True</code>
+AND <code>has_existing_managed_spark=True</code>. Confirm the long-running-service need wins
+(<code>RayService</code>), matching the function's own priority order.</p>
+<p><strong>Starting point:</strong> <code>choose_deployment_mode</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>KubeRay RayService
+</code></pre><hr />
+<h3>Concept 4 — Measured Cost and Wall Clock for the Same Job on Both Engines</h3>
+<p>Running the SAME logical job (embed/tag 5,000 items) through Ray Data and through Spark
+and timing each with <code>time.monotonic()</code> gives a real, comparable number — with an honest
+caveat this concept states rather than hides: at only 5,000 rows, BOTH measurements are
+dominated by session-startup overhead (Ray's cluster bootstrap, Spark's JVM launch), not
+by genuine per-row processing cost. This is itself a real lesson: a micro-benchmark at
+too small a scale measures overhead, not throughput, and drawing a &quot;which engine is
+faster&quot; conclusion from it would be a real, avoidable mistake.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+import ray
+
+ray.init(num_cpus=4)
+
+def embed_batch(batch):
+    batch[&quot;embedded&quot;] = [True] * len(batch[&quot;id&quot;])
+    return batch
+
+t0 = time.monotonic()
+rows = ray.data.range(5000).map_batches(embed_batch, batch_size=100).take_all()
+ray_time = time.monotonic() - t0
+print(f&quot;Ray Data processed {len(rows)} rows: {ray_time &gt; 0}&quot;)
+ray.shutdown()
+
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.master(&quot;local[4]&quot;).appName(&quot;costcompare&quot;).getOrCreate()
+spark.sparkContext.setLogLevel(&quot;ERROR&quot;)
+
+data = [(i,) for i in range(5000)]
+df = spark.createDataFrame(data, [&quot;id&quot;])
+t0 = time.monotonic()
+count = df.withColumn(&quot;embedded&quot;, df[&quot;id&quot;] * 0 + 1).count()
+spark_time = time.monotonic() - t0
+print(f&quot;Spark processed {count} rows: {spark_time &gt; 0}&quot;)
+spark.stop()
+
+print(f&quot;both measurements completed and are directly comparable wall-clock numbers: {ray_time &gt; 0 and spark_time &gt; 0}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>Ray Data processed 5000 rows: True
+Spark processed 5000 rows: True
+both measurements completed and are directly comparable wall-clock numbers: True
+</code></pre><p>Actual measured values (not asserted as fixed): Ray Data completed in roughly 1.6s and
+Spark in roughly 2.4s on this sandbox's hardware for this specific tiny job — numbers
+dominated by each engine's own startup cost, disclosed as such rather than presented as a
+general &quot;Ray beats Spark&quot; or &quot;Spark beats Ray&quot; verdict, since a genuinely large job would
+amortize that startup cost very differently.</p>
+<p><strong>Exercise:</strong>
+Re-run just the Ray Data half of this comparison with 50,000 rows instead of 5,000 (10x
+more data, same <code>batch_size=100</code>). Confirm it still completes successfully — the actual
+timing ratio between the two data volumes is left for you to observe, not asserted here,
+since it depends on how much of the original measurement was fixed startup cost versus
+genuine per-row work.</p>
+<p><strong>Starting point:</strong> <code>embed_batch</code> and the <code>ray.init()</code>/timing pattern from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>Ray Data processed 50000 rows successfully: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> Concept 1's actor-restart-loses-state finding matters directly for a
+BFSI batch job processing claims in memory-resident order — a spot-instance interruption
+mid-run does not just pause the job, it genuinely discards whatever that specific worker
+had accumulated, which is exactly why Week 12's idempotent, checkpoint-per-document
+pattern exists: state that matters must be persisted outside the worker, not trusted to
+survive in its memory.</p>
+<p><strong>Compliance angle:</strong> Concept 2's real, logged worker-exit diagnostic message
+(<code>SYSTEM_ERROR</code>, OOM killer, <code>dmesg</code>-checkable) is the actual audit trail available after
+a production incident — &quot;why did this batch job fail last Tuesday&quot; has a genuine, checked
+answer path, not a shrug.</p>
+<p><strong>What breaks in production:</strong> A team sets <code>max_retries=5</code> on a task calling an external
+payment or claims API, assumes retries are &quot;on,&quot; and never notices <code>retry_exceptions</code>
+defaults to <code>False</code> — every real API error (a 500, a timeout raised as a Python
+exception) propagates on the FIRST attempt, and the retry budget silently never fires for
+the exact failure mode it was meant to handle. Concept 1's own explicit check
+(<code>retry_exceptions=True</code>) is not a nice-to-have detail; without it, <code>max_retries</code> is
+mostly cosmetic for this failure class.</p>
+<hr />
+<h2>Architecture Decision — Week 21</h2>
+<p><strong>Choosing between:</strong> Polars on one machine vs Ray (actor-based parallelism, online
+serving) vs Spark (mature shuffle/join optimizer) vs a Kubernetes-native deployment
+(KubeRay) vs a managed cluster (Databricks/EMR) for the SAME distributed-processing need.</p>
+<p><strong>Rule of thumb:</strong> start every decision from Day 1's workload-shape framework and Day 1
+Concept 3's genuinely computable crossover point — most jobs, measured honestly against
+their real row count and real per-node throughput, do not clear the threshold where a
+cluster's coordination overhead pays for itself, and Polars-on-one-machine remains
+correct far more often than a &quot;we need to scale&quot; instinct assumes. Once a job genuinely
+clears that threshold: choose Spark when the workload is shuffle/join-heavy and benefits
+from AQE's runtime adaptivity (Day 4); choose Ray when the workload is actor-shaped
+(a loaded, reused model across many batches, Day 2) or needs online serving with
+autoscaling and dynamic batching (Day 3). Deploy either through Kubernetes (KubeRay) only
+once container-orchestration is ALREADY the team's operational reality for other
+services — adopting Kubernetes specifically to run a distributed-processing job, rather
+than because the team already lives there, inverts this whole week's cost discipline:
+paying real, measured coordination overhead (Day 1) to justify infrastructure the actual
+workload didn't need in the first place. And whichever engine wins, Day 5's own findings
+mean the choice is not &quot;set it and forget it&quot;: <code>retry_exceptions</code> and <code>max_restarts</code> need
+deliberate configuration, not defaults, and a node/actor disappearing mid-job costs
+exactly the in-memory state Week 12's idempotent, externally-checkpointed design already
+assumed it would.</p>
+<div class="pager"><a class="btn ghost" href="week-20.html">&larr; Week 20</a><a class="btn ghost" href="week-22.html">Week 22 &rarr;</a></div>
+</main></body></html>

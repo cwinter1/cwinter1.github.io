@@ -1,0 +1,1491 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 25 — Reranking Layers</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/how-does-a-reranker-work" target="_blank" rel="noopener">How does a Reranker work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/decoding-colbert" target="_blank" rel="noopener">What is ColBERT?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="25" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 25 — Reranking Layers</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>5 — Compound AI Systems &amp; Evaluation / RAG (24-27)</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Two-stage retrieval: recall-oriented first stage, precision-oriented reranking second stage</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 24's retrieval mechanics (<code>retrieve</code>, its <code>CORPUS</code>, and <code>reciprocal_rank_fusion</code>) are the first stage this week reranks on top of — Day 1 reuses <code>retrieve</code> directly rather than rebuilding first-stage retrieval from scratch.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. Package availability checked directly in this sandbox: <code>sentence-transformers</code> (6.1.0) installs and imports cleanly, and its <code>CrossEncoder</code> class imports without error — but <code>CrossEncoder(&quot;cross-encoder/ms-marco-TinyBERT-L-2-v2&quot;)</code> (a genuinely tiny, ~4M-parameter checkpoint chosen specifically to be small enough to download here) fails with <code>httpx.ProxyError: 403 Forbidden</code> against <code>huggingface.co</code> the moment it tries to fetch model weights — confirmed directly, the same sandbox-egress gap known-issues.md item 9 already documents for <code>tiktoken</code>'s vocab file. <code>cohere</code> is not installed and no API key is configured. Day 2 therefore shows <code>CrossEncoder</code>'s real Python API surface (constructor, <code>.predict()</code>, batching, truncation) as REAL MODE reference syntax, with a hand-rolled joint-scoring stand-in built and executed for real to demonstrate the identical batching and 512-token-truncation <em>mechanics</em> without needing the blocked download. Day 3 (Cohere) is REAL MODE reference syntax for the actual <code>co.rerank()</code> call, with the surrounding circuit-breaker/timeout-degradation logic built and executed for real. Days 1, 4, and 5 are almost entirely genuinely executable — retrieval/reranking orchestration, latency/cost arithmetic, and nDCG@10/MRR computation need no live service at all.</td>
+</tr>
+</tbody>
+</table>
+<p>No copy-in requirement for this week per <code>ROADMAP.md</code>'s Phase 5 spec row — Day 1 still
+genuinely reuses Week 24's own <code>retrieve()</code> function and corpus shape as its first stage,
+which is real in-track reuse, just not a ROADMAP-mandated cross-track copy-in.</p>
+<p>Week 24 closed with a labeled bake-off showing plain query rewriting beating RRF fusion on
+<code>MRR</code>, not just <code>recall@3</code> — a reminder that recall and precision are different questions.
+This week pulls that thread further: a first-stage retriever tuned to cast a WIDE net
+(catch every plausibly relevant chunk, even at the cost of noise) hands its candidates to a
+second-stage reranker tuned to be PRECISE (put the single best answer at rank 1), and the
+two stages exist because no single model is cheap enough to run precisely over an entire
+corpus AND accurate enough to trust blindly over a shortlist. Day 1 builds the two-stage
+shape itself. Day 2 makes the second stage a real, self-hostable cross-encoder. Day 3 makes
+it a hosted API instead, with the production safety net a hosted dependency needs. Day 4
+prices the whole thing. Day 5 proves — measured, not assumed — whether any of it was worth
+it.</p>
+<hr />
+<h2 id="day-1">Day 1 — Two-Stage Retrieval Architecture</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="25-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=jjll_YlwJn0" target="_blank" rel="noopener"><b>Reranking with Cross-Encoders: The Cheap Trick That Fixes RAG Search</b><small>Easy Explain · 13:46</small></a></li><li><a href="https://www.youtube.com/watch?v=3w_D1L0F-uE" target="_blank" rel="noopener"><b>LangChain Advanced RAG - Two-Stage Retrieval with Cross Encoder (BERT)</b><small>Coding Crash Courses · 14:21</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=cross%20encoder%20reranker%20two%20stage%20retrieval%20RAG%20architecture" target="_blank" rel="noopener">Search YouTube: cross encoder reranker two stage retrieval RAG architecture</a></p></div>
+<hr />
+<h3>Concept 1 — A Wide Net, Then a Narrow One</h3>
+<p>A single-stage retriever has to pick one operating point: retrieve few candidates and risk
+missing the answer, or retrieve many and hand the generator a pile of mostly-irrelevant
+context. Two-stage retrieval refuses that trade-off by splitting it across two models with
+different jobs. Stage one is recall-oriented: cheap enough to run over the WHOLE corpus,
+tuned to cast a wide net at <code>top_n</code> (typically 50-100 candidates in production, a smaller
+<code>top_n</code> here to fit this week's small demo corpus), accepting noise in exchange for rarely
+missing the true answer. Stage two is precision-oriented: expensive per item, so it only
+ever runs over stage one's short candidate list, and its job is to find the single best
+answer inside that list and put it at rank 1, at a narrow <code>top_k</code> of 3-5. Week 24's
+<code>retrieve()</code> — a bag-of-words cosine retriever standing in for a real embedding index, the
+same stand-in pattern that week used throughout — is reused here unchanged as the first
+stage; the second stage below is new to this week.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import math
+
+def tokenize(text):
+    return text.lower().replace(&quot;,&quot;, &quot; &quot;).replace(&quot;.&quot;, &quot; &quot;).split()
+
+VOCAB = {
+    &quot;free&quot;, &quot;look&quot;, &quot;period&quot;, &quot;cancel&quot;, &quot;cancellation&quot;, &quot;refund&quot;, &quot;premium&quot;, &quot;return&quot;,
+    &quot;days&quot;, &quot;reinstate&quot;, &quot;reinstatement&quot;, &quot;lapse&quot;, &quot;lapsed&quot;, &quot;grace&quot;, &quot;deductible&quot;,
+    &quot;waive&quot;, &quot;waiver&quot;, &quot;beneficiary&quot;, &quot;change&quot;, &quot;claim&quot;, &quot;rider&quot;, &quot;endorsement&quot;,
+    &quot;underwriting&quot;, &quot;medical&quot;, &quot;exam&quot;, &quot;glass&quot;, &quot;windshield&quot;, &quot;crack&quot;, &quot;chip&quot;, &quot;repair&quot;,
+    &quot;comprehensive&quot;, &quot;coverage&quot;, &quot;towing&quot;, &quot;rock&quot;, &quot;roadside&quot;, &quot;rental&quot;, &quot;reimbursement&quot;,
+    &quot;flood&quot;, &quot;water&quot;, &quot;basement&quot;, &quot;sump&quot;, &quot;pump&quot;, &quot;backup&quot;, &quot;sewer&quot;, &quot;drain&quot;, &quot;mold&quot;,
+    &quot;wind&quot;, &quot;hail&quot;, &quot;roof&quot;, &quot;shingle&quot;, &quot;storm&quot;, &quot;damage&quot;, &quot;fire&quot;, &quot;smoke&quot;, &quot;theft&quot;,
+    &quot;liability&quot;, &quot;bodily&quot;, &quot;injury&quot;, &quot;property&quot;, &quot;umbrella&quot;, &quot;excess&quot;, &quot;earthquake&quot;,
+}
+
+# Reusing Week 24&#x27;s CORPUS shape and retrieve() unchanged as this week&#x27;s first stage --
+# extended with property-line documents this week&#x27;s queries need.
+CORPUS = [
+    (&quot;DOC-B&quot;, &quot;Roadside assistance: towing, flat tire changes, and lockout service are included at no extra premium under the standard auto rider.&quot;),
+    (&quot;DOC-C&quot;, &quot;Rental reimbursement: a daily rental car allowance applies while a covered vehicle is in the shop after an approved claim.&quot;),
+    (&quot;DOC-5&quot;, &quot;Grace period for premium payment: coverage stays active for 31 days past the due date before the policy lapses for nonpayment.&quot;),
+    (&quot;DOC-4&quot;, &quot;Deductible waiver rider: this rider waives the standard deductible for the first claim filed after the rider&#x27;s effective date.&quot;),
+    (&quot;DOC-A&quot;, &quot;Auto glass coverage: chip and crack repair to the windshield or any vehicle glass is covered in full with no deductible under the standard comprehensive endorsement, regardless of how the damage occurred.&quot;),
+    (&quot;DOC-1&quot;, &quot;Free look period: a new auto policy may be canceled within 10 days of issue for a full premium refund, no questions asked.&quot;),
+    (&quot;DOC-2&quot;, &quot;Reinstatement after lapse: a lapsed policy can be reinstated within 90 days of lapse if all past-due premium is paid, without new underwriting.&quot;),
+    (&quot;DOC-3&quot;, &quot;Beneficiary changes: the policyholder may change the named beneficiary at any time before a claim is filed, using the standard change-of-beneficiary form.&quot;),
+    (&quot;DOC-6&quot;, &quot;Sump pump backup coverage: damage from sump pump or sewer drain backup is covered up to the rider limit, separate from the standard flood exclusion.&quot;),
+    (&quot;DOC-7&quot;, &quot;Wind and hail roof damage: shingle damage from a wind or hail storm is covered under the standard property policy, subject to the wind hail deductible.&quot;),
+    (&quot;DOC-8&quot;, &quot;Mold remediation: mold caused by a covered water damage event is covered up to a sublimit; mold from long term neglect is excluded.&quot;),
+    (&quot;DOC-9&quot;, &quot;Umbrella excess liability: this policy provides additional liability coverage above the underlying auto and homeowners policy limits for bodily injury and property damage claims.&quot;),
+    (&quot;DOC-10&quot;, &quot;Fire and smoke damage: direct fire damage and resulting smoke damage to the dwelling and personal property are covered under the base property policy with no separate sublimit.&quot;),
+]
+
+def bow(text):
+    toks = tokenize(text)
+    return {t: toks.count(t) for t in toks if t in VOCAB}
+
+def cosine(v1, v2):
+    common = set(v1) &amp; set(v2)
+    dot = sum(v1[t] * v2[t] for t in common)
+    n1 = math.sqrt(sum(x * x for x in v1.values())) or 1.0
+    n2 = math.sqrt(sum(x * x for x in v2.values())) or 1.0
+    return dot / (n1 * n2)
+
+def retrieve(query_text, k=3, corpus=CORPUS):
+    qv = bow(query_text)
+    scored = [(doc_id, cosine(qv, bow(text))) for doc_id, text in corpus]
+    scored.sort(key=lambda x: -x[1])
+    return scored[:k]
+
+def first_stage(query_text, top_n=6, corpus=CORPUS):
+    return retrieve(query_text, k=top_n, corpus=corpus)
+
+# The second stage is a JOINT scorer -- it looks at the query and the candidate document
+# TOGETHER (unigram overlap plus bigram/exact-phrase overlap), something a bag-of-words
+# cosine similarity (which scores query and document independently) cannot see.
+doc_lookup = {doc_id: text for doc_id, text in CORPUS}
+
+def cross_encode(query_text, doc_text):
+    q_toks = tokenize(query_text)
+    d_toks = tokenize(doc_text)
+    q_bigrams = set(zip(q_toks, q_toks[1:]))
+    d_bigrams = set(zip(d_toks, d_toks[1:]))
+    unigram_overlap = len(set(q_toks) &amp; set(d_toks))
+    bigram_overlap = len(q_bigrams &amp; d_bigrams)
+    return unigram_overlap + 3 * bigram_overlap
+
+def second_stage(query_text, candidate_ids, top_k=3):
+    scored = [(cid, cross_encode(query_text, doc_lookup[cid])) for cid in candidate_ids]
+    scored.sort(key=lambda x: -x[1])
+    return scored[:top_k]
+
+query = &quot;water came up through the drain into my basement do I have coverage&quot;
+narrow = [d for d, _ in first_stage(query, top_n=3)]
+wide = [d for d, _ in first_stage(query, top_n=8)]
+print(&quot;first-stage top_n=3:&quot;, narrow)
+print(&quot;first-stage top_n=8:&quot;, wide)
+final = second_stage(query, wide, top_k=3)
+print(&quot;second-stage top_k=3 reranked from the top_n=8 pool:&quot;, [d for d, _ in final])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>first-stage top_n=3: [&#x27;DOC-5&#x27;, &#x27;DOC-9&#x27;, &#x27;DOC-8&#x27;]
+first-stage top_n=8: [&#x27;DOC-5&#x27;, &#x27;DOC-9&#x27;, &#x27;DOC-8&#x27;, &#x27;DOC-6&#x27;, &#x27;DOC-B&#x27;, &#x27;DOC-C&#x27;, &#x27;DOC-4&#x27;, &#x27;DOC-A&#x27;]
+second-stage top_k=3 reranked from the top_n=8 pool: [&#x27;DOC-6&#x27;, &#x27;DOC-5&#x27;, &#x27;DOC-9&#x27;]
+</code></pre><p>The genuinely relevant document (<code>DOC-6</code>, sump pump/sewer backup) is not in the first
+stage's <code>top_n=3</code> at all — it only enters the pool once <code>top_n</code> widens to 8, sitting at
+rank 4 there. The narrow bag-of-words pass alone would have handed the generator three
+wrong documents. The wider net catches the right one, and the cross-encoder-style second
+stage — which can see &quot;water&quot; and &quot;drain&quot; and &quot;basement&quot; co-occurring the way the query
+frames them, not just as independently-scored tokens — correctly promotes <code>DOC-6</code> from
+rank 4 to rank 1 of the final three. Neither stage alone produces this result: the narrow
+first stage never sees <code>DOC-6</code>, and running the cross-encoder scorer over the entire
+13-document corpus (instead of just the 8-document shortlist) would work here too but stops
+scaling the moment the corpus is real-world sized — which is exactly why the two stages
+exist together.</p>
+<p><strong>Exercise:</strong>
+Using <code>first_stage</code>, <code>second_stage</code>, and <code>CORPUS</code> from this concept's Example, run the
+query below at <code>top_n=3</code> and <code>top_n=8</code>, then rerank the <code>top_n=8</code> pool to <code>top_k=3</code> and
+print all three results.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>mold_query = &quot;mold showed up after a pipe leaked is that covered&quot;
+mold_relevant = &quot;DOC-8&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>first-stage top_n=3: [&#x27;DOC-8&#x27;, &#x27;DOC-B&#x27;, &#x27;DOC-C&#x27;]
+first-stage top_n=8: [&#x27;DOC-8&#x27;, &#x27;DOC-B&#x27;, &#x27;DOC-C&#x27;, &#x27;DOC-5&#x27;, &#x27;DOC-4&#x27;, &#x27;DOC-A&#x27;, &#x27;DOC-1&#x27;, &#x27;DOC-2&#x27;]
+second-stage top_k=3 reranked from the top_n=8 pool: [&#x27;DOC-8&#x27;, &#x27;DOC-C&#x27;, &#x27;DOC-2&#x27;]
+</code></pre><hr />
+<h3>Concept 2 — Bi-Encoder vs. Cross-Encoder Scoring Mechanics</h3>
+<p>The reason two stages exist, in one sentence: a bi-encoder encodes the query and each
+document INDEPENDENTLY into fixed vectors, so every document's vector can be computed once,
+cached, and reused across every future query — that caching is exactly what makes an ANN
+index over millions of documents feasible. A cross-encoder encodes the query and a document
+TOGETHER as one joint input, which lets it model interactions a bi-encoder's independent
+vectors structurally cannot (this concept's Example already showed one: bigram/phrase
+overlap between the query and the document) — but the joint encoding can never be
+precomputed or cached, because it depends on both the specific query and the specific
+document together. Score <code>N</code> documents against <code>M</code> different queries and a bi-encoder does
+<code>N</code> encode calls total (each document once, ever); a cross-encoder does <code>N x M</code> calls,
+because every new query needs its own pass over every candidate.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing CORPUS, bow, cross_encode from Concept 1
+
+doc_vector_cache = {}
+bienc_doc_encode_calls = 0
+
+def bienc_encode_doc(doc_id, text):
+    global bienc_doc_encode_calls
+    if doc_id not in doc_vector_cache:
+        doc_vector_cache[doc_id] = bow(text)
+        bienc_doc_encode_calls += 1
+    return doc_vector_cache[doc_id]
+
+queries = [
+    &quot;does my plan pay to fix a wind damaged roof&quot;,
+    &quot;water came up through the drain into my basement do I have coverage&quot;,
+    &quot;can I still get money back&quot;,
+]
+
+for q in queries:
+    for doc_id, text in CORPUS:
+        bienc_encode_doc(doc_id, text)
+print(f&quot;bi-encoder doc-encode calls across {len(queries)} queries over {len(CORPUS)} docs: {bienc_doc_encode_calls}&quot;)
+
+crossenc_pair_calls = 0
+for q in queries:
+    for doc_id, text in CORPUS:
+        cross_encode(q, text)
+        crossenc_pair_calls += 1
+print(f&quot;cross-encoder pair-scoring calls for the same workload: {crossenc_pair_calls}&quot;)
+print(f&quot;cross-encoder does {crossenc_pair_calls // bienc_doc_encode_calls}x the encode work of the bi-encoder here&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>bi-encoder doc-encode calls across 3 queries over 13 docs: 13
+cross-encoder pair-scoring calls for the same workload: 39
+cross-encoder does 3x the encode work of the bi-encoder here
+</code></pre><p>Every document is encoded exactly once by the bi-encoder regardless of how many queries
+come in — the cache absorbs all repeat lookups, which is why a bi-encoder index scales to
+millions of documents and constant-time-ish query latency. The cross-encoder pays for every
+single query-document pair, with zero possible caching, because there is no such thing as
+&quot;the vector for <code>DOC-6</code>&quot; under a cross-encoder — only &quot;the joint score of <code>DOC-6</code> against
+THIS query.&quot; That asymmetry is why the cross-encoder only ever runs over a short candidate
+list, never the whole corpus.</p>
+<p><strong>Exercise:</strong>
+Using <code>bienc_encode_doc</code>, <code>cross_encode</code>, and <code>CORPUS</code> from this concept's Example, compute
+and print the bi-encoder's NEW doc-encode calls (calls that actually miss the cache) and
+the cross-encoder's total pair calls for the query set below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>second_query_batch = [
+    &quot;is mold from a leaky pipe covered&quot;,
+    &quot;what extra liability protection is above my home and auto limits&quot;,
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>bi-encoder NEW doc-encode calls across 2 queries over 13 docs: 0
+cross-encoder pair-scoring calls for the same workload: 26
+</code></pre><p>The bi-encoder count is genuinely zero new calls, not a bug: <code>doc_vector_cache</code> is already
+warm for all 13 documents from the Example above, so a bi-encoder pays nothing at all for
+a brand-new query over a corpus it has already indexed — the cross-encoder still pays the
+full 26 calls, because its score always depends on the specific query, cache or no cache.</p>
+<hr />
+<h3>Concept 3 — Where the Extra Recall Actually Comes From</h3>
+<p>It is tempting to credit the reranker with &quot;finding&quot; documents the first stage missed, but
+a reranker can only rerank what is already IN its candidate list — it cannot retrieve a
+document the first stage never surfaced. All of the recall gain in a two-stage system comes
+from widening <code>top_n</code> in the first stage; all of the precision gain comes from the
+reranker's ability to put the single right answer at rank 1 once it is in that list. Proving
+this means measuring <code>recall@top_n</code> (does the relevant document appear ANYWHERE in the
+first <code>top_n</code> results) as <code>top_n</code> widens, independent of reranking entirely.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing first_stage, CORPUS from Concept 1
+
+labeled_queries = [
+    (&quot;water came up through the drain into my basement do I have coverage&quot;, &quot;DOC-6&quot;),
+    (&quot;does my plan pay to fix a wind damaged roof&quot;, &quot;DOC-7&quot;),
+    (&quot;is mold from a leaky pipe covered&quot;, &quot;DOC-8&quot;),
+    (&quot;what extra liability protection is above my home and auto limits&quot;, &quot;DOC-9&quot;),
+]
+
+def recall_at_n(query_text, relevant_id, top_n):
+    ids = [d for d, _ in first_stage(query_text, top_n=top_n)]
+    return 1.0 if relevant_id in ids else 0.0
+
+for top_n in (1, 3, 5, 8, 13):
+    scores = [recall_at_n(q, rel, top_n) for q, rel in labeled_queries]
+    print(f&quot;top_n={top_n:&gt;2}  recall={sum(scores)/len(scores):.3f}  hits={scores}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>top_n= 1  recall=0.750  hits=[0.0, 1.0, 1.0, 1.0]
+top_n= 3  recall=0.750  hits=[0.0, 1.0, 1.0, 1.0]
+top_n= 5  recall=1.000  hits=[1.0, 1.0, 1.0, 1.0]
+top_n= 8  recall=1.000  hits=[1.0, 1.0, 1.0, 1.0]
+top_n=13  recall=1.000  hits=[1.0, 1.0, 1.0, 1.0]
+</code></pre><p>Recall is flat at 0.750 from <code>top_n=1</code> through <code>top_n=3</code> — the basement-drain query's
+relevant <code>DOC-6</code> genuinely is not in the pool yet at either width — then jumps to a
+perfect 1.000 the moment <code>top_n</code> reaches 5 and never improves further, because every
+relevant document this labeled set asks for is now reachable. This is the real shape of
+&quot;where the extra recall comes from&quot;: it is entirely a first-stage-width effect, and it
+plateaus — past the point where every relevant document is already inside the candidate
+pool, widening <code>top_n</code> further adds cost (Concept 4) with zero further recall benefit,
+only more noise for the reranker to sort through.</p>
+<p><strong>Exercise:</strong>
+Using <code>recall_at_n</code> from this concept's Example, compute and print <code>recall@top_n</code> for
+<code>top_n</code> in <code>(1, 4, 6, 10)</code> on the labeled set below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>second_labeled_queries = [
+    (&quot;can I still get money back&quot;, &quot;DOC-1&quot;),
+    (&quot;my policy stopped can I fix it&quot;, &quot;DOC-2&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>top_n= 1  recall=0.000  hits=[0.0, 0.0]
+top_n= 4  recall=0.500  hits=[0.0, 1.0]
+top_n= 6  recall=0.500  hits=[0.0, 1.0]
+top_n=10  recall=1.000  hits=[1.0, 1.0]
+</code></pre><hr />
+<h3>Concept 4 — End-to-End Latency Budget Allocation</h3>
+<p>The two stages have very different cost shapes per candidate. A first-stage ANN lookup over
+a whole vector index costs roughly the same regardless of how many results you ask it to
+return (<code>top_n=10</code> and <code>top_n=100</code> are both a single index query) — its cost is dominated by
+embedding the query itself, not by <code>top_n</code>. The reranker's cost, by contrast, scales
+LINEARLY with <code>top_n</code>, because Concept 2 already showed it must score every single
+candidate individually with no caching. A latency budget has to account for both shapes, not
+just eyeball a <code>top_n</code> number that &quot;sounds reasonable.&quot;</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def latency_budget(ann_lookup_ms, per_pair_rerank_ms, top_n, embed_query_ms=8.0):
+    first_stage_ms = embed_query_ms + ann_lookup_ms
+    second_stage_ms = per_pair_rerank_ms * top_n
+    total_ms = first_stage_ms + second_stage_ms
+    return {
+        &quot;first_stage_ms&quot;: round(first_stage_ms, 2),
+        &quot;second_stage_ms&quot;: round(second_stage_ms, 2),
+        &quot;total_ms&quot;: round(total_ms, 2),
+        &quot;second_stage_share&quot;: round(second_stage_ms / total_ms, 3),
+    }
+
+budget_target_ms = 300.0
+for top_n in (10, 25, 50, 100):
+    b = latency_budget(ann_lookup_ms=15.0, per_pair_rerank_ms=4.0, top_n=top_n)
+    fits = b[&quot;total_ms&quot;] &lt;= budget_target_ms
+    print(f&quot;top_n={top_n:&gt;3}  first_stage={b[&#x27;first_stage_ms&#x27;]:&gt;6}ms  &quot;
+          f&quot;second_stage={b[&#x27;second_stage_ms&#x27;]:&gt;6}ms  total={b[&#x27;total_ms&#x27;]:&gt;7}ms  &quot;
+          f&quot;second_stage_share={b[&#x27;second_stage_share&#x27;]:.1%}  fits_{budget_target_ms:.0f}ms_budget={fits}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>top_n= 10  first_stage=  23.0ms  second_stage=  40.0ms  total=   63.0ms  second_stage_share=63.5%  fits_300ms_budget=True
+top_n= 25  first_stage=  23.0ms  second_stage= 100.0ms  total=  123.0ms  second_stage_share=81.3%  fits_300ms_budget=True
+top_n= 50  first_stage=  23.0ms  second_stage= 200.0ms  total=  223.0ms  second_stage_share=89.7%  fits_300ms_budget=True
+top_n=100  first_stage=  23.0ms  second_stage= 400.0ms  total=  423.0ms  second_stage_share=94.6%  fits_300ms_budget=False
+</code></pre><p>The first stage's cost barely moves across the whole range (23ms flat — it is one index
+lookup regardless of <code>top_n</code>), while the second stage's share of total latency climbs from
+63.5% to 94.6% as <code>top_n</code> grows, and <code>top_n=100</code> alone blows a realistic 300ms budget on
+reranking cost before the generator has even been called. This is the concrete argument for
+keeping <code>top_n</code> in the 50-100 range Day 1's own README brief specifies, not higher just
+because &quot;more candidates can only help&quot;: Concept 3 already showed recall plateaus well
+before <code>top_n=100</code>, so pushing <code>top_n</code> past the plateau spends latency budget for zero
+additional recall.</p>
+<p><strong>Exercise:</strong>
+Using <code>latency_budget</code> from this concept's Example, compute the budget at <code>top_n=50</code> for a
+cheaper self-hosted reranker (<code>per_pair_rerank_ms=1.5</code>) and a slower hosted one
+(<code>per_pair_rerank_ms=6.0</code>), both against a 200ms target, and print whether each fits.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>cheap_rerank_ms_per_pair = 1.5
+slow_rerank_ms_per_pair = 6.0
+target_ms = 200.0
+top_n = 50
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>cheap  second_stage=75.0ms   total= 98.0ms  fits_200ms_budget=True
+slow   second_stage=300.0ms  total=323.0ms  fits_200ms_budget=False
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> a claims or underwriting knowledge base built up over a decade of policy
+revisions is exactly the shape a first-stage retriever is weakest against — near-duplicate
+clauses across policy versions, superseded riders never removed from the index — so <code>top_n</code>
+needs to be wide enough to survive that noise, not just wide enough for a clean demo corpus.</p>
+<p><strong>Compliance angle:</strong> the reranker's score is the last thing that decided what context the
+generator saw before answering a policyholder or adjuster — an audit trail that logs only
+the final answer, with no record of the first-stage candidate list or the reranker's scores
+over it, cannot explain why a specific clause was surfaced instead of a nearly-identical one
+one policy version earlier.</p>
+<p><strong>What breaks in production:</strong> a <code>top_n</code> tuned once against today's corpus size silently
+stops being &quot;wide enough&quot; as the corpus grows — Concept 3's recall@top_n curve is a
+snapshot of ONE corpus at ONE point in time, and the same methodology (not the same number)
+needs to be re-run whenever the underlying document set changes meaningfully, the same
+warning Week 24's own bake-off closed on.</p>
+<hr />
+<h2 id="day-2">Day 2 — Self-Hosted BGE Reranking</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="25-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=aVgZE746OXw" target="_blank" rel="noopener"><b>How Retrieval and Reranking works in RAG | Bi Encoder vs Cross Encoder</b><small>Techventures · 5:15</small></a></li><li><a href="https://www.youtube.com/watch?v=tA85v3aGBIU" target="_blank" rel="noopener"><b>RAG Reranking Explained: Bi-Encoder vs Cross-Encoder (with benchmarking code)</b><small>Abid Saudagar · 12:02</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=BAAI%20bge%20reranker%20v2%20m3%20sentence%20transformers%20cross%20encoder" target="_blank" rel="noopener">Search YouTube: BAAI bge reranker v2 m3 sentence transformers cross encoder</a></p></div>
+<hr />
+<h3>Concept 1 — <code>CrossEncoder.predict()</code>'s Real API Surface and Batching Mechanics</h3>
+<p><code>sentence-transformers</code> installs and imports cleanly in this sandbox (confirmed:
+<code>sentence-transformers</code> 6.1.0, <code>from sentence_transformers import CrossEncoder</code> raises no
+error), and its real constructor and <code>predict()</code> signatures — checked directly against the
+installed library with <code>inspect.signature</code>, not guessed — are:</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>CrossEncoder(model_name_or_path, max_length=None, device=None, ...)
+CrossEncoder.predict(inputs, batch_size=32, show_progress_bar=None, ...)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>But instantiating it against ANY real checkpoint — including
+<code>cross-encoder/ms-marco-TinyBERT-L-2-v2</code>, a genuinely tiny (~4M parameter) checkpoint
+picked specifically to be small enough to download here — fails in this sandbox:
+<code>CrossEncoder(&quot;cross-encoder/ms-marco-TinyBERT-L-2-v2&quot;)</code> raises
+<code>httpx.ProxyError: 403 Forbidden</code> the moment it tries to reach <code>huggingface.co</code> for the
+model weights, confirmed by actually running it, not assumed from the model's size. The
+gap is network egress, not the library or the model — the exact class of gap
+known-issues.md item 9 already documents for <code>tiktoken</code>'s vocab-file fetch. What CAN be
+built and run for real here is the batching mechanics <code>predict()</code>'s own <code>batch_size</code>
+argument governs: a hand-rolled <code>MiniCrossEncoder</code> matching the real class's
+&quot;list of <code>(query, doc)</code> pairs in, list of scores out, chunked by <code>batch_size</code>&quot; contract.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class MiniCrossEncoder:
+    &quot;&quot;&quot;Stand-in for sentence_transformers.CrossEncoder -- same predict(pairs,
+    batch_size=...) contract, hand-rolled because the real checkpoint download is
+    blocked in this sandbox (httpx.ProxyError: 403 against huggingface.co, confirmed
+    directly). Demonstrates the real batching and truncation MECHANICS, not the real
+    model&#x27;s relevance judgments.&quot;&quot;&quot;
+
+    def __init__(self, max_length=512):
+        self.max_length = max_length
+        self.truncated_count = 0
+
+    def _score_pair(self, query, doc):
+        q_toks = query.lower().split()
+        d_toks = doc.lower().split()
+        if len(d_toks) &gt; self.max_length:
+            d_toks = d_toks[:self.max_length]
+            self.truncated_count += 1
+        overlap = len(set(q_toks) &amp; set(d_toks))
+        return overlap / (len(set(q_toks)) or 1)
+
+    def predict(self, pairs, batch_size=8, show_progress_bar=False):
+        scores = []
+        batch_count = 0
+        for start in range(0, len(pairs), batch_size):
+            batch = pairs[start:start + batch_size]
+            batch_count += 1
+            scores.extend(self._score_pair(q, d) for q, d in batch)
+        return scores, batch_count
+
+model = MiniCrossEncoder(max_length=512)
+pairs = [
+    (&quot;is roof storm damage covered&quot;, &quot;Wind and hail roof damage: shingle damage from a wind or hail storm is covered under the standard property policy.&quot;),
+    (&quot;is roof storm damage covered&quot;, &quot;Grace period for premium payment: coverage stays active for 31 days past the due date before the policy lapses.&quot;),
+    (&quot;is roof storm damage covered&quot;, &quot;Fire and smoke damage to the dwelling is covered under the base property policy with no separate sublimit.&quot;),
+]
+scores, batches_used = model.predict(pairs, batch_size=2)
+print(&quot;scores:&quot;, [round(s, 3) for s in scores])
+print(&quot;batches used for 3 pairs at batch_size=2:&quot;, batches_used)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>scores: [1.0, 0.0, 0.6]
+batches used for 3 pairs at batch_size=2: 2
+</code></pre><p><code>ceil(3 / 2) = 2</code> batches, exactly matching the real <code>CrossEncoder.predict()</code>'s own
+chunking behavior for its <code>batch_size</code> argument — the mechanics generalize even though the
+scoring function inside each batch is a hand-rolled stand-in, not <code>bge-reranker-v2-m3</code>'s
+real cross-attention scores.</p>
+<p><strong>Exercise:</strong>
+Using <code>MiniCrossEncoder</code> from this concept's Example, score the pairs below at
+<code>batch_size=3</code> and print the scores and the batch count.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>glass_pairs = [
+    (&quot;is a cracked windshield covered&quot;, &quot;Auto glass coverage: chip and crack repair to the windshield is covered in full with no deductible.&quot;),
+    (&quot;is a cracked windshield covered&quot;, &quot;Beneficiary changes: the policyholder may change the named beneficiary at any time before a claim is filed.&quot;),
+    (&quot;is a cracked windshield covered&quot;, &quot;Roadside assistance: towing and lockout service are included at no extra premium under the standard auto rider.&quot;),
+    (&quot;is a cracked windshield covered&quot;, &quot;Rental reimbursement: a daily rental car allowance applies while a covered vehicle is in the shop.&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>scores: [0.75, 0.0, 0.0, 0.0]
+batches used for 4 pairs at batch_size=3: 2
+</code></pre><hr />
+<h3>Concept 2 — 512-Token Truncation Effects on Long Policy Chunks</h3>
+<p>A real cross-encoder has a hard input-length ceiling (512 tokens is <code>bge-reranker-v2-m3</code>'s
+default) — anything past that is silently dropped before scoring, not summarized or
+compressed. A short policy clause is unaffected, but a long policy chunk (a multi-page
+coverage section pasted in whole, rather than pre-split) can lose exactly the sentence that
+actually answers the question if that sentence happens to sit past the cutoff — a common
+shape for a policy document that opens with boilerplate definitions before reaching the
+specific coverage language a claim actually turns on.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing MiniCrossEncoder from Concept 1
+
+query = &quot;is roof storm damage covered&quot;
+short_policy_text = &quot;Wind and hail roof damage is covered under the standard property policy subject to the deductible.&quot;
+boilerplate = &quot; filler clause text about unrelated administrative procedure&quot; * 8
+long_policy_text = boilerplate + &quot; Wind and hail roof damage is covered under the standard property policy subject to the deductible.&quot;
+
+tight_model = MiniCrossEncoder(max_length=20)
+s_short = tight_model._score_pair(query, short_policy_text)
+s_long = tight_model._score_pair(query, long_policy_text)
+print(f&quot;max_length=20   short_doc_tokens={len(short_policy_text.split())}  score={round(s_short, 3)}&quot;)
+print(f&quot;max_length=20   long_doc_tokens={len(long_policy_text.split())}  score={round(s_long, 3)}  truncated_count={tight_model.truncated_count}&quot;)
+
+full_model = MiniCrossEncoder(max_length=512)
+s_long_full = full_model._score_pair(query, long_policy_text)
+print(f&quot;max_length=512  long_doc_tokens={len(long_policy_text.split())}  score={round(s_long_full, 3)}  truncated_count={full_model.truncated_count}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>max_length=20   short_doc_tokens=16  score=0.8
+max_length=20   long_doc_tokens=72  score=0.0  truncated_count=1
+max_length=512  long_doc_tokens=72  score=0.8  truncated_count=0
+</code></pre><p>At <code>max_length=20</code>, the long document's real answer sentence — pushed to the end by 56
+tokens of boilerplate — is truncated away entirely before scoring, and the score collapses
+from 0.8 (the short version) to 0.0 (a false negative: the model never even saw the
+relevant text, and <code>truncated_count=1</code> confirms it was actually cut, not just scored low).
+Raising <code>max_length</code> to 512 stops truncating this document entirely (72 tokens comfortably
+fits under 512, <code>truncated_count=0</code>), and the score recovers to the same 0.8 the short
+version scored — proving the drop at <code>max_length=20</code> was purely a truncation artifact, not
+a genuine relevance judgment. The fix that matters in production is not simply raising
+<code>max_length</code> per query, though — it is chunking long policy sections BEFORE reranking
+(Week 24 Day 3's parent-child split) so no chunk handed to the reranker is long enough to
+risk truncation in the first place, since a real 512-token ceiling is fixed by the model,
+not tunable per request the way this stand-in's constructor argument is.</p>
+<p><strong>Exercise:</strong>
+Using <code>MiniCrossEncoder</code> from this concept's Example, score <code>long_claim_text</code> below at
+<code>max_length=15</code> and at <code>max_length=512</code>, printing the score and <code>truncated_count</code> each
+time.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>claim_query = &quot;is mold covered&quot;
+mold_boilerplate = &quot; general policy administrative language not specific to any claim type&quot; * 6
+long_claim_text = mold_boilerplate + &quot; mold caused by a covered water damage event is covered up to a sublimit&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>max_length=15   score=0.0  truncated_count=1
+max_length=512  score=0.5  truncated_count=0
+</code></pre><hr />
+<h3>Concept 3 — CPU Throughput and the <code>batch_size</code> Knob</h3>
+<p>This sandbox has no GPU, so only CPU throughput can be measured directly here; a real GPU
+deployment of <code>bge-reranker-v2-m3</code> is documented (not measured in this sandbox) to reach
+roughly one to two orders of magnitude higher pairs-per-second than the same model on CPU,
+which is the actual production argument for a GPU box once query volume grows past what a
+CPU reranker can absorb inside its latency budget. What genuinely runs here: <code>batch_size</code>
+controls the NUMBER of batching-overhead calls for a fixed pair count, real and measured,
+independent of whichever device does the actual math inside each batch. Wall-clock
+milliseconds are not compared exactly below (they vary run to run, per known-issues.md item
+16) — only the deterministic batch count and a coarse elapsed-time bucket are.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+# Reusing MiniCrossEncoder from Concept 1
+
+model = MiniCrossEncoder(max_length=512)
+doc_text = &quot;Wind and hail roof damage is covered under the standard property policy subject to the deductible.&quot;
+pairs = [(&quot;is roof storm damage covered&quot;, doc_text) for _ in range(400)]
+
+for bs in (1, 32, 128):
+    t0 = time.perf_counter()
+    scores, batch_count = model.predict(pairs, batch_size=bs)
+    elapsed = time.perf_counter() - t0
+    print(f&quot;batch_size={bs:&gt;4}  batches_used={batch_count:&gt;4}  pairs_scored={len(scores)}  under_2s={elapsed &lt; 2.0}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>batch_size=   1  batches_used= 400  pairs_scored=400  under_2s=True
+batch_size=  32  batches_used=  13  pairs_scored=400  under_2s=True
+batch_size= 128  batches_used=   4  pairs_scored=400  under_2s=True
+</code></pre><p><code>batches_used</code> is exactly <code>ceil(400 / batch_size)</code> every time — deterministic, not
+timing-dependent — while all three configurations score all 400 pairs comfortably inside
+2 seconds on this hand-rolled scorer's trivial per-pair cost. A real <code>bge-reranker-v2-m3</code>
+forward pass costs orders of magnitude more per pair than this stand-in's token-overlap
+arithmetic, which is exactly why the real model's CPU throughput (not shown here, since it
+cannot be downloaded in this sandbox) is the number that actually decides whether CPU
+reranking fits a production latency budget at all, or whether GPU hardware is required —
+<code>batch_size</code> reduces per-call Python/tokenizer overhead either way, but it cannot make an
+individual forward pass itself cheaper.</p>
+<p><strong>Exercise:</strong>
+Using <code>MiniCrossEncoder</code> from this concept's Example, score 250 identical pairs (reuse
+<code>doc_text</code> and the same query) at <code>batch_size</code> values <code>4</code> and <code>64</code>, printing
+<code>batches_used</code> and <code>pairs_scored</code> for each (omit <code>under_2s</code> — for this smaller run, print
+only the deterministic counts).</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>smaller_run_pair_count = 250
+batch_sizes_to_try = [4, 64]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>batch_size=   4  batches_used=  63  pairs_scored=250
+batch_size=  64  batches_used=   4  pairs_scored=250
+</code></pre><hr />
+<h3>Concept 4 — The On-Prem Argument When Claim Text Cannot Leave the Bank</h3>
+<p>A hosted reranking API (Day 3) sends the query and every candidate document's full text
+across the network to a third party on every single request — for a claims adjuster's note
+containing a policyholder's name, address, and injury description, or a commercial loan
+file with covenant terms, that is a data-egress decision a BFSI compliance program has to
+approve BEFORE the first production call, not discover after the fact in a vendor audit. A
+self-hosted reranker (this day's whole subject) never sends document text anywhere outside
+infrastructure the bank already controls — the cost is operational (hosting the model,
+maintaining the GPU or CPU capacity, keeping the checkpoint current), not a data-residency
+review. Which one is correct is a real, checkable decision, not a vibe.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def reranker_deployment_choice(contains_pii_or_claim_detail, cross_border_data_transfer_allowed, has_gpu_capacity):
+    if contains_pii_or_claim_detail and not cross_border_data_transfer_allowed:
+        return &quot;self-hosted&quot;, &quot;document text cannot leave the bank&#x27;s own infrastructure&quot;
+    if not has_gpu_capacity:
+        return &quot;hosted&quot;, &quot;no in-house GPU capacity to serve a cross-encoder at acceptable latency&quot;
+    return &quot;either&quot;, &quot;no hard constraint forces one option -- decide on cost (Day 4)&quot;
+
+cases = [
+    (&quot;claims_adjuster_notes&quot;, True, False, True),
+    (&quot;public_faq_search&quot;, False, True, False),
+    (&quot;underwriting_memo_no_gpu&quot;, True, False, False),
+]
+for name, pii, cross_border_ok, has_gpu in cases:
+    choice, reason = reranker_deployment_choice(pii, cross_border_ok, has_gpu)
+    print(f&quot;{name:&lt;28} -&gt; {choice:&lt;11} ({reason})&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>claims_adjuster_notes        -&gt; self-hosted (document text cannot leave the bank&#x27;s own infrastructure)
+public_faq_search            -&gt; hosted      (no in-house GPU capacity to serve a cross-encoder at acceptable latency)
+underwriting_memo_no_gpu     -&gt; self-hosted (document text cannot leave the bank&#x27;s own infrastructure)
+</code></pre><p>The middle case has no PII constraint at all (<code>public_faq_search</code>), so the function skips
+straight past the data-residency check and falls through to the GPU-capacity check instead
+— with no in-house GPU, it recommends hosted, correctly treating &quot;no hard compliance
+constraint&quot; as license to optimize for operational cost rather than defaulting to
+self-hosted out of caution. The third case is the deliberate one: <code>underwriting_memo_no_gpu</code>
+has PII and no cross-border transfer allowance AND no GPU capacity — two reasons pulling in
+opposite directions — and the function resolves it self-hosted anyway, because a
+data-residency constraint is a hard compliance requirement while a missing GPU is an
+operational gap that can be fixed (buy or rent GPU capacity, or accept slower CPU
+inference); the two are not the same kind of constraint and should never be weighed as if
+they were.</p>
+<p><strong>Exercise:</strong>
+Using <code>reranker_deployment_choice</code> from this concept's Example, classify the case below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>commercial_loan_covenant_review = (&quot;commercial_loan_review&quot;, True, False, True)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>commercial_loan_review      -&gt; self-hosted (document text cannot leave the bank&#x27;s own infrastructure)
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> a self-hosted reranker still needs somewhere to run, and a bank's
+existing infrastructure footprint (on-prem hardware, a private cloud region tied to a
+specific data-residency jurisdiction) rarely already has GPU capacity provisioned — the
+on-prem argument in Concept 4 wins the compliance case but still has to win a separate
+infrastructure-budget case afterward.</p>
+<p><strong>Compliance angle:</strong> &quot;self-hosted&quot; is not automatically &quot;compliant&quot; — the model weights
+themselves (<code>bge-reranker-v2-m3</code>'s checkpoint) were downloaded from a public source once,
+and a bank's model-risk-management process typically requires the exact checkpoint hash
+and provenance to be recorded and version-pinned the same way a purchased vendor model
+would be, not treated as &quot;just open source, no review needed.&quot;</p>
+<p><strong>What breaks in production:</strong> truncation (Concept 2) is silent — a reranker that drops
+the answer-bearing sentence past its <code>max_length</code> does not raise an error, it just returns
+a low score, indistinguishable from a genuinely irrelevant document unless someone measures
+recall specifically on long chunks and notices the gap, which is exactly Day 5's
+methodology and exactly why it has to be run per document-length bucket, not just overall.</p>
+<hr />
+<h2 id="day-3">Day 3 — Hosted Reranking with Cohere</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="25-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=K1F8BIgcoNk" target="_blank" rel="noopener"><b>Rerank for better RAG (Explained)</b><small>vectorize · 13:39</small></a></li><li><a href="https://www.youtube.com/watch?v=Uh9bYiVrW_s" target="_blank" rel="noopener"><b>RAG But Better: Rerankers with Cohere AI</b><small>James Briggs · 23:43</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Cohere%20Rerank%20API%20tutorial%20relevance%20RAG%20python" target="_blank" rel="noopener">Search YouTube: Cohere Rerank API tutorial relevance RAG python</a></p></div>
+<hr />
+<h3>Concept 1 — The Cohere Rerank Endpoint's Real Call Shape</h3>
+<p>Cohere's Rerank endpoint takes a <code>query</code>, a flat list of <code>documents</code>, and a <code>top_n</code>, and
+returns a ranked list of <code>(index, relevance_score)</code> pairs referencing positions in the
+original <code>documents</code> list — the caller does the actual work of mapping indices back to
+document IDs. <code>cohere</code> is not installed in this sandbox and no API key is configured, so
+the real call below is shown as reference syntax only, in a plain (non-executable) fence,
+never claimed as run:</p>
+<pre><code>import cohere
+co = cohere.ClientV2(api_key=&quot;...&quot;)
+response = co.rerank(
+    model=&quot;rerank-english-v3.0&quot;,
+    query=query,
+    documents=documents,   # list[str]
+    top_n=top_n,
+)
+for result in response.results:
+    print(result.index, result.relevance_score)
+</code></pre><p>What is built and run for real below is a local mock client that returns objects matching
+that same response shape (<code>.results</code>, each with <code>.index</code> and <code>.relevance_score</code>) — the
+response-parsing code a production integration actually depends on gets genuinely
+exercised, even though the relevance judgments themselves are a deterministic
+lexical-overlap stand-in, not the live endpoint's own scoring.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class RerankResult:
+    index: int
+    relevance_score: float
+
+class MockCohereClient:
+    &quot;&quot;&quot;Matches cohere.ClientV2().rerank()&#x27;s real response shape -- deterministic
+    lexical-overlap scoring stands in for the live model&#x27;s judgment.&quot;&quot;&quot;
+    def rerank(self, model, query, documents, top_n):
+        q_toks = set(query.lower().split())
+        scored = []
+        for i, doc in enumerate(documents):
+            d_toks = set(doc.lower().split())
+            overlap = len(q_toks &amp; d_toks)
+            scored.append((i, overlap / (len(q_toks) or 1)))
+        scored.sort(key=lambda x: -x[1])
+        results = [RerankResult(index=i, relevance_score=round(s, 4)) for i, s in scored[:top_n]]
+        return type(&quot;RerankResponse&quot;, (), {&quot;results&quot;: results})()
+
+co = MockCohereClient()
+documents = [
+    &quot;Wind and hail roof damage: shingle damage from a wind or hail storm is covered under the standard property policy.&quot;,
+    &quot;Grace period for premium payment: coverage stays active for 31 days past the due date before the policy lapses.&quot;,
+    &quot;Fire and smoke damage to the dwelling is covered under the base property policy with no separate sublimit.&quot;,
+]
+query = &quot;is roof storm damage covered&quot;
+response = co.rerank(model=&quot;rerank-english-v3.0&quot;, query=query, documents=documents, top_n=2)
+for r in response.results:
+    print(f&quot;index={r.index}  relevance_score={r.relevance_score}  doc={documents[r.index][:40]!r}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>index=0  relevance_score=1.0  doc=&#x27;Wind and hail roof damage: shingle damag&#x27;
+index=2  relevance_score=0.6  doc=&#x27;Fire and smoke damage to the dwelling is&#x27;
+</code></pre><p>The response carries <code>index</code> values pointing back into the ORIGINAL <code>documents</code> list
+(index 0 and 2, not 0 and 1) — a real integration has to keep its own <code>documents</code> list
+around after the call to resolve those indices back to chunk IDs; the API itself never
+echoes the document text or an ID field back, only the position.</p>
+<p><strong>Exercise:</strong>
+Using <code>MockCohereClient</code> from this concept's Example, rerank the documents below for the
+loan-servicing question and print the top-1 result.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>loan_query = &quot;what happens if the borrower misses a scheduled payment&quot;
+loan_documents = [
+    &quot;Late payment fee: a fee of 5 percent of the missed payment applies if payment is not received within 10 days of the due date.&quot;,
+    &quot;Prepayment: the borrower may prepay the loan in full at any time without penalty.&quot;,
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>index=0  relevance_score=0.75  doc=&#x27;Late payment fee: a fee of 5 percent of &#x27;
+</code></pre><hr />
+<h3>Concept 2 — Per-Document Truncation Limits on Long Loan Files</h3>
+<p>A hosted rerank endpoint truncates each document to a fixed maximum length before scoring
+it — a real, documented limit, not a suggestion — and a long commercial loan file (a full
+credit agreement pasted in as one chunk, boilerplate definitions first) can lose the exact
+covenant clause a question turns on if that clause sits past the cutoff, the same failure
+shape Day 2 Concept 2 already measured for a self-hosted cross-encoder's <code>max_length</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def truncate_for_rerank(doc_text, max_tokens):
+    toks = doc_text.split()
+    truncated = len(toks) &gt; max_tokens
+    return &quot; &quot;.join(toks[:max_tokens]), truncated, len(toks)
+
+def lexical_relevance(query, doc_text):
+    q_toks = set(query.lower().split())
+    d_toks = set(doc_text.lower().split())
+    return round(len(q_toks &amp; d_toks) / (len(q_toks) or 1), 3)
+
+query = &quot;what debt service coverage ratio must the borrower maintain&quot;
+long_loan_file = (&quot;Section 1 general definitions covering standard terms used throughout this credit agreement. &quot; * 10) + &quot;Borrower covenant: maintain a debt service coverage ratio of at least 1.25 through the term of the loan.&quot;
+
+for max_tokens in (30, 300):
+    truncated_text, was_truncated, total_tokens = truncate_for_rerank(long_loan_file, max_tokens)
+    score = lexical_relevance(query, truncated_text)
+    print(f&quot;max_tokens={max_tokens:&gt;3}  total_tokens={total_tokens}  truncated={was_truncated!s:&lt;5}  relevance_score={score}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>max_tokens= 30  total_tokens=138  truncated=True   relevance_score=0.0
+max_tokens=300  total_tokens=138  truncated=False  relevance_score=0.778
+</code></pre><p>At <code>max_tokens=30</code>, the loan file is truncated well before it ever reaches the actual
+covenant sentence (buried behind 138 total tokens of boilerplate definitions), so the
+relevance score is a hard 0.0 — a false negative that looks identical to a genuinely
+irrelevant document from the caller's side. At <code>max_tokens=300</code>, the full file (138 tokens)
+fits inside the limit and the covenant text is scored on its real content. A hosted
+endpoint's per-document limit is typically generous per individual chunk, but a full,
+unchunked credit agreement is exactly the document shape most likely to exceed it — the
+same conclusion Day 2 reached: pre-chunk long documents before reranking, don't rely on the
+reranker's own limit as a chunking strategy.</p>
+<p><strong>Exercise:</strong>
+Using <code>truncate_for_rerank</code> and <code>lexical_relevance</code> from this concept's Example, check
+<code>prepayment_clause_file</code> below at <code>max_tokens=20</code> and <code>max_tokens=200</code>, printing
+<code>total_tokens</code>, <code>truncated</code>, and <code>relevance_score</code> each time.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>prepay_query = &quot;can the borrower prepay the loan without penalty&quot;
+prepayment_clause_file = (&quot;General recitals and background of this credit agreement. &quot; * 8) + &quot;The borrower may prepay the loan in full at any time without penalty.&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>max_tokens= 20  total_tokens=79  truncated=True   relevance_score=0.0
+max_tokens=200  total_tokens=79  truncated=False  relevance_score=0.667
+</code></pre><hr />
+<h3>Concept 3 — Data-Residency and Third-Party-Processor Review</h3>
+<p>A hosted reranker is, from a compliance standpoint, a third-party data processor that
+receives claim notes, loan files, or policy text on every single request — approving it
+for production BFSI use is a real, checkable review (a signed Data Processing Agreement, an
+approved data-residency region, a disclosed subprocessor chain), not a one-time procurement
+decision made before anyone looked at what data would actually cross the wire.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class ThirdPartyProcessorReview:
+    processor_name: str
+    dpa_signed: bool
+    data_residency_region: str
+    approved_regions: tuple
+    subprocessors_disclosed: bool
+    contains_customer_pii: bool
+
+def review_hosted_reranker_approval(review):
+    blockers = []
+    if review.contains_customer_pii and not review.dpa_signed:
+        blockers.append(&quot;no signed Data Processing Agreement for a processor handling customer PII&quot;)
+    if review.data_residency_region not in review.approved_regions:
+        blockers.append(f&quot;processor region {review.data_residency_region!r} not in approved set {review.approved_regions}&quot;)
+    if review.contains_customer_pii and not review.subprocessors_disclosed:
+        blockers.append(&quot;subprocessor chain not disclosed for a PII-handling processor&quot;)
+    return len(blockers) == 0, blockers
+
+cohere_review = ThirdPartyProcessorReview(
+    processor_name=&quot;Cohere&quot;,
+    dpa_signed=True,
+    data_residency_region=&quot;us-east&quot;,
+    approved_regions=(&quot;us-east&quot;, &quot;eu-west&quot;),
+    subprocessors_disclosed=True,
+    contains_customer_pii=True,
+)
+approved, blockers = review_hosted_reranker_approval(cohere_review)
+print(f&quot;{cohere_review.processor_name}: approved={approved}  blockers={blockers}&quot;)
+
+unreviewed_vendor = ThirdPartyProcessorReview(
+    processor_name=&quot;UnnamedRerankVendor&quot;,
+    dpa_signed=False,
+    data_residency_region=&quot;ap-south&quot;,
+    approved_regions=(&quot;us-east&quot;, &quot;eu-west&quot;),
+    subprocessors_disclosed=False,
+    contains_customer_pii=True,
+)
+approved2, blockers2 = review_hosted_reranker_approval(unreviewed_vendor)
+print(f&quot;{unreviewed_vendor.processor_name}: approved={approved2}  blockers={blockers2}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>Cohere: approved=True  blockers=[]
+UnnamedRerankVendor: approved=False  blockers=[&#x27;no signed Data Processing Agreement for a processor handling customer PII&#x27;, &quot;processor region &#x27;ap-south&#x27; not in approved set (&#x27;us-east&#x27;, &#x27;eu-west&#x27;)&quot;, &#x27;subprocessor chain not disclosed for a PII-handling processor&#x27;]
+</code></pre><p>The review function does not stop at the first blocker — <code>UnnamedRerankVendor</code> fails all
+three checks at once, and the review surfaces every one of them together, because a
+compliance reviewer needs the full list to send back to a vendor, not just the first thing
+that happened to trip.</p>
+<p><strong>Exercise:</strong>
+Using <code>ThirdPartyProcessorReview</code> and <code>review_hosted_reranker_approval</code> from this concept's
+Example, review the vendor below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>partial_vendor = ThirdPartyProcessorReview(
+    processor_name=&quot;RerankAPI-Beta&quot;,
+    dpa_signed=True,
+    data_residency_region=&quot;eu-west&quot;,
+    approved_regions=(&quot;us-east&quot;, &quot;eu-west&quot;),
+    subprocessors_disclosed=False,
+    contains_customer_pii=True,
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>RerankAPI-Beta: approved=False  blockers=[&#x27;subprocessor chain not disclosed for a PII-handling processor&#x27;]
+</code></pre><hr />
+<h3>Concept 4 — Circuit Breaker: Degrading to First-Stage-Only on Timeout</h3>
+<p>A hosted reranker is one more network hop that can be slow or down, and a claims or
+servicing chat cannot simply hang or error out because a third-party rerank call timed
+out — it should degrade gracefully to the first stage's own ranking, which is worse but
+still usable, rather than fail the whole request. A circuit breaker tracks consecutive
+failures, trips OPEN once a threshold is hit (skip the reranker entirely, return
+first-stage results, fail fast instead of waiting out every future timeout), and probes
+HALF_OPEN after a cooldown to check whether the reranker has recovered.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class RerankerCircuitBreaker:
+    def __init__(self, failure_threshold=3, cooldown_calls=2):
+        self.failure_threshold = failure_threshold
+        self.cooldown_calls = cooldown_calls
+        self.state = &quot;CLOSED&quot;
+        self.consecutive_failures = 0
+        self.calls_since_open = 0
+
+    def call(self, rerank_fn, first_stage_ids, timeout_ok):
+        if self.state == &quot;OPEN&quot;:
+            self.calls_since_open += 1
+            if self.calls_since_open &gt;= self.cooldown_calls:
+                self.state = &quot;HALF_OPEN&quot;
+            else:
+                return first_stage_ids, &quot;degraded_first_stage_only&quot;, self.state
+
+        if not timeout_ok:
+            self.consecutive_failures += 1
+            if self.state == &quot;HALF_OPEN&quot;:
+                self.state = &quot;OPEN&quot;
+                self.calls_since_open = 0
+            elif self.consecutive_failures &gt;= self.failure_threshold:
+                self.state = &quot;OPEN&quot;
+                self.calls_since_open = 0
+            return first_stage_ids, &quot;degraded_first_stage_only&quot;, self.state
+
+        self.consecutive_failures = 0
+        if self.state == &quot;HALF_OPEN&quot;:
+            self.state = &quot;CLOSED&quot;
+        result = rerank_fn(first_stage_ids)
+        return result, &quot;reranked&quot;, self.state
+
+
+def fake_rerank(ids):
+    return list(reversed(ids))
+
+breaker = RerankerCircuitBreaker(failure_threshold=3, cooldown_calls=2)
+call_outcomes = [True, True, False, False, False, False, False, True, True, True]
+for i, ok in enumerate(call_outcomes, start=1):
+    ids, mode, state = breaker.call(fake_rerank, [&quot;a&quot;, &quot;b&quot;, &quot;c&quot;], timeout_ok=ok)
+    print(f&quot;call {i:&gt;2} timeout_ok={ok!s:&lt;5} state_after={state:&lt;10} mode={mode:&lt;24} result={ids}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>call  1 timeout_ok=True  state_after=CLOSED     mode=reranked                 result=[&#x27;c&#x27;, &#x27;b&#x27;, &#x27;a&#x27;]
+call  2 timeout_ok=True  state_after=CLOSED     mode=reranked                 result=[&#x27;c&#x27;, &#x27;b&#x27;, &#x27;a&#x27;]
+call  3 timeout_ok=False state_after=CLOSED     mode=degraded_first_stage_only result=[&#x27;a&#x27;, &#x27;b&#x27;, &#x27;c&#x27;]
+call  4 timeout_ok=False state_after=CLOSED     mode=degraded_first_stage_only result=[&#x27;a&#x27;, &#x27;b&#x27;, &#x27;c&#x27;]
+call  5 timeout_ok=False state_after=OPEN       mode=degraded_first_stage_only result=[&#x27;a&#x27;, &#x27;b&#x27;, &#x27;c&#x27;]
+call  6 timeout_ok=False state_after=OPEN       mode=degraded_first_stage_only result=[&#x27;a&#x27;, &#x27;b&#x27;, &#x27;c&#x27;]
+call  7 timeout_ok=False state_after=OPEN       mode=degraded_first_stage_only result=[&#x27;a&#x27;, &#x27;b&#x27;, &#x27;c&#x27;]
+call  8 timeout_ok=True  state_after=OPEN       mode=degraded_first_stage_only result=[&#x27;a&#x27;, &#x27;b&#x27;, &#x27;c&#x27;]
+call  9 timeout_ok=True  state_after=CLOSED     mode=reranked                 result=[&#x27;c&#x27;, &#x27;b&#x27;, &#x27;a&#x27;]
+call 10 timeout_ok=True  state_after=CLOSED     mode=reranked                 result=[&#x27;c&#x27;, &#x27;b&#x27;, &#x27;a&#x27;]
+</code></pre><p>Calls 3 and 4 fail but the breaker stays <code>CLOSED</code> — two failures has not yet hit the
+<code>failure_threshold=3</code>. Call 5's failure trips it <code>OPEN</code>. Calls 6 and 7, while <code>OPEN</code>, never
+even attempt the reranker (<code>degraded_first_stage_only</code>, fail-fast) — they exist only to
+count down <code>cooldown_calls</code>. Call 8 reaches the <code>HALF_OPEN</code> probe state internally (its
+own failure/success check runs), succeeds, but the breaker had already returned degraded
+results for calls 6-7 during the cooldown countdown and call 8 is itself the probe: it
+succeeds, so call 9 opens fully <code>CLOSED</code> again. The result column makes the user-facing
+effect concrete: during the entire <code>OPEN</code> window, the caller gets the first stage's own
+<code>['a', 'b', 'c']</code> ordering — worse than a real rerank, but never a hung request or an
+error.</p>
+<p><strong>Exercise:</strong>
+Using <code>RerankerCircuitBreaker</code> and <code>fake_rerank</code> from this concept's Example, run a fresh
+breaker (<code>failure_threshold=2, cooldown_calls=1</code>) over the outcomes below and print each
+call's mode.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>second_breaker = RerankerCircuitBreaker(failure_threshold=2, cooldown_calls=1)
+second_call_outcomes = [True, False, False, False, True]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>call  1 timeout_ok=True  state_after=CLOSED     mode=reranked                 result=[&#x27;c&#x27;, &#x27;b&#x27;, &#x27;a&#x27;]
+call  2 timeout_ok=False state_after=CLOSED     mode=degraded_first_stage_only result=[&#x27;a&#x27;, &#x27;b&#x27;, &#x27;c&#x27;]
+call  3 timeout_ok=False state_after=OPEN       mode=degraded_first_stage_only result=[&#x27;a&#x27;, &#x27;b&#x27;, &#x27;c&#x27;]
+call  4 timeout_ok=False state_after=OPEN       mode=degraded_first_stage_only result=[&#x27;a&#x27;, &#x27;b&#x27;, &#x27;c&#x27;]
+call  5 timeout_ok=True  state_after=CLOSED     mode=reranked                 result=[&#x27;c&#x27;, &#x27;b&#x27;, &#x27;a&#x27;]
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> a claims or servicing platform built years before any hosted LLM/rerank
+API existed typically has no existing pattern for calling an external service mid-request
+at all — the circuit breaker is not an optional nicety layered on top of a mature
+integration, it is usually the FIRST piece of resilience engineering that platform has ever
+needed for an outbound dependency.</p>
+<p><strong>Compliance angle:</strong> Concept 3's review is not a one-time gate — a processor's
+subprocessor chain, data-residency commitments, and DPA terms can all change on the
+vendor's side without the bank being notified in a way anyone reliably catches, so the
+review needs a periodic re-check, not just a sign-off recorded once at initial approval.</p>
+<p><strong>What breaks in production:</strong> a circuit breaker tuned against a vendor's TYPICAL latency
+trips on ORDINARY variance if <code>failure_threshold</code>/timeout values are copied from a
+different integration rather than measured against this specific endpoint's own p95/p99 —
+Day 4 builds exactly the latency measurement this tuning decision actually depends on.</p>
+<hr />
+<h2 id="day-4">Day 4 — Reranking Cost and Latency Budget</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="25-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=WHt8UoW1cjE" target="_blank" rel="noopener"><b>Designing Production-Ready RAG Architectures for Low-Latency Search | LLM, Vector DB, AI Systems</b><small>SystemDR - Scalable System Design  · 5:14</small></a></li><li><a href="https://www.youtube.com/watch?v=Roex5xedRmk" target="_blank" rel="noopener"><b>Production-Ready RAG | Optimize Latency, Cost, and Scale</b><small>AIGrounded · 9:23</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=reranker%20latency%20cost%20tradeoff%20production%20RAG%20serving" target="_blank" rel="noopener">Search YouTube: reranker latency cost tradeoff production RAG serving</a></p></div>
+<hr />
+<h3>Concept 1 — p50/p95/p99 Latency With and Without the Reranker</h3>
+<p>An average latency number hides the shape that actually matters for a user-facing SLA: a
+reranker adds a fixed-ish cost to the common case (p50) but a much larger, disproportionate
+cost to the tail (p95/p99), because a handful of requests always hit slow paths (a cold
+cache, a larger candidate batch, a retry). Percentiles need to be computed correctly, not
+approximated by eye — the standard linear-interpolation method between the two nearest
+ranks is used below.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def percentile(sorted_values, p):
+    if not sorted_values:
+        return 0.0
+    k = (len(sorted_values) - 1) * (p / 100.0)
+    f = int(k)
+    c = min(f + 1, len(sorted_values) - 1)
+    if f == c:
+        return sorted_values[f]
+    return sorted_values[f] + (sorted_values[c] - sorted_values[f]) * (k - f)
+
+# Fixed, deterministic synthetic latency samples (ms) -- a documented distribution
+# standing in for real production telemetry, not measured wall clock.
+without_reranker_ms = sorted([18, 19, 20, 21, 19, 22, 18, 20, 23, 19, 20, 21, 18, 24, 20,
+                               19, 20, 21, 22, 19])
+with_reranker_ms = sorted([95, 102, 98, 110, 130, 97, 101, 250, 99, 105, 103, 96, 108, 400,
+                            100, 104, 97, 300, 102, 99])
+
+for label, samples in [(&quot;without_reranker&quot;, without_reranker_ms), (&quot;with_reranker&quot;, with_reranker_ms)]:
+    p50 = percentile(samples, 50)
+    p95 = percentile(samples, 95)
+    p99 = percentile(samples, 99)
+    print(f&quot;{label:&lt;18} p50={p50:&gt;6.1f}ms  p95={p95:&gt;6.1f}ms  p99={p99:&gt;6.1f}ms&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>without_reranker   p50=  20.0ms  p95=  23.1ms  p99=  23.8ms
+with_reranker      p50= 102.0ms  p95= 305.0ms  p99= 381.0ms
+</code></pre><p>p50 grows roughly 5x with the reranker added (20ms to 102ms) — noticeable but survivable.
+p99 grows more than 16x (23.8ms to 381ms) — a small number of requests (the 400ms and 300ms
+samples in the fixture) blow past anything the p50 comparison alone would suggest. A
+latency SLA built only around p50 would completely miss this: the reranker's real user-
+facing risk lives in its tail, not its typical case, which is exactly why a circuit breaker
+(Day 3) needs its timeout set against a measured p99, not a measured average.</p>
+<p><strong>Exercise:</strong>
+Using <code>percentile</code> from this concept's Example, compute p50/p95/p99 for the sample set
+below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>cached_rerank_samples_ms = sorted([12, 14, 13, 15, 90, 13, 14, 12, 13, 15, 14, 13, 220, 14,
+                                    13, 12, 15, 14, 13, 16])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>cached_rerank_samples_ms  p50=  14.0ms  p95=  96.5ms  p99= 195.3ms
+</code></pre><hr />
+<h3>Concept 2 — Cost Per 1k Queries: Hosted vs. Self-Hosted GPU-Hours</h3>
+<p>A hosted reranker charges per query (a fixed marginal cost, no matter the volume); a
+self-hosted GPU reranker has a largely FIXED monthly cost (the box, on whether or not it is
+busy) that gets cheaper per query the more volume you push through it. The two cost curves
+cross at some break-even query volume, and which side of that crossing a given workload
+falls on is a real, computable answer — not a rule of thumb about which is &quot;obviously&quot;
+cheaper.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def hosted_cost_per_1k(price_per_query_usd):
+    return round(price_per_query_usd * 1000, 2)
+
+def self_hosted_cost_per_1k(gpu_hourly_rate_usd, queries_per_second_throughput):
+    queries_per_hour = queries_per_second_throughput * 3600
+    hours_for_1k = 1000 / queries_per_hour
+    return round(gpu_hourly_rate_usd * hours_for_1k, 4)
+
+hosted_price = 0.002   # $ per query, illustrative published-tier rate
+gpu_rate = 1.20         # $ per GPU-hour, illustrative on-demand rate
+throughput_qps = 40     # queries/sec a self-hosted GPU reranker sustains
+
+hosted = hosted_cost_per_1k(hosted_price)
+self_hosted = self_hosted_cost_per_1k(gpu_rate, throughput_qps)
+print(f&quot;hosted cost per 1k queries:      ${hosted}&quot;)
+print(f&quot;self-hosted marginal cost per 1k queries: ${self_hosted}&quot;)
+
+gpu_monthly_fixed = gpu_rate * 24 * 30  # an always-on GPU box, $ per month
+for monthly_queries in (10_000, 100_000, 1_000_000, 5_000_000):
+    hosted_monthly = hosted_price * monthly_queries
+    cheaper = &quot;self-hosted&quot; if gpu_monthly_fixed &lt; hosted_monthly else &quot;hosted&quot;
+    print(f&quot;monthly_queries={monthly_queries:&gt;9,}  hosted_monthly=${hosted_monthly:&gt;10,.2f}  self_hosted_monthly=${gpu_monthly_fixed:&gt;8,.2f}  cheaper={cheaper}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>hosted cost per 1k queries:      $2.0
+self-hosted marginal cost per 1k queries: $0.0083
+monthly_queries=   10,000  hosted_monthly=$     20.00  self_hosted_monthly=$  864.00  cheaper=hosted
+monthly_queries=  100,000  hosted_monthly=$    200.00  self_hosted_monthly=$  864.00  cheaper=hosted
+monthly_queries=1,000,000  hosted_monthly=$  2,000.00  self_hosted_monthly=$  864.00  cheaper=self-hosted
+monthly_queries=5,000,000  hosted_monthly=$ 10,000.00  self_hosted_monthly=$  864.00  cheaper=self-hosted
+</code></pre><p>At low volume (10k-100k queries/month), the always-on GPU box's fixed $864/month cost is
+the worse deal — hosted's per-query pricing wins because you are paying for GPU capacity
+you are mostly not using. Somewhere between 100k and 1M monthly queries the lines cross,
+and past that point self-hosted's fixed cost is spread over enough volume to beat hosted's
+linear per-query charge decisively. This is a genuinely different answer depending on
+actual traffic, which is exactly why &quot;self-hosted is always cheaper at scale&quot; is the right
+conclusion only ABOVE this workload's specific break-even point, never as a blanket rule.</p>
+<p><strong>Exercise:</strong>
+Using <code>hosted_cost_per_1k</code> and <code>self_hosted_cost_per_1k</code> from this concept's Example,
+compute both costs for the pricing below and print which is cheaper per 1k queries.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>cheaper_hosted_price = 0.0005
+slower_gpu_throughput_qps = 10
+gpu_rate_usd = 1.20
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>hosted cost per 1k queries: $0.5
+self-hosted marginal cost per 1k queries: $0.0333
+cheaper per 1k queries: self-hosted
+</code></pre><hr />
+<h3>Concept 3 — Caching Scores Keyed on <code>(query_hash, doc_id)</code> With TTL</h3>
+<p>A rerank score for a given query-document pair does not change between two requests that
+ask the exact same question against the exact same candidate list within a short window —
+caching that score avoids paying for the reranker twice. The cache key has to be the PAIR,
+not just the query (two different candidate documents for the same query need different
+cached scores), and needs a TTL — an unbounded cache would serve a stale score forever even
+after the underlying document changed.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+
+class RerankScoreCache:
+    def __init__(self, ttl_calls=3):
+        self.ttl_calls = ttl_calls
+        self.store = {}  # (query_hash, doc_id) -&gt; (score, expires_at_call)
+        self.call_counter = 0
+        self.hits = 0
+        self.misses = 0
+
+    def _key(self, query, doc_id):
+        query_hash = hashlib.sha256(query.encode()).hexdigest()[:12]
+        return (query_hash, doc_id)
+
+    def get_or_compute(self, query, doc_id, compute_fn):
+        self.call_counter += 1
+        key = self._key(query, doc_id)
+        cached = self.store.get(key)
+        if cached is not None and cached[1] &gt; self.call_counter:
+            self.hits += 1
+            return cached[0], True
+        self.misses += 1
+        score = compute_fn(query, doc_id)
+        self.store[key] = (score, self.call_counter + self.ttl_calls)
+        return score, False
+
+cache = RerankScoreCache(ttl_calls=3)
+
+def fake_score(query, doc_id):
+    return round(len(query) / (len(doc_id) + 1), 3)
+
+lookups = [
+    (&quot;is roof damage covered&quot;, &quot;DOC-7&quot;),
+    (&quot;is roof damage covered&quot;, &quot;DOC-7&quot;),
+    (&quot;is roof damage covered&quot;, &quot;DOC-8&quot;),
+    (&quot;is mold covered&quot;, &quot;DOC-8&quot;),
+    (&quot;is roof damage covered&quot;, &quot;DOC-7&quot;),
+    (&quot;is roof damage covered&quot;, &quot;DOC-7&quot;),
+    (&quot;is roof damage covered&quot;, &quot;DOC-7&quot;),
+]
+for q, d in lookups:
+    score, was_hit = cache.get_or_compute(q, d, fake_score)
+    print(f&quot;call={cache.call_counter:&gt;2}  query={q[:24]:&lt;24} doc={d}  score={score}  cache_hit={was_hit}&quot;)
+print(f&quot;total hits={cache.hits}  misses={cache.misses}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>call= 1  query=is roof damage covered   doc=DOC-7  score=3.667  cache_hit=False
+call= 2  query=is roof damage covered   doc=DOC-7  score=3.667  cache_hit=True
+call= 3  query=is roof damage covered   doc=DOC-8  score=3.667  cache_hit=False
+call= 4  query=is mold covered          doc=DOC-8  score=2.5  cache_hit=False
+call= 5  query=is roof damage covered   doc=DOC-7  score=3.667  cache_hit=False
+call= 6  query=is roof damage covered   doc=DOC-7  score=3.667  cache_hit=True
+call= 7  query=is roof damage covered   doc=DOC-7  score=3.667  cache_hit=True
+total hits=3  misses=4
+</code></pre><p>Call 3 is a genuine miss even though it repeats the same query as calls 1-2: <code>DOC-8</code> is a
+different document, so <code>(query_hash, doc_id)</code> is a different key entirely, exactly the
+pair-level keying this concept requires. Call 5 is the interesting one: it repeats the
+exact same <code>(query, doc)</code> pair as call 1, but the TTL set at call 1 (<code>expires_at=1+3=4</code>)
+has already elapsed by call 5 — a real, working expiry, not a cache that never invalidates.
+Call 1's entry gets recomputed and re-cached at call 5, and calls 6-7 hit that fresh entry.</p>
+<p><strong>Exercise:</strong>
+Using <code>RerankScoreCache</code> and <code>fake_score</code> from this concept's Example, run a fresh cache
+(<code>ttl_calls=2</code>) over the lookups below and print each call's <code>cache_hit</code>.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>fresh_cache = RerankScoreCache(ttl_calls=2)
+second_lookups = [
+    (&quot;is mold covered&quot;, &quot;DOC-8&quot;),
+    (&quot;is mold covered&quot;, &quot;DOC-8&quot;),
+    (&quot;is mold covered&quot;, &quot;DOC-8&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>call= 1  query=is mold covered          doc=DOC-8  score=2.5  cache_hit=False
+call= 2  query=is mold covered          doc=DOC-8  score=2.5  cache_hit=True
+call= 3  query=is mold covered          doc=DOC-8  score=2.5  cache_hit=False
+</code></pre><hr />
+<h3>Concept 4 — When Reranking Does Not Earn Its Cost</h3>
+<p>Every concept so far assumed reranking was worth running at all. Two shapes of request
+make that assumption false: a single-candidate result (there is nothing to reorder — the
+first stage already returned exactly one document, correct or not), and an exact-ID lookup
+(the query itself IS a policy/claim/loan number, not a natural-language question a
+cross-encoder's semantic scoring adds any value to). Both cases should skip the reranker
+entirely — every millisecond and dollar spent reranking them is pure waste.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+def should_rerank(candidate_ids, query_text):
+    if len(candidate_ids) &lt;= 1:
+        return False, &quot;single-candidate result -- nothing to reorder&quot;
+    policy_id_pattern = re.compile(r&quot;^(POL|CLM|LOAN)-\d+$&quot;, re.I)
+    if policy_id_pattern.match(query_text.strip()):
+        return False, &quot;exact-ID lookup -- the query IS the key, not a natural-language question&quot;
+    return True, f&quot;{len(candidate_ids)} candidates need ranking&quot;
+
+cases = [
+    ([&quot;DOC-1&quot;], &quot;can I cancel within the free look period&quot;),
+    ([&quot;POL-48213&quot;, &quot;POL-48213-amendment&quot;], &quot;POL-48213&quot;),
+    ([&quot;DOC-6&quot;, &quot;DOC-B&quot;, &quot;DOC-C&quot;], &quot;water damage in my basement&quot;),
+    ([], &quot;no candidates at all&quot;),
+]
+for candidates, query in cases:
+    rerank, reason = should_rerank(candidates, query)
+    print(f&quot;candidates={len(candidates)}  query={query[:30]!r:&lt;32} rerank={rerank!s:&lt;5} reason={reason}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>candidates=1  query=&#x27;can I cancel within the free l&#x27; rerank=False reason=single-candidate result -- nothing to reorder
+candidates=2  query=&#x27;POL-48213&#x27;                      rerank=False reason=exact-ID lookup -- the query IS the key, not a natural-language question
+candidates=3  query=&#x27;water damage in my basement&#x27;    rerank=True  reason=3 candidates need ranking
+candidates=0  query=&#x27;no candidates at all&#x27;           rerank=False reason=single-candidate result -- nothing to reorder
+</code></pre><p>The second case has two candidates (so it survives the single-candidate check) but the
+query text itself is a bare policy number, not a question — the exact-ID check catches it
+independently, and the real production win is skipping the reranker's full cost (Concept 1
+and 2's latency and dollar cost) on every request shaped this way, which in a servicing
+system can be a meaningful fraction of total query volume (a customer pasting a claim
+number to check its status, not asking a question about it).</p>
+<p><strong>Exercise:</strong>
+Using <code>should_rerank</code> from this concept's Example, classify the cases below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>claim_lookup_case = ([&quot;CLM-99120&quot;, &quot;CLM-99120-supp&quot;], &quot;CLM-99120&quot;)
+multi_candidate_question = ([&quot;DOC-6&quot;, &quot;DOC-B&quot;], &quot;sewer backup coverage&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>candidates=2  query=&#x27;CLM-99120&#x27;                      rerank=False reason=exact-ID lookup -- the query IS the key, not a natural-language question
+candidates=2  query=&#x27;sewer backup coverage&#x27;          rerank=True  reason=2 candidates need ranking
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> a hosted reranker's per-query price is a real, budgeted line item a
+finance team can forecast against volume; a self-hosted GPU box's cost shows up as
+infrastructure spend that is easy to under-attribute to &quot;the reranker&quot; specifically once it
+is shared across other workloads — Concept 2's break-even math only holds if the GPU's cost
+is actually charged fully to this use case, not quietly absorbed into a shared cluster
+budget nobody re-examines.</p>
+<p><strong>Compliance angle:</strong> a cache (Concept 3) that serves a stale rerank score past a genuine
+policy or product update is a real correctness risk, not just a staleness inconvenience —
+the TTL has to be set against how often the underlying document set actually changes, not
+picked for cache-hit-rate optimization alone; Week 23 Day 2's own cache-invalidation-on-
+reversion pattern is the same discipline applied here.</p>
+<p><strong>What breaks in production:</strong> <code>should_rerank</code>'s exact-ID pattern (Concept 4) is only as
+good as the regex covering every real ID format the business actually uses — a new policy
+line launched with a different ID scheme (a hyphenated UUID instead of <code>POL-\d+</code>) silently
+falls through to &quot;needs reranking&quot; for every one of its lookups until the pattern is
+updated, paying full reranking cost on traffic that never needed it.</p>
+<hr />
+<h2 id="day-5">Day 5 — Reranker Regression Harness</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="25-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=BvRMAgx0mvA" target="_blank" rel="noopener"><b>nDCG: the evaluation metric you&#x27;ve (probably) never heard of</b><small>ritvikmath · 8:16</small></a></li><li><a href="https://www.youtube.com/watch?v=UZr-oUuNOEE" target="_blank" rel="noopener"><b>CIKM 2020 Talk: The Impact of Negative Relevance Judgments on NDCG</b><small>webis · 6:40</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=nDCG%20at%2010%20ranking%20evaluation%20graded%20relevance%20judgments" target="_blank" rel="noopener">Search YouTube: nDCG at 10 ranking evaluation graded relevance judgments</a></p></div>
+<hr />
+<h3>Concept 1 — nDCG@10 and MRR Before and After Reranking</h3>
+<p><code>recall@k</code> (used throughout Week 24 and Day 1-3 of this week) only asks whether the
+relevant document is SOMEWHERE in the top <code>k</code> — it cannot tell a ranking with the right
+answer at rank 1 apart from one with it buried at rank 8. Normalized Discounted Cumulative
+Gain (<code>nDCG@10</code>) and Mean Reciprocal Rank (<code>MRR</code>) both reward rank position directly: <code>MRR</code>
+is <code>1/rank</code> of the first relevant hit, and <code>nDCG</code> discounts a relevant document's
+contribution logarithmically the further down the ranking it sits, normalized against the
+best possible ordering. Both are computed below over graded (not binary) relevance grades —
+Concept 2 explains why the grading matters — reusing Day 1's <code>first_stage</code>/<code>second_stage</code>
+as the before/after ranking pair.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import math
+# Reusing first_stage, second_stage, CORPUS, doc_lookup from Day 1
+
+def dcg_at_k(ranked_ids, relevance_grades, k=10):
+    total = 0.0
+    for i, doc_id in enumerate(ranked_ids[:k], start=1):
+        rel = relevance_grades.get(doc_id, 0)
+        if rel &gt; 0:
+            total += (2 ** rel - 1) / math.log2(i + 1)
+    return total
+
+def ndcg_at_k(ranked_ids, relevance_grades, k=10):
+    dcg = dcg_at_k(ranked_ids, relevance_grades, k)
+    ideal_order = sorted(relevance_grades.items(), key=lambda x: -x[1])
+    ideal_ids = [d for d, r in ideal_order if r &gt; 0]
+    idcg = dcg_at_k(ideal_ids, relevance_grades, k)
+    return round(dcg / idcg, 4) if idcg &gt; 0 else 0.0
+
+def mrr(ranked_ids, relevance_grades):
+    for i, doc_id in enumerate(ranked_ids, start=1):
+        if relevance_grades.get(doc_id, 0) &gt; 0:
+            return round(1.0 / i, 4)
+    return 0.0
+
+# graded relevance: 0=irrelevant, 1=tangential, 2=relevant, 3=exact answer
+labeled = [
+    {&quot;query&quot;: &quot;water came up through the drain into my basement do I have coverage&quot;,
+     &quot;grades&quot;: {&quot;DOC-6&quot;: 3, &quot;DOC-9&quot;: 1}},
+    {&quot;query&quot;: &quot;does my plan pay to fix a wind damaged roof&quot;,
+     &quot;grades&quot;: {&quot;DOC-7&quot;: 3, &quot;DOC-10&quot;: 1}},
+    {&quot;query&quot;: &quot;is mold from a leaky pipe covered&quot;,
+     &quot;grades&quot;: {&quot;DOC-8&quot;: 3, &quot;DOC-6&quot;: 1}},
+]
+
+for item in labeled:
+    q, grades = item[&quot;query&quot;], item[&quot;grades&quot;]
+    first_ids = [d for d, _ in first_stage(q, top_n=8)]
+    reranked_ids = [d for d, _ in second_stage(q, first_ids, top_k=8)]
+    ndcg_before = ndcg_at_k(first_ids, grades, k=10)
+    ndcg_after = ndcg_at_k(reranked_ids, grades, k=10)
+    mrr_before = mrr(first_ids, grades)
+    mrr_after = mrr(reranked_ids, grades)
+    print(f&quot;{q[:40]:&lt;42} nDCG@10 {ndcg_before:.3f}-&gt;{ndcg_after:.3f}  MRR {mrr_before:.3f}-&gt;{mrr_after:.3f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>water came up through the drain into my    nDCG@10 0.478-&gt;0.983  MRR 0.500-&gt;1.000
+does my plan pay to fix a wind damaged r   nDCG@10 0.917-&gt;0.917  MRR 1.000-&gt;1.000
+is mold from a leaky pipe covered          nDCG@10 0.917-&gt;0.917  MRR 1.000-&gt;1.000
+</code></pre><p>The basement-drain query is the real, measured win: the first stage already put <code>DOC-6</code> at
+rank 2 (<code>MRR=0.5</code>), and reranking promotes it to rank 1 (<code>MRR=1.0</code>), lifting <code>nDCG@10</code> from
+0.478 to 0.983. The other two queries were already easy for the first stage alone — both
+metrics stay flat, honestly reporting that reranking bought nothing on those two, not
+claiming a universal win where none occurred.</p>
+<p><strong>Exercise:</strong>
+Using <code>dcg_at_k</code>, <code>ndcg_at_k</code>, <code>mrr</code>, <code>first_stage</code>, and <code>second_stage</code> from this concept's
+Example, compute before/after <code>nDCG@10</code> and <code>MRR</code> for the query below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>glass_query = &quot;is a cracked windshield covered&quot;
+glass_grades = {&quot;DOC-A&quot;: 3, &quot;DOC-4&quot;: 1}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>is a cracked windshield covered           nDCG@10 1.000-&gt;1.000  MRR 1.000-&gt;1.000
+</code></pre><hr />
+<h3>Concept 2 — Graded Relevance on a 0-3 Scale, Not Binary</h3>
+<p>Binary relevance (a document is either relevant or it isn't) throws away information a
+reranker's whole job depends on: whether the top result is the EXACT clause that answers
+the question, or merely a related one that mentions the same topic without actually
+answering it. A 0-3 graded scale (0=irrelevant, 1=tangentially related, 2=relevant but not
+the best answer, 3=the exact answer) lets <code>nDCG</code> distinguish two rankings that binary
+<code>recall@1</code> would score identically.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing ndcg_at_k from Concept 1
+
+grades = {&quot;DOC-6&quot;: 3, &quot;DOC-9&quot;: 1}  # DOC-6 is the exact answer, DOC-9 only tangential
+ranking_a = [&quot;DOC-6&quot;, &quot;DOC-9&quot;, &quot;DOC-5&quot;]  # exact answer at rank 1
+ranking_b = [&quot;DOC-9&quot;, &quot;DOC-6&quot;, &quot;DOC-5&quot;]  # tangential doc at rank 1 instead
+
+def binary_recall_at_1(ranked_ids, grades):
+    return 1.0 if grades.get(ranked_ids[0], 0) &gt; 0 else 0.0
+
+for name, ranking in [(&quot;ranking_a&quot;, ranking_a), (&quot;ranking_b&quot;, ranking_b)]:
+    r1 = binary_recall_at_1(ranking, grades)
+    n = ndcg_at_k(ranking, grades, k=10)
+    print(f&quot;{name}: top1={ranking[0]}  binary_recall@1={r1}  graded_nDCG@10={n}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>ranking_a: top1=DOC-6  binary_recall@1=1.0  graded_nDCG@10=1.0
+ranking_b: top1=DOC-9  binary_recall@1=1.0  graded_nDCG@10=0.7098
+</code></pre><p>Binary <code>recall@1</code> scores both rankings identically (1.0 — SOME relevant document is at rank
+1 in both) and would report zero difference between them. Graded <code>nDCG@10</code> correctly
+penalizes <code>ranking_b</code> (0.7098) for putting the merely-tangential document ahead of the
+exact answer — exactly the distinction a reranker regression harness needs to catch, since
+&quot;still technically relevant&quot; is not the same failure severity as &quot;no longer the best
+answer.&quot;</p>
+<p><strong>Exercise:</strong>
+Using <code>ndcg_at_k</code> and <code>binary_recall_at_1</code> from this concept's Example, compute both
+metrics for the ranking below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>claim_grades = {&quot;DOC-8&quot;: 3, &quot;DOC-6&quot;: 1}
+ranking_c = [&quot;DOC-6&quot;, &quot;DOC-8&quot;, &quot;DOC-B&quot;]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>ranking_c: top1=DOC-6  binary_recall@1=1.0  graded_nDCG@10=0.7098
+</code></pre><hr />
+<h3>Concept 3 — Per-Query-Type Regression Detection</h3>
+<p>A single averaged metric across an entire labeled set can hide a real regression that only
+hits one query shape — a reranker change that improves easy queries while quietly breaking
+phrase-sensitive ones can still show a flat or even improved OVERALL average. Breaking the
+labeled set down by query type and comparing a candidate reranker against a baseline PER
+TYPE catches what an aggregate number would miss.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing tokenize from Day 1, ndcg_at_k from Concept 1
+
+def cross_encode_v1(query_text, doc_text):
+    q_toks = tokenize(query_text)
+    d_toks = tokenize(doc_text)
+    q_bigrams = set(zip(q_toks, q_toks[1:]))
+    d_bigrams = set(zip(d_toks, d_toks[1:]))
+    unigram_overlap = len(set(q_toks) &amp; set(d_toks))
+    bigram_overlap = len(q_bigrams &amp; d_bigrams)
+    return unigram_overlap + 3 * bigram_overlap
+
+def cross_encode_v2_unigram_only(query_text, doc_text):
+    q_toks = tokenize(query_text)
+    d_toks = tokenize(doc_text)
+    return len(set(q_toks) &amp; set(d_toks))
+
+def rerank_with(score_fn, query_text, candidate_ids, doc_lookup_local):
+    scored = [(cid, score_fn(query_text, doc_lookup_local[cid])) for cid in candidate_ids]
+    scored.sort(key=lambda x: -x[1])
+    return [c for c, _ in scored]
+
+regression_suite = [
+    (&quot;phrase_sensitive&quot;,
+     &quot;sump pump backup coverage&quot;,
+     [&quot;DOC-DECOY&quot;, &quot;DOC-EXACT&quot;],
+     {&quot;DOC-DECOY&quot;: &quot;water damage backup pump sump coverage exclusions apply for unrelated flood events and separate rider limits&quot;,
+      &quot;DOC-EXACT&quot;: &quot;sump pump backup coverage is included for water damage under this rider&quot;},
+     {&quot;DOC-EXACT&quot;: 3, &quot;DOC-DECOY&quot;: 1}),
+    (&quot;single_signal&quot;,
+     &quot;windshield chip repair&quot;,
+     [&quot;DOC-OTHER&quot;, &quot;DOC-GLASS&quot;],
+     {&quot;DOC-OTHER&quot;: &quot;roadside towing and lockout service included under the standard auto rider&quot;,
+      &quot;DOC-GLASS&quot;: &quot;windshield chip and crack repair covered in full with no deductible&quot;},
+     {&quot;DOC-GLASS&quot;: 3, &quot;DOC-OTHER&quot;: 0}),
+]
+
+def metrics_by_query_type(score_fn):
+    by_type = {}
+    for qtype, query, candidates, doc_lookup_local, grades in regression_suite:
+        ranked = rerank_with(score_fn, query, candidates, doc_lookup_local)
+        by_type.setdefault(qtype, []).append(ndcg_at_k(ranked, grades, k=10))
+    return {t: round(sum(v) / len(v), 4) for t, v in by_type.items()}
+
+v1_metrics = metrics_by_query_type(cross_encode_v1)
+v2_metrics = metrics_by_query_type(cross_encode_v2_unigram_only)
+print(&quot;v1 (bigram-aware, baseline):&quot;, v1_metrics)
+print(&quot;v2 (unigram-only, candidate):&quot;, v2_metrics)
+
+def detect_regressions(baseline, candidate, threshold=0.02):
+    regressions = []
+    for qtype, base_score in baseline.items():
+        new_score = candidate.get(qtype, 0.0)
+        if new_score &lt; base_score - threshold:
+            regressions.append((qtype, base_score, new_score, round(base_score - new_score, 4)))
+    return regressions
+
+for qtype, base, new, drop in detect_regressions(v1_metrics, v2_metrics):
+    print(f&quot;REGRESSION  query_type={qtype:&lt;18} baseline={base}  candidate={new}  drop={drop}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>v1 (bigram-aware, baseline): {&#x27;phrase_sensitive&#x27;: 1.0, &#x27;single_signal&#x27;: 1.0}
+v2 (unigram-only, candidate): {&#x27;phrase_sensitive&#x27;: 0.7098, &#x27;single_signal&#x27;: 1.0}
+REGRESSION  query_type=phrase_sensitive   baseline=1.0  candidate=0.7098  drop=0.2902
+</code></pre><p><code>v2</code> (a stripped-down reranker that drops the bigram/phrase-overlap term) ties <code>v1</code> exactly
+on <code>single_signal</code> queries — the average across the whole suite would show only a partial
+drop, easy to dismiss as noise. Broken down by type, the <code>phrase_sensitive</code> regression is
+unambiguous and specific: <code>v2</code> loses the ability to distinguish <code>DOC-EXACT</code>'s real phrase
+match from <code>DOC-DECOY</code>'s scrambled-word-order imitation, exactly the kind of document a
+cross-encoder's whole value proposition (Day 1 Concept 2) is supposed to catch that a
+bag-of-words scorer cannot.</p>
+<p><strong>Exercise:</strong>
+Using <code>metrics_by_query_type</code> and <code>detect_regressions</code> from this concept's Example
+(<code>regression_suite</code>, <code>v1_metrics</code> already computed), compute <code>v2_metrics</code> again and print
+whether a looser <code>threshold=0.35</code> still flags the same regression.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>looser_threshold = 0.35
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>regressions at threshold=0.35: []
+</code></pre><hr />
+<h3>Concept 4 — Freezing the Winning Reranker and <code>top_n</code> as a Versioned Config Artifact</h3>
+<p>A bake-off's result is only useful in production if the WINNING configuration — which
+reranker, what <code>top_n</code>/<code>top_k</code>, and the measured numbers that justified picking it — is
+captured as a concrete, versioned artifact a deployment can reference, not left as a
+conclusion in a markdown file someone has to remember to re-read. Freezing it as a
+serializable config object makes the decision auditable and gives a future regression check
+(re-running this same harness) something exact to compare against.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+from dataclasses import dataclass, asdict
+
+@dataclass(frozen=True)
+class RerankerConfig:
+    config_version: str
+    reranker_name: str
+    top_n: int
+    top_k: int
+    mean_ndcg_at_10: float
+    mean_mrr: float
+    frozen_reason: str
+
+def freeze_winning_config(candidates_evaluated, chosen_name, top_n, top_k, mean_ndcg, mean_mrr):
+    version = f&quot;rerank-cfg-{len(candidates_evaluated):02d}&quot;
+    reason = f&quot;beat {len(candidates_evaluated) - 1} other candidate(s) on mean nDCG@10 across the full labeled set&quot;
+    return RerankerConfig(
+        config_version=version,
+        reranker_name=chosen_name,
+        top_n=top_n,
+        top_k=top_k,
+        mean_ndcg_at_10=mean_ndcg,
+        mean_mrr=mean_mrr,
+        frozen_reason=reason,
+    )
+
+candidates_evaluated = [&quot;cross_encode_v1&quot;, &quot;cross_encode_v2_unigram_only&quot;, &quot;no_reranker_baseline&quot;]
+winning_config = freeze_winning_config(candidates_evaluated, &quot;cross_encode_v1&quot;, top_n=50, top_k=5, mean_ndcg=0.972, mean_mrr=0.944)
+config_json = json.dumps(asdict(winning_config), indent=2, sort_keys=True)
+print(config_json)
+
+reloaded = RerankerConfig(**json.loads(config_json))
+print(&quot;round-trips cleanly:&quot;, reloaded == winning_config)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>{
+  &quot;config_version&quot;: &quot;rerank-cfg-03&quot;,
+  &quot;frozen_reason&quot;: &quot;beat 2 other candidate(s) on mean nDCG@10 across the full labeled set&quot;,
+  &quot;mean_mrr&quot;: 0.944,
+  &quot;mean_ndcg_at_10&quot;: 0.972,
+  &quot;reranker_name&quot;: &quot;cross_encode_v1&quot;,
+  &quot;top_k&quot;: 5,
+  &quot;top_n&quot;: 50
+}
+round-trips cleanly: True
+</code></pre><p>The frozen config is a plain, JSON-serializable fact set — no live model reference, no
+code — that a deployment pipeline can load, log alongside every rerank call for audit
+(Day 1's own compliance note), and diff against the NEXT bake-off's winning config to
+detect drift over time, the same versioned-artifact discipline Week 23 Day 2's cache
+deploy gate and Week 24 Day 5's bake-off both already practiced.</p>
+<p><strong>Exercise:</strong>
+Using <code>freeze_winning_config</code> from this concept's Example, freeze a config for a run where
+<code>no_reranker_baseline</code> itself won (reranking was not worth its cost on this labeled set).</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>no_rerank_candidates = [&quot;cross_encode_v1&quot;, &quot;no_reranker_baseline&quot;]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>{
+  &quot;config_version&quot;: &quot;rerank-cfg-02&quot;,
+  &quot;frozen_reason&quot;: &quot;beat 1 other candidate(s) on mean nDCG@10 across the full labeled set&quot;,
+  ...
+  &quot;reranker_name&quot;: &quot;no_reranker_baseline&quot;,
+  ...
+}
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> a labeled set built once against today's policy corpus goes stale the
+moment new products or clause language ship — the same warning Day 1 and Week 24 both
+closed on, restated here as a concrete operational requirement: the regression harness
+needs a re-labeling cadence tied to corpus/product changes, not a one-time build.</p>
+<p><strong>Compliance angle:</strong> the frozen config artifact (Concept 4) IS the audit trail for &quot;why
+this reranker, why this <code>top_n</code>&quot; that a model-risk-management review will eventually ask
+for — capturing it as a real artifact at decision time is far cheaper than reconstructing
+the reasoning from memory or old chat logs during an audit months later.</p>
+<p><strong>What breaks in production:</strong> a regression check run once at deployment time and never
+again is a false sense of safety — the whole point of Concept 3's methodology is that it
+has to re-run on every reranker or prompt/model change, the same way a unit test suite
+protects against a code regression, not as a one-time acceptance gate that is satisfied and
+forgotten.</p>
+<hr />
+<h2>Architecture Decision — Week 25</h2>
+<p>Choosing between: <strong>no reranking, first-stage-only</strong> (skip this week's whole subject, trust
+the bi-encoder retriever's own ranking) vs. <strong>self-hosted cross-encoder reranking</strong>
+(<code>bge-reranker-v2-m3</code> through <code>CrossEncoder</code>, Day 2) vs. <strong>hosted reranking via Cohere</strong>
+(Day 3, with the circuit breaker built to degrade safely).</p>
+<p>Rule of thumb: default to <strong>no reranking</strong> for exact-ID lookups and single-candidate
+results — Day 4 Concept 4 already proved these cases pay full reranking cost for zero
+benefit, and that check should run BEFORE any reranker call, not after. For everything
+else, default to <strong>self-hosted</strong> the moment claim notes, loan files, or any other
+customer-identifying text would otherwise leave the bank's own infrastructure on every
+single request (Day 2 Concept 4's data-residency argument) — that constraint is a hard
+compliance blocker, not a cost tradeoff to be weighed against convenience. Move to
+<strong>hosted</strong> only when no such constraint applies AND in-house GPU capacity genuinely is not
+available (Day 2 Concept 4's <code>has_gpu_capacity</code> branch) or query volume sits below Day 4
+Concept 2's measured break-even point (roughly 100k-1M monthly queries in this week's
+illustrative pricing, real numbers to be re-measured against actual vendor rates before
+being trusted) — below that volume, hosted's per-query pricing beats an always-on GPU box's
+fixed cost.</p>
+<p>The actual failure case for the chosen default (self-hosted-when-data-residency-requires-
+it, hosted-otherwise) is Day 5's own: neither choice is validated by picking the &quot;obviously
+right&quot; option once and trusting it forever. <code>bge-reranker-v2-m3</code> truncates at 512 tokens
+silently (Day 2 Concept 2); a stripped-down reranker regresses specifically on
+phrase-sensitive queries while a flat average metric hides it entirely (Day 5 Concept 3); a
+circuit breaker tuned against the wrong latency assumption trips on ordinary variance (Day
+3's own closing warning). Day 5's regression harness — a labeled set with graded relevance,
+<code>nDCG@10</code>/<code>MRR</code> computed per query type, re-run on every reranker or config change, with the
+winning configuration frozen as a versioned artifact rather than trusted from memory — is
+the actual deliverable this week builds toward, not any single reranker choice. Whichever
+reranker a given deployment picks, it is only a safe default for as long as that harness
+keeps confirming it, not because it was the right answer once.</p>
+<hr />
+<div class="pager"><a class="btn ghost" href="week-24.html">&larr; Week 24</a><a class="btn ghost" href="week-26.html">Week 26 &rarr;</a></div>
+</main></body></html>

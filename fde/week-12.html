@@ -1,0 +1,1062 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 12 — DataPrep Pipeline Orchestration</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="12" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 12 — DataPrep Pipeline Orchestration</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>2 — Advanced AI Data Pipelines / DataPrep for LLMs</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Expert</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 08 (parsing), Week 09 (chunking), Week 11 (incremental embedding). <code>Curriculum/Week_16_Airflow</code> (DAG/task simulation pattern) and <code>Curriculum/Week_17_Capstone_Scale</code> D1 (idempotent-load pattern) -- both copied in and re-grounded here rather than referenced.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>9–11 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>None yet. This week is markdown-only — every runnable example below was executed to produce its <code>Expected output:</code>, but no <code>.ipynb</code> has been built for it.</td>
+</tr>
+</tbody>
+</table>
+<p>Weeks 08, 09, and 11 each built one stage of a real DataPrep pipeline in isolation: parse a
+document, chunk it, decide when to re-embed it. This week wires those stages together into
+one orchestrated pipeline — parse → chunk → embed → upsert — and treats the orchestration
+itself as the subject, not any one stage's internals. The DAG/task simulation pattern is
+copied in from <code>Curriculum/Week_16_Airflow</code> and re-grounded in this pipeline's four stages
+instead of that lesson's generic ETL tasks; the idempotent-upsert pattern is copied in from
+<code>Curriculum/Week_17_Capstone_Scale</code> Day 1 and re-grounded in content-hash-keyed chunk/vector
+upserts instead of that lesson's generic transaction records — building on the same
+content-hash-based idempotency this track's Week 06 and Week 11 already established for
+Kafka ingestion and incremental re-embedding.</p>
+<hr />
+<h2 id="day-1">Day 1 — Designing the DataPrep DAG</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=zVzBVpbgw1A" target="_blank" rel="noopener"><b>Best Practices For Writing DAGs In Airflow 2</b><small>Astronomer · 46:24</small></a></li><li><a href="https://www.youtube.com/watch?v=iI0ymwOij88" target="_blank" rel="noopener"><b>Customizing Xcom to enhance data sharing between tasks</b><small>Apache Airflow · 40:41</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Airflow%20DAG%20design%20task%20boundaries%20XCom%20best%20practices" target="_blank" rel="noopener">Search YouTube: Airflow DAG design task boundaries XCom best practices</a></p></div>
+<hr />
+<h3>Concept 1 — Parse, Chunk, Embed, and Upsert as Separately Retryable Tasks</h3>
+<p>Each pipeline stage is its own task, not one monolithic function, specifically so a
+failure in one stage doesn't force re-running the stages before it. A task decorator that
+retries on failure and enforces a timeout — adapted here from <code>Curriculum/Week_16_Airflow</code>'s
+DAG/task simulation, re-grounded in this pipeline's four stages instead of that lesson's
+generic tasks — models Airflow's real <code>retries</code>/<code>execution_timeout</code> task parameters
+without needing a live Airflow scheduler.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+import functools
+
+class TaskResult:
+    def __init__(self, task_id, status, return_value=None, error=None, attempts=1):
+        self.task_id, self.status, self.return_value, self.error, self.attempts = \
+            task_id, status, return_value, error, attempts
+
+    def __repr__(self):
+        return f&quot;TaskResult({self.task_id}, {self.status}, attempts={self.attempts})&quot;
+
+def task(retries=0, timeout_s=None):
+    &quot;&quot;&quot;Real retry-with-reattempt and a real (simulated) timeout, matching
+    Airflow&#x27;s own retries/execution_timeout task parameters.&quot;&quot;&quot;
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            task_id = func.__name__
+            last_error = None
+            for attempt in range(1, retries + 2):
+                start = time.perf_counter()
+                try:
+                    result = func(*args, **kwargs)
+                    elapsed = time.perf_counter() - start
+                    if timeout_s is not None and elapsed &gt; timeout_s:
+                        raise TimeoutError(f&quot;{task_id} took {elapsed:.3f}s &gt; timeout {timeout_s}s&quot;)
+                    return TaskResult(task_id, &quot;success&quot;, return_value=result, attempts=attempt)
+                except Exception as exc:
+                    last_error = str(exc)
+            return TaskResult(task_id, &quot;failed&quot;, error=last_error, attempts=retries + 1)
+        return wrapper
+    return decorator
+
+xcom = {}
+
+@task(retries=2, timeout_s=1.0)
+def parse_task(source_key):
+    xcom[&quot;parse_output_key&quot;] = f&quot;bronze/{source_key}.parsed.json&quot;
+    return xcom[&quot;parse_output_key&quot;]
+
+@task(retries=1, timeout_s=1.0)
+def chunk_task(parse_output_key):
+    xcom[&quot;chunk_output_key&quot;] = parse_output_key.replace(&quot;bronze&quot;, &quot;silver&quot;).replace(&quot;.parsed&quot;, &quot;.chunks&quot;)
+    return xcom[&quot;chunk_output_key&quot;]
+
+@task(retries=3, timeout_s=2.0)
+def embed_task(chunk_output_key):
+    xcom[&quot;embed_output_key&quot;] = chunk_output_key.replace(&quot;silver&quot;, &quot;gold&quot;).replace(&quot;.chunks&quot;, &quot;.embeds&quot;)
+    return xcom[&quot;embed_output_key&quot;]
+
+@task(retries=2, timeout_s=1.0)
+def upsert_task(embed_output_key):
+    return f&quot;upserted from {embed_output_key}&quot;
+
+r1 = parse_task(&quot;claim-POL-8842-C&quot;)
+r2 = chunk_task(r1.return_value)
+r3 = embed_task(r2.return_value)
+r4 = upsert_task(r3.return_value)
+for r in (r1, r2, r3, r4):
+    print(r, &quot;-&gt;&quot;, r.return_value)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a fifth task, <code>notify_task(upsert_result)</code>, that runs after <code>upsert_task</code> and returns a
+string like <code>&quot;notified: &lt;upsert_result&gt;&quot;</code>. Chain it onto the pipeline and print its
+<code>TaskResult</code>.</p>
+<p><strong>Starting point:</strong> The <code>task</code> decorator and the four existing task functions from this
+concept's Example, plus <code>r4</code> from the pipeline run.</p>
+<p>Expected output: measured here, all four tasks report <code>status=&quot;success&quot;</code> on the first
+attempt (<code>attempts=1</code>), with return values <code>bronze/claim-POL-8842-C.parsed.json</code> →
+<code>silver/claim-POL-8842-C.chunks.json</code> → <code>gold/claim-POL-8842-C.embeds.json</code> → <code>&quot;upserted from gold/claim-POL-8842-C.embeds.json&quot;</code>. A <code>notify_task</code> chained onto <code>r4.return_value</code>
+should likewise succeed on the first attempt and return
+<code>&quot;notified: upserted from gold/claim-POL-8842-C.embeds.json&quot;</code>.</p>
+<hr />
+<h3>Concept 2 — XCom Carries Object Keys, Never Payloads</h3>
+<p>Airflow's XCom mechanism is metadata storage, not blob storage — most backends practically
+cap how much a single XCom entry should hold before it becomes a scheduler metadata-database
+bloat problem. The pattern above already only ever passes short string keys between tasks;
+the anti-pattern is passing the actual parsed document, chunk list, or embedding vectors
+through XCom directly.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import sys
+
+chunks_payload = [f&quot;chunk {i}: &quot; + (&quot;policy wording text &quot; * 20) for i in range(50)]
+xcom_with_payload = {&quot;chunks&quot;: chunks_payload}
+payload_bytes = sys.getsizeof(str(xcom_with_payload))
+
+object_key = &quot;silver/claim-POL-8842-C.chunks.json&quot;
+xcom_with_key = {&quot;chunk_output_key&quot;: object_key}
+key_bytes = sys.getsizeof(str(xcom_with_key))
+
+print(f&quot;XCom size carrying the payload directly: {payload_bytes:,} bytes&quot;)
+print(f&quot;XCom size carrying only an object key:    {key_bytes:,} bytes&quot;)
+print(f&quot;size ratio: {payload_bytes / key_bytes:.0f}x smaller with keys-only&quot;)
+
+n_docs, avg_chunks_per_doc = 1000, 50
+projected_bytes = n_docs * avg_chunks_per_doc * len(chunks_payload[0])
+print(f&quot;\nat {n_docs} documents x {avg_chunks_per_doc} chunks/doc, payload-XCom would &quot;
+      f&quot;store roughly {projected_bytes:,} bytes in the scheduler&#x27;s metadata database &quot;
+      f&quot;across all task instances&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Recompute the projected metadata-database bytes for a corpus of 50,000 documents
+(instead of 1,000) at the same <code>avg_chunks_per_doc=50</code>, and state at what corpus size a
+payload-in-XCom pattern would start being the scheduler metadata database's single
+largest consumer of storage, using the single-document <code>payload_bytes</code> measured above as
+a rough per-document floor.</p>
+<p><strong>Starting point:</strong> The <code>n_docs</code>/<code>avg_chunks_per_doc</code>/<code>chunks_payload</code> values from this
+concept's Example, with <code>n_docs</code> changed to <code>50_000</code>.</p>
+<p>Expected output: measured here, the payload-carrying XCom is 20,751 bytes against
+108 bytes for the key-only version — about 192x larger. At 1,000 documents, the projected
+total is roughly 20.45 million bytes (~19.5 MB); at 50,000 documents the same arithmetic
+scales linearly to roughly 1.02 billion bytes (~975 MB) — well past the point where a
+scheduler's metadata database, sized for storing lightweight task metadata, would need to
+be provisioned like a document store instead, which is exactly the operational cost the
+object-key pattern avoids by construction.</p>
+<hr />
+<h3>Concept 3 — Per-Task Retry Counts and Timeouts Set From Real Failure Modes</h3>
+<p>A retry count isn't a number picked out of habit — it should be sized to the failure mode a
+specific task actually faces. A transient embedding-API rate limit that clears in two
+retries needs <code>retries=2</code> at minimum; a task with <code>retries=1</code> against the same failure mode
+fails outright.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+import functools
+
+class TaskResult:
+    def __init__(self, task_id, status, return_value=None, error=None, attempts=1):
+        self.task_id, self.status, self.return_value, self.error, self.attempts = \
+            task_id, status, return_value, error, attempts
+
+    def __repr__(self):
+        return f&quot;TaskResult({self.task_id}, {self.status}, attempts={self.attempts})&quot;
+
+def task(retries=0, timeout_s=None):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            task_id = func.__name__
+            last_error = None
+            for attempt in range(1, retries + 2):
+                start = time.perf_counter()
+                try:
+                    result = func(*args, **kwargs)
+                    elapsed = time.perf_counter() - start
+                    if timeout_s is not None and elapsed &gt; timeout_s:
+                        raise TimeoutError(f&quot;{task_id} took {elapsed:.3f}s &gt; timeout {timeout_s}s&quot;)
+                    return TaskResult(task_id, &quot;success&quot;, return_value=result, attempts=attempt)
+                except Exception as exc:
+                    last_error = str(exc)
+            return TaskResult(task_id, &quot;failed&quot;, error=last_error, attempts=retries + 1)
+        return wrapper
+    return decorator
+
+# A flaky embedding call that fails twice (a transient rate limit clearing
+# on the third try) then succeeds -- a real, common failure shape.
+call_count = {&quot;embed&quot;: 0}
+
+@task(retries=2, timeout_s=1.0)
+def flaky_embed_task(chunk_key):
+    call_count[&quot;embed&quot;] += 1
+    if call_count[&quot;embed&quot;] &lt; 3:
+        raise ConnectionError(f&quot;attempt {call_count[&#x27;embed&#x27;]}: transient API error&quot;)
+    return f&quot;gold/{chunk_key}.embeds.json&quot;
+
+result = flaky_embed_task(&quot;silver/claim.chunks.json&quot;)
+print(f&quot;retries=2: {result}, total calls made: {call_count[&#x27;embed&#x27;]}&quot;)
+
+call_count[&quot;embed&quot;] = 0
+
+@task(retries=1, timeout_s=1.0)
+def flaky_embed_task_low_retry(chunk_key):
+    call_count[&quot;embed&quot;] += 1
+    if call_count[&quot;embed&quot;] &lt; 3:
+        raise ConnectionError(f&quot;attempt {call_count[&#x27;embed&#x27;]}: transient API error&quot;)
+    return f&quot;gold/{chunk_key}.embeds.json&quot;
+
+result2 = flaky_embed_task_low_retry(&quot;silver/claim.chunks.json&quot;)
+print(f&quot;retries=1: {result2}, total calls made: {call_count[&#x27;embed&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the same flaky failure pattern (fails on the first N-1 calls, succeeds on the Nth),
+find the minimum <code>retries</code> value that lets a task with a failure pattern of &quot;fails 4
+times, succeeds on the 5th call&quot; eventually succeed.</p>
+<p><strong>Starting point:</strong> The <code>flaky_embed_task</code> pattern from this concept's Example, with the
+failure condition changed to <code>call_count[&quot;embed&quot;] &lt; 5</code> and <code>retries</code> swept upward from 0.</p>
+<p>Expected output: measured here, <code>retries=2</code> (3 total attempts) succeeds against a
+fails-twice-then-succeeds pattern (<code>status=&quot;success&quot;</code>, <code>attempts=3</code>, <code>total calls made=3</code>);
+<code>retries=1</code> (2 total attempts) fails against the same pattern (<code>status=&quot;failed&quot;</code>,
+<code>attempts=2</code>, <code>total calls made=2</code>) because it runs out of attempts one call short of
+success. For a &quot;fails 4 times, succeeds on the 5th&quot; pattern, the minimum sufficient
+<code>retries</code> value is 4 (5 total attempts) — the general rule being <code>retries &gt;= (failures before success)</code>, not one less.</p>
+<hr />
+<h3>Concept 4 — Task Granularity Versus Scheduler Overhead</h3>
+<p>Splitting a pipeline into more, smaller tasks buys finer-grained retry and observability,
+but every task instance carries a real scheduling cost (state transitions, XCom writes,
+UI/metadata bookkeeping) independent of how little actual work is inside it. Below some
+task size, that fixed overhead dominates the task's total runtime.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+
+def run_with_scheduler_overhead(n_tasks, work_per_task_s, overhead_per_task_s):
+    start = time.perf_counter()
+    for _ in range(n_tasks):
+        time.sleep(overhead_per_task_s)
+        time.sleep(work_per_task_s)
+    return time.perf_counter() - start
+
+overhead = 0.01  # 10ms simulated per-task scheduler bookkeeping cost
+for n_tasks in (1, 5, 20, 100):
+    work_per_task = 0.2 / n_tasks  # keep total real work constant at 0.2s
+    elapsed = run_with_scheduler_overhead(n_tasks, work_per_task, overhead)
+    overhead_total = n_tasks * overhead
+    print(f&quot;n_tasks={n_tasks:&gt;4}  total_elapsed={elapsed:.3f}s  &quot;
+          f&quot;overhead_total={overhead_total:.3f}s  &quot;
+          f&quot;overhead_fraction={overhead_total/elapsed*100:.1f}%&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the same function, find the <code>n_tasks</code> value (checking every 10 from 10 to 200) at
+which <code>overhead_fraction</code> first exceeds 90%, keeping total real work fixed at 0.2s. State
+what this implies about splitting a per-chunk embedding step into one task per chunk for a
+document with hundreds of chunks.</p>
+<p><strong>Starting point:</strong> The <code>run_with_scheduler_overhead</code> function and the <code>overhead=0.01</code>
+constant from this concept's Example, with <code>n_tasks</code> swept from 10 to 200 in steps of 10.</p>
+<p>Expected output: measured here, overhead fraction rises from roughly 5% (<code>n_tasks=1</code>) to
+20% (<code>n_tasks=5</code>) to 49% (<code>n_tasks=20</code>) to 82% (<code>n_tasks=100</code>) -- exact figures are
+wall-clock timing and will vary run to run and machine to machine; the rising shape is
+what matters, not the specific percentages. The fixed per-task cost increasingly dominates
+as the same total work gets split finer. The sweep will find the
+90% crossover somewhere past <code>n_tasks=100</code>. The direct implication: a document with
+hundreds of chunks should batch several chunks per embedding task rather than dispatching
+one task per chunk — task granularity should track natural failure/retry boundaries (a
+whole document's embedding step, not each of its chunks individually), not the finest
+division the pipeline could technically support.</p>
+<hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> A DAG's task boundaries often have to work around legacy source-system
+realities that have nothing to do with the DataPrep logic itself — a nightly mainframe
+extract that only becomes available at 03:00 forces the parse task's schedule regardless of
+how fast the rest of the pipeline could otherwise run.</p>
+<p><strong>Compliance angle:</strong> XCom holding only object keys (Concept 2), not payloads, is not just
+a scalability choice — it keeps sensitive claim/policy text out of the scheduler's own
+metadata database, which is typically not covered by the same access controls, encryption,
+and retention policy as the actual document store.</p>
+<p><strong>What breaks in production:</strong> A retry count set once during initial development, based on
+whatever failure rate the embedding API happened to show that week, is never revisited when
+the API provider's reliability changes (better or worse) — a <code>retries=2</code> that was generous
+in month one silently becomes insufficient once the provider's transient-failure rate
+doubles, and the pipeline starts failing on documents it used to handle fine.</p>
+<hr />
+<h2 id="day-2">Day 2 — Deterministic IDs and Idempotent Upserts</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=xTvfcb7PZFg" target="_blank" rel="noopener"><b>Idempotency — The #1 Concept Every Data Engineer Needs to Know | Essentials of D.E| Video #1</b><small>Manjinder Brar · 14:24</small></a></li><li><a href="https://www.youtube.com/watch?v=GcU2vxYrA3g" target="_blank" rel="noopener"><b>Idempotent Data Pipelines | Building Reliable &amp; Fault-Tolerant Data Workflows | Uplatz</b><small>Uplatz · 8:50</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=idempotent%20data%20pipeline%20deterministic%20id%20upsert%20exactly%20once" target="_blank" rel="noopener">Search YouTube: idempotent data pipeline deterministic id upsert exactly once</a></p></div>
+<hr />
+<h3>Concept 1 — <code>uuid5</code> Over (doc_id, chunk_index, content_hash)</h3>
+<p><code>uuid4</code> generates a random id every call — the same chunk re-processed twice gets two
+different ids, which is exactly wrong for a pipeline that must be safely re-runnable.
+<code>uuid5</code> is deterministic: it hashes a namespace and a name string together, so the same
+inputs always produce the same UUID. Building that name string from <code>doc_id</code>,
+<code>chunk_index</code>, and a content hash means the id changes if (and only if) the chunk's actual
+content changes — a re-run over unchanged data reproduces the identical id.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import uuid
+import hashlib
+
+NAMESPACE = uuid.UUID(&quot;6ba7b810-9dad-11d1-80b4-00c04fd430c8&quot;)
+
+def content_hash(text):
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+def deterministic_chunk_id(doc_id, chunk_index, content_hash_val):
+    &quot;&quot;&quot;uuid5 is deterministic: same inputs always produce the same UUID,
+    unlike uuid4 (random). This is what lets a re-run generate the SAME id
+    for the same logical chunk instead of a new one each time.&quot;&quot;&quot;
+    return str(uuid.uuid5(NAMESPACE, f&quot;{doc_id}:{chunk_index}:{content_hash_val}&quot;))
+
+chunk_text = &quot;Flood, earth movement, and war are excluded.&quot;
+h = content_hash(chunk_text)
+id1 = deterministic_chunk_id(&quot;POL-8842-C&quot;, 3, h)
+id2 = deterministic_chunk_id(&quot;POL-8842-C&quot;, 3, h)
+print(f&quot;content_hash: {h}&quot;)
+print(f&quot;chunk_id (run 1): {id1}&quot;)
+print(f&quot;chunk_id (run 2): {id2}&quot;)
+print(f&quot;same id across runs: {id1 == id2}&quot;)
+
+random_id1 = str(uuid.uuid4())
+random_id2 = str(uuid.uuid4())
+print(f&quot;\nuuid4 run 1: {random_id1}&quot;)
+print(f&quot;uuid4 run 2: {random_id2}&quot;)
+print(f&quot;same id across runs: {random_id1 == random_id2}&quot;)
+
+changed_text = &quot;Flood, earth movement, war, and terrorism are excluded.&quot;
+h2 = content_hash(changed_text)
+id3 = deterministic_chunk_id(&quot;POL-8842-C&quot;, 3, h2)
+print(f&quot;\nsame doc_id/chunk_index, changed content -&gt; chunk_id changes: {id1 != id3}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Compute <code>deterministic_chunk_id</code> for the same <code>chunk_text</code> and <code>chunk_index=3</code>, but with a
+different <code>doc_id</code> (<code>&quot;POL-9901-A&quot;</code> instead of <code>&quot;POL-8842-C&quot;</code>). Confirm this produces a
+different id even though the chunk text and index are identical, and state in one sentence
+why <code>doc_id</code> has to be part of the name string rather than relying on content hash alone.</p>
+<p><strong>Starting point:</strong> The <code>deterministic_chunk_id</code> function, <code>chunk_text</code>, and <code>h</code> from this
+concept's Example, called with <code>doc_id=&quot;POL-9901-A&quot;</code> instead of <code>&quot;POL-8842-C&quot;</code>.</p>
+<p>Expected output: measured here, <code>id1</code> and <code>id2</code> (same inputs, two calls) are identical
+(<code>68ba4ccc-fea2-5f8d-94f2-8ec2317d08c0</code>), while two <code>uuid4()</code> calls produce different
+random ids every time. Changing the content changes the id (<code>id1 != id3</code> is <code>True</code>).
+Changing only <code>doc_id</code> while keeping the same text and index also changes the id, because
+two different policies could coincidentally contain byte-identical clause text at the
+same chunk position — content hash alone can't distinguish them, so <code>doc_id</code> has to be
+part of what makes the id unique.</p>
+<hr />
+<h3>Concept 2 — Upsert Semantics Turn At-Least-Once Delivery Into Exactly-Once Effect</h3>
+<p>A pipeline retried after a partial failure delivers at-least-once — the same document can
+genuinely be processed more than once. A plain <code>INSERT</code> duplicates a row on every re-run;
+an upsert keyed by the deterministic chunk id (<code>ON CONFLICT ... DO UPDATE</code> in pgvector,
+each vector store's own native upsert call in Milvus/Qdrant) makes the <em>effect</em> of running
+N times identical to running once — adapted here from
+<code>Curriculum/Week_17_Capstone_Scale</code> Day 1's idempotent-load pattern, re-grounded in
+chunk/vector upserts instead of that lesson's generic transaction rows.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class VectorStoreSimulation:
+    &quot;&quot;&quot;In-memory stand-in for insert vs. upsert semantics.&quot;&quot;&quot;
+    def __init__(self):
+        self.rows = []   # plain INSERT-only store: duplicates allowed
+        self.by_id = {}  # upsert store: keyed by chunk_id, no duplicates
+
+    def insert_only(self, chunk_id, text):
+        self.rows.append({&quot;chunk_id&quot;: chunk_id, &quot;text&quot;: text})
+
+    def upsert(self, chunk_id, text):
+        self.by_id[chunk_id] = {&quot;chunk_id&quot;: chunk_id, &quot;text&quot;: text}
+
+store = VectorStoreSimulation()
+chunk_id = &quot;68ba4ccc-fea2-5f8d-94f2-8ec2317d08c0&quot;
+text = &quot;Flood, earth movement, and war are excluded.&quot;
+
+for run in range(1, 4):
+    store.insert_only(chunk_id, text)
+    store.upsert(chunk_id, text)
+
+print(f&quot;insert-only store after 3 identical runs: {len(store.rows)} rows &quot;
+      f&quot;(duplicates: {len(store.rows) - 1})&quot;)
+print(f&quot;upsert store after 3 identical runs: {len(store.by_id)} row(s) &quot;
+      f&quot;(duplicates: {len(store.by_id) - 1})&quot;)
+
+updated_text = &quot;Flood, earth movement, war, and terrorism are excluded.&quot;
+store.upsert(chunk_id, updated_text)
+print(f&quot;\nafter upserting updated text with the SAME chunk_id: &quot;
+      f&quot;{len(store.by_id)} row(s), text = {store.by_id[chunk_id][&#x27;text&#x27;]!r}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Re-run the same 3-iteration loop, but call <code>store.upsert</code> with a slightly different
+<code>chunk_id</code> on the 3rd iteration only (simulating a genuinely new chunk arriving alongside
+re-processed ones). State how many total rows <code>store.by_id</code> holds afterward and why that
+count is correct.</p>
+<p><strong>Starting point:</strong> The <code>VectorStoreSimulation</code> class and the 3-run loop from this
+concept's Example, with the 3rd iteration's <code>store.upsert</code> call using a different
+<code>chunk_id</code> string.</p>
+<p>Expected output: measured here, after 3 identical runs the insert-only store holds 3 rows
+(2 duplicates) while the upsert store holds exactly 1 row (0 duplicates) — the upsert
+store's <em>effect</em> after 3 runs is identical to its effect after 1. Upserting updated text
+under the same <code>chunk_id</code> still leaves exactly 1 row, now holding the updated text — a
+content change on re-run correctly replaces the old value rather than adding a second row.
+Adding one genuinely different <code>chunk_id</code> on the 3rd iteration should bring the total to 2
+rows: the original chunk_id's row (updated, still 1 row) plus the new chunk_id's row —
+upserting never merges or drops a row that has a genuinely distinct key.</p>
+<hr />
+<h3>Concept 3 — Re-Running a Whole Day Safely</h3>
+<p>The real test of idempotency isn't one chunk re-processed in isolation — it's re-running
+the <em>entire</em> day's pipeline, across every document, and confirming the final state is
+identical no matter how many times that full run happens. This is what makes a stuck
+pipeline safe to simply re-trigger from the top, rather than requiring an operator to
+figure out exactly which documents already succeeded.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import uuid
+import hashlib
+
+NAMESPACE = uuid.UUID(&quot;6ba7b810-9dad-11d1-80b4-00c04fd430c8&quot;)
+
+def content_hash(text):
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+def deterministic_chunk_id(doc_id, chunk_index, content_hash_val):
+    return str(uuid.uuid5(NAMESPACE, f&quot;{doc_id}:{chunk_index}:{content_hash_val}&quot;))
+
+class VectorStoreSimulation:
+    def __init__(self):
+        self.by_id = {}
+    def upsert(self, chunk_id, text):
+        self.by_id[chunk_id] = {&quot;chunk_id&quot;: chunk_id, &quot;text&quot;: text}
+
+def run_day_pipeline(store, documents):
+    &quot;&quot;&quot;documents: list of (doc_id, [chunk_texts]). Simulates a full day&#x27;s
+    parse-&gt;chunk-&gt;embed-&gt;upsert for every document with deterministic ids,
+    so re-running this whole function is safe.&quot;&quot;&quot;
+    for doc_id, chunk_texts in documents:
+        for idx, text in enumerate(chunk_texts):
+            h = content_hash(text)
+            cid = deterministic_chunk_id(doc_id, idx, h)
+            store.upsert(cid, text)
+
+day_documents = [
+    (&quot;POL-8842-C&quot;, [&quot;Flood, earth movement, and war are excluded.&quot;,
+                     &quot;Dwelling limit is three hundred fifty thousand dollars.&quot;]),
+    (&quot;POL-9901-A&quot;, [&quot;Water backup sublimit is ten thousand dollars.&quot;]),
+]
+
+store = VectorStoreSimulation()
+for run in range(1, 4):
+    run_day_pipeline(store, day_documents)
+    print(f&quot;after run {run}: {len(store.by_id)} total chunks in store&quot;)
+
+expected = sum(len(chunks) for _, chunks in day_documents)
+print(f&quot;\nfinal store size after 3 identical day-level re-runs: {len(store.by_id)} &quot;
+      f&quot;(expected: {expected}, one per real chunk)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a 3rd document to <code>day_documents</code> between the 2nd and 3rd calls to
+<code>run_day_pipeline</code> (simulating a document that failed to parse on the first two runs and
+is now included after a fix). State the final store size after the 3rd run and confirm it
+reflects exactly the union of all documents that were ever successfully included, with no
+duplication of the first two documents' chunks from having been processed 3 times each.</p>
+<p><strong>Starting point:</strong> The <code>day_documents</code> list and the 3-run loop from this concept's
+Example, with a 3rd document added before the final <code>run_day_pipeline</code> call.</p>
+<p>Expected output: measured here, the store holds 3 total chunks after run 1, still 3 after
+run 2, and still 3 after run 3 — matching the expected count of 3 real chunks across both
+documents exactly, regardless of having processed the full day 3 times. Adding a 3rd
+document (say, with 2 chunks) before the final run should bring the total to 5 — the
+original 3 chunks (still deduplicated across all 3 runs) plus the new document's 2 chunks,
+with no duplicate rows from the repeated processing of the first two documents.</p>
+<hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> A legacy source system that reuses a document identifier after a
+retention-policy purge and reissues it to a genuinely different document breaks the
+<code>doc_id</code> half of the deterministic-id scheme outright — the new document's chunks would
+collide with (and silently overwrite) the old document's chunk ids, since <code>doc_id</code> reuse
+is exactly the assumption Concept 1's uniqueness argument depends on holding.</p>
+<p><strong>Compliance angle:</strong> Idempotent upserts (Concept 2) are what make a claims/policy
+DataPrep pipeline auditable after an incident — being able to state &quot;we re-ran the day 3
+times after the outage, and the resulting index is provably identical to a single clean
+run&quot; is a genuinely different, stronger claim than &quot;we re-ran it and it seems fine,&quot; which
+matters when a regulator or an internal model-risk review asks how a stale or duplicated
+answer could have reached a customer.</p>
+<p><strong>What breaks in production:</strong> A well-meaning fix changes how <code>content_hash</code> is computed
+(a different hash algorithm, or normalizing whitespace differently) without also
+re-processing the existing index — every existing chunk's deterministic id silently
+changes on the next natural re-run, and the store ends up with two ids for what is
+logically the same chunk: the old-hash id (now orphaned, never revisited) and the
+new-hash id, doubling storage and confusing any downstream count-based quality gate.</p>
+<hr />
+<h2 id="day-3">Day 3 — Partial Failure and Resumability</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=MhRQAw7PFD4" target="_blank" rel="noopener"><b>Airflow for Beginners: Build a Data Pipeline DAG with Retries (Data to Chatbot, Ep 3)</b><small>Safe to Ship · 7:11</small></a></li><li><a href="https://www.youtube.com/watch?v=ReYK6fsFxxU" target="_blank" rel="noopener"><b>Pipeline Crashed Between Stages? Resume from a Safe Checkpoint | Pipeline 19</b><small>Learners Dream · 6:33</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=airflow%20retries%20partial%20failure%20resume%20checkpoint%20pipeline" target="_blank" rel="noopener">Search YouTube: airflow retries partial failure resume checkpoint pipeline</a></p></div>
+<hr />
+<h3>Concept 1 — Checkpoint Per Document, Not Per Run</h3>
+<p>If a crash happens partway through a day's batch, the question that matters is &quot;which
+stage did each individual document reach,&quot; not &quot;did the run as a whole finish.&quot; A
+per-document checkpoint records the last completed stage for every document, so a resumed
+run picks each document back up exactly where it left off — a document that already
+reached &quot;chunk&quot; doesn't get re-parsed from scratch, and a document that never started
+still starts from the top.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class Checkpoint:
+    def __init__(self):
+        self.completed_stages = {}  # doc_id -&gt; last completed stage name
+
+    def mark_done(self, doc_id, stage):
+        self.completed_stages[doc_id] = stage
+
+    def resume_stage(self, doc_id, stages):
+        &quot;&quot;&quot;Return the index of the next stage to run for doc_id.&quot;&quot;&quot;
+        last = self.completed_stages.get(doc_id)
+        if last is None:
+            return 0
+        return stages.index(last) + 1
+
+stages = [&quot;parse&quot;, &quot;chunk&quot;, &quot;embed&quot;, &quot;upsert&quot;]
+checkpoint = Checkpoint()
+
+# POL-8842-C got through &quot;chunk&quot; before the pipeline crashed;
+# POL-9901-A never started.
+checkpoint.mark_done(&quot;POL-8842-C&quot;, &quot;chunk&quot;)
+
+for doc_id in (&quot;POL-8842-C&quot;, &quot;POL-9901-A&quot;):
+    resume_idx = checkpoint.resume_stage(doc_id, stages)
+    remaining = stages[resume_idx:]
+    label = &quot;top of pipeline&quot; if resume_idx == 0 else f&quot;after {stages[resume_idx - 1]}&quot;
+    print(f&quot;{doc_id}: resume from stage index {resume_idx} ({label}), &quot;
+          f&quot;remaining stages: {remaining}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a 3rd document, <code>&quot;POL-1122-B&quot;</code>, checkpointed at <code>&quot;embed&quot;</code> (one stage further along
+than <code>POL-8842-C</code>). Confirm its resume point correctly shows only <code>[&quot;upsert&quot;]</code> remaining,
+distinct from the other two documents' resume points.</p>
+<p><strong>Starting point:</strong> The <code>Checkpoint</code> class and <code>stages</code> list from this concept's Example,
+with <code>checkpoint.mark_done(&quot;POL-1122-B&quot;, &quot;embed&quot;)</code> added before the loop, and
+<code>&quot;POL-1122-B&quot;</code> added to the documents iterated over.</p>
+<p>Expected output: measured here, <code>POL-8842-C</code> resumes from stage index 2 (after
+<code>&quot;chunk&quot;</code>), with remaining stages <code>['embed', 'upsert']</code>; <code>POL-9901-A</code> resumes from stage
+index 0 (top of pipeline), with all four stages remaining. Adding <code>POL-1122-B</code>
+checkpointed at <code>&quot;embed&quot;</code> should resume it from stage index 3, with only <code>['upsert']</code>
+remaining — one stage further along than <code>POL-8842-C</code>, reflecting that each document's
+checkpoint is tracked completely independently of every other document's progress.</p>
+<hr />
+<h3>Concept 2 — A Quarantine Table for Poison Documents</h3>
+<p>A malformed document that fails every retry attempt at some stage is a poison document —
+one that will never succeed no matter how many times the pipeline retries it. Moving it to
+a quarantine table (recording which document, which stage, what error, how many attempts)
+and continuing to the next document is what keeps one bad file from stalling the entire
+day's processing.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class Quarantine:
+    def __init__(self):
+        self.entries = []
+
+    def add(self, doc_id, stage, error, attempts):
+        self.entries.append({&quot;doc_id&quot;: doc_id, &quot;failed_stage&quot;: stage,
+                              &quot;error&quot;: error, &quot;attempts&quot;: attempts})
+
+def process_document(doc_id, stages, max_retries, poison_docs, quarantine):
+    &quot;&quot;&quot;Bounded retries per stage; a document that exhausts retries at any
+    stage is quarantined and processing MOVES ON to the next document.&quot;&quot;&quot;
+    for stage in stages:
+        attempt = 0
+        while True:
+            attempt += 1
+            if doc_id in poison_docs and stage == poison_docs[doc_id]:
+                if attempt &gt; max_retries:
+                    quarantine.add(doc_id, stage, &quot;malformed document&quot;, attempt - 1)
+                    return &quot;quarantined&quot;
+                continue
+            break
+    return &quot;success&quot;
+
+stages = [&quot;parse&quot;, &quot;chunk&quot;, &quot;embed&quot;, &quot;upsert&quot;]
+poison_docs = {&quot;POL-BAD-1&quot;: &quot;parse&quot;}  # this doc always fails at &quot;parse&quot;
+quarantine = Quarantine()
+max_retries = 3
+
+results = {}
+for doc_id in (&quot;POL-8842-C&quot;, &quot;POL-BAD-1&quot;, &quot;POL-9901-A&quot;):
+    results[doc_id] = process_document(doc_id, stages, max_retries, poison_docs, quarantine)
+
+for doc_id, result in results.items():
+    print(f&quot;{doc_id}: {result}&quot;)
+
+print(f&quot;\nquarantine table: {quarantine.entries}&quot;)
+print(f&quot;\nPOL-9901-A processed successfully DESPITE POL-BAD-1 failing: &quot;
+      f&quot;{results[&#x27;POL-9901-A&#x27;] == &#x27;success&#x27;}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a second poison document, <code>&quot;POL-BAD-2&quot;</code>, that fails at the <code>&quot;embed&quot;</code> stage instead of
+<code>&quot;parse&quot;</code>. Confirm both poison documents end up in the quarantine table with their
+respective correct <code>failed_stage</code>, and that a third, healthy document processed after both
+still succeeds.</p>
+<p><strong>Starting point:</strong> The <code>poison_docs</code> dict and the document loop from this concept's
+Example, with <code>&quot;POL-BAD-2&quot;: &quot;embed&quot;</code> added to <code>poison_docs</code> and <code>&quot;POL-BAD-2&quot;</code> added to the
+documents processed.</p>
+<p>Expected output: measured here, <code>POL-8842-C</code> and <code>POL-9901-A</code> both succeed, <code>POL-BAD-1</code>
+is quarantined with <code>failed_stage=&quot;parse&quot;</code> and <code>attempts=3</code> (matching <code>max_retries=3</code>),
+and <code>POL-9901-A</code> succeeding despite <code>POL-BAD-1</code> failing confirms <code>True</code> — one bad document
+does not block the others. Adding <code>POL-BAD-2</code> (fails at <code>&quot;embed&quot;</code>) should add a second
+quarantine entry with <code>failed_stage=&quot;embed&quot;</code>, and any healthy document processed after it
+in the same run should still succeed, for the same reason <code>POL-9901-A</code> did.</p>
+<hr />
+<h3>Concept 3 — Bounded Retries So One Bad File Cannot Stall the DAG</h3>
+<p>Concepts 1-2 already assume retries are bounded (<code>max_retries</code>) — this concept makes
+explicit why that bound has to exist at all: an unbounded retry loop against a
+genuinely-poison document would never terminate, consuming scheduler capacity
+indefinitely and blocking everything queued behind it, which is strictly worse than
+quarantining the document and moving on.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def process_with_bound(doc_id, always_fails, max_retries):
+    &quot;&quot;&quot;max_retries=N means: try once, then retry up to N more times --
+    N+1 total real attempts before giving up and quarantining.&quot;&quot;&quot;
+    for attempt in range(1, max_retries + 2):
+        if not always_fails:
+            return &quot;success&quot;, attempt
+    return &quot;quarantined&quot;, max_retries + 1
+
+for max_retries in (0, 1, 3, 10):
+    result, attempts = process_with_bound(&quot;POL-BAD-1&quot;, always_fails=True, max_retries=max_retries)
+    print(f&quot;max_retries={max_retries:&gt;2}  result={result:12}  attempts_made={attempts}&quot;)
+
+# an UNBOUNDED retry loop against a genuinely-poison document would run
+# forever -- this is not run here (it would never terminate), but the
+# reasoning is direct: a while-True retry loop with no attempt ceiling and
+# no success condition never exits.
+print(&quot;\nan unbounded retry loop (no max_retries) against a poison document &quot;
+      &quot;would never return -- there is no attempt count at which it gives up.&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+State, for <code>max_retries=5</code>, how many total attempts are made before a permanently-failing
+document is quarantined, using the pattern in <code>process_with_bound</code>. Then state, in one
+sentence, what real operational cost an unbounded-retry design would impose on a scheduler
+that is also supposed to be processing other documents concurrently.</p>
+<p><strong>Starting point:</strong> The <code>process_with_bound</code> function from this concept's Example, called
+with <code>max_retries=5</code>.</p>
+<p>Expected output: measured here, <code>max_retries=0</code> quarantines after 1 attempt,
+<code>max_retries=1</code> after 2, <code>max_retries=3</code> after 4, <code>max_retries=10</code> after 11 — the pattern
+is <code>max_retries + 1</code> total attempts before quarantine. At <code>max_retries=5</code>, that's 6 total
+attempts. An unbounded-retry design would tie up a worker slot indefinitely on the poison
+document, which — depending on the scheduler's concurrency limits — can starve every other
+queued document of the capacity to run at all, turning one bad file into an outage for the
+whole day's batch rather than a contained, quarantined failure.</p>
+<hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> A poison document from a legacy source is often poison for a
+domain-specific reason no generic retry logic can fix — a mainframe report export with a
+truncated trailer record, or a scanned form with a corrupted image stream. Quarantining it
+with the real error attached (Concept 2) gives whoever investigates a starting point;
+silently dropping it or retrying it forever gives them nothing.</p>
+<p><strong>Compliance angle:</strong> A quarantine table is itself an audit artifact — being able to show
+exactly which documents failed, at which stage, on which date, and why, is direct evidence
+for a data-completeness question (&quot;were all of last quarter's claims actually processed&quot;),
+which a pipeline with no quarantine record and only a generic failure log cannot answer as
+precisely.</p>
+<p><strong>What breaks in production:</strong> A document quarantined once is never automatically
+retried after the underlying issue (a source-system bug, a bad file) is fixed, because
+nothing distinguishes &quot;still broken&quot; from &quot;was fixed weeks ago but nobody re-triggered
+it&quot; — a quarantine table needs its own periodic review process, not just a place for
+failures to go and be forgotten.</p>
+<hr />
+<h2 id="day-4">Day 4 — Backfill Versus Incremental Runs</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=W7ahAfS-sKM" target="_blank" rel="noopener"><b>Catchup and Backfill in Apache Airflow | Apache Airflow | Part 6</b><small>Big Tech Talk · 8:06</small></a></li><li><a href="https://www.youtube.com/watch?v=OXOiUeHOQ-0" target="_blank" rel="noopener"><b>Airflow DAG Catchup and Backfill: Airflow Tutorial P8</b><small>coder2j · 4:54</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=airflow%20backfill%20catchup%20parameterized%20date%20range" target="_blank" rel="noopener">Search YouTube: airflow backfill catchup parameterized date range</a></p></div>
+<hr />
+<h3>Concept 1 — Parameterized Date-Range Backfill With <code>catchup=False</code></h3>
+<p><code>catchup=False</code> (the common production default) means a scheduler only processes the
+current scheduled interval, regardless of how many prior intervals were missed — a missed
+day is a data gap, not something the next incremental run silently absorbs. Filling that
+gap is a separate, explicit, parameterized backfill: a date range chosen on purpose and
+run once, not an automatic side effect of the schedule resuming.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from datetime import date, timedelta
+
+def date_range(start, end):
+    days = []
+    d = start
+    while d &lt;= end:
+        days.append(d)
+        d += timedelta(days=1)
+    return days
+
+def incremental_run(today, catchup=False):
+    if catchup:
+        raise NotImplementedError(&quot;catchup=True path not modeled here -- production default is False&quot;)
+    return [today]
+
+def parameterized_backfill(start_date, end_date):
+    return date_range(start_date, end_date)
+
+today = date(2026, 9, 5)
+last_successful_run = date(2026, 9, 1)  # the pipeline was down for 4 days
+
+incremental_days = incremental_run(today, catchup=False)
+print(f&quot;incremental run (catchup=False) processes: {incremental_days}&quot;)
+gap = date_range(last_successful_run + timedelta(days=1), today - timedelta(days=1))
+print(f&quot;days silently skipped (a real gap now): {gap}&quot;)
+
+backfill_days = parameterized_backfill(last_successful_run + timedelta(days=1), today - timedelta(days=1))
+print(f&quot;\nexplicit backfill for the gap processes: {backfill_days}&quot;)
+print(f&quot;total days covered by incremental + backfill: {len(incremental_days) + len(backfill_days)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Compute the gap and backfill date range for a pipeline down for 10 days instead of 4
+(<code>last_successful_run = date(2026, 8, 26)</code>, <code>today</code> unchanged). State how many days the
+backfill needs to cover, and confirm incremental-plus-backfill together account for every
+day between the last successful run and today with no gap and no overlap.</p>
+<p><strong>Starting point:</strong> The <code>date_range</code>/<code>incremental_run</code>/<code>parameterized_backfill</code> functions
+from this concept's Example, with <code>last_successful_run = date(2026, 8, 26)</code>.</p>
+<p>Expected output: measured here (4-day gap), the incremental run covers only
+<code>[2026-09-05]</code>, the gap is <code>[2026-09-02, 2026-09-03, 2026-09-04]</code> (3 days), and the
+backfill covers exactly that same 3-day range — 4 total days covered between the two. At
+a 10-day gap, the backfill range grows to 9 days (<code>2026-08-27</code> through <code>2026-09-04</code>), and
+the total (1 incremental + 9 backfill = 10) should still exactly span every day since the
+last successful run, with neither a gap nor a double-processed day at the boundary.</p>
+<hr />
+<h3>Concept 2 — <code>max_active_runs</code> and Pools Capped by Embedding Rate Limits</h3>
+<p>A backfill can trigger many days' worth of runs at once — without a concurrency cap, it
+would try to embed every one of those days' documents simultaneously, which a real
+embedding API's rate limit will simply reject. A pool caps how many documents are ever
+embedded concurrently, matching the rate limit rather than the pipeline's own eagerness to
+parallelize.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+
+def process_with_pool(n_docs, pool_size, per_doc_s):
+    &quot;&quot;&quot;A pool caps concurrent embedding calls to match a real rate limit.
+    More pool slots than the rate limit allows doesn&#x27;t speed anything up,
+    it just means requests queue at the API instead of in the pool.&quot;&quot;&quot;
+    start = time.perf_counter()
+    remaining = n_docs
+    batches = 0
+    while remaining &gt; 0:
+        batch = min(pool_size, remaining)
+        time.sleep(batch * per_doc_s)
+        remaining -= batch
+        batches += 1
+    return time.perf_counter() - start, batches
+
+n_docs, per_doc_s = 20, 0.02
+for pool_size in (1, 4, 20):
+    elapsed, batches = process_with_pool(n_docs, pool_size, per_doc_s)
+    print(f&quot;pool_size={pool_size:&gt;3}  batches={batches:&gt;2}  elapsed={elapsed:.3f}s&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Re-run with <code>n_docs=100</code> at the same three <code>pool_size</code> values. State whether the number of
+batches at <code>pool_size=4</code> scales the way you'd expect (proportionally to <code>n_docs</code>), and
+what that implies about choosing <code>pool_size</code> to match a rate limit expressed as
+&quot;N requests per second&quot; rather than picking it arbitrarily.</p>
+<p><strong>Starting point:</strong> The <code>process_with_pool</code> function from this concept's Example, with
+<code>n_docs=100</code>.</p>
+<p>Expected output: measured here at <code>n_docs=20</code>, <code>pool_size=1</code> takes 20 batches,
+<code>pool_size=4</code> takes 5 batches, <code>pool_size=20</code> takes 1 batch — batches scale as
+<code>ceil(n_docs / pool_size)</code>, so at <code>n_docs=100</code> the same three pool sizes should give 100,
+25, and 5 batches respectively — proportional, as expected. This confirms <code>pool_size</code>
+should be set directly from a documented rate limit (say, &quot;the API allows 4 concurrent
+requests&quot;) rather than guessed, since the batch count (and therefore wall-clock time to
+process a backfill) is a direct, predictable function of that one number.</p>
+<hr />
+<h3>Concept 3 — A Cost-Estimate Gate Before Any Large Backfill</h3>
+<p>A backfill's total cost (embedding API calls x price per call) should be estimated and
+checked against a limit <em>before</em> the backfill runs, not discovered from a bill after the
+fact — a gate that refuses to launch a backfill whose projected cost exceeds an approved
+threshold is a cheap safeguard against a parameterized date range that was fat-fingered
+one order of magnitude too wide.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def estimate_backfill_cost(n_days, avg_docs_per_day, cost_per_doc_usd):
+    return n_days * avg_docs_per_day * cost_per_doc_usd
+
+def cost_gate(estimated_cost, max_allowed_usd):
+    if estimated_cost &gt; max_allowed_usd:
+        return False, f&quot;refused: ${estimated_cost:.2f} exceeds ${max_allowed_usd:.2f} limit&quot;
+    return True, f&quot;approved: ${estimated_cost:.2f} within ${max_allowed_usd:.2f} limit&quot;
+
+small_cost = estimate_backfill_cost(n_days=3, avg_docs_per_day=50, cost_per_doc_usd=0.002)
+large_cost = estimate_backfill_cost(n_days=365, avg_docs_per_day=50, cost_per_doc_usd=0.002)
+print(cost_gate(small_cost, max_allowed_usd=10.0))
+print(cost_gate(large_cost, max_allowed_usd=10.0))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+A backfill request comes in for <code>n_days=365</code> but <code>avg_docs_per_day</code> is corrected from 50
+to 500 (a data-volume assumption that was off by 10x). Recompute the estimated cost and
+state whether it still passes the same <code>max_allowed_usd=10.0</code> gate.</p>
+<p><strong>Starting point:</strong> The <code>estimate_backfill_cost</code>/<code>cost_gate</code> functions from this
+concept's Example, with <code>avg_docs_per_day=500</code>.</p>
+<p>Expected output: measured here, the 3-day backfill costs an estimated $0.30 (approved
+against a $10.00 limit), while the 365-day backfill costs an estimated $36.50 (refused).
+At <code>avg_docs_per_day=500</code> instead of 50, the 365-day estimate rises 10x to $365.00 — still
+refused, and by a much wider margin, which is exactly the gate doing its job: catching a
+volume-assumption error before it becomes an actual $365 charge rather than after.</p>
+<hr />
+<h3>Concept 4 — Ordering Guarantees When Backfill and Incremental Overlap</h3>
+<p>A backfill for an older date range and an incremental run for today's date can end up
+writing the same document if it was amended after the backfill's date range but the
+backfill happens to finish later in wall-clock time than the incremental run. Using each
+write's own <code>event_time</code> (when the underlying document was actually valid), rather than
+wall-clock arrival order, to decide which write wins keeps the final state correct
+regardless of which pipeline's write physically lands last.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class VersionedStore:
+    def __init__(self):
+        self.rows = {}  # chunk_id -&gt; {&quot;text&quot;:..., &quot;event_time&quot;:...}
+
+    def write(self, chunk_id, text, event_time):
+        existing = self.rows.get(chunk_id)
+        if existing is None or event_time &gt;= existing[&quot;event_time&quot;]:
+            self.rows[chunk_id] = {&quot;text&quot;: text, &quot;event_time&quot;: event_time}
+            return &quot;applied&quot;
+        return &quot;rejected (older event_time than what&#x27;s stored)&quot;
+
+store = VersionedStore()
+chunk_id = &quot;chunk-POL-8842-C-3&quot;
+
+# Incremental (for TODAY) happens to write FIRST in wall-clock time;
+# backfill (for an OLDER date) finishes SECOND.
+incremental_write = store.write(chunk_id, &quot;current exclusion wording&quot;, event_time=&quot;2026-09-05&quot;)
+print(f&quot;incremental write (event_time=2026-09-05) applied first: {incremental_write}&quot;)
+
+backfill_write = store.write(chunk_id, &quot;stale exclusion wording from last week&quot;, event_time=&quot;2026-08-29&quot;)
+print(f&quot;backfill write (event_time=2026-08-29) arrives SECOND in wall-clock time: {backfill_write}&quot;)
+
+print(f&quot;\nfinal stored text: {store.rows[chunk_id][&#x27;text&#x27;]!r}&quot;)
+print(f&quot;correct because event_time ordering, not arrival order, decided the winner: &quot;
+      f&quot;{store.rows[chunk_id][&#x27;event_time&#x27;] == &#x27;2026-09-05&#x27;}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Reverse the order of the two <code>store.write</code> calls (backfill's older-<code>event_time</code> write
+first, incremental's newer-<code>event_time</code> write second) on a fresh <code>VersionedStore</code>. State
+whether the final stored text is the same as in the Example, and what that confirms about
+the ordering guarantee not depending on which write physically arrives first.</p>
+<p><strong>Starting point:</strong> A fresh <code>VersionedStore()</code> instance, with the two <code>store.write</code> calls
+from this concept's Example issued in reversed order.</p>
+<p>Expected output: measured here, the incremental write (newer <code>event_time</code>) is <code>applied</code>
+regardless of arriving first; the backfill write (older <code>event_time</code>) is <code>rejected</code>
+because its <code>event_time</code> is older than what's already stored — final text is &quot;current
+exclusion wording&quot;, correctly reflecting <code>event_time=2026-09-05</code>. Reversing the call order
+(backfill first, incremental second) should produce the identical final state: the
+backfill's write is <code>applied</code> first (nothing stored yet to compare against), then the
+incremental write's newer <code>event_time</code> still wins and overwrites it — the same correct
+outcome regardless of which pipeline's write physically arrives first, which is the whole
+point of deciding by <code>event_time</code> rather than arrival order.</p>
+<hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> A legacy source system's own backfill capability (a mainframe batch job
+re-extracting a historical date range) often has no <code>event_time</code> field at all in its export
+format — only an extract timestamp. Bolting event-time-based ordering onto a source that
+doesn't natively carry it requires deriving one (from a document's own effective-date
+field, per Week 09 Day 4's chunk metadata) rather than assuming the source provides it for
+free.</p>
+<p><strong>Compliance angle:</strong> A cost-estimate gate (Concept 3) is also an unintentional-scope
+control: a backfill accidentally covering a much wider date range or document population
+than intended isn't just a cost overrun, it can pull historical documents into an index
+that were never meant to be reprocessed (a since-cancelled policy, a document under legal
+hold) — the same gate that catches a 10x cost error is a real check against reprocessing
+data that shouldn't be touched again.</p>
+<p><strong>What breaks in production:</strong> A backfill is kicked off with <code>max_active_runs</code> left at
+whatever an incremental run's config default happens to be, rather than sized down for the
+backfill's much larger volume — the backfill then either overwhelms the embedding API's
+rate limit (Concept 2) or starves today's incremental run of pool capacity, turning a
+routine catch-up job into an outage for current-day processing.</p>
+<hr />
+<h2 id="day-5">Day 5 — Pipeline Observability and Quality Gates</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="12-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=HDNPI0vegwI" target="_blank" rel="noopener"><b>Data Observability Explained: The Key to Trusted Data Pipelines</b><small>Software Engineering With Scott Moore · 17:13</small></a></li><li><a href="https://www.youtube.com/watch?v=YiCIDds7M7E" target="_blank" rel="noopener"><b>12 Best Data Observability Tools: Pros, Cons and Pricing (2026)</b><small>Fun with Learning Technology · 9:10</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=data%20quality%20gates%20pipeline%20observability%20freshness%20volume%20checks" target="_blank" rel="noopener">Search YouTube: data quality gates pipeline observability freshness volume checks</a></p></div>
+<hr />
+<h3>Concept 1 — Per-Stage Counts Asserted, Not Just Logged</h3>
+<p>A pipeline that logs &quot;160 chunks embedded&quot; relies on someone reading the log to notice
+when that number looks wrong. Asserting per-stage counts against the previous stage's
+output — chunk count matching vector count, chunks-per-document staying above a sane
+floor — fails the run loudly the moment a stage's output silently diverges from what it
+should have produced.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def assert_stage_counts(stage_name, doc_count, chunk_count, vector_count, expectations):
+    &quot;&quot;&quot;Real assertions on per-stage counts -- not just logging them.&quot;&quot;&quot;
+    errors = []
+    if &quot;min_chunks_per_doc&quot; in expectations:
+        actual_ratio = chunk_count / doc_count if doc_count else 0
+        if actual_ratio &lt; expectations[&quot;min_chunks_per_doc&quot;]:
+            errors.append(f&quot;chunks/doc ratio {actual_ratio:.1f} below minimum &quot;
+                           f&quot;{expectations[&#x27;min_chunks_per_doc&#x27;]}&quot;)
+    if vector_count != chunk_count:
+        errors.append(f&quot;vector_count ({vector_count}) != chunk_count ({chunk_count}) &quot;
+                       f&quot;-- some chunks produced no vector&quot;)
+    if errors:
+        raise AssertionError(f&quot;{stage_name} quality gate failed: &quot; + &quot;; &quot;.join(errors))
+    return f&quot;{stage_name}: {doc_count} docs, {chunk_count} chunks, {vector_count} vectors -- OK&quot;
+
+print(assert_stage_counts(&quot;run_2026-09-05&quot;, doc_count=40, chunk_count=160,
+                          vector_count=160, expectations={&quot;min_chunks_per_doc&quot;: 2}))
+
+try:
+    assert_stage_counts(&quot;run_2026-09-04&quot;, doc_count=40, chunk_count=160,
+                        vector_count=142, expectations={&quot;min_chunks_per_doc&quot;: 2})
+except AssertionError as e:
+    print(f&quot;caught: {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Call <code>assert_stage_counts</code> with <code>doc_count=40</code>, <code>chunk_count=60</code>, <code>vector_count=60</code>, and
+<code>expectations={&quot;min_chunks_per_doc&quot;: 2}</code>. State whether it raises, and which specific
+check triggers the failure.</p>
+<p><strong>Starting point:</strong> The <code>assert_stage_counts</code> function from this concept's Example, called
+with the values above.</p>
+<p>Expected output: the healthy run prints <code>&quot;run_2026-09-05: 40 docs, 160 chunks, 160 vectors -- OK&quot;</code>; the degraded run raises and the caught message reads <code>&quot;run_2026-09-04 quality gate failed: vector_count (142) != chunk_count (160) -- some chunks produced no vector&quot;</code>. The new call (<code>chunk_count=60</code> for 40 docs, an average of 1.5 chunks/doc) should
+raise on the <code>min_chunks_per_doc</code> check specifically — <code>vector_count</code> matches
+<code>chunk_count</code> here (60 == 60), so only the chunks-per-document ratio check fails, not the
+vector-count check.</p>
+<hr />
+<h3>Concept 2 — Null-Embedding and Dimension-Mismatch Checks</h3>
+<p>An embedding API can return a null result for a malformed input, an all-zero vector for a
+failed call that didn't raise an exception, or (after a model-version change) a vector of
+a different dimension than the index expects. None of these look like a task failure —
+the task reports success — so they have to be checked explicitly, not inferred from the
+absence of an error.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def check_embeddings(embeddings, expected_dim):
+    issues = []
+    for i, emb in enumerate(embeddings):
+        if emb is None:
+            issues.append(f&quot;chunk {i}: null embedding&quot;)
+        elif len(emb) != expected_dim:
+            issues.append(f&quot;chunk {i}: dimension {len(emb)} != expected {expected_dim}&quot;)
+        elif all(v == 0.0 for v in emb):
+            issues.append(f&quot;chunk {i}: all-zero embedding (likely a failed API call)&quot;)
+    return issues
+
+expected_dim = 4
+embeddings = [
+    [0.1, 0.2, 0.3, 0.4],
+    None,
+    [0.0, 0.0, 0.0, 0.0],
+    [0.1, 0.2, 0.3],
+    [0.5, 0.5, 0.5, 0.5],
+]
+issues = check_embeddings(embeddings, expected_dim)
+print(f&quot;checked {len(embeddings)} embeddings, found {len(issues)} issue(s):&quot;)
+for issue in issues:
+    print(f&quot;  {issue}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a 6th embedding, <code>[0.3, 0.3, 0.3, 0.3, 0.3]</code> (5 dimensions instead of the expected 4),
+to the <code>embeddings</code> list. State how many total issues <code>check_embeddings</code> now reports and
+confirm the new entry is caught by the dimension check specifically, not the null or
+all-zero checks.</p>
+<p><strong>Starting point:</strong> The <code>embeddings</code> list from this concept's Example, with the 6th
+embedding appended.</p>
+<p>Expected output: measured here, 3 issues are found among the original 5 embeddings —
+index 1 (null), index 2 (all-zero), index 3 (wrong dimension, 3 vs 4). Adding the 6th
+embedding (5 dimensions) should bring the total to 4 issues, with the new entry reported
+as a dimension mismatch (<code>5 != expected 4</code>), the same check that caught index 3, since a
+5-dimensional non-null, non-zero vector doesn't trigger either of the other two checks.</p>
+<hr />
+<h3>Concept 3 — Freshness SLI, Emitted Every Run</h3>
+<p>A freshness Service-Level Indicator — how much time has elapsed since a document was last
+successfully processed — has to be computed and emitted on every run, not just checked
+when someone suspects staleness. Without it being a routine, always-on measurement, there
+is no baseline to notice a freshness <em>regression</em> against.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from datetime import datetime
+
+def freshness_sli(last_processed_at, now):
+    lag = now - last_processed_at
+    return lag.total_seconds() / 3600  # hours
+
+now = datetime(2026, 9, 5, 14, 0, 0)
+last_processed = datetime(2026, 9, 5, 9, 0, 0)
+sli_hours = freshness_sli(last_processed, now)
+print(f&quot;freshness SLI: {sli_hours:.1f} hours since last successful processing&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Compute the freshness SLI for a document last processed at <code>datetime(2026, 9, 2, 9, 0, 0)</code>
+against the same <code>now</code>. State how many hours that is, and whether that lag would be
+acceptable for a claims-intake pipeline with (hypothetically) a documented 24-hour
+freshness SLA.</p>
+<p><strong>Starting point:</strong> The <code>freshness_sli</code> function and <code>now</code> value from this concept's
+Example, with <code>last_processed_at = datetime(2026, 9, 2, 9, 0, 0)</code>.</p>
+<p>Expected output: measured here, the 5-hour-old document's SLI is <code>5.0</code>. A document last
+processed on <code>2026-09-02</code> at <code>09:00</code> against <code>now = 2026-09-05 14:00</code> is 3 days and 5
+hours old, which is <code>77.0</code> hours — well past a hypothetical 24-hour freshness SLA, and
+exactly the kind of regression a freshness SLI emitted every run (rather than checked only
+when someone happens to ask) is designed to surface before a customer-facing answer is
+built on stale data.</p>
+<hr />
+<h3>Concept 4 — Alerting on a Chunk-Count Drop, Not Only on Task Failure</h3>
+<p>A task reporting &quot;success&quot; while silently producing far fewer chunks than a healthy run is
+not caught by task-failure alerting at all — it needs its own volume-drop check, comparing
+today's count against a historical baseline, with alerting on the drop itself.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def check_chunk_count_drop(today_count, historical_avg, drop_threshold_pct):
+    drop_pct = (historical_avg - today_count) / historical_avg * 100
+    if drop_pct &gt; drop_threshold_pct:
+        return True, drop_pct
+    return False, drop_pct
+
+alert, drop_pct = check_chunk_count_drop(today_count=95, historical_avg=160, drop_threshold_pct=20)
+print(f&quot;chunk count today=95 vs historical_avg=160: drop={drop_pct:.1f}%, &quot;
+      f&quot;alert triggered: {alert}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Call <code>check_chunk_count_drop</code> with <code>today_count=150</code>, <code>historical_avg=160</code>, keeping
+<code>drop_threshold_pct=20</code>. State whether this smaller drop still triggers an alert, and why
+a 20% threshold (rather than alerting on any drop at all) is a reasonable choice given
+that daily document volume naturally varies.</p>
+<p><strong>Starting point:</strong> The <code>check_chunk_count_drop</code> function from this concept's Example,
+called with the values above.</p>
+<p>Expected output: measured here, <code>today_count=95</code> against <code>historical_avg=160</code> is a 40.6%
+drop, which triggers the alert (<code>True</code>) against a 20% threshold. <code>today_count=150</code> against
+the same baseline is a 6.25% drop, which does NOT trigger the alert (<code>False</code>) — a
+threshold above zero is necessary because daily document volume naturally fluctuates
+(a slow business day is not a pipeline failure), and alerting on any drop at all would
+generate constant false alarms; the threshold has to be wide enough to absorb normal
+variance while still catching a genuine processing failure like the 40.6% case.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> A historical baseline for chunk-count-drop alerting (Concept 4) is only
+as good as the history it's computed over — a legacy source system's own seasonal
+patterns (a monthly billing cycle, a quarterly renewal surge) can look like a false alarm
+against a naive rolling average unless the baseline accounts for the same cycle, which
+means the alerting threshold itself needs domain knowledge of the source, not just a
+generic statistical rule.</p>
+<p><strong>Compliance angle:</strong> A freshness SLI (Concept 3) emitted every run, with a documented
+threshold, is exactly the kind of ongoing evidence an internal model-risk review wants for
+&quot;how current is the data this system answers from&quot; — a freshness claim checked only
+reactively, after a complaint, is not the same standard of evidence as a metric that has
+been continuously measured and would have caught the same staleness on its own.</p>
+<p><strong>What breaks in production:</strong> A quality gate (Concept 1) that raises an exception on
+failure, with no distinction between &quot;stop the whole day's pipeline&quot; and &quot;quarantine this
+one document and continue&quot; (Day 3's pattern), turns every single quality-gate failure into
+a full outage — the gate is doing its job by catching the problem, but an operations team
+that has to fully halt ingestion for one bad batch's worth of documents will eventually be
+pressured into loosening the gate rather than fixing the root cause, which defeats the
+gate's whole purpose.</p>
+<hr />
+<h2>Architecture Decision — Week 12</h2>
+<p><strong>Choosing between:</strong> treating orchestration, idempotency, resumability, backfill
+management, and observability as one integrated pipeline design versus bolting each of
+Days 1-5's concerns on separately, after the fact.</p>
+<p><strong>Rule of thumb:</strong> design the deterministic-id scheme (Day 2) and the per-document
+checkpoint (Day 3) together, from the start — retrofitting idempotent ids onto a pipeline
+that already has non-deterministic ids in production means a one-time, carefully-staged
+migration, not a config change. Build the cost-estimate gate (Day 4) and the quality gates
+(Day 5) as blocking checks in the DAG itself, not as a dashboard someone has to remember to
+look at — a gate that can be silently skipped is not a gate. Size <code>pool</code>/<code>max_active_runs</code>
+(Day 4) directly from the embedding provider's documented rate limit, and revisit that
+sizing whenever the provider's limits change, not just at initial launch. Treat the
+quarantine table (Day 3) and the freshness/volume alerting (Day 5) as one observability
+surface, not two: a document sitting in quarantine for weeks unreviewed is itself a
+freshness regression for that specific document, even while the pipeline's aggregate
+freshness SLI looks fine. And whatever this pipeline orchestrates — Weeks 08-11's parse,
+chunk, and embedding-update stages specifically — keep the orchestration layer itself
+free of stage-specific logic: a DAG that has to be edited every time a chunking strategy
+changes (Week 09) or an OCR fallback threshold changes (Week 08) has confused
+orchestration with implementation, which is exactly the boundary Day 1's task design
+was meant to hold.</p>
+<div class="pager"><a class="btn ghost" href="week-11.html">&larr; Week 11</a><a class="btn ghost" href="week-13.html">Week 13 &rarr;</a></div>
+</main></body></html>

@@ -1,0 +1,1277 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 06 — Kafka/Redpanda Streaming Ingestion for Vector Pipelines</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="06" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 06 — Kafka/Redpanda Streaming Ingestion for Vector Pipelines</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>1 — Real-Time Vector Infrastructure &amp; Streaming</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Expert</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 01's cost-model and benchmarking habits; comfort with Python, <code>asyncio</code>, and reading a config table without a live service behind it.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>7–9 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>None yet. This sandbox has no <code>confluent_kafka</code> package and no reachable broker, so every producer/consumer snippet below is REAL MODE — reasoned about and API-checked, not executed. Every genuinely runnable piece of logic (partition assignment, keying skew, compaction, the idempotence validator, commit-timing races, micro-batching, bounded concurrency, backoff, DLQ envelopes, replay planning) is pure Python with no broker dependency, and is EXECUTED with real captured output below. A notebook covering just that executable half is a reasonable follow-up, not a gap in this file.</td>
+</tr>
+</tbody>
+</table>
+<p>Weeks 04 and 05 built the index and the ranking function. Neither one gets fed by
+itself. Something has to notice that a claim was just filed, updated, or reopened, turn
+it into an embedding, and land it in the vector store — continuously, not as a nightly
+batch. That something is a stream, and this week is about the specific ways a streaming
+ingestion pipeline breaks that a batch pipeline never has to think about: ordering,
+duplicate delivery, a slow embedding call tripping a liveness timeout, and one bad record
+jamming an entire partition behind it.</p>
+<hr />
+<h2 id="day-1">Day 1 — Topics, Partitions and Keys</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="06-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=UxM1mn1gwoc" target="_blank" rel="noopener"><b>Differences between Apache Kafka and Redpanda - Thread per Core Architecture</b><small>Redpanda Data · 4:30</small></a></li><li><a href="https://www.youtube.com/watch?v=y9BStKvVzSs" target="_blank" rel="noopener"><b>Apache Kafka 101: Partitioning (2023)</b><small>Confluent, an IBM Company · 4:23</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Kafka%20partitions%20keys%20ordering%20guarantees%20Redpanda%20comparison" target="_blank" rel="noopener">Search YouTube: Kafka partitions keys ordering guarantees Redpanda comparison</a></p></div>
+<hr />
+<h3>Concept 1 — Partition Count Is the Ceiling on Embedder Parallelism</h3>
+<p>A Kafka topic's partitions are the unit of parallelism for a consumer group: each
+partition is assigned to exactly one consumer in the group at a time. That means the
+number of partitions is a hard ceiling — adding an eleventh consumer to a ten-partition
+topic buys you nothing, because there is no eleventh partition to hand it.</p>
+<p>For a claim-embedding pipeline this is not an abstract limit. If embedding one batch
+takes 800ms and each active consumer processes one batch at a time, the whole
+pipeline's throughput is <code>active_consumers x (batch_size / embed_latency)</code> — capped the
+moment <code>active_consumers</code> hits the partition count, no matter how many more consumer
+processes you add.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def assign_partitions(num_partitions, num_consumers):
+    &quot;&quot;&quot;Kafka&#x27;s default range/round-robin style assignment: partitions split as
+    evenly as possible, extra consumers beyond partition count sit idle.&quot;&quot;&quot;
+    assignment = {c: [] for c in range(num_consumers)}
+    for p in range(num_partitions):
+        assignment[p % num_consumers].append(p)
+    return assignment
+
+def throughput_records_per_sec(num_partitions, num_consumers, batch_size, embed_latency_s):
+    &quot;&quot;&quot;Each active consumer processes one batch at a time; idle consumers add nothing.&quot;&quot;&quot;
+    active_consumers = min(num_partitions, num_consumers)
+    per_consumer_rps = batch_size / embed_latency_s
+    return active_consumers * per_consumer_rps
+
+for num_consumers in (4, 8, 12, 24):
+    num_partitions = 12
+    assignment = assign_partitions(num_partitions, num_consumers)
+    idle = sum(1 for c, parts in assignment.items() if not parts)
+    rps = throughput_records_per_sec(num_partitions, num_consumers, batch_size=50, embed_latency_s=0.8)
+    print(f&quot;consumers={num_consumers:&gt;3}  partitions=12  idle_consumers={idle:&gt;2}  &quot;
+          f&quot;throughput={rps:8.1f} rec/s&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>consumers=  4  partitions=12  idle_consumers= 0  throughput=   250.0 rec/s
+consumers=  8  partitions=12  idle_consumers= 0  throughput=   500.0 rec/s
+consumers= 12  partitions=12  idle_consumers= 0  throughput=   750.0 rec/s
+consumers= 24  partitions=12  idle_consumers=12  throughput=   750.0 rec/s
+</code></pre><p><strong>Exercise:</strong>
+Re-run <code>throughput_records_per_sec</code> holding <code>num_consumers=12</code> fixed and sweep
+<code>num_partitions</code> over <code>(6, 12, 24, 48)</code> instead. Identify the point at which adding more
+partitions stops increasing throughput, and explain in one sentence why that point moves
+if partitions is instead pinned at 12 and consumers is the thing that grows.</p>
+<p><strong>Starting point:</strong> The <code>assign_partitions</code> and <code>throughput_records_per_sec</code> functions from this concept's Example, with <code>num_consumers = 12</code> fixed and <code>num_partitions</code> swept over <code>(6, 12, 24, 48)</code>.</p>
+<p>Expected output: throughput rises with partition count only up to 12 partitions (where
+every one of the 12 consumers is finally active); past 12 partitions throughput is flat
+again, because now <em>consumers</em>, not partitions, are the binding ceiling. The two
+ceilings are symmetric — whichever of <code>min(partitions, consumers)</code> is smaller decides
+throughput.</p>
+<hr />
+<h3>Concept 2 — Keying by <code>claim_id</code> Buys Per-Entity Ordering and Costs You Skew</h3>
+<p>Kafka guarantees order only within a partition. Keyed messages with the same key always
+land on the same partition (the default partitioner hashes the key), so keying every
+event for a claim by its <code>claim_id</code> guarantees that claim's own events arrive in order —
+opened, then updated, then closed, never out of sequence. That guarantee is per-key, not
+per-topic; two different claims' events can interleave freely across partitions.</p>
+<p>The cost is that the same hash-to-one-partition property that buys ordering also means a
+disproportionately busy key sends disproportionate volume to one partition, permanently.
+Uniformly-distributed keys spread evenly by the law of large numbers; a small number of
+unusually active claims do not average out, because every one of their events shares the
+same fixed destination.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+import random
+from collections import Counter
+
+def partition_for_key(key, num_partitions):
+    &quot;&quot;&quot;Stand-in for Kafka&#x27;s default partitioner (murmur2 mod partition count,
+    not in stdlib) -- same class of skew behaviour regardless of hash choice.&quot;&quot;&quot;
+    digest = hashlib.md5(key.encode()).digest()
+    return int.from_bytes(digest[:4], &quot;big&quot;) % num_partitions
+
+num_partitions = 8
+num_claims = 5_000
+rng = random.Random(6)
+claim_ids = [f&quot;CLM-{i:07d}&quot; for i in range(num_claims)]
+
+# Every event for a claim carries the SAME key -&gt; same partition every time.
+uniform_events_per_claim = {c: rng.randint(1, 3) for c in claim_ids}
+
+# 2% of claims (litigation, large commercial losses) generate 40x the typical
+# event volume -- reopens, adjuster notes, subrogation updates.
+hot_claims = set(rng.sample(claim_ids, k=int(num_claims * 0.02)))
+skewed_events_per_claim = {
+    c: rng.randint(60, 120) if c in hot_claims else rng.randint(1, 3)
+    for c in claim_ids
+}
+
+def partition_event_totals(events_per_claim):
+    totals = Counter()
+    for claim_id, n_events in events_per_claim.items():
+        totals[partition_for_key(claim_id, num_partitions)] += n_events
+    return totals
+
+def report(label, totals):
+    values = [totals.get(p, 0) for p in range(num_partitions)]
+    mean = sum(values) / len(values)
+    print(f&quot;{label}: min={min(values):&gt;6} max={max(values):&gt;6} mean={mean:8.0f} &quot;
+          f&quot;max/mean={max(values)/mean:.2f}&quot;)
+
+report(&quot;uniform event volume per claim&quot;, partition_event_totals(uniform_events_per_claim))
+report(&quot;2% hot claims, 40x volume    &quot;, partition_event_totals(skewed_events_per_claim))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>uniform event volume per claim: min=  1167 max=  1308 mean=    1244 max/mean=1.05
+2% hot claims, 40x volume    : min=  1941 max=  3343 mean=    2370 max/mean=1.41
+</code></pre><p><strong>Exercise:</strong>
+Repeat the measurement with the hot-claim fraction raised from 2% to 8% (same 40x
+multiplier), and again with the multiplier raised from 40x to 200x at 2%. Report
+<code>max/mean</code> for both changes and state which lever — fraction of hot keys, or their
+volume multiplier — moved skew more.</p>
+<p><strong>Starting point:</strong> The <code>partition_event_totals</code> and <code>report</code> functions from this concept's Example, with <code>hot_claims</code> resampled at <code>k=int(num_claims * 0.08)</code> for the first run, and the multiplier range changed to <code>rng.randint(60, 340)</code> for the second.</p>
+<p>Expected output: both changes increase <code>max/mean</code> above the 1.41 baseline; raising the
+hot-claim fraction spreads the extra volume across more partitions (each hot claim still
+lands somewhere different), while raising the multiplier concentrates more volume behind
+however many hot claims already exist. Report your own two ratios rather than assuming
+which wins — the answer depends on how many of the &quot;hot&quot; keys were already colliding on
+the same partition by chance.</p>
+<hr />
+<h3>Concept 3 — Redpanda: Raft Per Partition, No ZooKeeper, Same Client API</h3>
+<p>Redpanda is a Kafka-API-compatible broker written from scratch in C++, without
+ZooKeeper and without a separate KRaft-style controller quorum. Each partition runs its
+own Raft consensus group directly, and the broker speaks the same wire protocol Kafka
+clients already use — a producer or consumer written against <code>confluent_kafka</code> (or any
+other Kafka client library) does not know, or need to know, which broker it is talking
+to.</p>
+<p>What changes is entirely on the operations side: no ZooKeeper cluster to run and
+patch, one binary instead of Kafka-plus-ZooKeeper-plus-(optionally)-Schema-Registry, and
+a different set of tuning knobs at the broker/cluster layer. None of that touches the
+producer/consumer configuration this week spends most of its time on — <code>acks</code>,
+<code>enable.idempotence</code>, <code>linger.ms</code>, <code>max.poll.interval.ms</code> mean exactly the same thing
+against either broker.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>comparison = {
+    &quot;coordination&quot;:        {&quot;Kafka&quot;: &quot;ZooKeeper (legacy) or KRaft quorum&quot;, &quot;Redpanda&quot;: &quot;Raft per partition, no external quorum&quot;},
+    &quot;binaries to operate&quot;: {&quot;Kafka&quot;: &quot;brokers + ZooKeeper/KRaft controllers (+ optional Schema Registry)&quot;, &quot;Redpanda&quot;: &quot;one binary&quot;},
+    &quot;wire protocol&quot;:       {&quot;Kafka&quot;: &quot;Kafka protocol&quot;, &quot;Redpanda&quot;: &quot;Kafka protocol (compatible)&quot;},
+    &quot;producer config&quot;:     {&quot;Kafka&quot;: &quot;acks, enable.idempotence, linger.ms, batch.size&quot;, &quot;Redpanda&quot;: &quot;identical -- same client library, same options&quot;},
+    &quot;consumer config&quot;:     {&quot;Kafka&quot;: &quot;enable.auto.commit, max.poll.interval.ms, partition.assignment.strategy&quot;, &quot;Redpanda&quot;: &quot;identical&quot;},
+}
+for row, values in comparison.items():
+    print(f&quot;{row:&lt;22} Kafka: {values[&#x27;Kafka&#x27;]:&lt;55} Redpanda: {values[&#x27;Redpanda&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>coordination           Kafka: ZooKeeper (legacy) or KRaft quorum                              Redpanda: Raft per partition, no external quorum
+binaries to operate     Kafka: brokers + ZooKeeper/KRaft controllers (+ optional Schema Registry) Redpanda: one binary
+wire protocol           Kafka: Kafka protocol                                                    Redpanda: Kafka protocol (compatible)
+producer config         Kafka: acks, enable.idempotence, linger.ms, batch.size                   Redpanda: identical -- same client library, same options
+consumer config         Kafka: enable.auto.commit, max.poll.interval.ms, partition.assignment.strategy Redpanda: identical
+</code></pre><p><strong>Exercise:</strong>
+Add a sixth row to the <code>comparison</code> dict for &quot;schema registry&quot; (Kafka: a separately
+deployed Confluent or Apicurio service; Redpanda: a built-in schema registry exposed on
+the same API) and print the extended table.</p>
+<p><strong>Starting point:</strong> The <code>comparison</code> dict and print loop from this concept's Example, with one new key <code>&quot;schema registry&quot;</code> added before the loop runs.</p>
+<p>Expected output: the same table format with a sixth printed row, and the same
+conclusion restated: everything a client-side producer or consumer configures is
+unaffected by which broker sits behind it.</p>
+<hr />
+<h3>Concept 4 — Retention vs Log Compaction for an Embed Feed</h3>
+<p>A Kafka topic can be cleaned up two ways. <strong>Retention</strong> deletes records after a time or
+size limit regardless of key — appropriate for an append-only audit feed where every
+event matters and none should be silently collapsed. <strong>Compaction</strong> instead keeps only
+the latest record per key forever (subject to a cleaner running periodically), discarding
+every earlier value for that key.</p>
+<p>A &quot;current status of this claim&quot; feed is exactly what compaction is for: a consumer
+rebuilding &quot;where does every claim currently stand&quot; only ever needs the latest record per
+<code>claim_id</code>, and replaying a compacted topic costs one pass over the number of distinct
+keys, not the number of events ever written. An append-only &quot;every status change that
+ever happened&quot; audit trail needs retention instead, because compaction would destroy the
+history that trail exists to keep.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import random
+
+def compact(events):
+    &quot;&quot;&quot;Log compaction: keep only the latest value per key. Mirrors what a
+    compacted Kafka topic converges to after the cleaner runs (offsets are
+    not preserved -- only the payload).&quot;&quot;&quot;
+    latest = {}
+    for key, value in events:
+        latest[key] = value
+    return list(latest.items())
+
+rng = random.Random(11)
+num_claims = 2_000
+num_status_updates = 20_000
+statuses = [&quot;OPEN&quot;, &quot;IN_REVIEW&quot;, &quot;PENDING_DOCS&quot;, &quot;APPROVED&quot;, &quot;DENIED&quot;, &quot;CLOSED&quot;]
+events = [(f&quot;CLM-{rng.randrange(num_claims):06d}&quot;, rng.choice(statuses))
+          for _ in range(num_status_updates)]
+
+compacted = compact(events)
+print(f&quot;raw event log entries      : {len(events):&gt;7,}&quot;)
+print(f&quot;compacted (latest per key) : {len(compacted):&gt;7,}&quot;)
+print(f&quot;replay volume reduction    : {(1 - len(compacted) / len(events)) * 100:6.1f}%&quot;)
+print(f&quot;raw replay reads           : {len(events):&gt;7,} records&quot;)
+print(f&quot;compacted replay reads     : {len(compacted):&gt;7,} records&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>raw event log entries      :  20,000
+compacted (latest per key) :   2,000
+replay volume reduction    :   90.0%
+raw replay reads           :  20,000 records
+compacted replay reads     :   2,000 records
+</code></pre><p><strong>Exercise:</strong>
+Re-run with <code>num_status_updates</code> raised to 100,000 (same 2,000 claims), and again with
+<code>num_claims</code> raised to 20,000 (same 100,000 updates). Report the replay-volume reduction
+for both and state, in one sentence, which of the two variables actually controls how
+much compaction saves you.</p>
+<p><strong>Starting point:</strong> The <code>compact</code> function and event-generation loop from this concept's Example, with <code>num_status_updates=100_000</code> for the first run and <code>num_claims=20_000, num_status_updates=100_000</code> for the second.</p>
+<p>Expected output: reduction climbs above 90% as updates-per-claim rises with <code>num_claims</code>
+fixed, and falls back down as <code>num_claims</code> grows toward the update count — compaction's
+payoff tracks updates-per-key, not the raw event count on its own.</p>
+<hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> The event that should trigger re-embedding — &quot;this claim's adjuster
+notes changed&quot; — often has no native change feed on a legacy policy administration
+system. It arrives as a nightly batch extract diffed against yesterday's extract, turned
+into synthetic &quot;claim updated&quot; events after the fact. The partition-count and keying
+decisions in this section assume a real-time source; plan for a batch-to-stream adapter
+sitting in front of it instead.</p>
+<p><strong>Compliance angle:</strong> Keying by <code>claim_id</code> is also a data-minimization boundary. If the
+same topic carries claims for multiple lines of business or multiple legal entities under
+one insurance group, the partition assignment must not become a de facto way to infer
+which entity a claim belongs to from which partition it lands on — keep that mapping out
+of anything an external consumer group can observe.</p>
+<p><strong>What breaks in production:</strong> A well-meaning &quot;let's add more consumers for
+resilience&quot; change adds consumers past the partition count. Nothing errors. The extra
+consumers sit idle, throughput does not improve, and the on-call engineer spends an hour
+looking for the bottleneck in the wrong place before checking partition count.</p>
+<hr />
+<h2 id="day-2">Day 2 — Producers and Schema Registry</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="06-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=HX0yx5YX284" target="_blank" rel="noopener"><b>Integrate Python Clients with Schema Registry | Apache Kafka® for Python Developers</b><small>Confluent, an IBM Company · 6:25</small></a></li><li><a href="https://www.youtube.com/watch?v=RgEoYw6u0sg" target="_blank" rel="noopener"><b>Confluent Schema Registry | Apache Kafka 101 (2025 Edition)</b><small>Confluent Developer · 8:46</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Kafka%20schema%20registry%20avro%20producer%20python%20confluent%20tutorial" target="_blank" rel="noopener">Search YouTube: Kafka schema registry avro producer python confluent tutorial</a></p></div>
+<hr />
+<h3>Concept 1 — <code>acks=all</code> and <code>enable.idempotence</code> Are Two Different Guarantees</h3>
+<p><strong>REAL MODE — not executed (requires <code>pip install confluent-kafka</code> and a reachable broker):</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from confluent_kafka import Producer
+
+producer = Producer({
+    &quot;bootstrap.servers&quot;: &quot;broker1:9092,broker2:9092&quot;,
+    &quot;acks&quot;: &quot;all&quot;,                                   # durability: full ISR must ack
+    &quot;enable.idempotence&quot;: True,                        # no-duplicate-on-retry
+    &quot;retries&quot;: 5,                                       # idempotence is vacuous at retries=0
+    &quot;max.in.flight.requests.per.connection&quot;: 5,         # broker&#x27;s dedup window bound
+    &quot;linger.ms&quot;: 20,
+    &quot;batch.size&quot;: 32768,
+})
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (shape only, no broker to run this against): a <code>Producer</code> instance that,
+on <code>produce()</code>, buffers the record and later reports success or failure through the
+delivery callback registered on that call — no console output from construction itself.</p>
+<p><code>acks='all'</code> is a <strong>durability</strong> guarantee: the write is acknowledged only once every
+in-sync replica has it, so a broker failure after the ack cannot lose the record.
+<code>enable.idempotence=True</code> is a completely separate <strong>no-duplicate-on-producer-retry</strong>
+guarantee: the broker tracks a producer id plus per-partition sequence numbers, so if the
+producer retries a send whose ack was lost in transit, the broker recognizes the retry
+and discards the duplicate instead of writing it twice. Durability says nothing about
+duplicates; dedup-on-retry says nothing about durability. Idempotence only means what it
+claims under three preconditions: <code>acks=all</code> (the broker in fact rejects an idempotent
+producer configured otherwise), <code>retries &gt; 0</code> (zero retries means there is nothing to
+deduplicate), and <code>max.in.flight.requests.per.connection &lt;= 5</code> (the broker's
+sequence-number tracking window is bounded).</p>
+<p>The runnable version below is the config validator that enforces exactly those
+preconditions, so the muddled combinations fail loudly instead of silently running with a
+guarantee that was never actually in effect.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def validate_idempotent_producer_config(cfg):
+    problems = []
+    idempotent = cfg.get(&quot;enable.idempotence&quot;, False)
+    acks = cfg.get(&quot;acks&quot;)
+    retries = cfg.get(&quot;retries&quot;, 0)
+    max_in_flight = cfg.get(&quot;max.in.flight.requests.per.connection&quot;, 5)
+
+    if idempotent and acks != &quot;all&quot;:
+        problems.append(&quot;enable.idempotence=true requires acks=&#x27;all&#x27;&quot;)
+    if idempotent and retries == 0:
+        problems.append(&quot;enable.idempotence=true with retries=0 is vacuous&quot;)
+    if idempotent and max_in_flight &gt; 5:
+        problems.append(f&quot;max.in.flight.requests.per.connection={max_in_flight} exceeds 5&quot;)
+    if acks == &quot;all&quot; and not idempotent:
+        problems.append(&quot;acks=&#x27;all&#x27; without idempotence is durable but not dedup-safe&quot;)
+    return problems
+
+cfg = {&quot;enable.idempotence&quot;: True, &quot;acks&quot;: &quot;all&quot;, &quot;retries&quot;: 3,
+       &quot;max.in.flight.requests.per.connection&quot;: 5}
+print(validate_idempotent_producer_config(cfg))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>[]
+</code></pre><p><strong>Exercise:</strong>
+Run <code>validate_idempotent_producer_config</code> against five configs: <code>acks='1'</code> with
+idempotence on; idempotence on with <code>retries=0</code>; idempotence on with
+<code>max.in.flight.requests.per.connection=10</code>; <code>acks='all'</code> with idempotence off; and the
+fully correct combination. Print the rejection reason for each of the first four and
+confirm the fifth returns no problems.</p>
+<p><strong>Starting point:</strong> The <code>validate_idempotent_producer_config(cfg)</code> function from this concept's Example, and the five <code>cfg</code> dicts described above (correct config: <code>acks='all', enable.idempotence=True, retries=3, max.in.flight.requests.per.connection=5</code>).</p>
+<p>Expected output:</p>
+<pre><code>acks=1 with idempotence on:
+  REJECTED -- enable.idempotence=true requires acks=&#x27;all&#x27; ...
+idempotence on, retries=0:
+  REJECTED -- enable.idempotence=true with retries=0 is vacuous ...
+idempotence on, max.in.flight=10:
+  REJECTED -- max.in.flight.requests.per.connection=10 (&gt; 5) ...
+acks=all only, idempotence off:
+  REJECTED -- acks=&#x27;all&#x27; without enable.idempotence=true is durable but not dedup-safe ...
+correct combination:
+  OK -- durability and dedup guarantees both hold
+</code></pre><p>each REJECTED line naming which specific guarantee actually breaks, not a generic error.</p>
+<hr />
+<h3>Concept 2 — <code>linger.ms</code> and <code>batch.size</code> Are the Throughput Dial</h3>
+<p>A producer does not send one network request per record. It buffers records per
+partition into a batch and ships the batch when either <code>linger.ms</code> elapses since the
+first record in it arrived, or the batch fills to <code>batch.size</code> bytes — whichever happens
+first. <code>linger.ms=0</code> (the default) still batches opportunistically under load, but adds
+no deliberate delay; raising it trades a small amount of added latency for meaningfully
+fewer, larger requests.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def requests_per_second(event_rate, linger_ms, batch_size, avg_record_bytes):
+    time_trigger_batch = event_rate * (linger_ms / 1000)
+    size_trigger_batch = batch_size / avg_record_bytes
+    effective_batch = min(time_trigger_batch, size_trigger_batch) if time_trigger_batch &gt; 0 else size_trigger_batch
+    effective_batch = max(effective_batch, 1)
+    return event_rate / effective_batch, effective_batch
+
+event_rate = 4_000
+avg_record_bytes = 512
+batch_size = 16_384
+for linger_ms in (0, 5, 20, 50, 100):
+    rps, eff_batch = requests_per_second(event_rate, linger_ms, batch_size, avg_record_bytes)
+    print(f&quot;linger.ms={linger_ms:&gt;4}  eff.batch={eff_batch:&gt;6.1f}  requests/sec={rps:&gt;7.1f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>linger.ms=   0  eff.batch=  32.0  requests/sec=  125.0
+linger.ms=   5  eff.batch=  20.0  requests/sec=  200.0
+linger.ms=  20  eff.batch=  32.0  requests/sec=  125.0
+linger.ms=  50  eff.batch=  32.0  requests/sec=  125.0
+linger.ms= 100  eff.batch=  32.0  requests/sec=  125.0
+</code></pre><p><strong>Exercise:</strong>
+At <code>event_rate=4_000</code> and <code>avg_record_bytes=512</code>, sweep <code>linger.ms</code> finely between 0 and
+20 (say, every 1ms) and find the linger value at which the time trigger and size trigger
+produce the same effective batch size. Explain what happens to requests/sec on either
+side of that crossover.</p>
+<p><strong>Starting point:</strong> The <code>requests_per_second</code> function from this concept's Example, with <code>linger_ms</code> swept as <code>range(0, 21)</code> instead of the five fixed values.</p>
+<p>Expected output: the crossover lands at <code>linger_ms=8</code> (<code>4000 * 0.008 = 32</code> records,
+matching <code>16384/512=32</code>). Below 8ms, the linger timer is the tighter constraint and
+smaller <code>linger_ms</code> means smaller batches and more requests/sec; at or above 8ms, the
+byte-size limit is reached first regardless of how much longer you wait, so requests/sec
+flattens at 125 no matter how high <code>linger_ms</code> goes from there.</p>
+<hr />
+<h3>Concept 3 — Schema Registry Under BACKWARD Compatibility</h3>
+<p>A schema registry (Confluent's, Apicurio's, or Redpanda's built-in one) enforces a
+compatibility mode before it will register a new schema version. Under <strong>BACKWARD</strong>
+compatibility — the usual default and the right one for an embed feed, since it protects
+existing consumers reading new data — a consumer built against the <em>new</em> schema must be
+able to read data written under the <em>old</em> schema. That constrains what a schema change
+is allowed to do: adding a field is fine only if it has a default (an old record that
+never had the field falls back to the default); adding a field with no default breaks
+BACKWARD compatibility, because an old record genuinely has nothing there. Removing a
+field is allowed (the new reader simply never looks for it). Changing a field's type is
+a break unless the old and new types are on the registry's short list of promotable
+pairs (e.g. int to long).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def check_backward_compatible(old_schema, new_schema):
+    breaks = []
+    old_fields = old_schema[&quot;fields&quot;]
+    new_fields = new_schema[&quot;fields&quot;]
+    for name, new_field in new_fields.items():
+        if name not in old_fields:
+            if new_field.get(&quot;default&quot;) is None and new_field.get(&quot;required&quot;, True):
+                breaks.append(f&quot;added required field &#x27;{name}&#x27; with no default&quot;)
+        else:
+            if old_fields[name][&quot;type&quot;] != new_field[&quot;type&quot;]:
+                breaks.append(f&quot;changed type of &#x27;{name}&#x27;: {old_fields[name][&#x27;type&#x27;]} -&gt; {new_field[&#x27;type&#x27;]}&quot;)
+    return breaks
+
+claim_event_v1 = {&quot;fields&quot;: {
+    &quot;claim_id&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;required&quot;: True},
+    &quot;policy_id&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;required&quot;: True},
+    &quot;status&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;required&quot;: True},
+    &quot;amount_cents&quot;: {&quot;type&quot;: &quot;long&quot;, &quot;required&quot;: True},
+}}
+new_schema = {&quot;fields&quot;: {**claim_event_v1[&quot;fields&quot;],
+    &quot;embedding_model_id&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;required&quot;: False, &quot;default&quot;: None}}}
+print(check_backward_compatible(claim_event_v1, new_schema))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>[]
+</code></pre><p><strong>Exercise:</strong>
+Run <code>check_backward_compatible</code> against three more variants of <code>claim_event_v1</code>: adding
+<code>embedding_model_id</code> as a <em>required</em> field with no default; removing <code>amount_cents</code>
+entirely; and changing <code>amount_cents</code>'s type from <code>&quot;long&quot;</code> to <code>&quot;string&quot;</code>. State which
+variants pass BACKWARD compatibility and which break it.</p>
+<p><strong>Starting point:</strong> The <code>check_backward_compatible(old_schema, new_schema)</code> function and <code>claim_event_v1</code> dict from this concept's Example, with the three new-schema variants built from <code>claim_event_v1[&quot;fields&quot;]</code> as described.</p>
+<p>Expected output:</p>
+<pre><code>add optional embedding_model_id (has default): OK (BACKWARD compatible)
+add required embedding_model_id (no default): BREAK
+    - added required field &#x27;embedding_model_id&#x27; with no default
+remove amount_cents: OK (BACKWARD compatible)
+change amount_cents type long -&gt; string: BREAK
+    - changed type of &#x27;amount_cents&#x27;: long -&gt; string
+</code></pre><hr />
+<h3>Concept 4 — Delivery Callbacks and <code>flush()</code> Before Exit</h3>
+<p><strong>REAL MODE — not executed (requires <code>pip install confluent-kafka</code> and a reachable broker):</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def on_delivery(err, msg):
+    if err is not None:
+        log.error(&quot;delivery failed&quot;, extra={&quot;error&quot;: str(err), &quot;key&quot;: msg.key()})
+    else:
+        log.debug(&quot;delivered&quot;, extra={&quot;partition&quot;: msg.partition(), &quot;offset&quot;: msg.offset()})
+
+for claim_event in claim_events:
+    producer.produce(
+        topic=&quot;claim-events&quot;,
+        key=claim_event[&quot;claim_id&quot;],
+        value=json.dumps(claim_event).encode(),
+        on_delivery=on_delivery,
+    )
+producer.flush(timeout=10)   # blocks until the internal buffer drains or times out
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (shape only): every buffered record's <code>on_delivery</code> callback fires
+before <code>flush()</code> returns (or <code>flush()</code> returns a nonzero count of records still
+undelivered when the timeout is hit) — no console output guaranteed from this shape
+alone, since logging destinations vary.</p>
+<p><code>produce()</code> is asynchronous: it appends to an internal buffer and returns immediately.
+The delivery callback that confirms success or failure only fires when the library's
+background thread actually sends the batch — which <code>flush()</code> forces, and a bare process
+exit does not wait for. A process that produces records and exits without calling
+<code>flush()</code> can lose everything still sitting in the buffer, with no error raised anywhere,
+because from the buffer's point of view the write was never attempted.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class FakeProducer:
+    &quot;&quot;&quot;Models confluent_kafka.Producer&#x27;s async buffering: produce() queues,
+    only flush() drains it and fires delivery callbacks.&quot;&quot;&quot;
+    def __init__(self):
+        self.queue = []
+    def produce(self, value, on_delivery):
+        self.queue.append((value, on_delivery))
+    def flush(self, timeout=None):
+        remaining = list(self.queue)
+        self.queue.clear()
+        for value, callback in remaining:
+            if callback:
+                callback(None, value)
+        return len(remaining)
+
+def run_producer_session(num_events, call_flush):
+    producer = FakeProducer()
+    delivered = []
+    def on_delivery(err, msg):
+        if err is None:
+            delivered.append(msg)
+    for i in range(num_events):
+        producer.produce(f&quot;claim-event-{i}&quot;, on_delivery=on_delivery)
+    if call_flush:
+        producer.flush(timeout=10)
+    return num_events, len(delivered)
+
+for label, call_flush in ((&quot;without flush()&quot;, False), (&quot;with flush()&quot;, True)):
+    sent, confirmed = run_producer_session(500, call_flush)
+    print(f&quot;{label}: sent={sent}  confirmed_delivered={confirmed}  lost={sent - confirmed}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>without flush(): sent=500  confirmed_delivered=0  lost=500
+with flush(): sent=500  confirmed_delivered=500  lost=0
+</code></pre><p><strong>Exercise:</strong>
+Extend <code>FakeProducer</code> with a <code>partial_flush(self, n)</code> method that drains only the first
+<code>n</code> queued records (simulating a <code>flush(timeout=...)</code> call that times out before the
+whole buffer clears), and measure <code>lost</code> when 500 records are produced but only 300 are
+drained before the process exits.</p>
+<p><strong>Starting point:</strong> The <code>FakeProducer</code> class and <code>run_producer_session</code> function from this concept's Example, with a new <code>partial_flush(self, n)</code> method added.</p>
+<p>Expected output: <code>confirmed_delivered=300</code>, <code>lost=200</code> — a <code>flush()</code> call that times out
+partway through is not the same as a successful flush, and the 200 undelivered records
+are lost exactly as if <code>flush()</code> had never been called at all.</p>
+<hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> The producer side of this pipeline is frequently a change-data-capture
+adapter bolted onto a mainframe extract, not a service written with Kafka best practice
+in mind from day one. <code>acks=all</code> and <code>enable.idempotence</code> have to be set explicitly in
+that adapter's configuration; they are not defaults you inherit for free, and an adapter
+built by a systems-integration vendor under time pressure is a common place to find them
+missing.</p>
+<p><strong>Compliance angle:</strong> A schema registered under BACKWARD compatibility is itself an
+audit artifact — it is the versioned record of exactly what shape a claim event had at
+any point in time, which supports answering &quot;what data fed this decision&quot; months later.
+Treat schema evolution as a change with the same review weight as a database migration,
+because in effect it is one.</p>
+<p><strong>What breaks in production:</strong> A producer configured for <code>acks=1</code> because someone
+copied a low-latency example from a tutorial. It looks fine in every test, because test
+traffic never hits the one-in-a-million broker failure window where an unacknowledged
+write is silently lost. It is discovered only when a claim event genuinely never arrives
+downstream and nobody can explain why.</p>
+<hr />
+<h2 id="day-3">Day 3 — Consumer Groups and Offsets</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="06-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=udJ0ZJf97w8" target="_blank" rel="noopener"><b>Offset Commit, Rebalancing &amp; Consumer Group ~ Key Concepts in Kafka(Part2)</b><small>Hello Byte · 17:10</small></a></li><li><a href="https://www.youtube.com/watch?v=CRz_2ygimgA" target="_blank" rel="noopener"><b>Apache Kafka® Consumer Group Protocol — Coordinators, Rebalancing &amp; Offsets (Visual Explainer)</b><small>DevXOps Tech · 10:30</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Kafka%20consumer%20groups%20offsets%20rebalancing%20explained" target="_blank" rel="noopener">Search YouTube: Kafka consumer groups offsets rebalancing explained</a></p></div>
+<hr />
+<h3>Concept 1 — Commit After the Upsert, Not Before</h3>
+<p>An offset commit tells the broker &quot;everything up to and including this offset has been
+processed&quot; — a promise the next consumer to take over this partition after a restart or
+rebalance takes at face value: it resumes from <code>committed_offset + 1</code>. Whether that
+promise is actually true depends entirely on when the commit happens relative to the
+work.</p>
+<p><code>enable.auto.commit=True</code> commits on its own timer, based on what has been <em>fetched</em>,
+with no knowledge of whether the corresponding vector-index upsert has actually
+succeeded. A consumer typically fetches ahead of where it has finished processing —
+that pipelining is normal and desirable — so an auto-commit can advance the committed
+offset past work that has not actually landed in the index yet. If the process crashes
+in that window, those records are skipped forever on restart: genuine data loss. A
+manual <code>commit()</code> called only after a batch of upserts has actually succeeded can never
+commit past real, completed work — but because it commits in batches rather than after
+every single record, a crash between commits causes some already-upserted records to be
+reprocessed: a duplicate, not a loss.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>FETCH_AHEAD = 8
+UPSERT_EVERY_N_TICKS = 3
+AUTO_COMMIT_EVERY = 10
+MANUAL_COMMIT_BATCH = 5
+TOTAL_RECORDS = 200
+CRASH_AT_TICK = 31
+
+def simulate(mode):
+    fetch_cursor = -1
+    upsert_cursor = -1
+    committed_offset = -1
+    since_last_manual_commit = 0
+    for tick in range(CRASH_AT_TICK):
+        if fetch_cursor - upsert_cursor &lt; FETCH_AHEAD and fetch_cursor + 1 &lt; TOTAL_RECORDS:
+            fetch_cursor += 1
+        if tick % UPSERT_EVERY_N_TICKS == 0 and upsert_cursor &lt; fetch_cursor:
+            upsert_cursor += 1
+            since_last_manual_commit += 1
+        if mode == &quot;auto&quot;:
+            if tick % AUTO_COMMIT_EVERY == 0:
+                committed_offset = fetch_cursor
+        elif mode == &quot;manual&quot;:
+            if since_last_manual_commit &gt;= MANUAL_COMMIT_BATCH:
+                committed_offset = upsert_cursor
+                since_last_manual_commit = 0
+    return committed_offset, upsert_cursor
+
+for mode in (&quot;auto&quot;, &quot;manual&quot;):
+    committed_offset, upsert_cursor = simulate(mode)
+    resume_from = committed_offset + 1
+    lost = max(0, committed_offset - upsert_cursor)
+    duplicates = max(0, upsert_cursor - committed_offset)
+    print(f&quot;mode={mode:&gt;6}  committed_offset={committed_offset:&gt;3}  &quot;
+          f&quot;actually_upserted_through={upsert_cursor:&gt;3}  resume_from={resume_from:&gt;3}  &quot;
+          f&quot;lost_records={lost:&gt;2}  duplicate_replays_on_restart={duplicates:&gt;2}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>mode=  auto  committed_offset= 30  actually_upserted_through= 30  resume_from= 31  lost_records= 0  duplicate_replays_on_restart= 0
+mode=manual  committed_offset= 29  actually_upserted_through= 30  resume_from= 30  lost_records= 0  duplicate_replays_on_restart= 1
+</code></pre><p><strong>Exercise:</strong>
+Change <code>CRASH_AT_TICK</code> to 22 (a crash right after the auto-commit at tick 20, while
+<code>fetch_cursor</code> is still running ahead of <code>upsert_cursor</code>) and re-run both modes. Report
+<code>lost_records</code> and <code>duplicate_replays_on_restart</code> for each mode at this crash point.</p>
+<p><strong>Starting point:</strong> The <code>simulate(mode)</code> function from this concept's Example, unchanged, with <code>CRASH_AT_TICK = 22</code>.</p>
+<p>Expected output: the auto mode now shows <code>lost_records &gt; 0</code> — the timer-driven commit
+advanced past work that had not actually finished upserting when the crash hit, and
+those records are gone for good, while manual mode still shows only duplicates, never
+loss, regardless of exactly when the crash lands.</p>
+<hr />
+<h3>Concept 2 — At-Least-Once and What a Duplicate Costs a Vector Index</h3>
+<p>Manual-commit-after-batch gives you <strong>at-least-once</strong> delivery: every record is
+processed at least once, but a crash between commits can cause some records to be
+processed twice. The expected number of duplicates per crash is not tied to how often
+crashes happen — it depends only on the commit batch size. A crash lands at a uniformly
+random point within whatever batch was in flight, so on average it loses `(batch_size -</p>
+<ol>
+<li>/ 2` records' worth of already-done work to reprocessing, every time, independent of
+how rare or frequent crashes are.</li>
+</ol>
+<p>The duplicate <em>rate</em> (duplicates as a fraction of total records processed) does depend
+on crash frequency, though: the same fixed per-crash cost spread over more records
+between crashes is a smaller fraction. This is exactly the setup Day 4's content-hash
+key exists to neutralize — if the upsert is idempotent, a duplicate delivery costs
+nothing at all.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def expected_duplicates(commit_batch_size):
+    return (commit_batch_size - 1) / 2
+
+def duplicate_rate(mean_records_between_crashes, commit_batch_size):
+    return expected_duplicates(commit_batch_size) / mean_records_between_crashes
+
+for mean_between_crashes in (500, 2_000, 10_000):
+    for batch_size in (1, 10, 50, 200):
+        rate = duplicate_rate(mean_between_crashes, batch_size)
+        print(f&quot;crash_every={mean_between_crashes:&gt;7,}  batch={batch_size:&gt;4}  &quot;
+              f&quot;dupes/crash={expected_duplicates(batch_size):&gt;6.1f}  rate={rate:.4%}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output (first three rows):</p>
+<pre><code>crash_every=    500  batch=   1  dupes/crash=   0.0  rate=0.0000%
+crash_every=    500  batch=  10  dupes/crash=   4.5  rate=0.9000%
+crash_every=    500  batch=  50  dupes/crash=  24.5  rate=4.9000%
+</code></pre><p><strong>Exercise:</strong>
+Find the commit batch size at which the duplicate rate exceeds 1% when crashes happen
+on average every 2,000 records. Then explain, in one sentence, why lowering the batch
+size to reduce duplicates has a direct cost on Day 2's throughput arithmetic.</p>
+<p><strong>Starting point:</strong> The <code>duplicate_rate(mean_records_between_crashes, commit_batch_size)</code> function from this concept's Example, with <code>mean_records_between_crashes=2_000</code> fixed and <code>commit_batch_size</code> swept upward from 1.</p>
+<p>Expected output: the 1% threshold is crossed at <code>batch_size=41</code> (<code>(41-1)/2/2000 = 1.0%</code>). Smaller commit batches mean more frequent <code>commit()</code> calls, and each commit is
+itself a network round trip — the same batching-vs-overhead tradeoff Day 2 measured for
+producer sends applies symmetrically to consumer commits.</p>
+<hr />
+<h3>Concept 3 — Cooperative-Sticky Rebalance and <code>max.poll.interval.ms</code></h3>
+<p>Two different timeouts guard consumer liveness, and conflating them is the single most
+common cause of a mystery rebalance loop. <code>session.timeout.ms</code> is <strong>heartbeat</strong>
+liveness: heartbeats are sent from a background thread independent of whatever the
+application thread is doing, so it fires only when the process or its network is
+genuinely gone — a slow embedding call does not stop heartbeats and does not trip this
+timeout. <code>max.poll.interval.ms</code> is <strong>progress</strong> liveness on the application thread
+itself: it fires when the consumer has not called <code>poll()</code> again within that window,
+which is exactly what happens when a micro-batch of embedding-API calls takes too long
+between polls. When it fires, the consumer proactively leaves the group, its partitions
+get reassigned, and any offsets for the in-flight batch were never committed — so
+another consumer re-reads them. Batch too large, interval exceeded, rebalance, work
+redone, still too large, rebalance again: a loop with no error message that ever says
+&quot;your batch is too big&quot;.</p>
+<p><code>partition.assignment.strategy=cooperative-sticky</code> softens the damage a rebalance does,
+whatever triggers it: the older &quot;eager&quot; strategies revoke every partition from every
+consumer and reassign from scratch (stop-the-world), while cooperative-sticky revokes
+and reassigns incrementally, letting unaffected consumers keep working through the
+rebalance instead of all pausing at once.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def max_safe_records_per_poll(max_poll_interval_ms, per_record_embed_latency_ms, safety_factor=0.7):
+    budget_ms = max_poll_interval_ms * safety_factor
+    return int(budget_ms // per_record_embed_latency_ms)
+
+def would_trigger_rebalance(records_per_poll, per_record_embed_latency_ms, max_poll_interval_ms):
+    return records_per_poll * per_record_embed_latency_ms &gt; max_poll_interval_ms
+
+scenarios = [
+    {&quot;max_poll_interval_ms&quot;: 300_000, &quot;embed_latency_ms&quot;: 400, &quot;max_poll_records&quot;: 500},
+    {&quot;max_poll_interval_ms&quot;: 300_000, &quot;embed_latency_ms&quot;: 1_200, &quot;max_poll_records&quot;: 300},
+]
+for s in scenarios:
+    safe_n = max_safe_records_per_poll(s[&quot;max_poll_interval_ms&quot;], s[&quot;embed_latency_ms&quot;])
+    trips = would_trigger_rebalance(s[&quot;max_poll_records&quot;], s[&quot;embed_latency_ms&quot;], s[&quot;max_poll_interval_ms&quot;])
+    print(f&quot;interval={s[&#x27;max_poll_interval_ms&#x27;]:&gt;7}  latency={s[&#x27;embed_latency_ms&#x27;]:&gt;5}ms  &quot;
+          f&quot;max.poll.records={s[&#x27;max_poll_records&#x27;]:&gt;4}  safe_max={safe_n:&gt;4}  &quot;
+          f&quot;{&#x27;REBALANCE RISK&#x27; if trips else &#x27;safe&#x27;}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>interval= 300000  latency=  400ms  max.poll.records= 500  safe_max= 525  safe
+interval= 300000  latency= 1200ms  max.poll.records= 300  safe_max= 175  REBALANCE RISK
+</code></pre><p><strong>Exercise:</strong>
+For the <code>REBALANCE RISK</code> scenario above, find the smallest <code>max_poll_records</code> value that
+brings it back to <code>safe</code>, and separately find the smallest <code>max_poll_interval_ms</code>
+(holding <code>max_poll_records=300</code> and <code>embed_latency_ms=1200</code>) that achieves the same
+thing. Name which of the two real fixes you would actually deploy and why the other one
+is a worse tradeoff.</p>
+<p><strong>Starting point:</strong> The <code>max_safe_records_per_poll</code> and <code>would_trigger_rebalance</code> functions from this concept's Example, with the <code>REBALANCE RISK</code> scenario's <code>max_poll_records</code> and <code>max_poll_interval_ms</code> swept independently.</p>
+<p>Expected output: lowering <code>max_poll_records</code> to 175 or below restores <code>safe</code> at the
+original interval; raising <code>max_poll_interval_ms</code> to roughly 514,286ms or above restores
+<code>safe</code> at the original batch size. The real-world answer favors the first fix — smaller
+batches — because raising the interval trades away failure-detection speed: a genuinely
+dead consumer now takes proportionally longer for the group to notice and evict.</p>
+<hr />
+<h3>Concept 4 — Consumer Lag Is the Pipeline's SLI</h3>
+<p>Consumer lag — how many records behind the latest offset a consumer group sits — is the
+single most direct measure of whether an ingestion pipeline is keeping up. But the
+absolute number alone cannot distinguish a pipeline that just absorbed a burst and is
+draining normally from one that is steadily falling further behind: both can show the
+identical lag value at the moment you check.</p>
+<p>The number that actually tells you something is the <strong>derivative</strong> — lag's rate of
+change between consecutive samples, sometimes called the burn rate. A negative burn
+rate means the pipeline is catching up regardless of how high the absolute number is
+right now; a positive and growing burn rate means it is falling behind and heading
+toward an outage even if the current lag still looks survivable.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def burn_rate(lag_samples, interval_seconds):
+    return [(lag_samples[i] - lag_samples[i - 1]) / interval_seconds
+            for i in range(1, len(lag_samples))]
+
+sample_interval_s = 60
+recovering_samples = [70_000, 65_000, 59_000, 55_000, 50_000]
+degrading_samples  = [30_000, 36_000, 41_000, 46_000, 50_000]
+
+for label, samples in ((&quot;recovering (was 70k)&quot;, recovering_samples),
+                       (&quot;degrading  (was 30k)&quot;, degrading_samples)):
+    rates = burn_rate(samples, sample_interval_s)
+    print(f&quot;{label}: current lag={samples[-1]}  latest burn rate={rates[-1]:+.1f} rec/s  &quot;
+          f&quot;{&#x27;DEGRADING&#x27; if rates[-1] &gt; 0 else &#x27;draining&#x27;}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>recovering (was 70k): current lag=50000  latest burn rate=-83.3 rec/s  draining
+degrading  (was 30k): current lag=50000  latest burn rate=+66.7 rec/s  DEGRADING
+</code></pre><p><strong>Exercise:</strong>
+Both example pipelines end at the identical lag value, 50,000. Write an alerting rule
+using only <code>burn_rate</code> (not the absolute lag value) that fires for the degrading
+pipeline and stays silent for the recovering one, and confirm it against both sample
+sets.</p>
+<p><strong>Starting point:</strong> The <code>burn_rate(lag_samples, interval_seconds)</code> function and the two sample lists from this concept's Example.</p>
+<p>Expected output: a rule of the shape &quot;fire if the latest burn rate is positive&quot; (or
+positive beyond some small noise threshold) fires for the degrading pipeline
+(<code>+66.7 rec/s</code>) and stays silent for the recovering one (<code>-83.3 rec/s</code>), even though an
+absolute-lag threshold of, say, 40,000 would incorrectly fire on both.</p>
+<hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> A consumer group reading claim events often shares its host with
+batch jobs that were never designed with <code>max.poll.interval.ms</code> in mind — a nightly
+reconciliation script that pauses the whole container for a full GC sweep can look, from
+the group coordinator's point of view, identical to a consumer stuck in a slow embedding
+call. Both trip the same timeout for different reasons, and only lag and rebalance logs
+together tell them apart.</p>
+<p><strong>Compliance angle:</strong> A duplicate claim-event upsert is not just an engineering
+nuisance where downstream reporting is regulator-facing — a claim reserve or loss
+estimate recomputed twice from a duplicated event can produce an inconsistent number
+across two reports pulled an hour apart. At-least-once delivery is an acceptable design
+choice only once the consuming side is confirmed idempotent, which Day 4 makes explicit.</p>
+<p><strong>What breaks in production:</strong> Someone &quot;fixes&quot; a slow pipeline by raising
+<code>max.poll.records</code> to push more throughput per poll. Throughput improves in testing at
+low volume; at real volume the batch takes longer than <code>max.poll.interval.ms</code>, and the
+consumer starts rebalancing every few minutes — a self-inflicted throughput collapse
+that looks, from the dashboards, like a network problem.</p>
+<hr />
+<h2 id="day-4">Day 4 — Micro-Batch Embed and Upsert</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="06-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=vF5y17Pypds" target="_blank" rel="noopener"><b>Stream Processing | Apache Kafka 101 (2025 Edition)</b><small>Confluent Developer · 8:51</small></a></li><li><a href="https://www.youtube.com/watch?v=dN0lsF2cvm4" target="_blank" rel="noopener"><b>Vector Databases simply explained! (Embeddings &amp; Indexes)</b><small>AssemblyAI · 4:23</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=streaming%20embedding%20pipeline%20kafka%20batching%20upsert%20vector%20database" target="_blank" rel="noopener">Search YouTube: streaming embedding pipeline kafka batching upsert vector database</a></p></div>
+<hr />
+<h3>Concept 1 — Size- and Time-Triggered Micro-Batching</h3>
+<p>Calling an embedding API once per record is wasteful — most embedding APIs charge a
+fixed per-request overhead on top of the actual compute, and batching amortizes it. But
+waiting to accumulate a full batch under low traffic adds latency nobody asked for. A
+<code>MicroBatcher</code> flushes on whichever limit is hit first: <code>max_size</code> records buffered, or
+<code>max_age_ms</code> since the oldest buffered record arrived — the same two-trigger pattern Day
+2 used for producer batching, applied on the consuming side instead.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class MicroBatcher:
+    def __init__(self, max_size, max_age_ms):
+        self.max_size = max_size
+        self.max_age_ms = max_age_ms
+        self.buffer = []
+        self.buffer_started_at = None
+
+    def add(self, record, now):
+        if not self.buffer:
+            self.buffer_started_at = now
+        self.buffer.append(record)
+        if len(self.buffer) &gt;= self.max_size:
+            return &quot;size&quot;
+        if (now - self.buffer_started_at) * 1000 &gt;= self.max_age_ms:
+            return &quot;age&quot;
+        return None
+
+    def flush(self):
+        batch, self.buffer, self.buffer_started_at = self.buffer, [], None
+        return batch
+
+arrivals = (
+    [(f&quot;CLM-{i:04d}&quot;, t * 0.01) for i, t in enumerate(range(15))] +
+    [(f&quot;CLM-{i:04d}&quot;, 0.15 + (i - 15) * 0.08) for i in range(15, 20)] +
+    [(f&quot;CLM-{i:04d}&quot;, 0.55 + (i - 20) * 0.01) for i in range(20, 40)]
+)
+batcher = MicroBatcher(max_size=10, max_age_ms=150)
+for claim_id, t in arrivals:
+    trigger = batcher.add(claim_id, now=t)
+    if trigger:
+        batch = batcher.flush()
+        print(f&quot;t={t:5.2f}s  flush trigger={trigger:&lt;5}  batch_size={len(batch):&gt;2}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>t= 0.09s  flush trigger=size   batch_size=10
+t= 0.31s  flush trigger=age    batch_size= 8
+t= 0.55s  flush trigger=age    batch_size= 3
+t= 0.65s  flush trigger=size   batch_size=10
+</code></pre><p><strong>Exercise:</strong>
+Add end-of-stream handling: after the arrivals loop finishes, call <code>batcher.flush()</code>
+once more and print how many records were left unflushed (neither trigger having fired
+for them yet). Then lower <code>max_age_ms</code> from 150 to 60 and report how the flush trace
+changes.</p>
+<p><strong>Starting point:</strong> The <code>MicroBatcher</code> class and <code>arrivals</code> list from this concept's Example, with a final <code>batcher.flush()</code> call added after the loop.</p>
+<p>Expected output: 9 records remain unflushed at end of stream in the original run — a
+real pipeline needs an explicit end-of-stream or idle-timeout flush, or that tail sits
+in memory forever. At <code>max_age_ms=60</code>, more flushes fire on the age trigger and fewer on
+size, since the tighter time budget empties the buffer before it can fill.</p>
+<hr />
+<h3>Concept 2 — Bounded Concurrency via a Semaphore</h3>
+<p>Sending every record in a micro-batch to the embedding API at once is not free
+concurrency — it is an unbounded burst against a service that has its own rate limit,
+and enough concurrent requests will get you throttled or worse. An <code>asyncio.Semaphore</code>
+caps how many requests are in flight simultaneously without capping how many records
+the batch contains; <code>asyncio.gather</code> still processes the whole batch, just never more
+than the semaphore's limit at once.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import asyncio
+
+async def embed_and_upsert(claim_id, semaphore, in_flight_counter, peak_tracker):
+    async with semaphore:
+        in_flight_counter[0] += 1
+        peak_tracker[0] = max(peak_tracker[0], in_flight_counter[0])
+        await asyncio.sleep(0.05)   # stand-in for an embedding API call
+        in_flight_counter[0] -= 1
+        return claim_id
+
+async def run_batch(claim_ids, concurrency_limit):
+    semaphore = asyncio.Semaphore(concurrency_limit)
+    in_flight_counter, peak_tracker = [0], [0]
+    results = await asyncio.gather(
+        *(embed_and_upsert(cid, semaphore, in_flight_counter, peak_tracker) for cid in claim_ids)
+    )
+    return results, peak_tracker[0]
+
+async def main():
+    claim_ids = [f&quot;CLM-{i:04d}&quot; for i in range(50)]
+    for limit in (5, 10, 50):
+        results, peak = await run_batch(claim_ids, concurrency_limit=limit)
+        assert peak &lt;= limit
+        print(f&quot;concurrency_limit={limit:&gt;3}  measured_peak_in_flight={peak:&gt;3}  processed={len(results)}&quot;)
+
+asyncio.run(main())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>concurrency_limit=  5  measured_peak_in_flight=  5  processed=50
+concurrency_limit= 10  measured_peak_in_flight= 10  processed=50
+concurrency_limit= 50  measured_peak_in_flight= 50  processed=50
+</code></pre><p><strong>Exercise:</strong>
+Add a second semaphore-guarded call type with a different fixed delay (say, a
+0.02-second &quot;upsert&quot; call chained after the 0.05-second &quot;embed&quot; call, both inside the
+same <code>async with semaphore</code> block), and re-measure <code>peak_tracker</code> at <code>concurrency_limit=10</code>
+against a batch of 100 claim ids. Confirm the peak still never exceeds the configured
+limit even with two chained calls per record.</p>
+<p><strong>Starting point:</strong> The <code>embed_and_upsert</code>, <code>run_batch</code>, and <code>main</code> functions from this concept's Example, with an added <code>await asyncio.sleep(0.02)</code> inside the semaphore block after the existing <code>await asyncio.sleep(0.05)</code>.</p>
+<p>Expected output: <code>measured_peak_in_flight=10</code>, unchanged from the single-call case — the
+semaphore bounds concurrent <em>tasks</em>, not calls-per-task, so chaining more work inside
+one held semaphore slot does not raise the peak, it only makes each held slot last
+longer.</p>
+<hr />
+<h3>Concept 3 — Backpressure: Pause the Partition, Never Drop the Record</h3>
+<p><strong>REAL MODE — not executed (requires <code>pip install confluent-kafka</code> and a reachable broker):</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from confluent_kafka import TopicPartition
+
+HIGH_WATERMARK = 500   # queued-but-not-yet-upserted records
+LOW_WATERMARK = 100
+
+queue_depth = 0
+paused_partitions = set()
+
+def on_records_fetched(consumer, records):
+    global queue_depth
+    queue_depth += len(records)
+    if queue_depth &gt;= HIGH_WATERMARK:
+        tps = [TopicPartition(r.topic(), r.partition()) for r in records]
+        consumer.pause(tps)
+        paused_partitions.update((tp.topic, tp.partition) for tp in tps)
+
+def on_queue_drained_to(new_depth):
+    global queue_depth
+    queue_depth = new_depth
+    if queue_depth &lt;= LOW_WATERMARK and paused_partitions:
+        tps = [TopicPartition(topic, partition) for topic, partition in paused_partitions]
+        consumer.resume(tps)
+        paused_partitions.clear()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (shape only): <code>consumer.pause()</code> stops that partition's records from
+being returned by future <code>poll()</code> calls without leaving the consumer group, and
+<code>consumer.resume()</code> lets them flow again — no console output from these calls
+themselves.</p>
+<p>When the embedding API or the vector store's own write path is the slow link, the wrong
+response is to keep polling and either buffer unboundedly (a slow memory leak that ends
+in an OOM kill) or drop records (silent, undetectable data loss). The right response is
+to pause consumption on the affected partition once an internal queue depth crosses a
+high watermark, and resume once it drains below a low watermark — the two thresholds
+prevent rapid pause/resume flapping right at one boundary value.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code>class BackpressureController:
+    &quot;&quot;&quot;Pure watermark policy logic -- the same decision the REAL MODE
+    pause()/resume() calls above would be driven by.&quot;&quot;&quot;
+    def __init__(self, high_watermark, low_watermark):
+        self.high = high_watermark
+        self.low = low_watermark
+        self.paused = False
+
+    def on_queue_depth_change(self, depth):
+        if not self.paused and depth &gt;= self.high:
+            self.paused = True
+            return &quot;pause&quot;
+        if self.paused and depth &lt;= self.low:
+            self.paused = False
+            return &quot;resume&quot;
+        return None
+
+controller = BackpressureController(high_watermark=500, low_watermark=100)
+depths = [50, 300, 520, 480, 300, 90, 40, 200, 600, 550, 80]
+for depth in depths:
+    action = controller.on_queue_depth_change(depth)
+    if action:
+        print(f&quot;depth={depth:&gt;4}  action={action}&quot;)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Measured output:</p>
+<pre><code>depth= 520  action=pause
+depth=  90  action=resume
+depth= 600  action=pause
+depth=  80  action=resume
+</code></pre><p><strong>Exercise:</strong>
+Confirm the controller does not flap when the queue depth oscillates just above and
+below a single threshold rather than crossing both watermarks: feed it
+<code>[520, 490, 510, 495, 505]</code> (all between the low and high watermarks except the first)
+and count how many pause/resume actions fire.</p>
+<p><strong>Starting point:</strong> The <code>BackpressureController</code> class from this concept's Example, freshly instantiated, fed the depth sequence <code>[520, 490, 510, 495, 505]</code>.</p>
+<p>Expected output: exactly one action fires (<code>pause</code> at depth 520); none of the later
+values re-cross either watermark, so the controller stays paused and silent through the
+rest of the sequence — the two-watermark design is precisely what prevents the flapping
+a single threshold would cause.</p>
+<hr />
+<h3>Concept 4 — Content-Hash Keys Make the Upsert Idempotent</h3>
+<p>Day 3 established that manual-commit-after-batch is at-least-once, not exactly-once: a
+crash can cause some records to be reprocessed. The fix is not to chase exactly-once
+delivery (expensive and, across a Kafka-to-vector-store boundary, not really available)
+but to make redelivery harmless at the write itself. Deriving the vector store's point
+id as a deterministic hash of <code>(claim_id, text, model_id)</code> means the same input always
+produces the same id, so upserting it twice is a no-op from the reader's perspective —
+at-least-once delivery becomes effectively-once <em>in the index</em>, even though Kafka itself
+never stopped being at-least-once.</p>
+<p><code>model_id</code> has to be part of the hash, not an afterthought: if a model upgrade re-embeds
+the same claim text, that is a genuinely different vector and needs a different point,
+or the new embedding silently overwrites the old one under a shared id with no record
+that a swap happened.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+
+def point_id(claim_id, text, model_id):
+    payload = f&quot;{claim_id}|{text}|{model_id}&quot;.encode(&quot;utf-8&quot;)
+    return hashlib.sha256(payload).hexdigest()
+
+claim_id = &quot;CLM-0004821&quot;
+text = &quot;Water damage to kitchen ceiling from upstairs pipe burst&quot;
+
+deliveries = [point_id(claim_id, text, &quot;embed-v2&quot;) for _ in range(3)]
+print(&quot;redelivered 3x, all identical -&gt;&quot;, len(set(deliveries)) == 1)
+
+id_v2 = point_id(claim_id, text, &quot;embed-v2&quot;)
+id_v3 = point_id(claim_id, text, &quot;embed-v3&quot;)
+print(&quot;same text, different model_id -&gt; different point id:&quot;, id_v2 != id_v3)
+
+index = {}
+for _ in range(3):
+    index[id_v2] = &quot;&lt;embedding bytes&gt;&quot;
+print(&quot;index size after 3 upserts of the same point id:&quot;, len(index))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>redelivered 3x, all identical -&gt; True
+same text, different model_id -&gt; different point id: True
+index size after 3 upserts of the same point id: 1
+</code></pre><p><strong>Exercise:</strong>
+Two different claims happen to share identical adjuster note text (a common boilerplate
+phrase, e.g. &quot;Claim closed, no further action required&quot;). Compute <code>point_id</code> for both
+claims with that shared text under the same <code>model_id</code> and confirm the ids differ, then
+explain in one sentence why <code>claim_id</code> has to be in the hash even though the text
+content is identical.</p>
+<p><strong>Starting point:</strong> The <code>point_id(claim_id, text, model_id)</code> function from this concept's Example, called with two different <code>claim_id</code> values and the shared text <code>&quot;Claim closed, no further action required&quot;</code>.</p>
+<p>Expected output: two different point ids, because <code>claim_id</code> is part of the hashed
+payload — without it, two unrelated claims that happen to share boilerplate text would
+collide onto the same point and one claim's embedding would silently overwrite the
+other's.</p>
+<hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> The embedding-API rate limit is frequently the tightest real
+constraint in the whole pipeline, tighter than anything Kafka itself imposes, especially
+when a shared enterprise contract caps requests-per-minute across every team using it,
+not just this pipeline. The semaphore's concurrency limit has to be set against that
+shared budget, not against what a single pipeline could theoretically sustain alone.</p>
+<p><strong>Compliance angle:</strong> A content-hash point id doubles as a natural version marker: two
+different point ids for the same <code>claim_id</code> under two <code>model_id</code> values is exactly the
+audit trail a &quot;why did this record's retrieval change&quot; question needs, without any extra
+bookkeeping beyond the hash itself.</p>
+<p><strong>What breaks in production:</strong> A backpressure watermark tuned once against a quiet
+staging environment and never revisited. Under a real end-of-quarter claims surge the
+high watermark is reached constantly, the partition spends most of its time paused, and
+lag grows anyway — the watermark protected the process from an OOM kill but did nothing
+for the underlying throughput mismatch it was never meant to solve.</p>
+<hr />
+<h2 id="day-5">Day 5 — Retries and Dead-Letter Topics</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="06-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=aNBSd7T-RGA" target="_blank" rel="noopener"><b>Kafka Error Handling with Spring Boot | Retry Strategies &amp; Dead Letter Topics | JavaTechie</b><small>Java Techie · 28:34</small></a></li><li><a href="https://www.youtube.com/watch?v=GWBk9LIzy-A" target="_blank" rel="noopener"><b>Errors and Dead Letter Queues | Kafka Connect 101 (2023)</b><small>Confluent, an IBM Company · 4:57</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Kafka%20dead%20letter%20queue%20retry%20topic%20error%20handling%20pattern" target="_blank" rel="noopener">Search YouTube: Kafka dead letter queue retry topic error handling pattern</a></p></div>
+<hr />
+<h3>Concept 1 — Retry Topic With Backoff vs Blocking the Partition Head</h3>
+<p>Kafka processes each partition strictly in order. If a consumer retries a failed record
+in a loop right where it sits — blocking the partition head — every good record behind
+it in that same partition waits for the entire retry-then-fail sequence to finish, even
+though none of them had anything to do with the failure. A <strong>retry topic</strong> breaks this
+coupling: a failed record is republished to a separate topic (often several, one per
+backoff tier) and the main partition's head moves on immediately, so good records are
+never held hostage by one bad one.</p>
+<p>The retry itself should back off exponentially with jitter — a fixed or unjittered delay
+means every consumer that failed on the same broker blip retries in lockstep and
+recreates the exact overload that caused the failure in the first place.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import random
+
+def backoff_schedule(base_ms, max_ms, attempts, rng):
+    return [rng.uniform(0, min(max_ms, base_ms * (2 ** attempt))) for attempt in range(attempts)]
+
+rng = random.Random(42)
+schedule = backoff_schedule(base_ms=200, max_ms=30_000, attempts=6, rng=rng)
+print(&quot;retry delays (ms):&quot;, [round(d) for d in schedule])
+print(&quot;cumulative wait before giving up (s):&quot;, round(sum(schedule) / 1000, 1))
+
+def head_of_line_cost(num_records, poison_pill_index, retry_delays_ms):
+    retry_total_ms = sum(retry_delays_ms)
+    records_behind = num_records - poison_pill_index - 1
+    return records_behind, records_behind * retry_total_ms
+
+behind, extra_wait_ms = head_of_line_cost(200, 50, schedule)
+print(f&quot;good records delayed behind the poison pill: {behind}&quot;)
+print(f&quot;extra wait imposed on the partition&#x27;s tail: {extra_wait_ms / 1000:.1f}s total&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>retry delays (ms): [128, 10, 220, 357, 2357, 4331]
+cumulative wait before giving up (s): 7.4
+good records delayed behind the poison pill: 149
+extra wait imposed on the partition&#x27;s tail: 1103.0s total
+</code></pre><p><strong>Exercise:</strong>
+Recompute <code>head_of_line_cost</code> with the poison pill at <code>poison_pill_index=190</code> instead of
+50 (near the tail of the same 200-record window), and again at <code>poison_pill_index=5</code>
+(near the head). Report the extra wait for both and state which position is actually
+worse for total pipeline impact, and why moving a retry topic in front of the problem
+makes the poison pill's position stop mattering at all.</p>
+<p><strong>Starting point:</strong> The <code>head_of_line_cost(num_records, poison_pill_index, retry_delays_ms)</code> function and the <code>schedule</code> list from this concept's Example, called at <code>poison_pill_index=190</code> and <code>poison_pill_index=5</code>.</p>
+<p>Expected output: <code>poison_pill_index=5</code> produces far more extra wait (194 records
+delayed) than <code>poison_pill_index=190</code> (9 records delayed) — an early poison pill in the
+partition is worse precisely because more good records queue up behind it. A retry topic
+removes this position-dependence entirely: the bad record leaves the main partition
+immediately regardless of where in the window it sat.</p>
+<hr />
+<h3>Concept 2 — The DLQ Envelope Carries Offset, Headers and Error</h3>
+<p>A record that exhausts its retries needs to land somewhere a human or an automated
+remediation job can act on it — and doing anything useful with it later (debug it,
+replay it once the bug is fixed, or just count how many of a given error type occurred)
+requires more than the raw payload. The envelope wrapping a dead-lettered record should
+carry everything needed to find it again (original topic, partition, offset, key,
+timestamp), everything the record's own metadata said (propagated headers), and the
+failure itself (error type, message, attempt count, first-seen and failed-at
+timestamps).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json, datetime
+
+def build_dlq_envelope(original_message, error, attempt_count, first_seen_at):
+    return {
+        &quot;original_topic&quot;: original_message[&quot;topic&quot;],
+        &quot;original_partition&quot;: original_message[&quot;partition&quot;],
+        &quot;original_offset&quot;: original_message[&quot;offset&quot;],
+        &quot;original_key&quot;: original_message[&quot;key&quot;],
+        &quot;original_timestamp&quot;: original_message[&quot;timestamp&quot;],
+        &quot;propagated_headers&quot;: original_message[&quot;headers&quot;],
+        &quot;error_type&quot;: type(error).__name__,
+        &quot;error_message&quot;: str(error),
+        &quot;attempt_count&quot;: attempt_count,
+        &quot;first_seen_at&quot;: first_seen_at,
+        &quot;failed_at&quot;: datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+original_message = {
+    &quot;topic&quot;: &quot;claim-events&quot;, &quot;partition&quot;: 3, &quot;offset&quot;: 918273, &quot;key&quot;: &quot;CLM-0004821&quot;,
+    &quot;timestamp&quot;: &quot;2026-09-05T08:12:03.441000+00:00&quot;,
+    &quot;headers&quot;: {&quot;source_system&quot;: &quot;policy-admin-mainframe&quot;, &quot;schema_version&quot;: &quot;3&quot;},
+}
+try:
+    raise ValueError(&quot;embedding API returned HTTP 422: text field exceeds max token length&quot;)
+except ValueError as exc:
+    envelope = build_dlq_envelope(original_message, exc, attempt_count=4,
+                                   first_seen_at=&quot;2026-09-05T08:12:04.001000+00:00&quot;)
+print(json.dumps(envelope, indent=2))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>{
+  &quot;original_topic&quot;: &quot;claim-events&quot;,
+  &quot;original_partition&quot;: 3,
+  &quot;original_offset&quot;: 918273,
+  &quot;original_key&quot;: &quot;CLM-0004821&quot;,
+  &quot;original_timestamp&quot;: &quot;2026-09-05T08:12:03.441000+00:00&quot;,
+  &quot;propagated_headers&quot;: {
+    &quot;source_system&quot;: &quot;policy-admin-mainframe&quot;,
+    &quot;schema_version&quot;: &quot;3&quot;
+  },
+  &quot;error_type&quot;: &quot;ValueError&quot;,
+  &quot;error_message&quot;: &quot;embedding API returned HTTP 422: text field exceeds max token length&quot;,
+  &quot;attempt_count&quot;: 4,
+  &quot;first_seen_at&quot;: &quot;2026-09-05T08:12:04.001000+00:00&quot;,
+  &quot;failed_at&quot;: &quot;2026-09-05T08:48:47.869009+00:00&quot;
+}
+</code></pre><p><strong>Exercise:</strong>
+Write a second <code>original_message</code> where the failure is a <code>ConnectionError</code> (a
+transient, retryable class of error) rather than <code>ValueError</code>, build its envelope, and
+compare the two envelopes' <code>error_type</code> fields to the classification rule from Concept
+3. State which of the two envelopes should never have reached the DLQ at all if the
+retry logic were configured correctly.</p>
+<p><strong>Starting point:</strong> The <code>build_dlq_envelope</code> function from this concept's Example, and a second <code>original_message</code>/exception pair raising <code>ConnectionError</code> instead of <code>ValueError</code>.</p>
+<p>Expected output: an envelope with <code>&quot;error_type&quot;: &quot;ConnectionError&quot;</code> alongside the
+existing <code>ValueError</code> one. Per Concept 3's classification, <code>ConnectionError</code> is
+retryable — its presence in the DLQ means either the retry attempts were already
+exhausted (a real poison pill, not a misclassification) or the routing logic itself
+skipped the retry topic in error; <code>ValueError</code> belongs in the DLQ immediately, since it
+is terminal by definition.</p>
+<hr />
+<h3>Concept 3 — Poison-Pill Isolation After N Attempts</h3>
+<p>Not every failure deserves a retry. A transient error — a timeout, a rate limit, a
+temporarily unavailable dependency — is worth retrying, because the same input might
+succeed a moment later. A terminal error — a schema validation failure, a malformed
+payload that will never parse — will fail identically on every retry, and retrying it
+only delays the DLQ landing while wasting attempts. The routing decision reads an
+attempt counter carried in the record's own headers (set and incremented by the retry
+topic infrastructure itself) alongside the error's classification, and sends the record
+to the retry topic while attempts remain and the error is retryable, or straight to the
+DLQ otherwise.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>RETRYABLE_ERRORS = {&quot;ConnectionError&quot;, &quot;TimeoutError&quot;, &quot;RateLimitError&quot;, &quot;ServiceUnavailable&quot;}
+TERMINAL_ERRORS = {&quot;ValueError&quot;, &quot;SchemaValidationError&quot;, &quot;PermissionError&quot;}
+MAX_ATTEMPTS = 3
+
+def route_after_failure(error_type, attempt_count):
+    if error_type in TERMINAL_ERRORS:
+        return &quot;dlq&quot;, f&quot;{error_type} is not retryable -- straight to DLQ&quot;
+    if error_type in RETRYABLE_ERRORS:
+        if attempt_count &lt; MAX_ATTEMPTS:
+            return &quot;retry_topic&quot;, f&quot;attempt {attempt_count + 1} of {MAX_ATTEMPTS}&quot;
+        return &quot;dlq&quot;, f&quot;exhausted {MAX_ATTEMPTS} attempts -- poison pill&quot;
+    return &quot;dlq&quot;, f&quot;unclassified error type &#x27;{error_type}&#x27; -- treat as terminal by default&quot;
+
+cases = [
+    {&quot;error_type&quot;: &quot;TimeoutError&quot;, &quot;attempt_count&quot;: 0},
+    {&quot;error_type&quot;: &quot;TimeoutError&quot;, &quot;attempt_count&quot;: 3},
+    {&quot;error_type&quot;: &quot;ValueError&quot;, &quot;attempt_count&quot;: 0},
+    {&quot;error_type&quot;: &quot;WeirdCustomError&quot;, &quot;attempt_count&quot;: 0},
+]
+for case in cases:
+    destination, reason = route_after_failure(**case)
+    print(f&quot;error={case[&#x27;error_type&#x27;]:&lt;18} attempt={case[&#x27;attempt_count&#x27;]}  -&gt; {destination:&lt;11}  ({reason})&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>error=TimeoutError       attempt=0  -&gt; retry_topic  (attempt 1 of 3)
+error=TimeoutError       attempt=3  -&gt; dlq          (exhausted 3 attempts -- poison pill)
+error=ValueError         attempt=0  -&gt; dlq          (ValueError is not retryable -- straight to DLQ)
+error=WeirdCustomError   attempt=0  -&gt; dlq          (unclassified error type &#x27;WeirdCustomError&#x27; -- treat as terminal by default)
+</code></pre><p><strong>Exercise:</strong>
+Add <code>&quot;RateLimitError&quot;</code> at <code>attempt_count=1</code> and <code>attempt_count=2</code> to the <code>cases</code> list and
+confirm both route to <code>retry_topic</code> with the correct &quot;attempt N of 3&quot; message. Then
+explain in one sentence why an unclassified error type defaulting to DLQ (rather than
+defaulting to retry) is the safer failure mode.</p>
+<p><strong>Starting point:</strong> The <code>route_after_failure(error_type, attempt_count)</code> function and <code>cases</code> list from this concept's Example, with the two new <code>RateLimitError</code> cases appended.</p>
+<p>Expected output: <code>attempt 2 of 3</code> and <code>attempt 3 of 3</code> for the two new cases,
+respectively. Defaulting an unclassified error to DLQ is safer because the alternative —
+defaulting to retry — risks retrying something that is actually terminal indefinitely
+(or up to <code>MAX_ATTEMPTS</code> times) purely because nobody has classified it yet, silently
+delaying a failure that a human should see immediately.</p>
+<hr />
+<h3>Concept 4 — Replaying From a Stored Offset After the Fix</h3>
+<p><strong>REAL MODE — not executed (requires <code>pip install confluent-kafka</code> and a reachable broker):</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from confluent_kafka import TopicPartition
+
+consumer.assign([
+    TopicPartition(&quot;claim-events&quot;, 0, 140_200),
+    TopicPartition(&quot;claim-events&quot;, 1, 139_950),
+    TopicPartition(&quot;claim-events&quot;, 2, 140_500),
+])
+for tp in consumer.assignment():
+    consumer.seek(tp)   # seek() requires the partition to already be assigned
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (shape only): the consumer's next <code>poll()</code> calls return records
+starting from each partition's given offset — no console output from <code>assign()</code>/<code>seek()</code>
+themselves.</p>
+<p>Once a bug is fixed (say, a bad deploy that truncated adjuster-note text before
+embedding), the records affected while it was live need to be reprocessed. <code>assign()</code>
+plus <code>seek()</code> gives manual control over exactly which offsets to re-read, independent of
+the consumer group's normal committed-offset bookkeeping. Doing this safely has exactly
+one precondition, and it is the same one Day 4 built: the upsert must be idempotent. If
+it is, replaying a range that includes already-good records is a harmless no-op for
+those records; if it is not, the replay creates duplicate points for everything in the
+range, good and bad alike.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def build_replay_plan(partition_offset_ranges, idempotent_upsert):
+    plan = []
+    total = 0
+    for partition, (start, end) in partition_offset_ranges.items():
+        count = end - start + 1
+        total += count
+        plan.append({&quot;partition&quot;: partition, &quot;seek_to_offset&quot;: start,
+                     &quot;replay_through_offset&quot;: end, &quot;expected_record_count&quot;: count})
+    precondition = (
+        &quot;safe: upserts are keyed by a content hash, so re-processing already-good &quot;
+        &quot;records is a no-op&quot; if idempotent_upsert else
+        &quot;UNSAFE: upserts are not idempotent -- replaying will create duplicates&quot;
+    )
+    return {&quot;plan&quot;: plan, &quot;total_expected_records&quot;: total,
+            &quot;safe_to_replay&quot;: idempotent_upsert, &quot;precondition&quot;: precondition}
+
+affected_ranges = {0: (140_200, 141_875), 1: (139_950, 141_600), 2: (140_500, 142_003)}
+result = build_replay_plan(affected_ranges, idempotent_upsert=True)
+for entry in result[&quot;plan&quot;]:
+    print(f&quot;partition {entry[&#x27;partition&#x27;]}: seek to {entry[&#x27;seek_to_offset&#x27;]}, &quot;
+          f&quot;replay through {entry[&#x27;replay_through_offset&#x27;]} &quot;
+          f&quot;({entry[&#x27;expected_record_count&#x27;]} records)&quot;)
+print(f&quot;total expected records: {result[&#x27;total_expected_records&#x27;]}&quot;)
+print(f&quot;precondition: {result[&#x27;precondition&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>partition 0: seek to 140200, replay through 141875 (1676 records)
+partition 1: seek to 139950, replay through 141600 (1651 records)
+partition 2: seek to 140500, replay through 142003 (1504 records)
+total expected records: 4831
+precondition: safe: upserts are keyed by a content hash, so re-processing already-good records is a no-op
+</code></pre><p><strong>Exercise:</strong>
+Call <code>build_replay_plan</code> again on the same <code>affected_ranges</code> with <code>idempotent_upsert=False</code>
+and print the resulting <code>precondition</code> string. Then state, in one sentence, what has to
+happen operationally before a replay is safe to run in a pipeline that has not adopted
+Day 4's content-hash keying.</p>
+<p><strong>Starting point:</strong> The <code>build_replay_plan(partition_offset_ranges, idempotent_upsert)</code> function and <code>affected_ranges</code> dict from this concept's Example, called with <code>idempotent_upsert=False</code>.</p>
+<p>Expected output: a <code>precondition</code> string reading <code>&quot;UNSAFE: upserts are not idempotent -- replaying will create duplicates&quot;</code>. Without content-hash keying, a safe replay needs
+an explicit delete-then-reinsert of every affected point id first (a separate, riskier
+operation of its own), or the pipeline has to accept that the replay will double-count
+everything in the affected range.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> A poison pill is frequently not a malformed message at all but a
+perfectly valid one that encodes a legacy quirk nobody modeled — a claim amount field
+carrying a mainframe-era sentinel value like <code>999999999</code> for &quot;unknown,&quot; which a schema
+validator correctly rejects as out of range. The DLQ envelope's job in that case is
+surfacing the pattern fast enough that someone adds a translation rule, not endlessly
+retrying a record that will never parse.</p>
+<p><strong>Compliance angle:</strong> A DLQ is itself a store of claim data sitting outside the normal
+access-control and retention policy applied to the main topic, and it is easy to forget
+that when it was created purely as an engineering safety net. Whatever retention and
+access rules apply to <code>claim-events</code> apply to its DLQ too — a common gap an audit finds
+is a DLQ topic with no retention policy at all, quietly accumulating claim payloads
+forever.</p>
+<p><strong>What breaks in production:</strong> A replay run against a pipeline nobody confirmed was
+idempotent, because the person running it assumed &quot;we fixed the bug, so replaying is
+obviously fine.&quot; The replay succeeds, throughput looks normal, and the actual damage —
+duplicated points inflating a downstream similarity count — surfaces days later in a
+completely different investigation.</p>
+<hr />
+<h2>Architecture Decision — Week 06</h2>
+<p><strong>Choosing between:</strong> embed-on-consume, one record at a time, per message vs.
+micro-batched embedding with paused-partition backpressure (Day 4's <code>MicroBatcher</code> plus
+<code>consumer.pause()</code>/<code>resume()</code>).</p>
+<p><strong>Rule of thumb:</strong> use single-record-per-message embedding while the embedding API's
+rate limit and per-call latency comfortably clear the event rate with room to spare, and
+while the pipeline's lag SLO has no real burn-rate risk at current volume — the simpler
+code path is worth keeping until it measurably cannot keep up. Move to micro-batching
+plus backpressure once any of three things happen: the embedding API bills or throttles
+per request rather than per token, so amortizing overhead across a batch materially
+changes cost or throughput; <code>max.poll.interval.ms</code> starts constraining how much work a
+single poll cycle can safely do, which micro-batching lets you control independently of
+raw event rate; or lag's burn rate goes positive under normal (non-incident) load,
+meaning per-record processing genuinely cannot clear the volume regardless of tuning.
+Having adopted micro-batching, the watermark thresholds in the backpressure controller
+are not a set-once decision — they have to move with <code>max.poll.records</code> and the measured
+embedding latency, the same way <code>ef_search</code> in Week 01 turned out to be a monitored
+production knob rather than a launch-day constant.</p>
+<div class="pager"><a class="btn ghost" href="week-05.html">&larr; Week 05</a><a class="btn ghost" href="week-07.html">Week 07 &rarr;</a></div>
+</main></body></html>

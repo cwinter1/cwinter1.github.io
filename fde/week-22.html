@@ -1,0 +1,1503 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 22 — Agentic Tools for Legacy Core Systems</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/how-does-function-calling-work-in-llms" target="_blank" rel="noopener">How does Function Calling work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/what-is-mcp-model-context-protocol" target="_blank" rel="noopener">What is MCP?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/ai-agent" target="_blank" rel="noopener">What is an AI Agent?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="22" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 22 — Agentic Tools for Legacy Core Systems</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>4 — LLMOps &amp; Distributed Infrastructure</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Advanced · <code>[legacy thread]</code></td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 08's Circuit Breaker (Curriculum <code>W8_D5_Final_Project.ipynb</code>) is genuinely reused for Day 3, re-tuned for a core that blocks for minutes instead of a flaky LLM API. Week 13's <code>CopybookField</code>/JCL-parsing habits and Week 18's undocumented-legacy-estate stance inform Days 1, 2 and 4. Week 19's real <code>SqliteSaver</code> checkpointer is genuinely reused for Day 5's replay. No prior SQL Server/Oracle DBA or mainframe operations experience assumed.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. <code>pydantic</code>, <code>langgraph</code>, <code>langgraph-checkpoint-sqlite</code> all install and run genuinely in this sandbox. No live SQL Server, Oracle, or mainframe connection exists here (per this repo's own <code>pyodbc</code> note) — every real <code>GRANT EXECUTE</code>/<code>EXECUTE AS</code>/mainframe-submission call stays REAL MODE with correct real syntax, but this week's actual subject — tool-schema design, allowlist enforcement, permission-tier modeling, circuit-breaker state machines, async job-ticket/idempotency logic, and audit-log assembly — is pure Python and genuinely executed throughout, the same pattern Weeks 06, 07, 08, 13, and 18 already established for a legacy thread week.</td>
+</tr>
+</tbody>
+</table>
+<p>Weeks 19-21 built the machinery an agent needs to run reliably in production — durable
+checkpointing, LlamaIndex-grounded retrieval, distributed compute. All of it assumed the
+agent's tools talk to systems built with an agent in mind: a clean REST API, a documented
+schema, a service that answers in milliseconds. A large share of BFSI's real transaction
+authority does not look like that at all — it is a named stored procedure on an on-prem
+SQL Server or Oracle core, or a mainframe batch job that was never meant to be called
+programmatically in the first place, running against a system nobody will let an LLM
+write free-text SQL against. This week builds the tool layer that makes an agent safe to
+point at that system: typed wrappers instead of raw SQL, permission tiers instead of one
+shared service account, circuit breakers tuned for a core that blocks for minutes instead
+of milliseconds, async submit/poll/fetch tools for work that isn't request-response, and
+an audit trail thorough enough to replay exactly what an agent did and why.</p>
+<hr />
+<h2 id="day-1">Day 1 — Typed Tools Over Stored Procedures</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="22-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=WkW5kvUdUa0" target="_blank" rel="noopener"><b>🛠️ Give Your LLM Real Tools | Function Calling &amp; Tool Schema in Agentic AI (Lab 3)</b><small>Super Data Science · 5:46</small></a></li><li><a href="https://www.youtube.com/watch?v=5drn2DO7gNY" target="_blank" rel="noopener"><b>Building LLM Agents with Tool Use</b><small>Jay Alammar · 7:39</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LLM%20agent%20tool%20schema%20wrapping%20stored%20procedure%20safely" target="_blank" rel="noopener">Search YouTube: LLM agent tool schema wrapping stored procedure safely</a></p></div>
+<hr />
+<h3>Concept 1 — A Pydantic-Typed Tool Around <code>dbo.usp_GetPolicyBalance @PolicyNo</code></h3>
+<p>The real procedure signature is <code>dbo.usp_GetPolicyBalance @PolicyNo VARCHAR(10)</code> — a bare
+string parameter with no format check inside the procedure itself, because the original
+application code was trusted to only ever send a well-formed policy number. An agent
+cannot be trusted the same way: it can be prompted (or manipulated) into passing anything
+a string will hold. Wrapping the call in a Pydantic input model with a real <code>pattern</code>
+constraint enforces the policy-number shape BEFORE the call ever reaches the core, and a
+typed output model turns whatever the procedure returns into a stable contract the rest
+of the agent's code can rely on regardless of how the underlying T-SQL changes later.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pydantic import BaseModel, Field
+from typing import Literal
+
+class GetPolicyBalanceInput(BaseModel):
+    policy_no: str = Field(
+        ...,
+        pattern=r&quot;^POL-\d{6}$&quot;,
+        description=&quot;Maps to @PolicyNo -- the legacy proc has no format check of its own, so the tool enforces one before the call ever reaches the core&quot;,
+    )
+
+class GetPolicyBalanceOutput(BaseModel):
+    policy_no: str
+    balance: float
+    currency: Literal[&quot;USD&quot;, &quot;EUR&quot;, &quot;GBP&quot;]
+    as_of_date: str
+    status_code: int = Field(description=&quot;raw @ReturnCode OUTPUT parameter from the proc -- 0 = ok, negative = a legacy error the tool surfaces rather than hides&quot;)
+
+SIMULATED_CORE_RESPONSES = {
+    &quot;POL-100234&quot;: {&quot;balance&quot;: 18420.55, &quot;currency&quot;: &quot;USD&quot;, &quot;as_of_date&quot;: &quot;2026-09-17&quot;, &quot;status_code&quot;: 0},
+    &quot;POL-999999&quot;: {&quot;balance&quot;: 0.0, &quot;currency&quot;: &quot;USD&quot;, &quot;as_of_date&quot;: &quot;2026-09-17&quot;, &quot;status_code&quot;: -2},
+}
+
+def call_usp_get_policy_balance(payload: GetPolicyBalanceInput) -&gt; GetPolicyBalanceOutput:
+    raw = SIMULATED_CORE_RESPONSES.get(payload.policy_no)
+    if raw is None:
+        raise LookupError(f&quot;no simulated core response registered for {payload.policy_no}&quot;)
+    return GetPolicyBalanceOutput(policy_no=payload.policy_no, **raw)
+
+good = call_usp_get_policy_balance(GetPolicyBalanceInput(policy_no=&quot;POL-100234&quot;))
+print(good.model_dump())
+
+bad_status = call_usp_get_policy_balance(GetPolicyBalanceInput(policy_no=&quot;POL-999999&quot;))
+print(bad_status.model_dump())
+
+try:
+    GetPolicyBalanceInput(policy_no=&quot;&#x27;; DROP TABLE POLICIES; --&quot;)
+except Exception as e:
+    print(f&quot;rejected malformed policy_no before it reached the core: {type(e).__name__}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>{&#x27;policy_no&#x27;: &#x27;POL-100234&#x27;, &#x27;balance&#x27;: 18420.55, &#x27;currency&#x27;: &#x27;USD&#x27;, &#x27;as_of_date&#x27;: &#x27;2026-09-17&#x27;, &#x27;status_code&#x27;: 0}
+{&#x27;policy_no&#x27;: &#x27;POL-999999&#x27;, &#x27;balance&#x27;: 0.0, &#x27;currency&#x27;: &#x27;USD&#x27;, &#x27;as_of_date&#x27;: &#x27;2026-09-17&#x27;, &#x27;status_code&#x27;: -2}
+rejected malformed policy_no before it reached the core: ValidationError
+</code></pre><p><strong>Exercise:</strong>
+Build <code>SIMULATED_CORE_RESPONSES_EXT</code> (a copy of <code>SIMULATED_CORE_RESPONSES</code> plus a new
+entry <code>&quot;POL-300777&quot;</code> with <code>balance=5210.00</code>, <code>currency=&quot;EUR&quot;</code>,
+<code>as_of_date=&quot;2026-09-17&quot;</code>, <code>status_code=0</code>), write a <code>call_ext</code> function that looks the
+policy up in the extended dict, call it for <code>&quot;POL-300777&quot;</code> and print the result. Then try
+constructing <code>GetPolicyBalanceInput(policy_no=&quot;POL-30077&quot;)</code> (only 5 digits) and print one
+line confirming the field pattern rejects it before any core call happens.</p>
+<p><strong>Starting point:</strong> <code>GetPolicyBalanceInput</code>, <code>GetPolicyBalanceOutput</code>, and
+<code>SIMULATED_CORE_RESPONSES</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>{&#x27;policy_no&#x27;: &#x27;POL-300777&#x27;, &#x27;balance&#x27;: 5210.0, &#x27;currency&#x27;: &#x27;EUR&#x27;, &#x27;as_of_date&#x27;: &#x27;2026-09-17&#x27;, &#x27;status_code&#x27;: 0}
+5-digit policy_no rejected by the field pattern before any core call: ValidationError
+</code></pre><hr />
+<h3>Concept 2 — An Explicit Procedure Allowlist Instead of Free-Text SQL</h3>
+<p>The single most important safety property of a tool layer over a legacy core is that an
+agent can never assemble its own SQL — it can only name one of a small, explicitly
+allowed set of procedures, each with its own tier and rate limit. A requested name that
+isn't on the allowlist is rejected outright, and so is a parameter value that itself
+looks like SQL, since a clever prompt could otherwise smuggle a second statement in
+through what looks like an ordinary string argument.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+PROCEDURE_ALLOWLIST = {
+    &quot;dbo.usp_GetPolicyBalance&quot;: {&quot;tier&quot;: &quot;read&quot;, &quot;max_calls_per_minute&quot;: 120},
+    &quot;dbo.usp_GetClaimStatus&quot;: {&quot;tier&quot;: &quot;read&quot;, &quot;max_calls_per_minute&quot;: 120},
+    &quot;dbo.usp_RenewPolicy&quot;: {&quot;tier&quot;: &quot;write&quot;, &quot;max_calls_per_minute&quot;: 10},
+}
+
+FREE_TEXT_SQL_PATTERN = re.compile(r&quot;\b(SELECT|INSERT|UPDATE|DELETE|DROP|EXEC|EXECUTE)\b&quot;, re.IGNORECASE)
+
+class ProcedureNotAllowedError(Exception):
+    pass
+
+def resolve_tool_call(requested_name: str) -&gt; dict:
+    if requested_name not in PROCEDURE_ALLOWLIST:
+        raise ProcedureNotAllowedError(
+            f&quot;&#x27;{requested_name}&#x27; is not on the procedure allowlist -- an agent tool can only &quot;
+            f&quot;name a procedure, never assemble SQL text&quot;
+        )
+    return {&quot;procedure&quot;: requested_name, **PROCEDURE_ALLOWLIST[requested_name]}
+
+def reject_if_looks_like_free_text_sql(agent_argument: str) -&gt; None:
+    if FREE_TEXT_SQL_PATTERN.search(agent_argument):
+        raise ProcedureNotAllowedError(
+            f&quot;argument &#x27;{agent_argument}&#x27; contains a raw SQL keyword -- tools accept typed &quot;
+            f&quot;parameters only, never a string an agent assembled itself&quot;
+        )
+
+resolved = resolve_tool_call(&quot;dbo.usp_GetPolicyBalance&quot;)
+print(f&quot;resolved allowlisted call: {resolved}&quot;)
+
+try:
+    resolve_tool_call(&quot;dbo.usp_DropAllTables&quot;)
+except ProcedureNotAllowedError as e:
+    print(f&quot;blocked non-allowlisted procedure: {e}&quot;)
+
+try:
+    reject_if_looks_like_free_text_sql(&quot;POL-100234; DROP TABLE POLICIES&quot;)
+except ProcedureNotAllowedError as e:
+    print(f&quot;blocked free-text SQL disguised as a parameter: {type(e).__name__}&quot;)
+
+reject_if_looks_like_free_text_sql(&quot;POL-100234&quot;)
+print(&quot;a genuinely plain parameter value passes the free-text SQL check&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>resolved allowlisted call: {&#x27;procedure&#x27;: &#x27;dbo.usp_GetPolicyBalance&#x27;, &#x27;tier&#x27;: &#x27;read&#x27;, &#x27;max_calls_per_minute&#x27;: 120}
+blocked non-allowlisted procedure: &#x27;dbo.usp_DropAllTables&#x27; is not on the procedure allowlist -- an agent tool can only name a procedure, never assemble SQL text
+blocked free-text SQL disguised as a parameter: ProcedureNotAllowedError
+a genuinely plain parameter value passes the free-text SQL check
+</code></pre><p><strong>Exercise:</strong>
+Call <code>resolve_tool_call(&quot;sp_executesql&quot;)</code> — SQL Server's own real built-in system
+procedure for running dynamic SQL text, genuinely absent from <code>PROCEDURE_ALLOWLIST</code>
+because it is exactly the free-text-SQL escape hatch this concept exists to close. Print
+the caught error message.</p>
+<p><strong>Starting point:</strong> <code>PROCEDURE_ALLOWLIST</code>, <code>ProcedureNotAllowedError</code>, and
+<code>resolve_tool_call</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>blocked SQL Server&#x27;s own dynamic-SQL system procedure: &#x27;sp_executesql&#x27; is not on the procedure allowlist -- an agent tool can only name a procedure, never assemble SQL text
+</code></pre><hr />
+<h3>Concept 3 — Mapping OUTPUT Parameters and Multiple Result Sets Into One Response Schema</h3>
+<p>A legacy procedure accumulated over twenty years rarely returns just one clean row set.
+<code>dbo.usp_GetClaimStatus</code> genuinely does three separate things: it sets an
+<code>@TotalPaidToDate</code> OUTPUT parameter, returns a first result set (the claim header), and
+returns a second result set (the payment history) that <code>pyodbc</code>'s real
+<code>cursor.nextset()</code> call is needed to reach. A tool's job is to flatten all three of those
+into ONE stable Pydantic response — the caller never needs to know how many result sets
+or OUTPUT parameters the underlying T-SQL actually used.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from typing import List
+
+class FakeLegacyCursor:
+    &quot;&quot;&quot;Shaped exactly like pyodbc&#x27;s cursor -- fetchall() + nextset() -- standing in
+    for a live connection this sandbox does not have.&quot;&quot;&quot;
+    def __init__(self, result_sets, output_params):
+        self._result_sets = list(result_sets)
+        self._index = 0
+        self.output_params = output_params
+
+    def fetchall(self):
+        return self._result_sets[self._index]
+
+    def nextset(self):
+        self._index += 1
+        return self._index &lt; len(self._result_sets)
+
+
+class PaymentRow(BaseModel):
+    payment_date: str
+    amount: float
+
+
+class ClaimStatusResponse(BaseModel):
+    claim_id: str
+    status: str
+    adjuster: str
+    payments: List[PaymentRow]
+    total_paid_to_date: float  # sourced from the @TotalPaidToDate OUTPUT parameter, not a result set
+
+
+def map_claim_status_cursor(cursor: FakeLegacyCursor) -&gt; ClaimStatusResponse:
+    header_rows = cursor.fetchall()
+    claim_id, status, adjuster = header_rows[0]
+
+    has_more = cursor.nextset()
+    payments = []
+    if has_more:
+        for payment_date, amount in cursor.fetchall():
+            payments.append(PaymentRow(payment_date=payment_date, amount=amount))
+
+    return ClaimStatusResponse(
+        claim_id=claim_id,
+        status=status,
+        adjuster=adjuster,
+        payments=payments,
+        total_paid_to_date=cursor.output_params[&quot;TotalPaidToDate&quot;],
+    )
+
+
+fake_cursor = FakeLegacyCursor(
+    result_sets=[
+        [(&quot;CLM-4471&quot;, &quot;IN_REVIEW&quot;, &quot;J.Reyes&quot;)],
+        [(&quot;2026-08-01&quot;, 1200.00), (&quot;2026-08-15&quot;, 950.50)],
+    ],
+    output_params={&quot;TotalPaidToDate&quot;: 2150.50},
+)
+
+response = map_claim_status_cursor(fake_cursor)
+print(response.model_dump())
+print(f&quot;payments result set merged with the header row and the OUTPUT parameter into one schema: {len(response.payments)} payments, total_paid_to_date={response.total_paid_to_date}&quot;)
+
+no_payments_cursor = FakeLegacyCursor(
+    result_sets=[[(&quot;CLM-9002&quot;, &quot;OPENED&quot;, &quot;M.Chen&quot;)]],
+    output_params={&quot;TotalPaidToDate&quot;: 0.0},
+)
+no_payments_response = map_claim_status_cursor(no_payments_cursor)
+print(no_payments_response.model_dump())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>{&#x27;claim_id&#x27;: &#x27;CLM-4471&#x27;, &#x27;status&#x27;: &#x27;IN_REVIEW&#x27;, &#x27;adjuster&#x27;: &#x27;J.Reyes&#x27;, &#x27;payments&#x27;: [{&#x27;payment_date&#x27;: &#x27;2026-08-01&#x27;, &#x27;amount&#x27;: 1200.0}, {&#x27;payment_date&#x27;: &#x27;2026-08-15&#x27;, &#x27;amount&#x27;: 950.5}], &#x27;total_paid_to_date&#x27;: 2150.5}
+payments result set merged with the header row and the OUTPUT parameter into one schema: 2 payments, total_paid_to_date=2150.5
+{&#x27;claim_id&#x27;: &#x27;CLM-9002&#x27;, &#x27;status&#x27;: &#x27;OPENED&#x27;, &#x27;adjuster&#x27;: &#x27;M.Chen&#x27;, &#x27;payments&#x27;: [], &#x27;total_paid_to_date&#x27;: 0.0}
+</code></pre><p><strong>Exercise:</strong>
+Build <code>three_payment_cursor</code>, a <code>FakeLegacyCursor</code> for claim <code>CLM-5510</code> (status
+<code>&quot;CLOSED&quot;</code>, adjuster <code>&quot;R.Patel&quot;</code>) whose second result set has THREE payment rows
+(<code>(&quot;2026-06-01&quot;, 400.0)</code>, <code>(&quot;2026-06-20&quot;, 400.0)</code>, <code>(&quot;2026-07-05&quot;, 300.0)</code>) and whose
+<code>TotalPaidToDate</code> OUTPUT parameter is <code>1100.0</code>. Map it with <code>map_claim_status_cursor</code>,
+print the response, and print one line confirming the response's <code>payments</code> list length
+matches the second result set's row count.</p>
+<p><strong>Starting point:</strong> <code>FakeLegacyCursor</code> and <code>map_claim_status_cursor</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>{&#x27;claim_id&#x27;: &#x27;CLM-5510&#x27;, &#x27;status&#x27;: &#x27;CLOSED&#x27;, &#x27;adjuster&#x27;: &#x27;R.Patel&#x27;, &#x27;payments&#x27;: [{&#x27;payment_date&#x27;: &#x27;2026-06-01&#x27;, &#x27;amount&#x27;: 400.0}, {&#x27;payment_date&#x27;: &#x27;2026-06-20&#x27;, &#x27;amount&#x27;: 400.0}, {&#x27;payment_date&#x27;: &#x27;2026-07-05&#x27;, &#x27;amount&#x27;: 300.0}], &#x27;total_paid_to_date&#x27;: 1100.0}
+payments length matches result set row count: True
+</code></pre><hr />
+<h3>Concept 4 — Documenting Undocumented Parameter Semantics in the Tool Contract Itself</h3>
+<p><code>dbo.usp_RenewPolicy</code>'s real <code>@StatusFlag</code> parameter is a single legacy character with no
+comment anywhere in the procedure body and no lookup table anywhere in the schema — its
+meaning only survives in institutional memory (here: a retired underwriter's paper
+notes). A Pydantic <code>Field(description=...)</code> is not decoration; <code>model_json_schema()</code>
+turns it into the exact JSON Schema an LLM tool-calling framework reads to decide how to
+call the tool, so writing the undocumented meaning into the field description ships that
+institutional knowledge with the tool itself, rather than leaving it in someone's head.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+
+class RenewPolicyInput(BaseModel):
+    policy_no: str = Field(..., description=&quot;maps to @PolicyNo&quot;)
+    status_flag: Literal[&quot;P&quot;, &quot;A&quot;, &quot;X&quot;, &quot;H&quot;] = Field(
+        ...,
+        description=(
+            &quot;maps to @StatusFlag, a single legacy character undocumented anywhere in the &quot;
+            &quot;database itself: &#x27;P&#x27; = pending underwriting, &#x27;A&#x27; = active/renewed, &quot;
+            &quot;&#x27;X&#x27; = cancelled, &#x27;H&#x27; = held for manual review. Discovered from a retired &quot;
+            &quot;underwriter&#x27;s paper notes, not from any schema comment.&quot;
+        ),
+    )
+    effective_date: str = Field(..., description=&quot;maps to @EffectiveDate, format YYYY-MM-DD&quot;)
+
+
+schema = RenewPolicyInput.model_json_schema()
+status_flag_doc = schema[&quot;properties&quot;][&quot;status_flag&quot;][&quot;description&quot;]
+print(f&quot;status_flag description length: {len(status_flag_doc)} chars&quot;)
+print(f&quot;status_flag description mentions all four legacy codes: {all(code in status_flag_doc for code in (&#x27;pending&#x27;, &#x27;active&#x27;, &#x27;cancelled&#x27;, &#x27;held&#x27;))}&quot;)
+
+payload = RenewPolicyInput(policy_no=&quot;POL-100234&quot;, status_flag=&quot;A&quot;, effective_date=&quot;2026-10-01&quot;)
+print(payload.model_dump())
+
+tool_schema_for_llm = {
+    &quot;name&quot;: &quot;renew_policy&quot;,
+    &quot;description&quot;: &quot;Renews a policy against dbo.usp_RenewPolicy. Every parameter&#x27;s legacy meaning is documented in its own field, not assumed.&quot;,
+    &quot;parameters&quot;: schema,
+}
+print(f&quot;tool schema handed to the LLM carries the undocumented status_flag meaning: {&#x27;pending underwriting&#x27; in json.dumps(tool_schema_for_llm)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>status_flag description length: 271 chars
+status_flag description mentions all four legacy codes: True
+{&#x27;policy_no&#x27;: &#x27;POL-100234&#x27;, &#x27;status_flag&#x27;: &#x27;A&#x27;, &#x27;effective_date&#x27;: &#x27;2026-10-01&#x27;}
+tool schema handed to the LLM carries the undocumented status_flag meaning: True
+</code></pre><p><strong>Exercise:</strong>
+Build <code>RenewPolicyInputExt</code> with a <code>policy_no: str</code> field and a new <code>channel: Literal[&quot;B&quot;, &quot;D&quot;, &quot;T&quot;]</code> field, described as undocumented-in-the-schema with <code>'B'</code> =
+branch-originated, <code>'D'</code> = direct-to-consumer, <code>'T'</code> = telesales. Pull its
+<code>model_json_schema()</code>, read the <code>channel</code> field's description, and print one line
+confirming all three legacy codes appear in it.</p>
+<p><strong>Starting point:</strong> <code>BaseModel</code>, <code>Field</code>, and <code>Literal</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>channel description mentions all three legacy codes: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> <code>usp_RenewPolicy</code>'s <code>@StatusFlag</code> meaning genuinely came from a retired
+employee's notes, not from the database — the tool contract this concept builds is often
+the FIRST time that meaning has ever been written down anywhere a machine can read it.</p>
+<p><strong>Compliance angle:</strong> A typed, allowlisted tool boundary is itself an audit artifact — a
+regulator asking &quot;what could this agent possibly have done to the core&quot; gets answered by
+reading <code>PROCEDURE_ALLOWLIST</code>, not by reverse-engineering a transcript of every SQL
+statement the agent could theoretically have generated.</p>
+<p><strong>What breaks in production:</strong> <code>GetPolicyBalanceInput</code>'s <code>pattern=r&quot;^POL-\d{6}$&quot;</code> assumes
+every policy number in the core follows that shape — but a core running for twenty years
+often has a handful of legacy records from BEFORE the current numbering convention was
+adopted, whose real <code>@PolicyNo</code> values don't match the pattern at all. A tool this strict
+correctly blocks SQL injection but will also silently refuse to ever look up those old
+records, and that gap needs a deliberate decision (a second allowed pattern, or an
+explicit legacy-record exception list), not a regex tightened in isolation without
+checking what's actually in the core.</p>
+<hr />
+<h2 id="day-2">Day 2 — Permission Models and Blast Radius</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="22-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=1F4VvYNSl_U" target="_blank" rel="noopener"><b>DP-300 Lesson 8: Permissions and Access Troubleshooting | GRANT, DENY, REVOKE, Least Privilege</b><small>Cert Espresso · 7:03</small></a></li><li><a href="https://www.youtube.com/watch?v=XzjhYSZgJeY" target="_blank" rel="noopener"><b>07 07 The Principle of Least Privilege</b><small>Hackers Journey · 7:58</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=least%20privilege%20database%20service%20account%20grant%20execute%20stored%20procedure" target="_blank" rel="noopener">Search YouTube: least privilege database service account grant execute stored procedure</a></p></div>
+<hr />
+<h3>Concept 1 — <code>GRANT EXECUTE</code> on Individual Procedures, No Underlying Table Rights</h3>
+<p>The real, minimal grant for a service account that only ever calls procedures is <code>GRANT EXECUTE ON dbo.usp_GetPolicyBalance TO svc_agent_reader</code> — with no accompanying <code>GRANT SELECT ON POLICIES</code> at all. That account can run the two procedures it was explicitly
+granted EXECUTE on and genuinely cannot query any table directly, even the tables those
+same procedures read from internally. This is the real least-privilege boundary a legacy
+core's own permission system already provides, before any application-level allowlist
+gets involved.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+class GrantSet:
+    def __init__(self, principal, procedure_execute_grants, table_direct_grants):
+        self.principal = principal
+        self.procedure_execute_grants = procedure_execute_grants
+        self.table_direct_grants = table_direct_grants
+
+SVC_AGENT_READER_GRANTS = GrantSet(
+    principal=&quot;svc_agent_reader&quot;,
+    procedure_execute_grants={&quot;dbo.usp_GetPolicyBalance&quot;, &quot;dbo.usp_GetClaimStatus&quot;},
+    table_direct_grants={},  # genuinely empty -- no direct table access at all
+)
+
+def can_execute_procedure(grants: GrantSet, procedure: str) -&gt; bool:
+    return procedure in grants.procedure_execute_grants
+
+def can_query_table_directly(grants: GrantSet, table: str, permission: str) -&gt; bool:
+    return permission in grants.table_direct_grants.get(table, set())
+
+print(f&quot;svc_agent_reader can EXECUTE usp_GetPolicyBalance: {can_execute_procedure(SVC_AGENT_READER_GRANTS, &#x27;dbo.usp_GetPolicyBalance&#x27;)}&quot;)
+print(f&quot;svc_agent_reader can SELECT directly against POLICIES: {can_query_table_directly(SVC_AGENT_READER_GRANTS, &#x27;POLICIES&#x27;, &#x27;SELECT&#x27;)}&quot;)
+print(f&quot;svc_agent_reader can EXECUTE an unlisted procedure: {can_execute_procedure(SVC_AGENT_READER_GRANTS, &#x27;dbo.usp_DeleteAllPolicies&#x27;)}&quot;)
+
+blast_radius = f&quot;limited to exactly what {len(SVC_AGENT_READER_GRANTS.procedure_execute_grants)} allowlisted procedures do internally, zero direct table rights&quot;
+print(f&quot;blast radius: {blast_radius}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>svc_agent_reader can EXECUTE usp_GetPolicyBalance: True
+svc_agent_reader can SELECT directly against POLICIES: False
+svc_agent_reader can EXECUTE an unlisted procedure: False
+blast radius: limited to exactly what 2 allowlisted procedures do internally, zero direct table rights
+</code></pre><p><strong>Exercise:</strong>
+Build <code>SVC_AGENT_WRITER_GRANTS</code>, a <code>GrantSet</code> for principal <code>&quot;svc_agent_writer&quot;</code> with
+<code>procedure_execute_grants={&quot;dbo.usp_RenewPolicy&quot;}</code> and an empty
+<code>table_direct_grants</code>. Print whether it can EXECUTE <code>dbo.usp_RenewPolicy</code>, whether it can
+EXECUTE <code>dbo.usp_GetPolicyBalance</code> (a procedure it was never granted), and whether it can
+SELECT directly against <code>POLICIES</code>.</p>
+<p><strong>Starting point:</strong> <code>GrantSet</code>, <code>can_execute_procedure</code>, and <code>can_query_table_directly</code>
+from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>svc_agent_writer can EXECUTE usp_RenewPolicy: True
+svc_agent_writer can EXECUTE usp_GetPolicyBalance: False
+svc_agent_writer can SELECT directly against POLICIES: False
+</code></pre><hr />
+<h3>Concept 2 — <code>EXECUTE AS</code> and Definer's-Rights Packages as the Real Privilege Boundary</h3>
+<p><code>CREATE PROCEDURE dbo.usp_RenewPolicy WITH EXECUTE AS OWNER AS ...</code> is real T-SQL syntax:
+every statement inside that procedure body runs under the PROCEDURE OWNER's own
+permissions, not the caller's — Oracle's PL/SQL package works the same way by default
+(definer's rights, unless the package is explicitly declared <code>AUTHID CURRENT_USER</code>). This
+means Concept 1's caller-side grants are not the real privilege boundary at all once
+<code>EXECUTE AS OWNER</code> is in play — the real boundary is whatever tables and operations the
+PROCEDURE BODY itself touches, which a caller with zero direct table rights can still
+trigger.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class ProcedureDefinition:
+    def __init__(self, name, execute_as, tables_touched):
+        self.name = name
+        self.execute_as = execute_as  # &quot;OWNER&quot; (definer&#x27;s rights) or &quot;CALLER&quot; (invoker&#x27;s rights)
+        self.tables_touched = tables_touched  # table -&gt; set of operations the BODY performs
+
+USP_RENEW_POLICY = ProcedureDefinition(
+    name=&quot;dbo.usp_RenewPolicy&quot;,
+    execute_as=&quot;OWNER&quot;,
+    tables_touched={&quot;POLICIES&quot;: {&quot;SELECT&quot;, &quot;UPDATE&quot;}, &quot;POLICY_HISTORY&quot;: {&quot;INSERT&quot;}},
+)
+
+def real_blast_radius(proc: ProcedureDefinition) -&gt; dict:
+    if proc.execute_as == &quot;OWNER&quot;:
+        # the caller&#x27;s own grants are irrelevant -- the body&#x27;s own table touches ARE the boundary
+        return {table: sorted(ops) for table, ops in proc.tables_touched.items()}
+    raise NotImplementedError(&quot;invoker&#x27;s-rights boundary needs the caller&#x27;s own grants&quot;)
+
+radius = real_blast_radius(USP_RENEW_POLICY)
+print(f&quot;usp_RenewPolicy real blast radius (EXECUTE AS OWNER, caller grants irrelevant): {radius}&quot;)
+
+caller_grants = {&quot;POLICIES&quot;: set(), &quot;POLICY_HISTORY&quot;: set()}  # svc_agent_writer: EXECUTE only, zero direct table rights
+print(f&quot;caller&#x27;s own direct table grants (irrelevant under EXECUTE AS OWNER): {caller_grants}&quot;)
+print(f&quot;the procedure can UPDATE POLICIES even though the caller has zero direct rights on it: {&#x27;UPDATE&#x27; in radius[&#x27;POLICIES&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>usp_RenewPolicy real blast radius (EXECUTE AS OWNER, caller grants irrelevant): {&#x27;POLICIES&#x27;: [&#x27;SELECT&#x27;, &#x27;UPDATE&#x27;], &#x27;POLICY_HISTORY&#x27;: [&#x27;INSERT&#x27;]}
+caller&#x27;s own direct table grants (irrelevant under EXECUTE AS OWNER): {&#x27;POLICIES&#x27;: set(), &#x27;POLICY_HISTORY&#x27;: set()}
+the procedure can UPDATE POLICIES even though the caller has zero direct rights on it: True
+</code></pre><p><strong>Exercise:</strong>
+Build <code>USP_GET_CLAIM_STATUS</code>, a <code>ProcedureDefinition</code> for <code>&quot;dbo.usp_GetClaimStatus&quot;</code> with
+<code>execute_as=&quot;OWNER&quot;</code> and <code>tables_touched={&quot;CLAIMS&quot;: {&quot;SELECT&quot;}, &quot;PAYMENTS&quot;: {&quot;SELECT&quot;}}</code>
+— a genuinely read-only procedure. Compute its real blast radius with
+<code>real_blast_radius</code>, print it, then print one line confirming a read-only procedure's
+blast radius contains NO write operations (<code>&quot;INSERT&quot;</code>, <code>&quot;UPDATE&quot;</code>, <code>&quot;DELETE&quot;</code>) in any
+table it touches.</p>
+<p><strong>Starting point:</strong> <code>ProcedureDefinition</code> and <code>real_blast_radius</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>usp_GetClaimStatus real blast radius: {&#x27;CLAIMS&#x27;: [&#x27;SELECT&#x27;], &#x27;PAYMENTS&#x27;: [&#x27;SELECT&#x27;]}
+a read-only procedure&#x27;s blast radius contains no write operations at all: True
+</code></pre><hr />
+<h3>Concept 3 — Read, Dry-Run, and Write Tools in Distinct Permission Tiers</h3>
+<p>Not every tool in an agent's registry should be reachable by every calling role. Tagging
+each <code>ToolDefinition</code> with an explicit tier — <code>READ</code> (changes nothing), <code>DRY_RUN</code> (asks
+the procedure to validate/plan without committing, a real capability a write procedure
+needs to be deliberately built with), or <code>WRITE</code> (actually commits) — and checking a
+calling role's allowed tier SET at authorization time keeps an analyst-level agent role
+from ever reaching a write-tier tool at all, regardless of what the underlying model
+decides to attempt.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pydantic import BaseModel
+from typing import Literal
+
+class ToolDefinition(BaseModel):
+    name: str
+    procedure: str
+    tier: Literal[&quot;READ&quot;, &quot;DRY_RUN&quot;, &quot;WRITE&quot;]
+
+TOOL_REGISTRY = [
+    ToolDefinition(name=&quot;get_policy_balance&quot;, procedure=&quot;dbo.usp_GetPolicyBalance&quot;, tier=&quot;READ&quot;),
+    ToolDefinition(name=&quot;preview_policy_renewal&quot;, procedure=&quot;dbo.usp_RenewPolicy_DryRun&quot;, tier=&quot;DRY_RUN&quot;),
+    ToolDefinition(name=&quot;renew_policy&quot;, procedure=&quot;dbo.usp_RenewPolicy&quot;, tier=&quot;WRITE&quot;),
+]
+
+ROLE_ALLOWED_TIERS = {
+    &quot;agent_analyst&quot;: {&quot;READ&quot;, &quot;DRY_RUN&quot;},
+    &quot;agent_operator&quot;: {&quot;READ&quot;, &quot;DRY_RUN&quot;, &quot;WRITE&quot;},
+}
+
+class ToolAccessDeniedError(Exception):
+    pass
+
+def authorize_tool_call(role: str, tool_name: str) -&gt; ToolDefinition:
+    tool = next((t for t in TOOL_REGISTRY if t.name == tool_name), None)
+    if tool is None:
+        raise ToolAccessDeniedError(f&quot;&#x27;{tool_name}&#x27; is not a registered tool&quot;)
+    allowed = ROLE_ALLOWED_TIERS.get(role, set())
+    if tool.tier not in allowed:
+        raise ToolAccessDeniedError(f&quot;role &#x27;{role}&#x27; is not permitted to call a {tool.tier}-tier tool (&#x27;{tool_name}&#x27;)&quot;)
+    return tool
+
+analyst_read = authorize_tool_call(&quot;agent_analyst&quot;, &quot;get_policy_balance&quot;)
+print(f&quot;agent_analyst -&gt; get_policy_balance: authorized, tier={analyst_read.tier}&quot;)
+
+try:
+    authorize_tool_call(&quot;agent_analyst&quot;, &quot;renew_policy&quot;)
+except ToolAccessDeniedError as e:
+    print(f&quot;agent_analyst -&gt; renew_policy: {e}&quot;)
+
+operator_write = authorize_tool_call(&quot;agent_operator&quot;, &quot;renew_policy&quot;)
+print(f&quot;agent_operator -&gt; renew_policy: authorized, tier={operator_write.tier}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>agent_analyst -&gt; get_policy_balance: authorized, tier=READ
+agent_analyst -&gt; renew_policy: role &#x27;agent_analyst&#x27; is not permitted to call a WRITE-tier tool (&#x27;renew_policy&#x27;)
+agent_operator -&gt; renew_policy: authorized, tier=WRITE
+</code></pre><p><strong>Exercise:</strong>
+Add <code>&quot;agent_reviewer&quot;: {&quot;READ&quot;}</code> to <code>ROLE_ALLOWED_TIERS</code>. Call <code>authorize_tool_call</code> for
+<code>agent_reviewer</code> against <code>&quot;preview_policy_renewal&quot;</code> (a DRY_RUN-tier tool) and print the
+caught error, then call it against <code>&quot;get_policy_balance&quot;</code> (a READ-tier tool) and print
+the successful result's tier.</p>
+<p><strong>Starting point:</strong> <code>TOOL_REGISTRY</code>, <code>ROLE_ALLOWED_TIERS</code>, <code>ToolAccessDeniedError</code>, and
+<code>authorize_tool_call</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>agent_reviewer -&gt; preview_policy_renewal: role &#x27;agent_reviewer&#x27; is not permitted to call a DRY_RUN-tier tool (&#x27;preview_policy_renewal&#x27;)
+agent_reviewer -&gt; get_policy_balance: authorized, tier=READ
+</code></pre><hr />
+<h3>Concept 4 — Per-Tool Scopes Bound to the Requesting User, Not One Shared Service Account</h3>
+<p>A single shared <code>svc_agent_writer</code> service account means every call the agent makes to
+the core looks identical in the core's own audit log — there is no way to tell which
+human's session actually triggered a given renewal. Binding each call's scope to the
+REQUESTING USER instead means the agent authenticates on behalf of a specific person, and
+that person's own book-of-business restricts which policy numbers the call may touch —
+the same restriction a human underwriter using the legacy terminal directly would already
+face.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class UserScope:
+    def __init__(self, user_id, role, owned_policy_numbers):
+        self.user_id = user_id
+        self.role = role
+        self.owned_policy_numbers = owned_policy_numbers  # this user&#x27;s own book of business
+
+USER_SCOPES = {
+    &quot;jreyes&quot;: UserScope(user_id=&quot;jreyes&quot;, role=&quot;agent_operator&quot;, owned_policy_numbers={&quot;POL-100234&quot;, &quot;POL-100235&quot;}),
+    &quot;mchen&quot;: UserScope(user_id=&quot;mchen&quot;, role=&quot;agent_operator&quot;, owned_policy_numbers={&quot;POL-200500&quot;}),
+}
+
+class ScopeDeniedError(Exception):
+    pass
+
+def authorize_policy_scoped_call(user_id: str, policy_no: str) -&gt; UserScope:
+    scope = USER_SCOPES.get(user_id)
+    if scope is None:
+        raise ScopeDeniedError(f&quot;&#x27;{user_id}&#x27; has no registered scope at all&quot;)
+    if policy_no not in scope.owned_policy_numbers:
+        raise ScopeDeniedError(f&quot;&#x27;{user_id}&#x27; is not scoped to touch &#x27;{policy_no}&#x27; -- outside their own book of business&quot;)
+    return scope
+
+jreyes_own_policy = authorize_policy_scoped_call(&quot;jreyes&quot;, &quot;POL-100234&quot;)
+print(f&quot;jreyes on their own policy POL-100234: authorized as {jreyes_own_policy.role}&quot;)
+
+try:
+    authorize_policy_scoped_call(&quot;jreyes&quot;, &quot;POL-200500&quot;)
+except ScopeDeniedError as e:
+    print(f&quot;jreyes on mchen&#x27;s policy POL-200500: {e}&quot;)
+
+print(&quot;a shared svc_agent_writer service account could not express this distinction at all -- every call would look identical in the core&#x27;s own audit log&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>jreyes on their own policy POL-100234: authorized as agent_operator
+jreyes on mchen&#x27;s policy POL-200500: &#x27;jreyes&#x27; is not scoped to touch &#x27;POL-200500&#x27; -- outside their own book of business
+a shared svc_agent_writer service account could not express this distinction at all -- every call would look identical in the core&#x27;s own audit log
+</code></pre><p><strong>Exercise:</strong>
+Build <code>USER_SCOPES_EXT</code> (a copy of <code>USER_SCOPES</code> plus a new entry <code>&quot;rpatel&quot;</code> scoped to
+<code>owned_policy_numbers={&quot;POL-300777&quot;}</code>, role <code>&quot;agent_operator&quot;</code>), write an <code>authorize_ext</code>
+function checking against the extended dict, call it for <code>rpatel</code> on their own
+<code>&quot;POL-300777&quot;</code> and print the result, then call it for <code>&quot;unknown_user&quot;</code> (never
+registered at all) on that same policy and print the caught error.</p>
+<p><strong>Starting point:</strong> <code>UserScope</code>, <code>ScopeDeniedError</code>, and <code>USER_SCOPES</code> from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>rpatel on their own policy POL-300777: authorized as agent_operator
+unknown_user (no registered scope at all): &#x27;unknown_user&#x27; has no registered scope at all
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> <code>EXECUTE AS OWNER</code> is usually the DBA's own choice, made years before
+any agent existed, to keep application code simple — reusing it for an agent tool means
+inheriting a privilege boundary someone else designed for a different threat model, not
+one this week's allowlist chose.</p>
+<p><strong>Compliance angle:</strong> A permission model this granular is exactly what a SOX/SOC 2
+access review wants to see — <code>ROLE_ALLOWED_TIERS</code> and <code>USER_SCOPES</code> are themselves the
+evidence that &quot;the agent could only ever touch what its calling user was already
+entitled to touch,&quot; provable from code rather than asserted in a policy document.</p>
+<p><strong>What breaks in production:</strong> <code>USER_SCOPES</code>'s <code>owned_policy_numbers</code> snapshot goes stale
+the moment a human underwriter's book of business is reassigned — a policy transferred
+to a new owner mid-quarter keeps blocking the NEW owner's agent calls until someone
+remembers to update this table, and nothing in <code>authorize_policy_scoped_call</code> itself
+would ever surface that staleness as an error worth investigating.</p>
+<hr />
+<h2 id="day-3">Day 3 — Circuit Breakers for Slow Legacy Calls</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="22-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=YTS9_vrkXFY" target="_blank" rel="noopener"><b>Circuit Breaker Pattern, Timeouts and Retries | System Design Interview Ep 32</b><small>Coding With Taimoor · 6:47</small></a></li><li><a href="https://www.youtube.com/watch?v=aVyCa1RhZIc" target="_blank" rel="noopener"><b>Make Your HttpClient Resilient - Circuit Breaker, Retry, Timeout</b><small>Milan Jovanović · 19:23</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=circuit%20breaker%20timeout%20pattern%20legacy%20database%20integration" target="_blank" rel="noopener">Search YouTube: circuit breaker timeout pattern legacy database integration</a></p></div>
+<hr />
+<h3>Concept 1 — CLOSED/OPEN/HALF-OPEN Retuned for a Core That Blocks for Minutes</h3>
+<p><code>CircuitBreaker</code> below is copied in unchanged from
+<code>Curriculum/Week_8_Production/W8_D5_Final_Project.ipynb</code>'s real &quot;Circuit Breaker &amp; Model
+Fallback Chain&quot; concept, per this week's <code>[legacy thread]</code> copy-in — the same three-state
+CLOSED/OPEN/HALF-OPEN machine originally tuned for a flaky LLM API that fails FAST, in
+milliseconds. That tuning is exactly wrong here: a legacy core call that eventually
+SUCCEEDS but takes minutes to do it is not a &quot;failure&quot; under the original <code>.call()</code>
+alone, so this concept adds a latency-budget wrapper that turns a too-slow-but-successful
+call into a real circuit-breaker failure, and retunes the breaker itself with a lower
+<code>failure_threshold</code> and a much longer <code>cooldown_seconds</code> — giving up fast and staying
+quiet, rather than hammering an already-struggling core every few seconds.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+from dataclasses import dataclass, field
+from typing import Callable
+
+@dataclass
+class CircuitBreaker:
+    &quot;&quot;&quot;Simple circuit breaker with three states.&quot;&quot;&quot;
+    failure_threshold: int   = 3
+    cooldown_seconds:  float = 10.0
+    _failures:  int   = field(default=0, repr=False)
+    _state:     str   = field(default=&#x27;CLOSED&#x27;, repr=False)
+    _opened_at: float = field(default=0.0, repr=False)
+
+    def call(self, fn: Callable, *args, **kwargs):
+        if self._state == &#x27;OPEN&#x27;:
+            if time.monotonic() - self._opened_at &lt; self.cooldown_seconds:
+                raise RuntimeError(f&#x27;Circuit OPEN — blocked ({self._failures} failures)&#x27;)
+            self._state = &#x27;HALF-OPEN&#x27;
+        try:
+            result = fn(*args, **kwargs)
+            self._failures = 0
+            self._state    = &#x27;CLOSED&#x27;
+            return result
+        except Exception as e:
+            self._failures += 1
+            if self._failures &gt;= self.failure_threshold:
+                self._state    = &#x27;OPEN&#x27;
+                self._opened_at = time.monotonic()
+            raise
+
+
+class SlowCallExceedsBudget(Exception):
+    pass
+
+
+def call_with_latency_budget(breaker: CircuitBreaker, fn, latency_budget_seconds: float, *args, **kwargs):
+    &quot;&quot;&quot;Even a call that eventually SUCCEEDS still counts as a circuit-breaker failure if
+    it blows past the latency budget -- a legacy core holding a connection open for
+    minutes is exactly the failure mode Week 8&#x27;s original fast-fail LLM tuning never had
+    to handle.&quot;&quot;&quot;
+    def timed_call():
+        start = time.monotonic()
+        result = fn(*args, **kwargs)
+        elapsed = time.monotonic() - start
+        if elapsed &gt; latency_budget_seconds:
+            raise SlowCallExceedsBudget(f&quot;call exceeded its {latency_budget_seconds}s latency budget&quot;)
+        return result
+    return breaker.call(timed_call)
+
+
+# Week 8&#x27;s original tuning: failure_threshold=3, cooldown_seconds=10 (fits a flaky API
+# retried within seconds). Week 22&#x27;s core-tuned breaker: a lower failure_threshold=2
+# (the nightly batch window means the agent should give up FAST, not hammer a busy core)
+# and a much longer cooldown_seconds=300 (5 minutes -- retrying a blocked core every 10
+# seconds just adds more load to something already struggling).
+core_breaker = CircuitBreaker(failure_threshold=2, cooldown_seconds=300.0)
+
+def instant_call():
+    return &quot;ok&quot;
+
+def slow_call():
+    time.sleep(0.05)
+    return &quot;ok, but slow&quot;
+
+result1 = call_with_latency_budget(core_breaker, instant_call, latency_budget_seconds=1.0)
+print(f&quot;fast call within budget: {result1}, breaker state after: {core_breaker._state}&quot;)
+
+for attempt in range(2):
+    try:
+        call_with_latency_budget(core_breaker, slow_call, latency_budget_seconds=0.01)
+    except SlowCallExceedsBudget as e:
+        print(f&quot;attempt {attempt + 1}: {e}, breaker state: {core_breaker._state}, failures: {core_breaker._failures}&quot;)
+
+try:
+    call_with_latency_budget(core_breaker, instant_call, latency_budget_seconds=1.0)
+except RuntimeError as e:
+    print(f&quot;third attempt while OPEN: {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>fast call within budget: ok, breaker state after: CLOSED
+attempt 1: call exceeded its 0.01s latency budget, breaker state: CLOSED, failures: 1
+attempt 2: call exceeded its 0.01s latency budget, breaker state: OPEN, failures: 2
+third attempt while OPEN: Circuit OPEN — blocked (2 failures)
+</code></pre><p><strong>Exercise:</strong>
+Build <code>single_strike_breaker</code>, a <code>CircuitBreaker</code> with <code>failure_threshold=1</code> and
+<code>cooldown_seconds=300.0</code> — a single strike, harsher than the Example's own
+<code>failure_threshold=2</code>. Call <code>slow_call</code> through it via <code>call_with_latency_budget</code> with
+<code>latency_budget_seconds=0.01</code>, print the caught error and the breaker's state, then print
+one line confirming one slow call alone was enough to OPEN it.</p>
+<p><strong>Starting point:</strong> <code>CircuitBreaker</code>, <code>SlowCallExceedsBudget</code>,
+<code>call_with_latency_budget</code>, and <code>slow_call</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>single-strike breaker after one slow call: call exceeded its 0.01s latency budget, state=OPEN
+a single slow call was enough to OPEN a failure_threshold=1 breaker: True
+</code></pre><hr />
+<h3>Concept 2 — Statement Timeouts and <code>LOCK_TIMEOUT</code> So an Agent Cannot Hold Locks</h3>
+<p><code>SET LOCK_TIMEOUT &lt;ms&gt;</code> (SQL Server) and Oracle's session-level statement/DDL timeout
+settings are the real server-side defense against an agent's call holding a lock the
+nightly batch needs — no live core exists in this sandbox to prove the server-side abort,
+but the CLIENT-side backstop an agent tool adds on top of it (a hard wall-clock deadline
+that gives up on a call regardless of what the server eventually does) is genuinely
+executable: a background thread runs the call, and the calling code refuses to wait past
+its own deadline, treating a still-running call as blocked rather than retrying it
+against a core that may be mid-batch.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import threading
+
+class StatementTimeoutError(Exception):
+    pass
+
+def call_with_statement_timeout(fn, timeout_seconds, *args, **kwargs):
+    result_box = {}
+    def target():
+        try:
+            result_box[&quot;value&quot;] = fn(*args, **kwargs)
+        except Exception as e:
+            result_box[&quot;error&quot;] = e
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    if thread.is_alive():
+        raise StatementTimeoutError(
+            f&quot;call did not return within the {timeout_seconds}s LOCK_TIMEOUT -- treated as &quot;
+            f&quot;blocked, NOT retried against a core that may be mid-batch&quot;
+        )
+    if &quot;error&quot; in result_box:
+        raise result_box[&quot;error&quot;]
+    return result_box[&quot;value&quot;]
+
+
+def fast_lookup():
+    return {&quot;policy_no&quot;: &quot;POL-100234&quot;, &quot;balance&quot;: 18420.55}
+
+def blocked_by_nightly_batch():
+    time.sleep(1.0)  # simulates a real lock held by the nightly batch job
+    return &quot;should never get here within the timeout&quot;
+
+
+fast_result = call_with_statement_timeout(fast_lookup, timeout_seconds=1.0)
+print(f&quot;fast_lookup within LOCK_TIMEOUT: {fast_result}&quot;)
+
+try:
+    call_with_statement_timeout(blocked_by_nightly_batch, timeout_seconds=0.1)
+except StatementTimeoutError as e:
+    print(f&quot;blocked call correctly timed out: {e}&quot;)
+
+print(&quot;the blocked call&#x27;s background thread is still alive and will eventually finish, but the agent tool has already moved on -- never awaited&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>fast_lookup within LOCK_TIMEOUT: {&#x27;policy_no&#x27;: &#x27;POL-100234&#x27;, &#x27;balance&#x27;: 18420.55}
+blocked call correctly timed out: call did not return within the 0.1s LOCK_TIMEOUT -- treated as blocked, NOT retried against a core that may be mid-batch
+the blocked call&#x27;s background thread is still alive and will eventually finish, but the agent tool has already moved on -- never awaited
+</code></pre><p><strong>Exercise:</strong>
+Write <code>slightly_slow_call</code> (sleeps <code>0.05</code> seconds, then returns
+<code>&quot;finished within a generous timeout&quot;</code>). Call it through <code>call_with_statement_timeout</code>
+twice: once with <code>timeout_seconds=0.5</code> (a generous timeout it should comfortably finish
+within — print the result), and once with <code>timeout_seconds=0.01</code> (a tight timeout it
+should trip — print the caught error).</p>
+<p><strong>Starting point:</strong> <code>call_with_statement_timeout</code> and <code>StatementTimeoutError</code> from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>call with a generous timeout: finished within a generous timeout
+same call against a tight timeout: call did not return within the 0.01s LOCK_TIMEOUT -- treated as blocked, NOT retried against a core that may be mid-batch
+</code></pre><hr />
+<h3>Concept 3 — Connection-Pool Starvation and Bulkhead Isolation Per Tool</h3>
+<p>A single shared connection pool means one slow tool (a report procedure that genuinely
+takes minutes) can hold every connection in the pool, starving a completely unrelated
+fast tool that has nothing to do with the slow one. A BULKHEAD — borrowed from ship
+design, where separate watertight compartments keep one hull breach from sinking the
+whole vessel — gives each tool its own small, dedicated pool instead. A real
+<code>threading.Semaphore</code>-backed pool genuinely blocks or raises when a tool's own bulkhead
+is exhausted, with zero effect on any other tool's pool.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import threading
+
+class PoolExhaustedError(Exception):
+    pass
+
+class BulkheadPool:
+    def __init__(self, tool_name, size):
+        self.tool_name = tool_name
+        self._semaphore = threading.Semaphore(size)
+        self.size = size
+
+    def acquire(self, blocking=False):
+        acquired = self._semaphore.acquire(blocking=blocking)
+        if not acquired:
+            raise PoolExhaustedError(f&quot;&#x27;{self.tool_name}&#x27; bulkhead exhausted (size={self.size}) -- other tools&#x27; pools are unaffected&quot;)
+        return acquired
+
+    def release(self):
+        self._semaphore.release()
+
+
+REPORT_POOL = BulkheadPool(&quot;run_slow_report&quot;, size=1)
+BALANCE_POOL = BulkheadPool(&quot;get_policy_balance&quot;, size=3)
+
+REPORT_POOL.acquire()  # simulates one long-running report call holding its only connection
+print(&quot;run_slow_report holds its single bulkhead connection&quot;)
+
+try:
+    REPORT_POOL.acquire()
+except PoolExhaustedError as e:
+    print(f&quot;a second concurrent run_slow_report call: {e}&quot;)
+
+balance_conn = BALANCE_POOL.acquire()
+print(f&quot;get_policy_balance still acquires its own connection fine, unaffected by run_slow_report&#x27;s exhausted pool: {balance_conn}&quot;)
+
+REPORT_POOL.release()
+print(&quot;run_slow_report released its connection&quot;)
+REPORT_POOL.acquire()
+print(&quot;a fresh run_slow_report call can now acquire the bulkhead again&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>run_slow_report holds its single bulkhead connection
+a second concurrent run_slow_report call: &#x27;run_slow_report&#x27; bulkhead exhausted (size=1) -- other tools&#x27; pools are unaffected
+get_policy_balance still acquires its own connection fine, unaffected by run_slow_report&#x27;s exhausted pool: True
+run_slow_report released its connection
+a fresh run_slow_report call can now acquire the bulkhead again
+</code></pre><p><strong>Exercise:</strong>
+Build <code>CLAIM_POOL</code>, a <code>BulkheadPool</code> for tool <code>&quot;get_claim_status&quot;</code> with <code>size=2</code>. Acquire
+it twice (both should succeed), then attempt a third acquire and print the caught
+error. Then acquire <code>BALANCE_POOL</code> (from this concept's Example, still at its original
+<code>size=3</code> with nothing acquired yet) and print one line confirming it succeeds — proving
+<code>CLAIM_POOL</code>'s exhaustion had zero effect on it.</p>
+<p><strong>Starting point:</strong> <code>BulkheadPool</code>, <code>PoolExhaustedError</code>, and <code>BALANCE_POOL</code> from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>get_claim_status has acquired both of its size=2 bulkhead connections
+a third concurrent get_claim_status call: &#x27;get_claim_status&#x27; bulkhead exhausted (size=2) -- other tools&#x27; pools are unaffected
+get_policy_balance&#x27;s own pool is completely unaffected by get_claim_status&#x27;s exhaustion: True
+</code></pre><hr />
+<h3>Concept 4 — Degraded Fallback Answers While the Core Is Inside Its Batch Window</h3>
+<p>The nightly batch window is a KNOWN, scheduled maintenance period, not a surprise
+failure — an agent tool can check the current time against that window BEFORE even
+attempting a call, and serve a degraded, clearly-labelled-as-stale last-known-good answer
+instead of hammering a core that predictably cannot answer right now. The window itself
+often wraps past midnight (<code>23:00</code>-<code>02:00</code>), which the membership check has to handle
+explicitly rather than assuming a simple <code>start &lt;= now &lt;= end</code> always works.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import datetime
+
+BATCH_WINDOW_START = datetime.time(23, 0)
+BATCH_WINDOW_END = datetime.time(2, 0)  # wraps past midnight
+
+def is_inside_batch_window(now: datetime.time) -&gt; bool:
+    if BATCH_WINDOW_START &lt;= BATCH_WINDOW_END:
+        return BATCH_WINDOW_START &lt;= now &lt;= BATCH_WINDOW_END
+    # window wraps midnight: inside if AFTER start OR BEFORE end
+    return now &gt;= BATCH_WINDOW_START or now &lt;= BATCH_WINDOW_END
+
+
+LAST_KNOWN_GOOD_CACHE = {
+    &quot;POL-100234&quot;: {&quot;balance&quot;: 18102.10, &quot;as_of_date&quot;: &quot;2026-09-16&quot;, &quot;stale&quot;: True},
+}
+
+
+def get_policy_balance_with_batch_awareness(policy_no: str, now: datetime.time, live_call):
+    if is_inside_batch_window(now):
+        cached = LAST_KNOWN_GOOD_CACHE.get(policy_no)
+        if cached is None:
+            raise RuntimeError(f&quot;core is inside its batch window and no cached value exists for {policy_no}&quot;)
+        return {**cached, &quot;degraded&quot;: True, &quot;reason&quot;: &quot;core inside nightly batch window, serving last-known-good&quot;}
+    return {**live_call(policy_no), &quot;degraded&quot;: False}
+
+
+def real_live_call(policy_no):
+    return {&quot;balance&quot;: 18420.55, &quot;as_of_date&quot;: &quot;2026-09-17&quot;}
+
+
+daytime_result = get_policy_balance_with_batch_awareness(&quot;POL-100234&quot;, datetime.time(14, 30), real_live_call)
+print(f&quot;during the day (live call reachable): {daytime_result}&quot;)
+
+batch_window_result = get_policy_balance_with_batch_awareness(&quot;POL-100234&quot;, datetime.time(23, 45), real_live_call)
+print(f&quot;during the nightly batch window (degraded fallback): {batch_window_result}&quot;)
+
+wraparound_result = get_policy_balance_with_batch_awareness(&quot;POL-100234&quot;, datetime.time(1, 15), real_live_call)
+print(f&quot;after midnight but still inside the wrapped window (degraded fallback): {wraparound_result}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>during the day (live call reachable): {&#x27;balance&#x27;: 18420.55, &#x27;as_of_date&#x27;: &#x27;2026-09-17&#x27;, &#x27;degraded&#x27;: False}
+during the nightly batch window (degraded fallback): {&#x27;balance&#x27;: 18102.1, &#x27;as_of_date&#x27;: &#x27;2026-09-16&#x27;, &#x27;stale&#x27;: True, &#x27;degraded&#x27;: True, &#x27;reason&#x27;: &#x27;core inside nightly batch window, serving last-known-good&#x27;}
+after midnight but still inside the wrapped window (degraded fallback): {&#x27;balance&#x27;: 18102.1, &#x27;as_of_date&#x27;: &#x27;2026-09-16&#x27;, &#x27;stale&#x27;: True, &#x27;degraded&#x27;: True, &#x27;reason&#x27;: &#x27;core inside nightly batch window, serving last-known-good&#x27;}
+</code></pre><p><strong>Exercise:</strong>
+Print one line confirming <code>is_inside_batch_window</code> treats the window's own start time
+(<code>datetime.time(23, 0)</code>) as inside the window (a boundary check). Then call
+<code>get_policy_balance_with_batch_awareness</code> for a policy with NO cached entry at all
+(<code>&quot;POL-999999&quot;</code>) at a time inside the window (<code>datetime.time(23, 30)</code>), and print the
+caught error.</p>
+<p><strong>Starting point:</strong> <code>is_inside_batch_window</code>, <code>get_policy_balance_with_batch_awareness</code>,
+and <code>real_live_call</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>exactly at the batch window&#x27;s own start time (23:00) is treated as inside: True
+batch window hit for a policy with no cached value at all: core is inside its batch window and no cached value exists for POL-999999
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> Week 8's original <code>CircuitBreaker</code> tuning (<code>failure_threshold=3</code>,
+<code>cooldown_seconds=10</code>) was correct for the system it was built for — the mistake would be
+reusing that SAME tuning here unexamined, rather than re-deriving it from how this
+system actually fails (slowly, for minutes, on a predictable schedule).</p>
+<p><strong>Compliance angle:</strong> <code>LAST_KNOWN_GOOD_CACHE</code>'s <code>&quot;stale&quot;: True</code> flag is not optional
+decoration — a degraded answer an agent hands a policyholder or an underwriter during the
+batch window must be distinguishable from a live one in any downstream record of that
+interaction, or an audit later cannot tell which answers were ever actually current.</p>
+<p><strong>What breaks in production:</strong> <code>BulkheadPool.acquire(blocking=False)</code> fails FAST and
+loud, which is exactly right for an agent tool — but a naive retry loop wrapped around a
+bulkhead-protected call defeats the entire point of the bulkhead: hammering a
+<code>size=1</code> pool in a tight retry loop is functionally identical to never having the
+bulkhead at all, just with extra CPU spent failing. The retry policy has to respect the
+same backoff discipline the circuit breaker itself uses, not bypass it.</p>
+<hr />
+<h2 id="day-4">Day 4 — Async Tools for Mainframe Batch Jobs</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="22-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=JzD7ZvsCimk" target="_blank" rel="noopener"><b>AIHubMix Async Tasks Tutorial: LLM, Image, Video &amp; Webhooks</b><small>AIHubMix · 4:45</small></a></li><li><a href="https://www.youtube.com/watch?v=wEaeALcVj5c" target="_blank" rel="noopener"><b>Async APIs for Long Jobs: 202 Accepted, Job Status, Polling vs Callbacks | System Design Phase 2 #51</b><small>Tapan kumar Barik · 4:11</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=mainframe%20batch%20job%20integration%20async%20API%20polling%20pattern" target="_blank" rel="noopener">Search YouTube: mainframe batch job integration async API polling pattern</a></p></div>
+<hr />
+<h3>Concept 1 — A Submit, Poll, Fetch Tool Triple for Work That Is Not Request-Response</h3>
+<p>A mainframe batch job (a JCL-submitted nightly claims run, a policy renewal batch) has no
+single call that both starts it and returns its result — the real shape is three
+separate tools: SUBMIT (returns a job ticket immediately; the job runs asynchronously),
+POLL (checks status by ticket, cheap, safe to call repeatedly), and FETCH (retrieves the
+actual result, only valid once POLL reports completion). Modeling this as three tools,
+not one blocking call, is what lets an agent do other work while a job that may take
+twenty minutes runs in the background — and what stops it from ever fetching a result
+that doesn't exist yet.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pydantic import BaseModel
+from typing import Literal, Optional
+
+class SubmitJobInput(BaseModel):
+    job_type: Literal[&quot;CLAIMS_EXTRACT&quot;, &quot;POLICY_RENEWAL_BATCH&quot;]
+    params: dict
+
+class JobTicket(BaseModel):
+    job_id: str
+    status: Literal[&quot;QUEUED&quot;, &quot;RUNNING&quot;, &quot;COMPLETE&quot;, &quot;FAILED&quot;]
+
+class JobResult(BaseModel):
+    job_id: str
+    output_dataset: Optional[str] = None
+    row_count: Optional[int] = None
+
+
+class InMemoryJobStore:
+    &quot;&quot;&quot;Stands in for the real mainframe job scheduler -- no live JES/JCL submission
+    exists in this sandbox, but the submit/poll/fetch state machine an agent tool wraps
+    around it is genuinely exercised.&quot;&quot;&quot;
+    def __init__(self):
+        self._jobs = {}
+
+    def submit(self, payload: SubmitJobInput) -&gt; JobTicket:
+        job_id = f&quot;JOB{len(self._jobs) + 1:06d}&quot;
+        self._jobs[job_id] = {&quot;status&quot;: &quot;QUEUED&quot;, &quot;payload&quot;: payload, &quot;result&quot;: None}
+        return JobTicket(job_id=job_id, status=&quot;QUEUED&quot;)
+
+    def advance(self, job_id: str, new_status: str, result: dict = None) -&gt; None:
+        &quot;&quot;&quot;Test-only hook standing in for the real scheduler&#x27;s own state transitions
+        over wall-clock time.&quot;&quot;&quot;
+        self._jobs[job_id][&quot;status&quot;] = new_status
+        if result is not None:
+            self._jobs[job_id][&quot;result&quot;] = result
+
+    def poll(self, job_id: str) -&gt; JobTicket:
+        job = self._jobs[job_id]
+        return JobTicket(job_id=job_id, status=job[&quot;status&quot;])
+
+    def fetch(self, job_id: str) -&gt; JobResult:
+        job = self._jobs[job_id]
+        if job[&quot;status&quot;] != &quot;COMPLETE&quot;:
+            raise RuntimeError(f&quot;job {job_id} is not COMPLETE yet (status={job[&#x27;status&#x27;]}) -- poll before fetching&quot;)
+        return JobResult(job_id=job_id, **job[&quot;result&quot;])
+
+
+store = InMemoryJobStore()
+
+ticket = store.submit(SubmitJobInput(job_type=&quot;CLAIMS_EXTRACT&quot;, params={&quot;as_of_date&quot;: &quot;2026-09-17&quot;}))
+print(f&quot;submitted job: {ticket.model_dump()}&quot;)
+
+status_while_running = store.poll(ticket.job_id)
+print(f&quot;poll before the job finishes: {status_while_running.model_dump()}&quot;)
+
+try:
+    store.fetch(ticket.job_id)
+except RuntimeError as e:
+    print(f&quot;fetch before COMPLETE correctly refuses: {e}&quot;)
+
+store.advance(ticket.job_id, &quot;RUNNING&quot;)
+store.advance(ticket.job_id, &quot;COMPLETE&quot;, result={&quot;output_dataset&quot;: &quot;PROD.CLAIMS.EXTRACT.20260917&quot;, &quot;row_count&quot;: 4821})
+
+final_status = store.poll(ticket.job_id)
+print(f&quot;poll after completion: {final_status.model_dump()}&quot;)
+
+result = store.fetch(ticket.job_id)
+print(f&quot;fetch after completion: {result.model_dump()}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>submitted job: {&#x27;job_id&#x27;: &#x27;JOB000001&#x27;, &#x27;status&#x27;: &#x27;QUEUED&#x27;}
+poll before the job finishes: {&#x27;job_id&#x27;: &#x27;JOB000001&#x27;, &#x27;status&#x27;: &#x27;QUEUED&#x27;}
+fetch before COMPLETE correctly refuses: job JOB000001 is not COMPLETE yet (status=QUEUED) -- poll before fetching
+poll after completion: {&#x27;job_id&#x27;: &#x27;JOB000001&#x27;, &#x27;status&#x27;: &#x27;COMPLETE&#x27;}
+fetch after completion: {&#x27;job_id&#x27;: &#x27;JOB000001&#x27;, &#x27;output_dataset&#x27;: &#x27;PROD.CLAIMS.EXTRACT.20260917&#x27;, &#x27;row_count&#x27;: 4821}
+</code></pre><p><strong>Exercise:</strong>
+Submit a new <code>POLICY_RENEWAL_BATCH</code> job on the SAME <code>store</code> from this concept's Example,
+advance it straight to <code>&quot;FAILED&quot;</code> (never <code>&quot;COMPLETE&quot;</code>) with <code>store.advance</code>, then call
+<code>store.fetch</code> on it and print the caught error.</p>
+<p><strong>Starting point:</strong> <code>SubmitJobInput</code>, <code>InMemoryJobStore</code>, and <code>store</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>fetch on a FAILED job: job JOB000001 is not COMPLETE yet (status=FAILED) -- poll before fetching
+</code></pre><hr />
+<h3>Concept 2 — Job Ticket Identifiers and Idempotency Keys Against Double Submission</h3>
+<p>A network timeout between an agent submitting a job and receiving the acknowledgment does
+NOT mean the submission failed — the mainframe may have genuinely queued it anyway. A
+naive retry that resubmits blindly can double-run a real batch job: double-paying claims,
+double-renewing policies. Keying the store by a CALLER-supplied <code>idempotency_key</code> (never
+generated server-side — the retry has to send the SAME key deliberately) means a retry
+with the same key returns the EXISTING job ticket instead of creating a second one.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class SubmitJobInputWithKey(BaseModel):
+    job_type: Literal[&quot;CLAIMS_EXTRACT&quot;, &quot;POLICY_RENEWAL_BATCH&quot;]
+    params: dict
+    idempotency_key: str
+
+
+class IdempotentJobStore:
+    def __init__(self):
+        self._jobs = {}
+        self._by_idempotency_key = {}
+
+    def submit(self, payload: SubmitJobInputWithKey) -&gt; JobTicket:
+        existing_job_id = self._by_idempotency_key.get(payload.idempotency_key)
+        if existing_job_id is not None:
+            job = self._jobs[existing_job_id]
+            return JobTicket(job_id=existing_job_id, status=job[&quot;status&quot;])
+        job_id = f&quot;JOB{len(self._jobs) + 1:06d}&quot;
+        self._jobs[job_id] = {&quot;status&quot;: &quot;QUEUED&quot;, &quot;payload&quot;: payload}
+        self._by_idempotency_key[payload.idempotency_key] = job_id
+        return JobTicket(job_id=job_id, status=&quot;QUEUED&quot;)
+
+
+idem_store = IdempotentJobStore()
+
+key = &quot;renewal-batch-2026-09-17-run1&quot;
+first_attempt = idem_store.submit(SubmitJobInputWithKey(job_type=&quot;POLICY_RENEWAL_BATCH&quot;, params={&quot;batch_date&quot;: &quot;2026-09-17&quot;}, idempotency_key=key))
+print(f&quot;first submission: {first_attempt.model_dump()}&quot;)
+
+# simulates the network timing out AFTER the mainframe queued the job but BEFORE the
+# agent received the acknowledgment -- the agent&#x27;s retry logic resubmits with the SAME key
+retry_after_timeout = idem_store.submit(SubmitJobInputWithKey(job_type=&quot;POLICY_RENEWAL_BATCH&quot;, params={&quot;batch_date&quot;: &quot;2026-09-17&quot;}, idempotency_key=key))
+print(f&quot;retry with the SAME idempotency_key: {retry_after_timeout.model_dump()}&quot;)
+print(f&quot;retry returned the SAME job_id, not a second job: {first_attempt.job_id == retry_after_timeout.job_id}&quot;)
+print(f&quot;exactly one job exists in the store despite two submit() calls: {len(idem_store._jobs) == 1}&quot;)
+
+different_key_submission = idem_store.submit(SubmitJobInputWithKey(job_type=&quot;POLICY_RENEWAL_BATCH&quot;, params={&quot;batch_date&quot;: &quot;2026-09-17&quot;}, idempotency_key=&quot;renewal-batch-2026-09-17-run2&quot;))
+print(f&quot;a genuinely DIFFERENT idempotency_key creates a real second job: {different_key_submission.job_id != first_attempt.job_id}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>first submission: {&#x27;job_id&#x27;: &#x27;JOB000001&#x27;, &#x27;status&#x27;: &#x27;QUEUED&#x27;}
+retry with the SAME idempotency_key: {&#x27;job_id&#x27;: &#x27;JOB000001&#x27;, &#x27;status&#x27;: &#x27;QUEUED&#x27;}
+retry returned the SAME job_id, not a second job: True
+exactly one job exists in the store despite two submit() calls: True
+a genuinely DIFFERENT idempotency_key creates a real second job: True
+</code></pre><p><strong>Exercise:</strong>
+Build a fresh <code>IdempotentJobStore</code>, then call <code>.submit</code> on it THREE times in a row with
+the identical <code>SubmitJobInputWithKey(job_type=&quot;CLAIMS_EXTRACT&quot;, params={&quot;as_of_date&quot;: &quot;2026-09-17&quot;}, idempotency_key=&quot;claims-extract-2026-09-17-run1&quot;)</code>.
+Print one line confirming exactly one job exists in the store afterward, despite three
+submit calls.</p>
+<p><strong>Starting point:</strong> <code>IdempotentJobStore</code> and <code>SubmitJobInputWithKey</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>exactly one job exists after THREE submit() calls with the same idempotency_key: True
+</code></pre><hr />
+<h3>Concept 3 — File-Drop and FTP Handoff Artifacts as the Real Return Value</h3>
+<p>A mainframe batch job's real output is almost never a row set an agent can consume
+directly — it's a dataset written to a file drop (a shared directory) or delivered via
+SFTP to a landing zone, in a fixed-width or delimited layout the agent has to know about
+separately. The tool's FETCH step should return that HANDOFF ARTIFACT — location, naming
+convention, row/byte count, and delivery mechanism — not pretend the result is a normal
+API response with inline rows.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class FileDropArtifact(BaseModel):
+    delivery_mechanism: Literal[&quot;FILE_DROP&quot;, &quot;SFTP&quot;]
+    dataset_name: str
+    location: str
+    row_count: int
+    byte_count: int
+    layout: Literal[&quot;FIXED_WIDTH&quot;, &quot;DELIMITED&quot;]
+
+
+def build_claims_extract_artifact(job_id: str) -&gt; FileDropArtifact:
+    # the real naming convention: PROD.CLAIMS.EXTRACT.&lt;YYYYMMDD&gt;, dropped to a fixed
+    # SFTP landing path the downstream warehouse ETL job already watches
+    return FileDropArtifact(
+        delivery_mechanism=&quot;SFTP&quot;,
+        dataset_name=&quot;PROD.CLAIMS.EXTRACT.20260917&quot;,
+        location=&quot;/landing/claims/PROD.CLAIMS.EXTRACT.20260917&quot;,
+        row_count=4821,
+        byte_count=4821 * 212,  # fixed 212-byte record length, from the copybook
+        layout=&quot;FIXED_WIDTH&quot;,
+    )
+
+artifact = build_claims_extract_artifact(&quot;JOB000001&quot;)
+print(artifact.model_dump())
+print(f&quot;the tool&#x27;s real return value is a file handoff description, not inline row data: {&#x27;row_count&#x27; in artifact.model_dump() and not hasattr(artifact, &#x27;rows&#x27;)}&quot;)
+
+expected_byte_count = artifact.row_count * 212
+print(f&quot;byte_count matches row_count times the copybook&#x27;s fixed 212-byte record length: {artifact.byte_count == expected_byte_count}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>{&#x27;delivery_mechanism&#x27;: &#x27;SFTP&#x27;, &#x27;dataset_name&#x27;: &#x27;PROD.CLAIMS.EXTRACT.20260917&#x27;, &#x27;location&#x27;: &#x27;/landing/claims/PROD.CLAIMS.EXTRACT.20260917&#x27;, &#x27;row_count&#x27;: 4821, &#x27;byte_count&#x27;: 1022052, &#x27;layout&#x27;: &#x27;FIXED_WIDTH&#x27;}
+the tool&#x27;s real return value is a file handoff description, not inline row data: True
+byte_count matches row_count times the copybook&#x27;s fixed 212-byte record length: True
+</code></pre><p><strong>Exercise:</strong>
+Write <code>build_policy_renewal_artifact(job_id)</code>, returning a <code>FileDropArtifact</code> with
+<code>delivery_mechanism=&quot;FILE_DROP&quot;</code>, <code>dataset_name=&quot;PROD.POLICY.RENEWAL.20260917&quot;</code>,
+<code>location=&quot;/landing/policy/PROD.POLICY.RENEWAL.20260917.csv&quot;</code>, <code>row_count=1500</code>,
+<code>byte_count=1500 * 180</code>, and <code>layout=&quot;DELIMITED&quot;</code>. Print the result and one line
+confirming this artifact's layout differs from Concept 3's own FIXED_WIDTH claims
+extract.</p>
+<p><strong>Starting point:</strong> <code>FileDropArtifact</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>{&#x27;delivery_mechanism&#x27;: &#x27;FILE_DROP&#x27;, &#x27;dataset_name&#x27;: &#x27;PROD.POLICY.RENEWAL.20260917&#x27;, &#x27;location&#x27;: &#x27;/landing/policy/PROD.POLICY.RENEWAL.20260917.csv&#x27;, &#x27;row_count&#x27;: 1500, &#x27;byte_count&#x27;: 270000, &#x27;layout&#x27;: &#x27;DELIMITED&#x27;}
+a different job type produces a DELIMITED layout artifact, unlike Concept 3&#x27;s FIXED_WIDTH claims extract: True
+</code></pre><hr />
+<h3>Concept 4 — Batch-Window and Cutoff Constraints Encoded in the Tool</h3>
+<p>A same-day <code>CLAIMS_EXTRACT</code> job submitted after the real 20:00 cutoff misses that night's
+batch window entirely and genuinely runs the FOLLOWING business day — a hard constraint
+of the mainframe's own job scheduling calendar, not something a prompt should be trusted
+to remember. Encoding it in the tool means the agent's response to &quot;submit today's
+claims extract&quot; at 21:00 correctly says &quot;queued for tomorrow,&quot; not a false promise of
+same-day completion.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import datetime
+
+SAME_DAY_CUTOFF = datetime.time(20, 0)
+
+class ScheduledSubmission(BaseModel):
+    requested_at: str
+    scheduled_run_date: str
+    same_day: bool
+
+
+def schedule_batch_submission(requested_at: datetime.datetime) -&gt; ScheduledSubmission:
+    if requested_at.time() &lt; SAME_DAY_CUTOFF:
+        run_date = requested_at.date()
+        same_day = True
+    else:
+        run_date = requested_at.date() + datetime.timedelta(days=1)
+        same_day = False
+    return ScheduledSubmission(
+        requested_at=requested_at.isoformat(),
+        scheduled_run_date=run_date.isoformat(),
+        same_day=same_day,
+    )
+
+
+before_cutoff = schedule_batch_submission(datetime.datetime(2026, 9, 17, 14, 30))
+print(f&quot;submitted before the 20:00 cutoff: {before_cutoff.model_dump()}&quot;)
+
+after_cutoff = schedule_batch_submission(datetime.datetime(2026, 9, 17, 21, 15))
+print(f&quot;submitted after the 20:00 cutoff: {after_cutoff.model_dump()}&quot;)
+
+print(f&quot;a request the agent might otherwise promise as &#x27;running tonight&#x27; is correctly deferred to the next scheduled run date: {after_cutoff.same_day is False and after_cutoff.scheduled_run_date == &#x27;2026-09-18&#x27;}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>submitted before the 20:00 cutoff: {&#x27;requested_at&#x27;: &#x27;2026-09-17T14:30:00&#x27;, &#x27;scheduled_run_date&#x27;: &#x27;2026-09-17&#x27;, &#x27;same_day&#x27;: True}
+submitted after the 20:00 cutoff: {&#x27;requested_at&#x27;: &#x27;2026-09-17T21:15:00&#x27;, &#x27;scheduled_run_date&#x27;: &#x27;2026-09-18&#x27;, &#x27;same_day&#x27;: False}
+a request the agent might otherwise promise as &#x27;running tonight&#x27; is correctly deferred to the next scheduled run date: True
+</code></pre><p><strong>Exercise:</strong>
+Call <code>schedule_batch_submission</code> with a request made at EXACTLY the cutoff,
+<code>datetime.datetime(2026, 9, 17, 20, 0)</code>. Print the result and one line confirming the
+cutoff boundary itself is treated as AFTER cutoff (deferred to the next day), not before.</p>
+<p><strong>Starting point:</strong> <code>schedule_batch_submission</code> and <code>SAME_DAY_CUTOFF</code> from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>submitted exactly AT the 20:00 cutoff: {&#x27;requested_at&#x27;: &#x27;2026-09-17T20:00:00&#x27;, &#x27;scheduled_run_date&#x27;: &#x27;2026-09-18&#x27;, &#x27;same_day&#x27;: False}
+the cutoff boundary itself is treated as AFTER cutoff (deferred), not before: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> <code>InMemoryJobStore</code> stands in for a real JES2/JES3 job queue this
+sandbox has no access to — the real submit/poll/fetch tools would shell out to (or call
+an API wrapping) <code>SDSF</code> or an equivalent job-monitoring interface, but the state machine
+those tools implement is identical to what this concept genuinely executed.</p>
+<p><strong>Compliance angle:</strong> <code>idempotency_key</code> is not just a reliability feature — it is the
+artifact that lets an auditor confirm a specific claims-extract run happened exactly
+once, even after a retry, rather than trusting a log entry's timestamp alone to rule out
+a silent duplicate.</p>
+<p><strong>What breaks in production:</strong> <code>IdempotentJobStore</code> keys purely on the caller-supplied
+string with no expiry — a <code>idempotency_key</code> reused MONTHS later for a genuinely different
+batch run (an agent or a script that happens to generate predictable keys) would silently
+return the ancient job's stale ticket instead of submitting a new one. A production
+version needs the idempotency key scoped to a bounded time window, not held forever.</p>
+<hr />
+<h2 id="day-5">Day 5 — Shadow Mode and the Audit Trail</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="22-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=iGXIMXqeCOs" target="_blank" rel="noopener"><b>Secure Audit Trails for AI Agents: Evidence-Ready Logging | Module 5.2</b><small>KryptoMindz Technologies · 8:56</small></a></li><li><a href="https://www.youtube.com/watch?v=dWNkU27-GgE" target="_blank" rel="noopener"><b>How to Build Audit Trails for AI Agents</b><small>CyberRiderX · 8:25</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=AI%20agent%20audit%20logging%20shadow%20mode%20production%20rollout" target="_blank" rel="noopener">Search YouTube: AI agent audit logging shadow mode production rollout</a></p></div>
+<hr />
+<h3>Concept 1 — Logging Every Tool Call With Arguments, Principal, and Legacy Return Code</h3>
+<p>Every tool this week built needs one audit log entry recording: which tool, what
+arguments, WHICH calling principal (never a shared service account, per Day 2), and the
+legacy return code the core actually gave back — enough to replay exactly what happened
+later, for an incident review or a regulator's request, without having to reconstruct it
+from scattered application logs.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pydantic import BaseModel
+
+class ToolCallAuditEntry(BaseModel):
+    sequence: int
+    tool_name: str
+    arguments: dict
+    calling_principal: str
+    legacy_return_code: int
+    result_summary: str
+
+
+class AuditLog:
+    def __init__(self):
+        self._entries = []
+
+    def record(self, tool_name: str, arguments: dict, calling_principal: str, legacy_return_code: int, result_summary: str) -&gt; ToolCallAuditEntry:
+        entry = ToolCallAuditEntry(
+            sequence=len(self._entries) + 1,
+            tool_name=tool_name,
+            arguments=arguments,
+            calling_principal=calling_principal,
+            legacy_return_code=legacy_return_code,
+            result_summary=result_summary,
+        )
+        self._entries.append(entry)
+        return entry
+
+    def all_entries(self):
+        return list(self._entries)
+
+    def entries_for_principal(self, calling_principal: str):
+        return [e for e in self._entries if e.calling_principal == calling_principal]
+
+
+log = AuditLog()
+
+log.record(
+    tool_name=&quot;get_policy_balance&quot;,
+    arguments={&quot;policy_no&quot;: &quot;POL-100234&quot;},
+    calling_principal=&quot;jreyes&quot;,
+    legacy_return_code=0,
+    result_summary=&quot;balance=18420.55&quot;,
+)
+log.record(
+    tool_name=&quot;renew_policy&quot;,
+    arguments={&quot;policy_no&quot;: &quot;POL-100234&quot;, &quot;status_flag&quot;: &quot;A&quot;},
+    calling_principal=&quot;jreyes&quot;,
+    legacy_return_code=0,
+    result_summary=&quot;renewed&quot;,
+)
+log.record(
+    tool_name=&quot;get_policy_balance&quot;,
+    arguments={&quot;policy_no&quot;: &quot;POL-999999&quot;},
+    calling_principal=&quot;mchen&quot;,
+    legacy_return_code=-2,
+    result_summary=&quot;core returned error code -2&quot;,
+)
+
+for entry in log.all_entries():
+    print(f&quot;#{entry.sequence} {entry.calling_principal} -&gt; {entry.tool_name}({entry.arguments}) rc={entry.legacy_return_code}: {entry.result_summary}&quot;)
+
+jreyes_entries = log.entries_for_principal(&quot;jreyes&quot;)
+print(f&quot;jreyes made {len(jreyes_entries)} calls, all recorded under their own identity, never a shared service account&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>#1 jreyes -&gt; get_policy_balance({&#x27;policy_no&#x27;: &#x27;POL-100234&#x27;}) rc=0: balance=18420.55
+#2 jreyes -&gt; renew_policy({&#x27;policy_no&#x27;: &#x27;POL-100234&#x27;, &#x27;status_flag&#x27;: &#x27;A&#x27;}) rc=0: renewed
+#3 mchen -&gt; get_policy_balance({&#x27;policy_no&#x27;: &#x27;POL-999999&#x27;}) rc=-2: core returned error code -2
+jreyes made 2 calls, all recorded under their own identity, never a shared service account
+</code></pre><p><strong>Exercise:</strong>
+Record a fourth entry on the SAME <code>log</code> from this concept's Example: tool <code>renew_policy</code>,
+arguments <code>{&quot;policy_no&quot;: &quot;POL-300777&quot;, &quot;status_flag&quot;: &quot;A&quot;}</code>, calling principal
+<code>&quot;unknown_user&quot;</code>, <code>legacy_return_code=-1</code> (a sentinel meaning the call was blocked
+BEFORE it ever reached the core — Day 2's own scope check), result summary
+<code>&quot;blocked: not scoped to touch POL-300777&quot;</code>. Print the total entry count afterward, then
+print <code>log.entries_for_principal(&quot;rpatel&quot;)</code> — a principal who never called anything this
+run.</p>
+<p><strong>Starting point:</strong> <code>AuditLog</code> and <code>log</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>total entries after the blocked call: 4
+rpatel entries (never called anything this run): []
+</code></pre><hr />
+<h3>Concept 2 — Shadow Mode: the Agent Drafts, a Human Commits Before Any Write Lands</h3>
+<p>Shadow mode: the agent DRAFTS a write action — which procedure, which arguments — but
+never actually executes it. A human reviews the draft and explicitly commits it before
+the real call reaches the core. This is a separate safety layer from Day 2's permission
+tiers: even a human with WRITE-tier access can require an explicit second approval step
+before an agent-originated write goes live, and a draft that is never approved (or is
+explicitly rejected) can never reach <code>commit</code> no matter what the agent proposed.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from typing import Literal, Optional
+
+class WriteDraft(BaseModel):
+    draft_id: str
+    tool_name: str
+    arguments: dict
+    proposed_by: str  # the agent&#x27;s own identity, never a human&#x27;s
+    status: Literal[&quot;DRAFT&quot;, &quot;APPROVED&quot;, &quot;REJECTED&quot;, &quot;COMMITTED&quot;] = &quot;DRAFT&quot;
+    approved_by: Optional[str] = None
+
+
+class ShadowModeError(Exception):
+    pass
+
+
+class ShadowModeGateway:
+    def __init__(self):
+        self._drafts = {}
+
+    def draft(self, tool_name: str, arguments: dict, proposed_by: str) -&gt; WriteDraft:
+        draft_id = f&quot;DRAFT{len(self._drafts) + 1:04d}&quot;
+        write_draft = WriteDraft(draft_id=draft_id, tool_name=tool_name, arguments=arguments, proposed_by=proposed_by)
+        self._drafts[draft_id] = write_draft
+        return write_draft
+
+    def approve(self, draft_id: str, approved_by: str) -&gt; WriteDraft:
+        draft = self._drafts[draft_id]
+        draft.status = &quot;APPROVED&quot;
+        draft.approved_by = approved_by
+        return draft
+
+    def reject(self, draft_id: str, rejected_by: str) -&gt; WriteDraft:
+        draft = self._drafts[draft_id]
+        draft.status = &quot;REJECTED&quot;
+        draft.approved_by = rejected_by
+        return draft
+
+    def commit(self, draft_id: str, execute_fn) -&gt; dict:
+        draft = self._drafts[draft_id]
+        if draft.status != &quot;APPROVED&quot;:
+            raise ShadowModeError(f&quot;draft {draft_id} is {draft.status}, not APPROVED -- a human must approve before any write reaches the core&quot;)
+        result = execute_fn(draft.arguments)
+        draft.status = &quot;COMMITTED&quot;
+        return result
+
+
+gateway = ShadowModeGateway()
+
+draft = gateway.draft(
+    tool_name=&quot;renew_policy&quot;,
+    arguments={&quot;policy_no&quot;: &quot;POL-100234&quot;, &quot;status_flag&quot;: &quot;A&quot;},
+    proposed_by=&quot;agent_operator&quot;,
+)
+print(f&quot;agent drafted a write, never executed: {draft.model_dump()}&quot;)
+
+def real_renew_policy(args):
+    return {&quot;status&quot;: &quot;renewed&quot;, &quot;policy_no&quot;: args[&quot;policy_no&quot;]}
+
+try:
+    gateway.commit(draft.draft_id, real_renew_policy)
+except ShadowModeError as e:
+    print(f&quot;commit attempted before human approval: {e}&quot;)
+
+approved = gateway.approve(draft.draft_id, approved_by=&quot;j.reyes.supervisor&quot;)
+print(f&quot;human approved the draft: {approved.model_dump()}&quot;)
+
+committed_result = gateway.commit(draft.draft_id, real_renew_policy)
+print(f&quot;commit after approval: {committed_result}&quot;)
+print(f&quot;the draft&#x27;s own record shows it is now COMMITTED, with the approving human&#x27;s identity preserved: {gateway._drafts[draft.draft_id].status == &#x27;COMMITTED&#x27; and gateway._drafts[draft.draft_id].approved_by == &#x27;j.reyes.supervisor&#x27;}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>agent drafted a write, never executed: {&#x27;draft_id&#x27;: &#x27;DRAFT0001&#x27;, &#x27;tool_name&#x27;: &#x27;renew_policy&#x27;, &#x27;arguments&#x27;: {&#x27;policy_no&#x27;: &#x27;POL-100234&#x27;, &#x27;status_flag&#x27;: &#x27;A&#x27;}, &#x27;proposed_by&#x27;: &#x27;agent_operator&#x27;, &#x27;status&#x27;: &#x27;DRAFT&#x27;, &#x27;approved_by&#x27;: None}
+commit attempted before human approval: draft DRAFT0001 is DRAFT, not APPROVED -- a human must approve before any write reaches the core
+human approved the draft: {&#x27;draft_id&#x27;: &#x27;DRAFT0001&#x27;, &#x27;tool_name&#x27;: &#x27;renew_policy&#x27;, &#x27;arguments&#x27;: {&#x27;policy_no&#x27;: &#x27;POL-100234&#x27;, &#x27;status_flag&#x27;: &#x27;A&#x27;}, &#x27;proposed_by&#x27;: &#x27;agent_operator&#x27;, &#x27;status&#x27;: &#x27;APPROVED&#x27;, &#x27;approved_by&#x27;: &#x27;j.reyes.supervisor&#x27;}
+commit after approval: {&#x27;status&#x27;: &#x27;renewed&#x27;, &#x27;policy_no&#x27;: &#x27;POL-100234&#x27;}
+the draft&#x27;s own record shows it is now COMMITTED, with the approving human&#x27;s identity preserved: True
+</code></pre><p><strong>Exercise:</strong>
+Build a fresh <code>ShadowModeGateway</code>, draft a <code>renew_policy</code> call for <code>POL-999999</code> proposed
+by <code>&quot;agent_operator&quot;</code>, then call <code>.reject(draft_id, rejected_by=&quot;supervisor&quot;)</code> on it
+instead of approving it. Print the rejected draft, then attempt <code>.commit</code> on it and print
+the caught error.</p>
+<p><strong>Starting point:</strong> <code>ShadowModeGateway</code>, <code>ShadowModeError</code>, and <code>real_renew_policy</code>
+(redefine it if needed) from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>draft rejected by a human: {&#x27;draft_id&#x27;: &#x27;DRAFT0001&#x27;, &#x27;tool_name&#x27;: &#x27;renew_policy&#x27;, &#x27;arguments&#x27;: {&#x27;policy_no&#x27;: &#x27;POL-999999&#x27;, &#x27;status_flag&#x27;: &#x27;X&#x27;}, &#x27;proposed_by&#x27;: &#x27;agent_operator&#x27;, &#x27;status&#x27;: &#x27;REJECTED&#x27;, &#x27;approved_by&#x27;: &#x27;supervisor&#x27;}
+commit attempted on a REJECTED draft: draft DRAFT0001 is REJECTED, not APPROVED -- a human must approve before any write reaches the core
+</code></pre><hr />
+<h3>Concept 3 — Deterministic Replay Against the Week 19 Checkpointer</h3>
+<p>Week 19's real <code>SqliteSaver</code> checkpointer (genuinely reused, not reimplemented) durably
+records every state transition a LangGraph run makes, keyed by <code>thread_id</code>. Feeding this
+week's own audit-log entries through a graph node — one graph step per recorded tool
+call — turns the checkpointer's own history into a DETERMINISTIC replay of exactly what
+the agent did, in exactly the order it did it: any past checkpoint is individually
+addressable by its own <code>checkpoint_id</code>, independent of the in-memory <code>AuditLog</code> object
+that originally recorded it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import sqlite3
+from typing import TypedDict
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.sqlite import SqliteSaver
+
+class ReplayState(TypedDict):
+    applied_calls: list  # plain overwrite -- each invoke passes the FULL snapshot
+                          # explicitly, so there is no ambiguity about how updates merge
+
+def apply_one_call(state: ReplayState) -&gt; ReplayState:
+    return state
+
+builder = StateGraph(ReplayState)
+builder.add_node(&quot;apply_call&quot;, apply_one_call)
+builder.set_entry_point(&quot;apply_call&quot;)
+builder.add_edge(&quot;apply_call&quot;, END)
+
+conn = sqlite3.connect(&quot;:memory:&quot;, check_same_thread=False)
+checkpointer = SqliteSaver(conn)
+graph = builder.compile(checkpointer=checkpointer)
+
+REPLAYED_AUDIT_ENTRIES = [
+    {&quot;sequence&quot;: 1, &quot;tool_name&quot;: &quot;get_policy_balance&quot;, &quot;calling_principal&quot;: &quot;jreyes&quot;},
+    {&quot;sequence&quot;: 2, &quot;tool_name&quot;: &quot;renew_policy&quot;, &quot;calling_principal&quot;: &quot;jreyes&quot;},
+    {&quot;sequence&quot;: 3, &quot;tool_name&quot;: &quot;get_policy_balance&quot;, &quot;calling_principal&quot;: &quot;mchen&quot;},
+]
+
+config = {&quot;configurable&quot;: {&quot;thread_id&quot;: &quot;run-2026-09-17-001&quot;}}
+applied_so_far = []
+for entry in REPLAYED_AUDIT_ENTRIES:
+    applied_so_far = applied_so_far + [f&quot;#{entry[&#x27;sequence&#x27;]} {entry[&#x27;calling_principal&#x27;]} -&gt; {entry[&#x27;tool_name&#x27;]}&quot;]
+    graph.invoke({&quot;applied_calls&quot;: applied_so_far}, config=config)
+
+final_state = graph.get_state(config)
+print(f&quot;final checkpointed state after replaying {len(REPLAYED_AUDIT_ENTRIES)} audit entries: {final_state.values[&#x27;applied_calls&#x27;]}&quot;)
+
+# walk the checkpoint history (newest first, as get_state_history returns it) and find the
+# most recent checkpoint whose applied_calls has exactly 2 entries -- proving an earlier
+# point in the run is individually addressable, not just the final state
+history = list(graph.get_state_history(config))
+two_call_checkpoint = next(c for c in history if len(c.values.get(&quot;applied_calls&quot;, [])) == 2)
+print(f&quot;an earlier checkpoint (2 of 3 calls applied) is independently addressable: {two_call_checkpoint.values[&#x27;applied_calls&#x27;]}&quot;)
+
+replayed_at_checkpoint = graph.get_state({&quot;configurable&quot;: {&quot;thread_id&quot;: &quot;run-2026-09-17-001&quot;, &quot;checkpoint_id&quot;: two_call_checkpoint.config[&quot;configurable&quot;][&quot;checkpoint_id&quot;]}})
+print(f&quot;re-fetching that exact checkpoint_id reproduces the identical 2-call state deterministically: {replayed_at_checkpoint.values == two_call_checkpoint.values}&quot;)
+
+fresh_conn = sqlite3.connect(&quot;:memory:&quot;, check_same_thread=False)
+fresh_checkpointer = SqliteSaver(fresh_conn)
+fresh_graph = builder.compile(checkpointer=fresh_checkpointer)
+same_thread_new_checkpointer_state = fresh_graph.get_state(config)
+print(f&quot;the SAME thread_id against a brand-new checkpointer sees no history at all: {same_thread_new_checkpointer_state.values == {}}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>final checkpointed state after replaying 3 audit entries: [&#x27;#1 jreyes -&gt; get_policy_balance&#x27;, &#x27;#2 jreyes -&gt; renew_policy&#x27;, &#x27;#3 mchen -&gt; get_policy_balance&#x27;]
+an earlier checkpoint (2 of 3 calls applied) is independently addressable: [&#x27;#1 jreyes -&gt; get_policy_balance&#x27;, &#x27;#2 jreyes -&gt; renew_policy&#x27;]
+re-fetching that exact checkpoint_id reproduces the identical 2-call state deterministically: True
+the SAME thread_id against a brand-new checkpointer sees no history at all: True
+</code></pre><p><strong>Exercise:</strong>
+Build a fresh in-memory <code>SqliteSaver</code>-backed graph from the SAME <code>builder</code>. Invoke it
+twice under <code>thread_id=&quot;run-a&quot;</code> (first with <code>applied_calls=[&quot;#1 jreyes -&gt; get_policy_balance&quot;]</code>, then with <code>applied_calls=[&quot;#1 jreyes -&gt; get_policy_balance&quot;, &quot;#2 jreyes -&gt; renew_policy&quot;]</code>). Then check <code>graph.get_state</code> for a DIFFERENT
+<code>thread_id=&quot;run-b&quot;</code> that was never invoked at all, and print one line confirming it has
+no history. Finally print <code>run-a</code>'s own final state, confirming it is unaffected by the
+<code>run-b</code> check.</p>
+<p><strong>Starting point:</strong> <code>ReplayState</code>, <code>apply_one_call</code>, and <code>builder</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>a DIFFERENT thread_id on the SAME checkpointer has no history at all: True
+run-a&#x27;s own history is unaffected by run-b&#x27;s isolation check: [&#x27;#1 jreyes -&gt; get_policy_balance&#x27;, &#x27;#2 jreyes -&gt; renew_policy&#x27;]
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> <code>legacy_return_code</code> in <code>ToolCallAuditEntry</code> is not decorative — it is
+often the ONLY signal a legacy core ever gives back about why a call failed, and it needs
+to survive into the audit trail verbatim, not translated into a friendlier message that
+loses the original code a mainframe operator would recognize.</p>
+<p><strong>Compliance angle:</strong> Shadow mode's <code>proposed_by</code>/<code>approved_by</code> split on <code>WriteDraft</code> is
+the literal artifact a SOX or model-risk review asks for: proof that a specific human,
+identified by name, made the actual commit decision, with the agent's own proposal
+preserved unmodified alongside it.</p>
+<p><strong>What breaks in production:</strong> <code>ShadowModeGateway</code>'s <code>_drafts</code> dict is in-memory only —
+in a real deployment, a draft awaiting approval has to survive a process restart between
+when the agent proposes it and when a human gets around to reviewing it hours later, or
+every unapproved draft silently vanishes the moment the service redeploys. The Week 19
+checkpointer this concept genuinely reused for run replay is exactly the kind of durable
+store a production shadow-mode queue would need too — the same mechanism, applied to a
+different problem.</p>
+<hr />
+<h2>Architecture Decision — Week 22</h2>
+<p>Choosing between: <strong>agent writes directly</strong> (a WRITE-tier tool call reaches the legacy
+core the moment the agent decides to call it, with permission tiers and circuit breakers
+as the only gates) vs. <strong>agent drafts, human commits</strong> (every write becomes a
+<code>ShadowModeGateway</code> draft — Day 5's Concept 2 — that sits in <code>DRAFT</code> status until a named
+human explicitly approves it, and only THEN can <code>commit</code> reach the core).</p>
+<p>Rule of thumb: use <strong>agent writes directly</strong> when the tool's own blast radius is small
+and well-understood (a single, well-scoped procedure like <code>dbo.usp_RenewPolicy</code>, called
+under a <code>WRITE</code>-tier permission already bound to a specific requesting user per Day 2,
+with a circuit breaker and bulkhead already limiting how much damage a malfunction can do
+per Day 3) AND the action is easily and cheaply reversible if wrong. Move to <strong>agent
+drafts, human commits</strong> the moment any one of those conditions breaks: the procedure's
+<code>EXECUTE AS OWNER</code> body touches more tables than the caller's own grants would suggest
+(Day 2, Concept 2), the action is expensive or slow to reverse (a mainframe batch job
+already submitted and running, per Day 4 — there is no <code>UNDO</code> tool for a JCL job halfway
+through), or the organization's own risk appetite for THIS specific procedure (a claims
+payment, a policy cancellation) is lower than for a read-only balance lookup, regardless
+of how well-scoped the write tool otherwise is.</p>
+<p>In practice this is not a single track-wide choice — it is a PER-TOOL decision, made
+explicit in the same <code>ToolDefinition</code>/tier metadata Day 2 Concept 3 already attaches to
+every tool, not left to be inferred from the tool's name. A newly-added write tool
+defaults to <code>agent drafts, human commits</code> until its own blast radius, reversibility, and
+audit-trail track record earn it a deliberate, documented promotion to direct-write —
+never the other way around, and never assumed from a tool that merely LOOKS safe.</p>
+<hr />
+<div class="pager"><a class="btn ghost" href="week-21.html">&larr; Week 21</a><a class="btn ghost" href="week-23.html">Week 23 &rarr;</a></div>
+</main></body></html>

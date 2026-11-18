@@ -1,0 +1,1275 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 08 — Layout-Aware Document Parsing</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="08" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 08 — Layout-Aware Document Parsing</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>2 — Advanced AI Data Pipelines / DataPrep for LLMs</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Expert</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Comfort with Python and basic PDF structure. No prior Unstructured.io, LlamaParse, or Tesseract experience assumed.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>7–9 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>None yet. Unstructured.io fails to install in this sandbox (its <code>langdetect</code> dependency's setup.py breaks under this environment's setuptools — confirmed by a real <code>pip install unstructured</code> attempt), and Tesseract's binary is not present either, so both are REAL MODE throughout: written to be API-correct from real library signatures, never executed here. Every genuinely runnable mechanic this week actually needs — multi-column reading-order reconstruction, ruled-line table detection, multi-row header flattening, HTML-to-markdown conversion, scanned-vs-digital page detection, DPI/deskew arithmetic, confidence-threshold routing, cost modeling, content-hash caching, and a field-level quality harness — is built with <code>pdfplumber</code>, <code>reportlab</code>, <code>Pillow</code>, <code>numpy</code> and <code>beautifulsoup4</code> (all import cleanly here) and is EXECUTED below with real captured output. A notebook covering that executable core is a reasonable follow-up, not a gap in this file.</td>
+</tr>
+</tbody>
+</table>
+<p>Weeks 01 through 07 assumed the input to a pipeline was already a clean vector or a
+well-formed database row. Real BFSI documents rarely arrive that way. A claim form is a
+scanned fax with a ruled table on it; a loan application is a multi-column PDF where the
+borrower's name sits in one column and the co-borrower's sits in the other, printed on the
+same line. Extracting text from that naively — reading the page purely left-to-right,
+top-to-bottom in one pass — does not fail loudly. It silently interleaves unrelated
+sentences, drops tables into a wall of unstructured text, and returns nothing at all for a
+page that is actually a picture of text. This week is about the specific failure modes
+that make PDF text extraction harder than <code>page.extract_text()</code>, and the two real tools
+— Unstructured.io and LlamaParse — built to handle them, plus the OCR fallback path
+underneath both.</p>
+<hr />
+<h2 id="day-1">Day 1 — Partitioning PDFs with Unstructured</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="08-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=JrbPltpOVJk" target="_blank" rel="noopener"><b>STOP Fighting Messy PDFs! Unstructured.io is the RAG Preprocessing Tool Every AI Developer NEEDS</b><small>STARP AI · 6:49</small></a></li><li><a href="https://www.youtube.com/watch?v=FRIOwOy6VZk" target="_blank" rel="noopener"><b>Qdrant x Unstructured.io | Process and Vectorize Documents with Enterprise ETL and Vector Search</b><small>Qdrant Vector Search · 8:09</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Unstructured.io%20partition_pdf%20hi_res%20strategy%20tutorial" target="_blank" rel="noopener">Search YouTube: Unstructured.io partition_pdf hi_res strategy tutorial</a></p></div>
+<hr />
+<h3>Concept 1 — Multi-Column Layouts Break Reading Order</h3>
+<p>A PDF has no concept of &quot;paragraph&quot; or &quot;column.&quot; It has positioned characters on a page,
+each with an <code>(x, y)</code> coordinate. A naive text extractor reads those characters ordered
+primarily by vertical position, then horizontal — which is exactly right for a single
+column of body text and exactly wrong for two independent columns printed side by side at
+the same line height. It does not error. It quietly stitches the end of one column's line
+onto the start of the other column's line at the same height, producing a sentence that
+reads as if generated by shuffling two documents together.</p>
+<p>The fix is to detect the columns first — group text by horizontal band — and only then
+apply top-to-bottom ordering, independently, within each band. That two-step process
+(bands first, order second) is the core of what a real layout model does at much greater
+sophistication; this is its simplest possible version.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import io
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+import pdfplumber
+
+
+def build_two_column_pdf():
+    &quot;&quot;&quot;An adjuster narrative report: two independent columns of prose at
+    the same line height, the way a legacy claims system&#x27;s PDF export
+    often lays out a summary alongside policy metadata.&quot;&quot;&quot;
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    c.setFont(&quot;Helvetica-Bold&quot;, 16)
+    c.drawString(72, height - 72, &quot;ADJUSTER NARRATIVE REPORT&quot;)
+    left_x = 72
+    right_x = width / 2 + 20
+    top_y = height - 110
+    left_lines = [
+        &quot;The insured vehicle was stopped at&quot;,
+        &quot;a red light on Dizengoff Street when&quot;,
+        &quot;it was struck from behind by the&quot;,
+        &quot;second vehicle at approximately 40&quot;,
+        &quot;km/h based on skid mark analysis.&quot;,
+    ]
+    right_lines = [
+        &quot;Policy POL-88123 was bound on&quot;,
+        &quot;2025-01-01 with a $500 deductible&quot;,
+        &quot;and comprehensive collision cover.&quot;,
+        &quot;No prior claims are on file for&quot;,
+        &quot;this policyholder in the last 5 years.&quot;,
+    ]
+    c.setFont(&quot;Helvetica&quot;, 11)
+    for i, line in enumerate(left_lines):
+        c.drawString(left_x, top_y - i * 16, line)
+    for i, line in enumerate(right_lines):
+        c.drawString(right_x, top_y - i * 16, line)
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf
+
+
+def reconstruct_columns(words, page_width, num_columns=2):
+    &quot;&quot;&quot;Group words into vertical bands by x0 position first, THEN order
+    each band top-to-bottom -- the layout-aware fix for a reader that
+    otherwise orders purely by y and splices unrelated columns together.&quot;&quot;&quot;
+    band_width = page_width / num_columns
+    columns = [[] for _ in range(num_columns)]
+    for w in words:
+        band = min(int(w[&quot;x0&quot;] // band_width), num_columns - 1)
+        columns[band].append(w)
+    column_texts = []
+    for col_words in columns:
+        col_words.sort(key=lambda w: (round(w[&quot;top&quot;]), w[&quot;x0&quot;]))
+        lines = {}
+        for w in col_words:
+            key = round(w[&quot;top&quot;] / 8) * 8   # snap to line bands
+            lines.setdefault(key, []).append(w)
+        ordered_lines = []
+        for key in sorted(lines):
+            line_words = sorted(lines[key], key=lambda w: w[&quot;x0&quot;])
+            ordered_lines.append(&quot; &quot;.join(w[&quot;text&quot;] for w in line_words))
+        column_texts.append(&quot;\n&quot;.join(ordered_lines))
+    return column_texts
+
+
+pdf_buf = build_two_column_pdf()
+with pdfplumber.open(pdf_buf) as pdf:
+    page = pdf.pages[0]
+    naive_text = page.extract_text()
+    words = page.extract_words()
+    page_width = page.width
+
+print(&quot;--- naive page.extract_text() reading order ---&quot;)
+print(naive_text)
+print()
+columns = reconstruct_columns(words, page_width, num_columns=2)
+for i, col in enumerate(columns):
+    print(f&quot;--- column {i} ---&quot;)
+    print(col)
+    print()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>--- naive page.extract_text() reading order ---
+ADJUSTER NARRATIVE REPORT
+The insured vehicle was stopped at Policy POL-88123 was bound on
+a red light on Dizengoff Street when 2025-01-01 with a $500 deductible
+it was struck from behind by the and comprehensive collision cover.
+second vehicle at approximately 40 No prior claims are on file for
+km/h based on skid mark analysis. this policyholder in the last 5 years.
+
+--- column 0 ---
+ADJUSTER NARRATIVE REPORT
+The insured vehicle was stopped at
+a red light on Dizengoff Street when
+it was struck from behind by the
+second vehicle at approximately 40
+km/h based on skid mark analysis.
+
+--- column 1 ---
+Policy POL-88123 was bound on
+2025-01-01 with a $500 deductible
+and comprehensive collision cover.
+No prior claims are on file for
+this policyholder in the last 5 years.
+</code></pre><p>Notice the naive output is not obviously broken — it reads almost like coherent prose
+until you actually check the content against the source, at which point &quot;struck from
+behind by the... No prior claims are on file for&quot; is nonsense manufactured by the reader,
+not present in either column. That is the dangerous failure mode: it looks plausible
+enough that nobody double-checks it, and an LLM fed this text will confidently answer
+questions using the spliced sentence.</p>
+<p><strong>Exercise:</strong>
+Build a three-column version of the same report (three short, independent narrative
+columns instead of two) and confirm <code>reconstruct_columns</code> with <code>num_columns=3</code> correctly
+separates all three, while <code>page.extract_text()</code> still garbles them into one interleaved
+block.</p>
+<p><strong>Starting point:</strong> The <code>reconstruct_columns(words, page_width, num_columns=2)</code> function from this concept's Example, called with <code>num_columns=3</code> against a fresh 3-column PDF built the same way as <code>build_two_column_pdf</code> but with three <code>drawString</code> column loops instead of two.</p>
+<p>Expected output: the naive <code>extract_text()</code> interleaves all three columns line-by-line
+exactly as before, while <code>reconstruct_columns(..., num_columns=3)</code> returns three clean,
+independently-ordered column texts.</p>
+<hr />
+<h3>Concept 2 — Element Types: Title, NarrativeText, Table, ListItem</h3>
+<p>Unstructured's real <code>partition_pdf</code> does not return a flat string. It returns a list of
+typed elements — <code>Title</code>, <code>NarrativeText</code>, <code>Table</code>, <code>ListItem</code>, and a few rarer types —
+each carrying its own text plus metadata (<code>page_number</code>, bounding-box <code>coordinates</code>, and
+for tables, an HTML rendering of the detected structure). That typing is the whole reason
+to use a real partitioning library over <code>extract_text()</code>: an LLM prompt built from typed
+elements can treat a <code>Title</code> as a heading and a <code>Table</code> as structured data, instead of
+guessing from raw text which lines are which.</p>
+<p><strong>REAL MODE — requires the Unstructured.io library (fails to install in this sandbox,
+see this week's Metadata row):</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from unstructured.partition.pdf import partition_pdf
+
+elements = partition_pdf(
+    filename=&quot;claim_form.pdf&quot;,
+    strategy=&quot;hi_res&quot;,             # runs a layout-detection model
+    infer_table_structure=True,    # populates Table.metadata.text_as_html
+)
+
+for el in elements:
+    print(type(el).__name__, &quot;| page&quot;, el.metadata.page_number, &quot;|&quot;, el.text[:60])
+
+# Expected shape of the output (not run -- illustrative only):
+# Title           | page 1 | AUTO CLAIM INTAKE FORM
+# NarrativeText    | page 1 | The claimant reported the vehicle was parked...
+# Table            | page 1 | Claim ID  Loss Type  Reserve  Status
+# ListItem         | page 1 | Front bumper replacement
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>The hand-rolled classifier below reproduces the same <em>idea</em> — assign each line of text a
+type from font size and a leading marker character — using only what <code>pdfplumber</code> gives
+us directly (per-character font size and position), so the underlying signal (a Title is
+bigger than body text; a ListItem starts with a bullet marker) is genuinely testable here
+even without the real layout model.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import io
+import dataclasses
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+import pdfplumber
+
+
+def build_form_pdf():
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    y = height - 72
+    c.setFont(&quot;Helvetica-Bold&quot;, 16)
+    c.drawString(72, y, &quot;AUTO CLAIM INTAKE FORM&quot;)
+    y -= 30
+    c.setFont(&quot;Helvetica&quot;, 11)
+    c.drawString(72, y, &quot;The claimant reported the vehicle was parked and unattended&quot;)
+    y -= 16
+    c.drawString(72, y, &quot;when the damage occurred in the apartment parking garage.&quot;)
+    y -= 30
+    c.setFont(&quot;Helvetica-Bold&quot;, 13)
+    c.drawString(72, y, &quot;Itemized Damage&quot;)
+    y -= 20
+    c.setFont(&quot;Helvetica&quot;, 11)
+    for item in [&quot;Front bumper replacement&quot;, &quot;Headlight assembly&quot;, &quot;Paint and labor&quot;]:
+        c.drawString(90, y, f&quot;- {item}&quot;)
+        y -= 16
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf
+
+
+@dataclasses.dataclass
+class Element:
+    element_type: str
+    text: str
+    font_size: float
+    page_number: int
+
+
+def classify_line(text, font_size, body_size):
+    &quot;&quot;&quot;Font size relative to the page&#x27;s dominant (body) size, plus a
+    leading bullet/dash marker, stands in for the real layout model&#x27;s
+    Title/NarrativeText/ListItem typing.&quot;&quot;&quot;
+    stripped = text.strip()
+    if stripped.startswith((&quot;-&quot;, &quot;*&quot;, &quot;•&quot;)):
+        return &quot;ListItem&quot;
+    if font_size &gt; body_size + 1.5:
+        return &quot;Title&quot;
+    return &quot;NarrativeText&quot;
+
+
+pdf_buf = build_form_pdf()
+elements = []
+with pdfplumber.open(pdf_buf) as pdf:
+    page = pdf.pages[0]
+    chars = page.chars
+    lines = {}
+    for ch in chars:
+        key = round(ch[&quot;top&quot;] / 4) * 4
+        lines.setdefault(key, []).append(ch)
+    all_sizes = [ch[&quot;size&quot;] for ch in chars]
+    body_size = max(set(all_sizes), key=all_sizes.count)  # modal size = body text
+    for key in sorted(lines):
+        line_chars = sorted(lines[key], key=lambda c: c[&quot;x0&quot;])
+        text = &quot;&quot;.join(c[&quot;text&quot;] for c in line_chars)
+        size = round(line_chars[0][&quot;size&quot;], 1)
+        etype = classify_line(text, size, body_size)
+        elements.append(Element(etype, text, size, page_number=1))
+
+for el in elements:
+    print(f&quot;{el.element_type:&lt;14} size={el.font_size:&lt;5} {el.text!r}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>Title          size=16.0  &#x27;AUTO CLAIM INTAKE FORM&#x27;
+NarrativeText  size=11.0  &#x27;The claimant reported the vehicle was parked and unattended&#x27;
+NarrativeText  size=11.0  &#x27;when the damage occurred in the apartment parking garage.&#x27;
+Title          size=13.0  &#x27;Itemized Damage&#x27;
+ListItem       size=11.0  &#x27;- Front bumper replacement&#x27;
+ListItem       size=11.0  &#x27;- Headlight assembly&#x27;
+ListItem       size=11.0  &#x27;- Paint and labor&#x27;
+</code></pre><p><strong>Exercise:</strong>
+Add a second heading, <code>&quot;Next Steps&quot;</code>, followed by three numbered items (<code>&quot;1. Confirm tow receipt&quot;</code>, <code>&quot;2. Schedule adjuster visit&quot;</code>, <code>&quot;3. Close file pending signature&quot;</code>) to the
+form. Classify them with <code>classify_line</code> as written, then extend it with a numbered-marker
+check (<code>re.match(r&quot;^\d+\.\s&quot;, stripped)</code>) and re-classify, comparing the two runs.</p>
+<p><strong>Starting point:</strong> The <code>build_form_pdf()</code> and <code>classify_line(text, font_size, body_size)</code> functions from this concept's Example, with the form extended by the &quot;Next Steps&quot; heading and its three numbered lines.</p>
+<p>Expected output: without the numbered-marker check, the three numbered lines are
+misclassified as <code>NarrativeText</code> (they carry no dash/asterisk/bullet, and their font size
+matches body text). Adding <code>re.match(r&quot;^\d+\.\s&quot;, stripped)</code> reclassifies all three as
+<code>ListItem</code>, while <code>&quot;AUTO CLAIM INTAKE FORM&quot;</code> and <code>&quot;Next Steps&quot;</code> remain <code>Title</code> in both
+runs.</p>
+<hr />
+<h3>Concept 3 — Strategy Selection: <code>hi_res</code> vs <code>fast</code> vs <code>ocr_only</code></h3>
+<p><code>partition_pdf</code>'s <code>strategy</code> parameter is not a quality dial you crank up &quot;to be safe.&quot; It
+picks a genuinely different code path: <code>&quot;fast&quot;</code> reads the PDF's own text layer directly
+with no layout model at all (cheap, but blind to tables and reading order); <code>&quot;hi_res&quot;</code>
+runs a real layout-detection model over a rendered image of each page to find titles,
+tables, and reading order (accurate, computationally expensive); <code>&quot;ocr_only&quot;</code> skips the
+text layer entirely and assumes none exists. Running every document through <code>&quot;hi_res&quot;</code>
+&quot;to be safe&quot; is the single most common way a document-parsing pipeline's compute bill
+becomes unexplainable — most digital-native, single-column documents get zero benefit
+from a layout model whose whole job is untangling structure they don't have.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def choose_strategy(has_extractable_text, expects_tables, page_count):
+    if not has_extractable_text:
+        return &quot;ocr_only&quot;
+    if expects_tables:
+        return &quot;hi_res&quot;
+    return &quot;fast&quot;
+
+
+# Illustrative per-page compute time, ordered fast &lt; hi_res &lt; ocr_only --
+# not measured against a real corpus, just the relative-cost ordering
+# every parser vendor documents. Swap in real timings once you profile
+# your own document mix.
+STRATEGY_SECONDS_PER_PAGE = {&quot;fast&quot;: 0.05, &quot;hi_res&quot;: 0.9, &quot;ocr_only&quot;: 2.4}
+
+documents = [
+    {&quot;name&quot;: &quot;loss_run_table.pdf&quot;, &quot;has_extractable_text&quot;: True, &quot;expects_tables&quot;: True, &quot;page_count&quot;: 3},
+    {&quot;name&quot;: &quot;policy_wording.pdf&quot;, &quot;has_extractable_text&quot;: True, &quot;expects_tables&quot;: False, &quot;page_count&quot;: 40},
+    {&quot;name&quot;: &quot;faxed_intake.pdf&quot;, &quot;has_extractable_text&quot;: False, &quot;expects_tables&quot;: False, &quot;page_count&quot;: 1},
+]
+
+total_seconds = 0.0
+for doc in documents:
+    strategy = choose_strategy(doc[&quot;has_extractable_text&quot;], doc[&quot;expects_tables&quot;], doc[&quot;page_count&quot;])
+    est_seconds = doc[&quot;page_count&quot;] * STRATEGY_SECONDS_PER_PAGE[strategy]
+    total_seconds += est_seconds
+    print(f&quot;{doc[&#x27;name&#x27;]:&lt;20} strategy={strategy:&lt;8} est={est_seconds:6.2f}s &quot;
+          f&quot;({doc[&#x27;page_count&#x27;]} pages)&quot;)
+print(f&quot;\ntotal estimated compute: {total_seconds:.2f}s for {len(documents)} documents&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>loss_run_table.pdf   strategy=hi_res   est=  2.70s (3 pages)
+policy_wording.pdf   strategy=fast     est=  2.00s (40 pages)
+faxed_intake.pdf     strategy=ocr_only est=  2.40s (1 pages)
+
+total estimated compute: 7.10s for 3 documents
+</code></pre><p><strong>Exercise:</strong>
+Add a fourth document, <code>adjuster_batch_scan.pdf</code> — a 15-page scanned batch that also
+contains tables (<code>has_extractable_text=False</code>, <code>expects_tables=True</code>) — and confirm which
+strategy it routes to. Then report the total pages routed to each strategy across all four
+documents.</p>
+<p><strong>Starting point:</strong> The <code>choose_strategy(...)</code>, <code>STRATEGY_SECONDS_PER_PAGE</code> dict and <code>documents</code> list from this concept's Example, with the fourth document appended.</p>
+<p>Expected output: <code>adjuster_batch_scan.pdf</code> routes to <code>&quot;ocr_only&quot;</code> — a missing text layer
+overrides the table check, because a scanned page cannot use <code>&quot;hi_res&quot;</code>'s text-layer
+assumptions no matter how well-ruled its tables are. Totals: <code>hi_res</code> gets 3 pages, <code>fast</code>
+gets 40 pages, <code>ocr_only</code> gets 16 pages (1 + 15), for 43.10s total estimated compute across
+4 documents.</p>
+<hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> A loan-origination system built in the 2000s often exports its case file
+as a single PDF concatenating a digitally-generated cover sheet, a scanned signature page,
+and a faxed pay stub — three different &quot;documents&quot; glued into one file with three
+different parsing needs. <code>choose_strategy</code> has to run per page, not per file, or the cover
+sheet's cheap <code>&quot;fast&quot;</code> path gets dragged into <code>&quot;ocr_only&quot;</code> by one scanned page at the end.</p>
+<p><strong>Compliance angle:</strong> <code>metadata.page_number</code> and <code>coordinates</code> on every element are not
+convenience fields — they are what lets a downstream answer cite &quot;this figure came from
+page 3, this specific paragraph&quot; rather than &quot;somewhere in this 40-page document.&quot; Under
+EU AI Act Article 13's transparency duties, a high-risk system's outputs need to be
+traceable to their source; discarding coordinates at parse time makes that traceability
+unrecoverable later.</p>
+<p><strong>What breaks in production:</strong> Every document silently defaulting to <code>&quot;hi_res&quot;</code> because
+nobody set <code>strategy</code> explicitly. Nothing errors — the pipeline just runs ten times slower
+and costs ten times more than it needs to, and the first person to notice is whoever gets
+the compute bill, not whoever wrote the parsing code.</p>
+<hr />
+<h2 id="day-2">Day 2 — Table Extraction from Claim Forms</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="08-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=yKAuUAPREMw" target="_blank" rel="noopener"><b>Python Libraries to Extract Tables from PDFs</b><small>NeuralNine · 31:39</small></a></li><li><a href="https://www.youtube.com/watch?v=I9hB18UuDnE" target="_blank" rel="noopener"><b>How To: Extract Table From Image In Python (OpenCV &amp; OCR)</b><small>LiveFire Dev · 4:50</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=extract%20tables%20from%20scanned%20PDF%20python%20table%20structure%20recognition" target="_blank" rel="noopener">Search YouTube: extract tables from scanned PDF python table structure recognition</a></p></div>
+<hr />
+<h3>Concept 1 — Ruled-Line Table Detection</h3>
+<p>A ruled table — one drawn with actual vector lines on the page, the way an ACORD loss-run
+form is laid out — is detected by finding the grid itself: the horizontal and vertical
+lines that bound each cell, then reading the text that falls inside each bounded region.
+This is exactly how <code>pdfplumber.extract_tables()</code> works, and it is the same structural
+signal Unstructured's <code>infer_table_structure=True</code> uses internally before rendering the
+result as <code>Table.metadata.text_as_html</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import io
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+import pdfplumber
+
+
+def build_table_pdf(rows, col_widths):
+    &quot;&quot;&quot;A ruled table with real grid lines -- header row plus data rows --
+    drawn the way a scanned ACORD loss-run form is ruled.&quot;&quot;&quot;
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    row_height = 24
+    x0 = 72
+    y0 = height - 100
+    n_rows = len(rows)
+    xs = [x0]
+    for w in col_widths:
+        xs.append(xs[-1] + w)
+    table_width = sum(col_widths)
+    c.setLineWidth(0.75)
+    for xline in xs:
+        c.line(xline, y0, xline, y0 - row_height * n_rows)
+    for r in range(n_rows + 1):
+        yline = y0 - row_height * r
+        c.line(x0, yline, x0 + table_width, yline)
+    c.setFont(&quot;Helvetica-Bold&quot;, 10)
+    for j, cell in enumerate(rows[0]):
+        c.drawString(xs[j] + 4, y0 - 16, cell)
+    c.setFont(&quot;Helvetica&quot;, 10)
+    for r, row in enumerate(rows[1:], start=1):
+        for j, cell in enumerate(row):
+            c.drawString(xs[j] + 4, y0 - row_height * r - 16, cell)
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf
+
+
+rows = [
+    [&quot;Claim ID&quot;, &quot;Loss Type&quot;, &quot;Reserve&quot;, &quot;Status&quot;],
+    [&quot;CLM-1001&quot;, &quot;Collision&quot;, &quot;$4,200&quot;, &quot;Open&quot;],
+    [&quot;CLM-1002&quot;, &quot;Theft&quot;, &quot;$1,850&quot;, &quot;Closed&quot;],
+    [&quot;CLM-1003&quot;, &quot;Water Damage&quot;, &quot;$9,600&quot;, &quot;Open&quot;],
+]
+pdf_buf = build_table_pdf(rows, col_widths=[90, 110, 80, 80])
+with pdfplumber.open(pdf_buf) as pdf:
+    tables = pdf.pages[0].extract_tables()
+
+print(f&quot;tables found: {len(tables)}&quot;)
+for row in tables[0]:
+    print(row)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>tables found: 1
+[&#x27;Claim ID&#x27;, &#x27;Loss Type&#x27;, &#x27;Reserve&#x27;, &#x27;Status&#x27;]
+[&#x27;CLM-1001&#x27;, &#x27;Collision&#x27;, &#x27;$4,200&#x27;, &#x27;Open&#x27;]
+[&#x27;CLM-1002&#x27;, &#x27;Theft&#x27;, &#x27;$1,850&#x27;, &#x27;Closed&#x27;]
+[&#x27;CLM-1003&#x27;, &#x27;Water Damage&#x27;, &#x27;$9,600&#x27;, &#x27;Open&#x27;]
+</code></pre><p><strong>REAL MODE — requires the Unstructured.io library:</strong> the equivalent real call is
+<code>partition_pdf(filename=&quot;loss_run.pdf&quot;, infer_table_structure=True)</code>, after which any
+<code>Table</code> element's <code>el.metadata.text_as_html</code> holds an HTML <code>&lt;table&gt;</code> string with the same
+cells — Concept 3 below builds the HTML-to-markdown conversion that output would need.</p>
+<p><strong>Exercise:</strong>
+Extend the table to 5 rows and 5 columns by adding an <code>&quot;Adjuster&quot;</code> column and a 4th data
+row, then assert the extracted table's shape matches <code>(5, 5)</code> before printing it.</p>
+<p><strong>Starting point:</strong> The <code>build_table_pdf(rows, col_widths)</code> function from this concept's Example, called with a <code>rows</code> list carrying the extra column and row, and <code>col_widths=[70, 90, 70, 60, 80]</code>.</p>
+<p>Expected output:</p>
+<pre><code>table shape OK: 5 rows x 5 cols
+[&#x27;Claim ID&#x27;, &#x27;Loss Type&#x27;, &#x27;Reserve&#x27;, &#x27;Status&#x27;, &#x27;Adjuster&#x27;]
+[&#x27;CLM-2001&#x27;, &#x27;Fire&#x27;, &#x27;$22,000&#x27;, &#x27;Open&#x27;, &#x27;R. Fine&#x27;]
+[&#x27;CLM-2002&#x27;, &#x27;Water Damage&#x27;, &#x27;$6,400&#x27;, &#x27;Open&#x27;, &#x27;D. Levi&#x27;]
+[&#x27;CLM-2003&#x27;, &#x27;Theft&#x27;, &#x27;$900&#x27;, &#x27;Closed&#x27;, &#x27;R. Fine&#x27;]
+[&#x27;CLM-2004&#x27;, &#x27;Collision&#x27;, &#x27;$3,100&#x27;, &#x27;Open&#x27;, &#x27;M. Katz&#x27;]
+</code></pre><hr />
+<h3>Concept 2 — Multi-Row Headers and Merged Cells</h3>
+<p>A ruled-line extractor has no concept of a merged cell — it only knows the grid. A header
+that visually spans two columns (&quot;CLAIM INFO&quot; printed once, over what are really two
+separate columns) comes back from extraction as one cell holding the label and one empty
+cell beside it, on the row above a second header row that names the actual sub-columns.
+Reconciling that into one flat, usable column name per column is a forward-fill: propagate
+each non-blank top-header cell rightward until the next non-blank one, then join it with
+the sub-header beneath it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import io
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+import pdfplumber
+
+
+def build_multirow_header_pdf():
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    col_widths = [70, 90, 80, 80]
+    row_height = 22
+    x0 = 72
+    y0 = height - 100
+    n_rows = 3
+    xs = [x0]
+    for w in col_widths:
+        xs.append(xs[-1] + w)
+    table_width = sum(col_widths)
+    c.setLineWidth(0.75)
+    for xline in xs:
+        c.line(xline, y0, xline, y0 - row_height * n_rows)
+    for r in range(n_rows + 1):
+        yline = y0 - row_height * r
+        c.line(x0, yline, x0 + table_width, yline)
+    c.setFont(&quot;Helvetica-Bold&quot;, 9)
+    c.drawString(xs[0] + 4, y0 - 15, &quot;CLAIM INFO&quot;)   # spans cols 0-1
+    c.drawString(xs[2] + 4, y0 - 15, &quot;RESERVE&quot;)       # spans cols 2-3
+    row2 = [&quot;ID&quot;, &quot;Type&quot;, &quot;Amount&quot;, &quot;Currency&quot;]
+    for j, cell in enumerate(row2):
+        c.drawString(xs[j] + 4, y0 - row_height - 15, cell)
+    c.setFont(&quot;Helvetica&quot;, 9)
+    data_row = [&quot;CLM-1001&quot;, &quot;Collision&quot;, &quot;4200&quot;, &quot;USD&quot;]
+    for j, cell in enumerate(data_row):
+        c.drawString(xs[j] + 4, y0 - 2 * row_height - 15, cell)
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf
+
+
+def flatten_multirow_header(header_row1, header_row2):
+    &quot;&quot;&quot;Forward-fill the top header row across its blank (merged) cells,
+    then join with the sub-header row into one flat column name per
+    column.&quot;&quot;&quot;
+    filled = []
+    last = &quot;&quot;
+    for cell in header_row1:
+        if cell and cell.strip():
+            last = cell.strip()
+        filled.append(last)
+    flat = []
+    for top, sub in zip(filled, header_row2):
+        name = f&quot;{top}_{sub}&quot;.strip(&quot;_&quot;).lower().replace(&quot; &quot;, &quot;_&quot;)
+        flat.append(name)
+    return flat
+
+
+pdf_buf = build_multirow_header_pdf()
+with pdfplumber.open(pdf_buf) as pdf:
+    table = pdf.pages[0].extract_tables()[0]
+
+print(&quot;raw extracted rows:&quot;)
+for row in table:
+    print(row)
+
+header_row1, header_row2, data_row = table
+columns = flatten_multirow_header(header_row1, header_row2)
+print(&quot;\nflattened columns:&quot;, columns)
+record = dict(zip(columns, data_row))
+print(&quot;record:&quot;, record)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>raw extracted rows:
+[&#x27;CLAIM INFO&#x27;, &#x27;&#x27;, &#x27;RESERVE&#x27;, &#x27;&#x27;]
+[&#x27;ID&#x27;, &#x27;Type&#x27;, &#x27;Amount&#x27;, &#x27;Currency&#x27;]
+[&#x27;CLM-1001&#x27;, &#x27;Collision&#x27;, &#x27;4200&#x27;, &#x27;USD&#x27;]
+
+flattened columns: [&#x27;claim_info_id&#x27;, &#x27;claim_info_type&#x27;, &#x27;reserve_amount&#x27;, &#x27;reserve_currency&#x27;]
+record: {&#x27;claim_info_id&#x27;: &#x27;CLM-1001&#x27;, &#x27;claim_info_type&#x27;: &#x27;Collision&#x27;, &#x27;reserve_amount&#x27;: &#x27;4200&#x27;, &#x27;reserve_currency&#x27;: &#x27;USD&#x27;}
+</code></pre><p><strong>Exercise:</strong>
+Build a 4-column header where the top header row spans <strong>three</strong> columns
+(<code>&quot;INCIDENT DETAIL&quot;</code> over <code>Date</code>/<code>Type</code>/<code>Location</code>) and the fourth column has its own
+unmerged header (<code>&quot;STATUS&quot;</code> over <code>Open/Closed</code>). Flatten it and produce the record.</p>
+<p><strong>Starting point:</strong> The <code>flatten_multirow_header(header_row1, header_row2)</code> function from this concept's Example, called with <code>header_row1 = [&quot;INCIDENT DETAIL&quot;, &quot;&quot;, &quot;&quot;, &quot;STATUS&quot;]</code>, <code>header_row2 = [&quot;Date&quot;, &quot;Type&quot;, &quot;Location&quot;, &quot;Open/Closed&quot;]</code>, and <code>data_row = [&quot;2026-08-14&quot;, &quot;Collision&quot;, &quot;Tel Aviv&quot;, &quot;Open&quot;]</code>.</p>
+<p>Expected output:</p>
+<pre><code>flattened columns: [&#x27;incident_detail_date&#x27;, &#x27;incident_detail_type&#x27;, &#x27;incident_detail_location&#x27;, &#x27;status_open/closed&#x27;]
+record: {&#x27;incident_detail_date&#x27;: &#x27;2026-08-14&#x27;, &#x27;incident_detail_type&#x27;: &#x27;Collision&#x27;, &#x27;incident_detail_location&#x27;: &#x27;Tel Aviv&#x27;, &#x27;status_open/closed&#x27;: &#x27;Open&#x27;}
+</code></pre><hr />
+<h3>Concept 3 — HTML-to-Markdown for LLM Consumption</h3>
+<p>Unstructured's <code>Table.metadata.text_as_html</code> is HTML — correct, unambiguous, and full of
+tokens an LLM prompt does not need to spend on. A <code>&lt;table&gt;&lt;tr&gt;&lt;td&gt;</code> structure converts
+losslessly to a GitHub-flavoured markdown table at a fraction of the character count, which
+matters directly at inference time: fewer tokens per table means more tables fit in a
+context window and a lower per-call cost.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from bs4 import BeautifulSoup
+
+# Stand-in for Unstructured&#x27;s own Table.metadata.text_as_html output --
+# same shape: a plain &lt;table&gt; with &lt;tr&gt;/&lt;td&gt;, no styling.
+text_as_html = &quot;&quot;&quot;
+&lt;table&gt;
+&lt;tr&gt;&lt;td&gt;Claim ID&lt;/td&gt;&lt;td&gt;Loss Type&lt;/td&gt;&lt;td&gt;Reserve&lt;/td&gt;&lt;td&gt;Status&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;CLM-1001&lt;/td&gt;&lt;td&gt;Collision&lt;/td&gt;&lt;td&gt;$4,200&lt;/td&gt;&lt;td&gt;Open&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;CLM-1002&lt;/td&gt;&lt;td&gt;Theft&lt;/td&gt;&lt;td&gt;$1,850&lt;/td&gt;&lt;td&gt;Closed&lt;/td&gt;&lt;/tr&gt;
+&lt;/table&gt;
+&quot;&quot;&quot;
+
+
+def html_table_to_markdown(html):
+    &quot;&quot;&quot;Convert a simple &lt;table&gt; (no rowspan/colspan) to a GitHub-flavoured
+    markdown table.&quot;&quot;&quot;
+    soup = BeautifulSoup(html, &quot;html.parser&quot;)
+    rows = [[td.get_text(strip=True) for td in tr.find_all(&quot;td&quot;)]
+            for tr in soup.find_all(&quot;tr&quot;)]
+    if not rows:
+        return &quot;&quot;
+    header, *body = rows
+    lines = [&quot;| &quot; + &quot; | &quot;.join(header) + &quot; |&quot;,
+             &quot;| &quot; + &quot; | &quot;.join([&quot;---&quot;] * len(header)) + &quot; |&quot;]
+    for row in body:
+        lines.append(&quot;| &quot; + &quot; | &quot;.join(row) + &quot; |&quot;)
+    return &quot;\n&quot;.join(lines)
+
+
+markdown = html_table_to_markdown(text_as_html)
+print(markdown)
+print()
+print(&quot;markdown chars:&quot;, len(markdown), &quot; html chars:&quot;, len(text_as_html))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>| Claim ID | Loss Type | Reserve | Status |
+| --- | --- | --- | --- |
+| CLM-1001 | Collision | $4,200 | Open |
+| CLM-1002 | Theft | $1,850 | Closed |
+
+markdown chars: 149  html chars: 238
+</code></pre><p><strong>Exercise:</strong>
+Add a fifth column, <code>&quot;Adjuster&quot;</code>, to the HTML table (one data row is enough) and confirm
+<code>html_table_to_markdown</code> handles the extra column without any code change.</p>
+<p><strong>Starting point:</strong> The <code>html_table_to_markdown(html)</code> function from this concept's Example, applied to <code>text_as_html</code> with a 5th <code>&lt;td&gt;Adjuster&lt;/td&gt;</code> added to the header row and one data row.</p>
+<p>Expected output:</p>
+<pre><code>| Claim ID | Loss Type | Reserve | Status | Adjuster |
+| --- | --- | --- | --- | --- |
+| CLM-2001 | Fire | $22,000 | Open | R. Fine |
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> A branch-scanned ACORD form rarely rules its table as cleanly as a
+generated PDF does. Faded toner breaks a grid line into dashes; <code>extract_tables()</code> then
+either misses the table entirely or splits one logical column into two. Treat &quot;zero tables
+found&quot; on a document that obviously has one as a parse failure requiring re-scan or
+manual entry, not as &quot;no table present.&quot;</p>
+<p><strong>Compliance angle:</strong> A loss-reserve figure ($4,200 vs $42,00) misread from a table is a
+financial-reporting error, not a cosmetic one. Row/column count assertions belong in the
+pipeline precisely because a silently-shifted column (Reserve values landing under the
+Status header after one merged-cell parse went wrong) produces numbers that look valid and
+are completely wrong.</p>
+<p><strong>What breaks in production:</strong> A table extractor tuned and tested against one insurer's
+ACORD template breaks the moment a second insurer's form uses a different column order or
+an extra merged header row. Table extraction logic needs a template identifier per
+document class, not one hard-coded column mapping for &quot;the claim form.&quot;</p>
+<hr />
+<h2 id="day-3">Day 3 — OCR Fallback and Scan Quality</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="08-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=QgoPaBe23ME" target="_blank" rel="noopener"><b>Tesseract OCR Python Tutorial for Beginners | Build ANPR System with Image Processing - Part 4</b><small>Raviteja Mulukuntla · 20:43</small></a></li><li><a href="https://www.youtube.com/watch?v=ADV-AjAXHdc" target="_blank" rel="noopener"><b>How to Preprocess Images for Text OCR in Python (OCR in Python Tutorials 02.02)</b><small>Python Tutorials for Digital Humanities · 53:24</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=tesseract%20OCR%20preprocessing%20deskew%20DPI%20accuracy%20python" target="_blank" rel="noopener">Search YouTube: tesseract OCR preprocessing deskew DPI accuracy python</a></p></div>
+<hr />
+<h3>Concept 1 — Detecting a Scanned Page</h3>
+<p>Before OCR can even be considered, the pipeline has to know a page needs it. A digitally
+generated PDF page has a text layer <code>pdfplumber</code> (or any extractor) can read directly; a
+scanned or faxed page is a picture with no text layer at all — <code>extract_text()</code> returns
+an empty or near-empty string, not an error. Counting extractable characters per page is
+the cheapest possible routing signal: below a threshold, the page has no text layer to
+extract and must go through OCR instead.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import io
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.utils import ImageReader
+from PIL import Image, ImageDraw
+import pdfplumber
+
+
+def render_text_as_image(text_lines, size=(600, 200)):
+    &quot;&quot;&quot;Render text into a raster image -- the way a scanned claim form
+    arrives: pixels only, no text layer for a PDF text extractor to find.&quot;&quot;&quot;
+    img = Image.new(&quot;L&quot;, size, color=255)
+    draw = ImageDraw.Draw(img)
+    y = 10
+    for line in text_lines:
+        draw.text((10, y), line, fill=0)
+        y += 24
+    return img
+
+
+def build_mixed_pdf():
+    &quot;&quot;&quot;Page 1: a real digital text layer. Page 2: the same content
+    rendered as a picture and dropped onto the page as an image --
+    simulating a scanned document with zero extractable characters.&quot;&quot;&quot;
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    c.setFont(&quot;Helvetica&quot;, 12)
+    c.drawString(72, height - 100, &quot;Claim CLM-2001: digital intake form, text layer present.&quot;)
+    c.showPage()
+    img = render_text_as_image([
+        &quot;Claim CLM-2002: faxed intake form,&quot;,
+        &quot;scanned at the branch, no text layer.&quot;,
+    ])
+    c.drawImage(ImageReader(img), 72, height - 300, width=300, height=100)
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf
+
+
+def needs_ocr(page, min_chars=20):
+    &quot;&quot;&quot;Below min_chars of extractable text, the page is image-only and
+    must go through the OCR path rather than direct text extraction.&quot;&quot;&quot;
+    text = page.extract_text() or &quot;&quot;
+    return len(text.strip()) &lt; min_chars, len(text.strip())
+
+
+pdf_buf = build_mixed_pdf()
+with pdfplumber.open(pdf_buf) as pdf:
+    for i, page in enumerate(pdf.pages, start=1):
+        route_to_ocr, char_count = needs_ocr(page)
+        route = &quot;OCR fallback&quot; if route_to_ocr else &quot;direct text extraction&quot;
+        print(f&quot;page {i}: extractable_chars={char_count:&gt;3}  route -&gt; {route}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>page 1: extractable_chars= 56  route -&gt; direct text extraction
+page 2: extractable_chars=  0  route -&gt; OCR fallback
+</code></pre><p><strong>REAL MODE — requires the Tesseract binary:</strong> once a page is routed to OCR, the real
+recognition call is <code>pytesseract.image_to_string(page_image, lang=&quot;eng&quot;)</code>, run against the
+rendered page image (not the PDF's absent text layer). Concept 3 below covers the
+per-word confidence output <code>pytesseract.image_to_data(...)</code> provides alongside the text.</p>
+<p><strong>Exercise:</strong>
+Build a 3-page document: page 1 has a full digital sentence, page 2 is a rendered image
+(no text layer), and page 3 has only the 2-character digital string <code>&quot;OK&quot;</code> — an edge case
+between &quot;clearly has text&quot; and &quot;clearly scanned.&quot; Route all three with <code>min_chars=10</code>.</p>
+<p><strong>Starting point:</strong> The <code>render_text_as_image(...)</code>, <code>build_mixed_pdf()</code>-style construction, and <code>needs_ocr(page, min_chars=10)</code> from this concept's Example, extended to a 3-page document.</p>
+<p>Expected output:</p>
+<pre><code>page 1: extractable_chars= 61  route -&gt; direct text extraction
+page 2: extractable_chars=  0  route -&gt; OCR fallback
+page 3: extractable_chars=  2  route -&gt; OCR fallback
+</code></pre><p>The 2-character page routes to OCR under the same rule that correctly caught the blank
+scanned page — a real threshold has to accept that some genuinely-digital, very-short
+pages will also route to OCR unnecessarily, and that a false positive here is cheap
+compared to a false negative that skips OCR on a real scan.</p>
+<hr />
+<h3>Concept 2 — DPI, Deskew and the Preprocessing Pipeline</h3>
+<p>Two preprocessing steps decide whether Tesseract even has a fair chance: resolution and
+rotation. Below roughly 300 DPI, a typical body-text font resolves to too few pixels tall
+for reliable glyph shapes — this is arithmetic, not a rule of thumb, since a point size and
+a DPI directly determine a pixel height. Rotation (skew) is the second: a page scanned
+even a few degrees off-level breaks the row-by-row assumption OCR engines rely on, and has
+to be corrected before recognition, not after.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+from PIL import Image, ImageDraw
+
+# --- Part A: DPI arithmetic ---
+def px_height_for_font(point_size, dpi):
+    return point_size * dpi / 72  # 72 points per inch is the PDF unit
+
+for dpi in (150, 200, 300):
+    print(f&quot;10pt font at {dpi:&gt;3} DPI -&gt; {px_height_for_font(10, dpi):5.1f} px tall&quot;)
+
+# --- Part B: skew estimation by projection profile ---
+# Rotate candidate angles, sum pixel darkness per row, and pick the angle
+# whose row-sum profile has the highest variance -- text rows line up
+# into sharp peaks only when the image is level.
+def make_text_rows_image(size=(300, 150), n_rows=6):
+    img = Image.new(&quot;L&quot;, size, color=255)
+    draw = ImageDraw.Draw(img)
+    for r in range(n_rows):
+        y = 15 + r * 20
+        draw.line([(10, y), (280, y)], fill=0, width=4)
+    return img
+
+
+def estimate_skew_angle(img, angle_range=(-10, 10), step=0.5):
+    best_angle, best_score = 0.0, -1.0
+    angles = np.arange(angle_range[0], angle_range[1] + step, step)
+    for angle in angles:
+        rotated = img.rotate(angle, expand=False, fillcolor=255)
+        rot_arr = np.array(rotated.convert(&quot;L&quot;))
+        darkness = 255 - rot_arr
+        row_sums = darkness.sum(axis=1)
+        score = row_sums.var()
+        if score &gt; best_score:
+            best_score, best_angle = score, angle
+    return best_angle
+
+
+base = make_text_rows_image()
+true_angle = 4.0
+skewed = base.rotate(true_angle, expand=False, fillcolor=255)
+estimated = estimate_skew_angle(skewed)
+print(f&quot;\ntrue skew angle applied  : {true_angle} degrees&quot;)
+print(f&quot;estimated correction angle: {estimated} degrees&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>10pt font at 150 DPI -&gt;  20.8 px tall
+10pt font at 200 DPI -&gt;  27.8 px tall
+10pt font at 300 DPI -&gt;  41.7 px tall
+
+true skew angle applied  : 4.0 degrees
+estimated correction angle: -4.0 degrees
+</code></pre><p>The estimated angle is the <em>correction</em> needed, not the skew itself: the image was
+deliberately skewed by +4 degrees, and the projection-profile search correctly finds that
+rotating it by -4 degrees undoes that skew and restores the sharpest row peaks. A real
+deskew step would apply that -4-degree rotation before handing the page to Tesseract.</p>
+<p><strong>Exercise:</strong>
+Repeat the skew estimation with <code>true_angle = -6.0</code> (the opposite rotation direction) and
+confirm the estimated correction angle is the exact negation.</p>
+<p><strong>Starting point:</strong> The <code>make_text_rows_image()</code> and <code>estimate_skew_angle(img, angle_range=(-10, 10), step=0.5)</code> functions from this concept's Example, applied to a page rotated by <code>true_angle = -6.0</code>.</p>
+<p>Expected output:</p>
+<pre><code>true skew angle applied  : -6.0 degrees
+estimated correction angle: 6.0 degrees
+</code></pre><hr />
+<h3>Concept 3 — Per-Word Confidence as a Routing Signal</h3>
+<p>Tesseract does not just return text — <code>pytesseract.image_to_data(...)</code> returns a
+per-word confidence score (0-100). That score is the real routing signal for the last
+decision in this pipeline: whether to accept an OCR result, or send the page to a
+quarantine queue for a human to key in by hand. Two independent thresholds matter, not
+one: a low <em>average</em> confidence across the page catches broadly poor scan quality, while a
+single very-low-confidence word — even on an otherwise clean page — can be exactly the
+claim amount or policy number that must not be silently wrong.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+# Tesseract&#x27;s pytesseract.image_to_data(...) returns a per-word confidence
+# (0-100, or -1 for non-text regions) alongside each recognized word. The
+# numbers below stand in for that real output shape -- what matters here
+# is the routing logic built on top of confidence scores, which is
+# identical whether the scores come from a real Tesseract call (REAL
+# MODE, no engine in this sandbox) or this stand-in list.
+@dataclasses.dataclass
+class OcrWord:
+    text: str
+    confidence: float
+
+
+def route_ocr_result(words, mean_floor=75.0, hard_floor=40.0):
+    &quot;&quot;&quot;Quarantine instead of silently accepting a partial OCR result.
+    Either the page average drops below mean_floor, or any single word
+    falls below hard_floor -- one badly-recognized field (a claim amount)
+    can poison a downstream number even when the page average looks fine.&quot;&quot;&quot;
+    if not words:
+        return &quot;quarantine&quot;, &quot;no words recognized&quot;
+    confidences = [w.confidence for w in words]
+    mean_conf = sum(confidences) / len(confidences)
+    min_conf = min(confidences)
+    if min_conf &lt; hard_floor:
+        return &quot;quarantine&quot;, f&quot;a word scored {min_conf:.0f} (&lt; hard floor {hard_floor:.0f})&quot;
+    if mean_conf &lt; mean_floor:
+        return &quot;quarantine&quot;, f&quot;mean confidence {mean_conf:.1f} (&lt; floor {mean_floor:.1f})&quot;
+    return &quot;accept&quot;, f&quot;mean confidence {mean_conf:.1f}&quot;
+
+
+pages = {
+    &quot;clean_scan&quot;: [OcrWord(&quot;CLM-2002&quot;, 96), OcrWord(&quot;Collision&quot;, 93), OcrWord(&quot;4200&quot;, 91)],
+    &quot;smudged_amount&quot;: [OcrWord(&quot;CLM-2003&quot;, 94), OcrWord(&quot;Collision&quot;, 90), OcrWord(&quot;42O0&quot;, 31)],
+    &quot;faded_fax&quot;: [OcrWord(&quot;CLM-2004&quot;, 68), OcrWord(&quot;Colli5ion&quot;, 61), OcrWord(&quot;42OO&quot;, 58)],
+}
+
+for page_id, words in pages.items():
+    decision, reason = route_ocr_result(words)
+    print(f&quot;{page_id:&lt;16} -&gt; {decision:&lt;10} ({reason})&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>clean_scan       -&gt; accept     (mean confidence 93.3)
+smudged_amount   -&gt; quarantine (a word scored 31 (&lt; hard floor 40))
+faded_fax        -&gt; quarantine (mean confidence 62.3 (&lt; floor 75.0))
+</code></pre><p><strong>Exercise:</strong>
+Add a fourth page, <code>single_bad_field</code> (<code>OcrWord(&quot;CLM-2005&quot;, 98)</code>, <code>OcrWord(&quot;Theft&quot;, 95)</code>,
+<code>OcrWord(&quot;$1?00&quot;, 47)</code>), and tighten <code>hard_floor</code> to <code>50.0</code>. Confirm which pages now
+quarantine and why.</p>
+<p><strong>Starting point:</strong> The <code>route_ocr_result(words, mean_floor=75.0, hard_floor=40.0)</code> function from this concept's Example, called with <code>hard_floor=50.0</code> against the <code>pages</code> dict extended with <code>single_bad_field</code>.</p>
+<p>Expected output:</p>
+<pre><code>clean_scan         -&gt; accept     (mean confidence 93.3)
+smudged_amount     -&gt; quarantine (a word scored 45 (&lt; hard floor 50))
+faded_fax          -&gt; quarantine (mean confidence 62.3 (&lt; floor 75.0))
+single_bad_field   -&gt; quarantine (a word scored 47 (&lt; hard floor 50))
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> Branch-scanned intake forms are frequently faxed rather than scanned
+directly, and fax transmission itself degrades quality (dropped rows, added noise) on top
+of whatever the original scan quality was. A DPI/deskew pipeline built and tested against
+a flatbed scanner's output can still fail badly on a faxed page, because fax compression
+introduces artifacts a flatbed scan never has.</p>
+<p><strong>Compliance angle:</strong> Silently accepting a low-confidence OCR read on a claim amount or
+policy number is a data-quality control failure with a direct financial consequence. The
+quarantine queue is the control — not a nice-to-have UX feature, the actual mechanism by
+which a human reviews exactly the documents the system could not confidently read, rather
+than the system guessing and moving on.</p>
+<p><strong>What breaks in production:</strong> A confidence threshold tuned once, on a clean sample batch,
+and never revisited. Scan quality drifts — a branch replaces its scanner, a new fax
+gateway compresses harder — and a threshold that correctly quarantined 2% of pages a year
+ago silently accepts far more bad reads today because nobody re-measured it against
+current input.</p>
+<hr />
+<h2 id="day-4">Day 4 — LlamaParse and Parser Selection</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="08-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=5Ahdg1DkPMc" target="_blank" rel="noopener"><b>A quick walk-through of LlamaParse: simplified document parsing for generative AI applications</b><small>LlamaIndex · 15:23</small></a></li><li><a href="https://www.youtube.com/watch?v=7DJzHncUlpI" target="_blank" rel="noopener"><b>LlamaParse: Convert PDF (with tables) to Markdown</b><small>Alejandro AO · 15:55</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LlamaParse%20document%20parsing%20markdown%20LlamaIndex%20tutorial" target="_blank" rel="noopener">Search YouTube: LlamaParse document parsing markdown LlamaIndex tutorial</a></p></div>
+<hr />
+<h3>Concept 1 — LlamaParse's Markdown-Native Output</h3>
+<p>LlamaParse takes a different design stance than Unstructured: instead of returning typed
+elements, it returns the whole document as markdown directly, with tables already rendered
+as markdown tables and a <code>parsing_instruction</code> parameter that steers extraction toward a
+specific document shape (&quot;this is a claims intake form; extract the itemized damage table
+as a markdown table&quot;). Because its output is markdown from the start, the same
+<code>html_table_to_markdown</code> conversion built in Day 2 Concept 3 is exactly the shape
+LlamaParse hands you natively — no separate HTML step in between.</p>
+<p><strong>REAL MODE — requires the LlamaParse API (network call, real API key):</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_parse import LlamaParse
+
+parser = LlamaParse(
+    api_key=&quot;llx-...&quot;,
+    result_type=&quot;markdown&quot;,
+    parsing_instruction=(
+        &quot;This is an auto insurance claim intake form. &quot;
+        &quot;Extract the itemized damage table as a markdown table.&quot;
+    ),
+)
+documents = parser.load_data(&quot;claim_form.pdf&quot;)
+print(documents[0].text)
+
+# Expected shape of the output (not run -- illustrative only):
+# # AUTO CLAIM INTAKE FORM
+# The claimant reported ...
+# | Item | Cost |
+# | --- | --- |
+# | Front bumper replacement | $1,200 |
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Example:</strong> (reusing <code>html_table_to_markdown</code> from Day 2 Concept 3 to build the same
+markdown shape from a locally-extracted table)</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from bs4 import BeautifulSoup
+
+# Reusing html_table_to_markdown from Day 2 Concept 3
+def html_table_to_markdown(html):
+    soup = BeautifulSoup(html, &quot;html.parser&quot;)
+    rows = [[td.get_text(strip=True) for td in tr.find_all(&quot;td&quot;)]
+            for tr in soup.find_all(&quot;tr&quot;)]
+    if not rows:
+        return &quot;&quot;
+    header, *body = rows
+    lines = [&quot;| &quot; + &quot; | &quot;.join(header) + &quot; |&quot;,
+             &quot;| &quot; + &quot; | &quot;.join([&quot;---&quot;] * len(header)) + &quot; |&quot;]
+    for row in body:
+        lines.append(&quot;| &quot; + &quot; | &quot;.join(row) + &quot; |&quot;)
+    return &quot;\n&quot;.join(lines)
+
+
+policy_table_html = &quot;&quot;&quot;
+&lt;table&gt;
+&lt;tr&gt;&lt;td&gt;Coverage&lt;/td&gt;&lt;td&gt;Limit&lt;/td&gt;&lt;td&gt;Deductible&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;Collision&lt;/td&gt;&lt;td&gt;$50,000&lt;/td&gt;&lt;td&gt;$500&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;Comprehensive&lt;/td&gt;&lt;td&gt;$50,000&lt;/td&gt;&lt;td&gt;$250&lt;/td&gt;&lt;/tr&gt;
+&lt;/table&gt;
+&quot;&quot;&quot;
+print(html_table_to_markdown(policy_table_html))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>| Coverage | Limit | Deductible |
+| --- | --- | --- |
+| Collision | $50,000 | $500 |
+| Comprehensive | $50,000 | $250 |
+</code></pre><p><strong>Exercise:</strong>
+Apply the same reused <code>html_table_to_markdown</code> function to a two-row <code>Coverage</code>/<code>Limit</code>
+table with no <code>Deductible</code> column at all, confirming the function makes no assumption
+about a fixed column count.</p>
+<p><strong>Starting point:</strong> The <code>html_table_to_markdown(html)</code> function from this concept's Example, applied to a fresh <code>&lt;table&gt;</code> string with only <code>Coverage</code> and <code>Limit</code> columns and one data row (<code>&quot;Liability&quot;</code>, <code>&quot;$100,000&quot;</code>).</p>
+<p>Expected output:</p>
+<pre><code>| Coverage | Limit |
+| --- | --- |
+| Liability | $100,000 |
+</code></pre><hr />
+<h3>Concept 2 — API Cost vs Local Compute</h3>
+<p>LlamaParse bills per page through a hosted API; Unstructured's <code>hi_res</code> strategy runs
+locally, which trades a per-call cost for a fixed infrastructure cost (a server, whether or
+not it is busy). At low volume, paying only for what you use tends to be cheaper. At high
+enough volume, the fixed cost of running your own compute amortizes below the accumulated
+per-page API cost. The crossover point is not a rule of thumb — it is arithmetic that
+depends on your actual page volume and both providers' actual rates.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Illustrative unit-cost parameters (not measured, not scraped from any
+# vendor page today) -- the arithmetic is what this concept teaches;
+# swap in the real published rate before using this for an actual budget.
+def monthly_cost(pages_per_month, api_cost_per_page=0.003, local_pages_per_hour=1200,
+                  compute_cost_per_hour=0.35, local_fixed_monthly=150.0):
+    api_total = pages_per_month * api_cost_per_page
+    local_hours = pages_per_month / local_pages_per_hour
+    local_total = local_fixed_monthly + local_hours * compute_cost_per_hour
+    return api_total, local_total
+
+
+for pages in (10_000, 100_000, 1_000_000):
+    api_cost, local_cost = monthly_cost(pages)
+    cheaper = &quot;API&quot; if api_cost &lt; local_cost else &quot;local hi_res&quot;
+    print(f&quot;{pages:&gt;9,} pages/mo  api=${api_cost:8.2f}  local=${local_cost:8.2f}  cheaper: {cheaper}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>   10,000 pages/mo  api=$   30.00  local=$  152.92  cheaper: API
+  100,000 pages/mo  api=$  300.00  local=$  179.17  cheaper: local hi_res
+1,000,000 pages/mo  api=$ 3000.00  local=$  441.67  cheaper: local hi_res
+</code></pre><p><strong>Exercise:</strong>
+Recompute the same table with a cheaper API rate, <code>api_cost_per_page=0.0015</code>, and identify
+where the crossover point moves to.</p>
+<p><strong>Starting point:</strong> The <code>monthly_cost(...)</code> function from this concept's Example, called at <code>api_cost_per_page=0.0015</code> (all other parameters unchanged) across the same three volumes.</p>
+<p>Expected output:</p>
+<pre><code>   10,000 pages/mo  api=$   15.00  local=$  152.92  cheaper: API
+  100,000 pages/mo  api=$  150.00  local=$  179.17  cheaper: API
+1,000,000 pages/mo  api=$ 1500.00  local=$  441.67  cheaper: local hi_res
+</code></pre><p>Halving the API rate pushes the crossover past 100,000 pages/month — at the original rate
+the API was already more expensive there.</p>
+<hr />
+<h3>Concept 3 — Parser Chosen Per Document Class, Not Globally</h3>
+<p>Neither Unstructured nor LlamaParse is uniformly &quot;the right tool.&quot; A pipeline handling
+multiple document classes should choose per class: a scanned document with no text layer
+needs an OCR-capable path regardless of which tool provides it; a short, table-heavy
+digital document is worth the accuracy of a layout model; a long digital document with no
+tables gains nothing from either and should take the cheapest path available.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def choose_parser(has_extractable_text, has_ruled_table, page_count):
+    &quot;&quot;&quot;Route each document to the cheapest parser that can actually
+    handle it, rather than running every document through the most
+    expensive path &#x27;to be safe&#x27;.&quot;&quot;&quot;
+    if not has_extractable_text:
+        return &quot;ocr_only&quot;
+    if has_ruled_table and page_count &lt;= 5:
+        return &quot;hi_res&quot;
+    return &quot;fast&quot;
+
+
+docs = [
+    {&quot;name&quot;: &quot;faxed_intake.pdf&quot;, &quot;has_extractable_text&quot;: False, &quot;has_ruled_table&quot;: False, &quot;page_count&quot;: 1},
+    {&quot;name&quot;: &quot;loss_run_table.pdf&quot;, &quot;has_extractable_text&quot;: True, &quot;has_ruled_table&quot;: True, &quot;page_count&quot;: 2},
+    {&quot;name&quot;: &quot;policy_wording.pdf&quot;, &quot;has_extractable_text&quot;: True, &quot;has_ruled_table&quot;: False, &quot;page_count&quot;: 40},
+]
+for doc in docs:
+    parser = choose_parser(doc[&quot;has_extractable_text&quot;], doc[&quot;has_ruled_table&quot;], doc[&quot;page_count&quot;])
+    print(f&quot;{doc[&#x27;name&#x27;]:&lt;20} -&gt; {parser}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>faxed_intake.pdf     -&gt; ocr_only
+loss_run_table.pdf   -&gt; hi_res
+policy_wording.pdf   -&gt; fast
+</code></pre><p><strong>Exercise:</strong>
+Add a fourth document, <code>scanned_loss_run.pdf</code> (<code>has_extractable_text=False</code>,
+<code>has_ruled_table=True</code>, <code>page_count=2</code>) — a scanned version of a document that would
+otherwise route to <code>hi_res</code>. Confirm which parser it actually routes to and why.</p>
+<p><strong>Starting point:</strong> The <code>choose_parser(...)</code> function and <code>docs</code> list from this concept's Example, with <code>scanned_loss_run.pdf</code> appended.</p>
+<p>Expected output:</p>
+<pre><code>faxed_intake.pdf       -&gt; ocr_only
+loss_run_table.pdf     -&gt; hi_res
+policy_wording.pdf     -&gt; fast
+scanned_loss_run.pdf   -&gt; ocr_only
+</code></pre><p>The missing text layer routes it to <code>ocr_only</code> even though it has a ruled table — the same
+priority order Day 1 Concept 3's exercise established: a scan overrides a table-structure
+preference, because <code>hi_res</code>'s reading-order model still assumes a text layer exists to
+correlate against.</p>
+<hr />
+<h3>Concept 4 — Deterministic Re-Parse and Caching</h3>
+<p>Re-parsing the same document under the same configuration should hit a cache, not
+re-trigger an API call or a slow <code>hi_res</code> pass. The cache key has to include both the
+document's content and the exact parser configuration — hashing content alone would
+incorrectly return a cached <code>&quot;fast&quot;</code> result when the caller actually asked for <code>&quot;hi_res&quot;</code>
+this time.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+
+def cache_key(file_bytes, parser_config):
+    &quot;&quot;&quot;Hash both the document content and the exact config so a config
+    change (e.g. strategy=&#x27;hi_res&#x27; -&gt; &#x27;fast&#x27;) correctly misses instead of
+    returning a stale result parsed under a different strategy.&quot;&quot;&quot;
+    config_str = &quot;&amp;&quot;.join(f&quot;{k}={v}&quot; for k, v in sorted(parser_config.items()))
+    digest_input = file_bytes + config_str.encode()
+    return hashlib.sha256(digest_input).hexdigest()[:16]
+
+
+doc_bytes = b&quot;%PDF-1.4 example claim form bytes&quot;
+key_a = cache_key(doc_bytes, {&quot;strategy&quot;: &quot;hi_res&quot;, &quot;infer_table_structure&quot;: True})
+key_b = cache_key(doc_bytes, {&quot;strategy&quot;: &quot;fast&quot;, &quot;infer_table_structure&quot;: True})
+key_c = cache_key(doc_bytes, {&quot;strategy&quot;: &quot;hi_res&quot;, &quot;infer_table_structure&quot;: True})
+print(f&quot;key (hi_res)      : {key_a}&quot;)
+print(f&quot;key (fast)        : {key_b}&quot;)
+print(f&quot;key (hi_res again): {key_c}&quot;)
+print(&quot;same config -&gt; same key:&quot;, key_a == key_c)
+print(&quot;different config -&gt; different key:&quot;, key_a != key_b)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>key (hi_res)      : 719339987b64c28f
+key (fast)        : dcf72bd104adf898
+key (hi_res again): 719339987b64c28f
+same config -&gt; same key: True
+different config -&gt; different key: True
+</code></pre><p><strong>Exercise:</strong>
+Compute cache keys for the same document bytes under two OCR-language configurations —
+<code>{&quot;strategy&quot;: &quot;ocr_only&quot;, &quot;ocr_languages&quot;: &quot;eng&quot;}</code> and <code>{&quot;strategy&quot;: &quot;ocr_only&quot;, &quot;ocr_languages&quot;: &quot;eng+heb&quot;}</code> — and confirm they produce different keys.</p>
+<p><strong>Starting point:</strong> The <code>cache_key(file_bytes, parser_config)</code> function from this concept's Example, applied to <code>doc_bytes</code> with the two <code>ocr_languages</code> configs above.</p>
+<p>Expected output:</p>
+<pre><code>key (ocr_languages=eng)     : b3e451d85b3cbafa
+key (ocr_languages=eng+heb) : 030e211cefcc0d4a
+different languages -&gt; different key: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> A vendor's hosted parsing API (LlamaParse included) may be entirely off
+the table under a data-residency requirement that customer documents cannot leave a
+specific country or leave the institution's own network at all. That constraint decides
+the parser choice before cost ever enters the conversation — the cheapest option on paper
+is not available when it requires an external network call.</p>
+<p><strong>Compliance angle:</strong> A deterministic, cached parse result is also an auditable one — the
+same document under the same configuration produces the same output every time, which
+matters when a regulator asks how a specific figure was extracted from a specific source
+document months after the fact. A non-deterministic pipeline (a hosted API whose model
+version changes underneath you) cannot make that guarantee without pinning a model
+version explicitly.</p>
+<p><strong>What breaks in production:</strong> Choosing LlamaParse for its accuracy on complex documents
+without checking whether the account's data-processing agreement actually covers the
+document classes being sent to it. A parser choice made purely on quality and cost, with
+the compliance constraint discovered afterward, is a rebuild, not a config change.</p>
+<hr />
+<h2 id="day-5">Day 5 — A Parse Quality Harness</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="08-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=zguxPRmFzxw" target="_blank" rel="noopener"><b>How to Evaluate Document Extraction</b><small>LangChain · 25:52</small></a></li><li><a href="https://www.youtube.com/watch?v=J872emnevQU" target="_blank" rel="noopener"><b>OmniExtractBench Explained: Open-Source Benchmark for AI Document Extraction</b><small>Micro Learning · 8:33</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=document%20extraction%20accuracy%20evaluation%20ground%20truth%20field%20level" target="_blank" rel="noopener">Search YouTube: document extraction accuracy evaluation ground truth field level</a></p></div>
+<hr />
+<h3>Concept 1 — Gold Set and Field-Level Recall/Precision</h3>
+<p>A parsing pipeline cannot be trusted on &quot;it looked right when I checked one document.&quot; The
+real check is a small hand-labeled gold set — roughly 20 documents with known-correct
+field values — scored field by field: recall (did the parser surface a value at all,
+whether right or wrong) and precision (of the values it did surface, how many were
+exactly correct). The two numbers separate two different failure modes: a low-recall
+field is being missed, a low-precision field is being extracted wrong.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>gold_set = [
+    {&quot;doc&quot;: &quot;clm_1001.pdf&quot;, &quot;gold&quot;: {&quot;claim_id&quot;: &quot;CLM-1001&quot;, &quot;reserve&quot;: &quot;4200&quot;, &quot;status&quot;: &quot;Open&quot;},
+     &quot;extracted&quot;: {&quot;claim_id&quot;: &quot;CLM-1001&quot;, &quot;reserve&quot;: &quot;4200&quot;, &quot;status&quot;: &quot;Open&quot;}},
+    {&quot;doc&quot;: &quot;clm_1002.pdf&quot;, &quot;gold&quot;: {&quot;claim_id&quot;: &quot;CLM-1002&quot;, &quot;reserve&quot;: &quot;1850&quot;, &quot;status&quot;: &quot;Closed&quot;},
+     &quot;extracted&quot;: {&quot;claim_id&quot;: &quot;CLM-1002&quot;, &quot;reserve&quot;: &quot;1850&quot;, &quot;status&quot;: None}},   # status missed
+    {&quot;doc&quot;: &quot;clm_1003.pdf&quot;, &quot;gold&quot;: {&quot;claim_id&quot;: &quot;CLM-1003&quot;, &quot;reserve&quot;: &quot;9600&quot;, &quot;status&quot;: &quot;Open&quot;},
+     &quot;extracted&quot;: {&quot;claim_id&quot;: &quot;CLM-1003&quot;, &quot;reserve&quot;: &quot;9600O&quot;, &quot;status&quot;: &quot;Open&quot;}},  # OCR digit/letter confusion
+    {&quot;doc&quot;: &quot;clm_1004.pdf&quot;, &quot;gold&quot;: {&quot;claim_id&quot;: &quot;CLM-1004&quot;, &quot;reserve&quot;: &quot;3100&quot;, &quot;status&quot;: &quot;Open&quot;},
+     &quot;extracted&quot;: {&quot;claim_id&quot;: &quot;CLM-1004&quot;, &quot;reserve&quot;: &quot;3100&quot;, &quot;status&quot;: &quot;Open&quot;}},
+]
+
+
+def field_level_scores(records):
+    &quot;&quot;&quot;recall = fraction of gold values the parser surfaced at all;
+    precision = fraction of surfaced (non-null) values that exactly
+    match gold.&quot;&quot;&quot;
+    fields = records[0][&quot;gold&quot;].keys()
+    scores = {}
+    for field in fields:
+        surfaced = correct = present_in_gold = 0
+        for rec in records:
+            gold_val = rec[&quot;gold&quot;][field]
+            ext_val = rec[&quot;extracted&quot;].get(field)
+            present_in_gold += 1
+            if ext_val is not None:
+                surfaced += 1
+                if ext_val == gold_val:
+                    correct += 1
+        recall = surfaced / present_in_gold
+        precision = correct / surfaced if surfaced else 0.0
+        scores[field] = {&quot;recall&quot;: round(recall, 3), &quot;precision&quot;: round(precision, 3)}
+    return scores
+
+
+for field, s in field_level_scores(gold_set).items():
+    print(f&quot;{field:&lt;10} recall={s[&#x27;recall&#x27;]:.3f}  precision={s[&#x27;precision&#x27;]:.3f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>claim_id   recall=1.000  precision=1.000
+reserve    recall=1.000  precision=0.750
+status     recall=0.750  precision=1.000
+</code></pre><p><strong>Exercise:</strong>
+Add a fourth gold-set field, <code>&quot;adjuster&quot;</code>, to all four records, with one record's
+extracted adjuster name misspelled (<code>&quot;M. Klatz&quot;</code> extracted against gold <code>&quot;M. Katz&quot;</code>).
+Recompute field-level scores across all four fields.</p>
+<p><strong>Starting point:</strong> The <code>field_level_scores(records)</code> function from this concept's Example, applied to <code>gold_set</code> with <code>&quot;adjuster&quot;</code> added to every record's <code>gold</code> and <code>extracted</code> dict (one record's extracted value deliberately wrong).</p>
+<p>Expected output:</p>
+<pre><code>claim_id   recall=1.000  precision=1.000
+reserve    recall=1.000  precision=0.750
+status     recall=0.750  precision=1.000
+adjuster   recall=1.000  precision=0.750
+</code></pre><hr />
+<h3>Concept 2 — Failure Taxonomy</h3>
+<p>A raw &quot;N documents failed&quot; count tells you nothing about what to fix. Tagging each failure
+with a specific cause — rotated scan, handwriting, multi-column layout, a stamped overlay
+covering text — turns a pile of failures into a prioritized backlog: if 40% of failures are
+<code>rotated_scan</code>, the highest-leverage fix is a deskew step, not a better OCR model.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import collections
+
+failure_log = [
+    {&quot;doc&quot;: &quot;clm_2001.pdf&quot;, &quot;failure&quot;: &quot;rotated_scan&quot;},
+    {&quot;doc&quot;: &quot;clm_2002.pdf&quot;, &quot;failure&quot;: &quot;multi_column&quot;},
+    {&quot;doc&quot;: &quot;clm_2003.pdf&quot;, &quot;failure&quot;: &quot;handwriting&quot;},
+    {&quot;doc&quot;: &quot;clm_2004.pdf&quot;, &quot;failure&quot;: &quot;rotated_scan&quot;},
+    {&quot;doc&quot;: &quot;clm_2005.pdf&quot;, &quot;failure&quot;: &quot;stamped_overlay&quot;},
+    {&quot;doc&quot;: &quot;clm_2006.pdf&quot;, &quot;failure&quot;: &quot;multi_column&quot;},
+    {&quot;doc&quot;: &quot;clm_2007.pdf&quot;, &quot;failure&quot;: &quot;rotated_scan&quot;},
+]
+tally = collections.Counter(f[&quot;failure&quot;] for f in failure_log)
+for failure_type, count in tally.most_common():
+    print(f&quot;{failure_type:&lt;16} {count}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>rotated_scan     3
+multi_column     2
+handwriting      1
+stamped_overlay  1
+</code></pre><p><strong>Exercise:</strong>
+Add three more failures, all tagged <code>&quot;handwriting&quot;</code>, to the log and recompute the tally,
+confirming <code>handwriting</code> becomes the leading failure category.</p>
+<p><strong>Starting point:</strong> The <code>failure_log</code> list from this concept's Example, with three more <code>{&quot;doc&quot;: ..., &quot;failure&quot;: &quot;handwriting&quot;}</code> entries appended, and the same <code>collections.Counter</code> tally.</p>
+<p>Expected output:</p>
+<pre><code>handwriting      4
+rotated_scan     3
+multi_column     2
+stamped_overlay  1
+</code></pre><hr />
+<h3>Concept 3 — Quarantine Queue, Not Silent Partial Output</h3>
+<p>The final decision in the pipeline is the same shape as Day 3's OCR confidence routing,
+applied one level up: after parsing and field extraction, a record with any missing or
+clearly malformed required field goes to a quarantine queue for human review, rather than
+being upserted downstream with a silent gap or a wrong value baked into it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def quality_gate(record, required_fields=(&quot;claim_id&quot;, &quot;reserve&quot;, &quot;status&quot;)):
+    &quot;&quot;&quot;A record with a missing OR malformed required field is quarantined
+    rather than upserted with a gap silently left in it.&quot;&quot;&quot;
+    missing = [f for f in required_fields if record[&quot;extracted&quot;].get(f) is None]
+    malformed = [f for f in required_fields
+                 if record[&quot;extracted&quot;].get(f) is not None
+                 and f == &quot;reserve&quot; and not record[&quot;extracted&quot;][f].isdigit()]
+    if missing or malformed:
+        return &quot;quarantine&quot;, missing, malformed
+    return &quot;accept&quot;, [], []
+
+
+for rec in gold_set:
+    decision, missing, malformed = quality_gate(rec)
+    print(f&quot;{rec[&#x27;doc&#x27;]:&lt;14} -&gt; {decision:&lt;10} missing={missing} malformed={malformed}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>clm_1001.pdf   -&gt; accept     missing=[] malformed=[]
+clm_1002.pdf   -&gt; quarantine missing=[&#x27;status&#x27;] malformed=[]
+clm_1003.pdf   -&gt; quarantine missing=[] malformed=[&#x27;reserve&#x27;]
+clm_1004.pdf   -&gt; accept     missing=[] malformed=[]
+</code></pre><p><strong>Exercise:</strong>
+Extend <code>quality_gate</code>'s <code>required_fields</code> to include <code>&quot;adjuster&quot;</code> (reusing the field added
+in Concept 1's exercise) and re-run the gate across all four records.</p>
+<p><strong>Starting point:</strong> The <code>quality_gate(record, required_fields=...)</code> function from this concept's Example, called with <code>required_fields=(&quot;claim_id&quot;, &quot;reserve&quot;, &quot;status&quot;, &quot;adjuster&quot;)</code> against <code>gold_set</code> (as extended by Concept 1's exercise, with the <code>adjuster</code> field present on every record).</p>
+<p>Expected output:</p>
+<pre><code>clm_1001.pdf   -&gt; accept     missing=[] malformed=[]
+clm_1002.pdf   -&gt; quarantine missing=[&#x27;status&#x27;] malformed=[]
+clm_1003.pdf   -&gt; quarantine missing=[] malformed=[&#x27;reserve&#x27;]
+clm_1004.pdf   -&gt; accept     missing=[] malformed=[]
+</code></pre><p>Unchanged from the 3-field gate here, since none of the four records is missing an
+<code>adjuster</code> value in this gold set — the point is that adding a required field to the gate
+costs nothing beyond naming it, not a rewrite of the gate's logic.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> Building the gold set itself is the real bottleneck against a legacy
+document backlog — someone has to open 20 real scanned claim forms and key in the correct
+answer by hand before any recall/precision number means anything. That labeling cost is
+often the actual reason a parsing pipeline ships without a quality harness, not a lack of
+awareness that one is needed.</p>
+<p><strong>Compliance angle:</strong> A field-level recall/precision score against a fixed gold set is
+exactly the kind of declared, reproducible accuracy metric EU AI Act Article 15 expects for
+a high-risk system — provided the gold set itself is versioned and the harness is rerun
+whenever the underlying parser configuration changes, not measured once at launch and
+never touched again.</p>
+<p><strong>What breaks in production:</strong> The gold set is built once, from whichever documents were
+on hand at the time, and never refreshed as new document templates and scan qualities
+enter the pipeline. Recall and precision measured against a stale gold set can look
+perfect while the live pipeline silently degrades on document shapes the gold set never
+covered.</p>
+<hr />
+<h2>Architecture Decision — Week 08</h2>
+<p><strong>Choosing between:</strong> Unstructured.io (self-hosted, local compute) vs. LlamaParse (hosted
+API) vs. a cloud OCR service (e.g. AWS Textract / Azure Document Intelligence), for a
+claims-intake pipeline under an on-prem or data-residency constraint.</p>
+<p><strong>Rule of thumb:</strong> Choose Unstructured.io when documents cannot leave the institution's own
+network — a data-residency requirement rules out every hosted option regardless of
+accuracy or cost, and Unstructured's local <code>hi_res</code> strategy is the only one of the three
+that runs entirely inside infrastructure you control. Choose LlamaParse when documents
+<em>can</em> leave the network, table-heavy or unusually-formatted documents are common, and
+engineering time to tune a local layout pipeline is scarcer than the per-page API cost —
+its markdown-native, instruction-steerable output needs the least post-processing to reach
+an LLM prompt. Choose a cloud OCR service (Textract/Document Intelligence) when the
+document mix is dominated by scanned forms with well-known field layouts (a specific
+insurer's ACORD template, a specific bank's loan form) and the cloud provider's
+form-specific extraction features (key-value pair detection, pre-trained form models) beat
+generic layout detection on exactly that template family, and the same data-residency
+constraint that would block LlamaParse is already satisfied because the documents already
+live in that provider's cloud region. Whichever is chosen, keep the parser choice a
+per-document-class decision (Day 4 Concept 3), not a single global pick — the three tools
+are not competing for one universal winner, they cover genuinely different constraints,
+and a real pipeline will end up using more than one.</p>
+<div class="pager"><a class="btn ghost" href="week-07.html">&larr; Week 07</a><a class="btn ghost" href="week-09.html">Week 09 &rarr;</a></div>
+</main></body></html>

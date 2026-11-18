@@ -1,0 +1,1139 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 05 — BM25 Hybrid Search</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/inverted-index" target="_blank" rel="noopener">How does an Inverted Index work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/how-does-hybrid-search-work" target="_blank" rel="noopener">How does Hybrid Search work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/how-does-a-reranker-work" target="_blank" rel="noopener">How does a Reranker work?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="05" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 05 — BM25 Hybrid Search</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>1 — Real-Time Vector Infrastructure &amp; Streaming</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Expert</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 01 vector search fundamentals (cosine/L2/inner product, brute-force k-NN); Week 02 pgvector operators; comfort with NumPy array arithmetic. No prior information-retrieval coursework assumed.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>7–9 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>None yet. This week is markdown-only for now: Days 1, 2, 3 and 5 are pure NumPy/stdlib and would notebook cleanly, but Day 4 is REAL MODE (needs a live PostgreSQL instance with <code>pg_trgm</code>/pgvector installed) and a notebook built before that day's shape is settled would ship mostly-unrunnable cells. Decided per the ROADMAP's per-week notebook rule: build the notebook once Day 4's REAL MODE/runnable split is confirmed, rather than guess now.</td>
+</tr>
+</tbody>
+</table>
+<p>Week 01 established that exact and approximate vector search both answer the same question: &quot;which
+stored vectors are closest to this query vector.&quot; This week asks a different question first —
+whether vector search is even the right tool for a given query. A claims database is full of exact
+identifiers (<code>POL-8842-C</code>, <code>CLM-2024-114858</code>) that a dense embedding was never trained to treat as
+special strings, and BM25 — the decades-old lexical scoring function behind most production search
+engines before embeddings existed — handles exactly this case by design. This week builds BM25 from
+its formula, runs a stand-in dense embedder to see it fail on identifiers for real, and then fuses
+the two with reciprocal rank fusion, because the honest answer to &quot;BM25 or vectors&quot; is usually both.</p>
+<hr />
+<h2 id="day-1">Day 1 — BM25 Lexical Scoring</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="05-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=JbCuWzzSj88" target="_blank" rel="noopener"><b>BM25 Explained: The Ranking Formula Still Used Everywhere | Search &amp; Ads Engineering 1.3</b><small>LatentQuest · 26:42</small></a></li><li><a href="https://www.youtube.com/watch?v=lD3_VF5bmWg" target="_blank" rel="noopener"><b>BM25 Algorithm and Hybrid Search: AI Explained</b><small>Tejas Kumar · 9:45</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=BM25%20explained%20ranking%20function%20k1%20b%20parameters" target="_blank" rel="noopener">Search YouTube: BM25 explained ranking function k1 b parameters</a></p></div>
+<hr />
+<h3>Concept 1 — The BM25 Scoring Formula in NumPy</h3>
+<p>BM25 scores a document against a query as a sum over query terms, each weighted by how rare the term
+is across the corpus (its inverse document frequency, IDF) and how strongly the term appears in this
+particular document relative to the corpus's typical document length. For a term with document
+frequency <code>df</code> in a corpus of <code>N</code> documents, and a document of length <code>L</code> (tokens) containing the
+term <code>f</code> times, with corpus average length <code>avgdl</code>:</p>
+<pre><code>IDF(term) = ln(1 + (N - df + 0.5) / (df + 0.5))
+
+BM25(term, doc) = IDF(term) * [ f * (k1 + 1) ] / [ f + k1 * (1 - b + b * L / avgdl) ]
+
+score(query, doc) = sum over query terms of BM25(term, doc)
+</code></pre><p><code>rank_bm25</code> is not installed in this environment (confirmed: <code>pip show rank-bm25</code> finds nothing), so
+every executed block this week implements BM25 directly from this formula in NumPy — the formula is
+short enough that there is no real teaching loss, and it removes any ambiguity about which exact
+variant is running.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+import numpy as np
+
+def tokenize(text):
+    # Keeps letter-digit-hyphen runs (POL-8842-C) as a single token instead of
+    # shredding it -- Concept 4 shows why that choice matters.
+    return re.findall(r&quot;[a-z0-9]+(?:-[a-z0-9]+)*&quot;, text.lower())
+
+corpus = [
+    &quot;Policy POL-8842-C: water damage claim, ceiling leak from upstairs pipe burst reported by tenant&quot;,
+    &quot;Claim under policy POL-8842-C for escape of water damage to kitchen ceiling, adjuster assigned&quot;,
+    &quot;Policy POL-8842-C renewal notice, no open claims, premium payment received on schedule&quot;,
+    &quot;Policy POL-9013-A rear-end collision claim, minor bumper damage, two vehicles involved&quot;,
+    &quot;Policy POL-7754-D theft of laptop and jewelry from parked vehicle, police report filed&quot;,
+    &quot;Policy POL-6620-B fire damage to garage roof, contractor estimate attached to claim file&quot;,
+]
+
+tokens = [tokenize(d) for d in corpus]
+N = len(corpus)
+doc_lens = np.array([len(t) for t in tokens])
+avgdl = doc_lens.mean()
+
+df = {}
+for t in tokens:
+    for w in set(t):
+        df[w] = df.get(w, 0) + 1
+
+def idf(term):
+    n = df.get(term, 0)
+    return np.log(1 + (N - n + 0.5) / (n + 0.5))
+
+def bm25_score(query_terms, doc_tokens, doc_len, k1=1.5, b=0.75):
+    counts = {}
+    for w in doc_tokens:
+        counts[w] = counts.get(w, 0) + 1
+    score = 0.0
+    for term in query_terms:
+        if term not in counts:
+            continue
+        f = counts[term]
+        num = f * (k1 + 1)
+        denom = f + k1 * (1 - b + b * doc_len / avgdl)
+        score += idf(term) * (num / denom)
+    return score
+
+print(f&quot;N={N}  avgdl={avgdl:.4f}&quot;)
+for term in (&quot;pol-8842-c&quot;, &quot;water&quot;, &quot;policy&quot;):
+    print(f&quot;{term:&lt;12} df={df.get(term, 0)}  idf={idf(term):.4f}&quot;)
+
+query = tokenize(&quot;POL-8842-C&quot;)
+for i, t in enumerate(tokens):
+    s = bm25_score(query, t, doc_lens[i])
+    print(f&quot;doc {i}  bm25={s:.4f}  len={doc_lens[i]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>N=6  avgdl=12.8333
+pol-8842-c   df=3  idf=0.6931
+water        df=2  idf=1.0296
+policy       df=6  idf=0.0741
+doc 0  bm25=0.6659  len=14
+doc 1  bm25=0.6659  len=14
+doc 2  bm25=0.7140  len=12
+doc 3  bm25=0.0000  len=11
+doc 4  bm25=0.0000  len=13
+doc 5  bm25=0.0000  len=13
+</code></pre><p>Notice the ranking: doc 2 (the shortest of the three documents holding <code>POL-8842-C</code>) scores highest,
+ahead of docs 0 and 1, which are longer but hold the identifier exactly once too. That is <code>b</code>'s
+length normalization already visible before Concept 3 names it. Docs 3-5 hold no occurrence of the
+term at all and score exactly 0.0 — BM25 does not guess; a document with zero term overlap gets zero
+credit, full stop.</p>
+<p><strong>Exercise:</strong>
+Using the same corpus, tokenizer and <code>bm25_score()</code>, score every document against the query
+<code>&quot;water damage&quot;</code> (two query terms) instead of <code>&quot;POL-8842-C&quot;</code>. Explain in one sentence why docs 0 and
+1 score identically.</p>
+<p><strong>Starting point:</strong> The <code>tokenize()</code>, <code>bm25_score()</code>, <code>corpus</code>, <code>tokens</code>, <code>doc_lens</code>, <code>avgdl</code> and <code>df</code> objects from this concept's Example.</p>
+<p>Expected output: doc 0 and doc 1 both score 1.4136, docs 3 and 5 score 0.4722 and 0.4393
+respectively (partial credit for &quot;damage&quot; alone), and docs 2 and 4 score 0.0000 (neither word
+appears). Docs 0 and 1 tie because they are the same length (14 tokens) and each contains &quot;water&quot;
+and &quot;damage&quot; exactly once — same term frequencies, same length normalization, same score.</p>
+<hr />
+<h3>Concept 2 — <code>k1</code>: Term-Frequency Saturation</h3>
+<p><code>k1</code> controls how much repeating a term inside a document keeps adding to its score. A term
+appearing 10 times is real evidence of relevance, but it should not score 10x a single occurrence —
+diminishing returns is the whole point. Low <code>k1</code> saturates fast (approaching binary &quot;present or
+not&quot;); high <code>k1</code> stays close to linear in term frequency. Typical values sit in 1.2-2.0.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+def tf_component(f, L, avgdl, k1, b):
+    return (f * (k1 + 1)) / (f + k1 * (1 - b + b * L / avgdl))
+
+print(&quot;TF component vs term frequency f, at L = avgdl (b has no effect here):&quot;)
+for k1 in (0.5, 1.2, 2.0, 100.0):
+    vals = [round(tf_component(f, 15, 15, k1, 0.75), 3) for f in (1, 2, 4, 8, 16, 32)]
+    print(f&quot;  k1={k1:&gt;5}  f=1..32 -&gt; {vals}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>TF component vs term frequency f, at L = avgdl (b has no effect here):
+  k1=  0.5  f=1..32 -&gt; [1.0, 1.2, 1.333, 1.412, 1.455, 1.477]
+  k1=  1.2  f=1..32 -&gt; [1.0, 1.375, 1.692, 1.913, 2.047, 2.12]
+  k1=  2.0  f=1..32 -&gt; [1.0, 1.5, 2.0, 2.4, 2.667, 2.824]
+  k1=100.0  f=1..32 -&gt; [1.0, 1.98, 3.885, 7.481, 13.931, 24.485]
+</code></pre><p>At <code>k1=0.5</code> the component barely moves past f=4 — a document mentioning &quot;water&quot; 4 times or 32 times
+scores almost the same. At <code>k1=100</code>, the component keeps climbing nearly linearly with f, which is
+what &quot;<code>k1 -&gt; 0</code> means binary presence, large <code>k1</code> means TF keeps mattering&quot; looks like in real
+numbers rather than as a slogan.</p>
+<p><strong>Exercise:</strong>
+Re-run the sweep at <code>k1 = 0.1</code> and <code>k1 = 5.0</code> (in addition to the values above) and identify, for
+each, the smallest <code>f</code> in <code>(1, 2, 4, 8, 16, 32)</code> where the component has grown to at least 90% of its
+value at <code>f=32</code>.</p>
+<p><strong>Starting point:</strong> The <code>tf_component(f, L, avgdl, k1, b)</code> function from this concept's Example, called with <code>L=avgdl=15</code> and <code>b=0.75</code>.</p>
+<p>Expected output: at <code>k1=0.1</code>, the component reaches 90% of its <code>f=32</code> value (1.0952) already by
+<code>f=1</code> (1.0 / 1.0952 = 91.3%) — it saturates almost immediately. At <code>k1=5.0</code>, the component is still
+climbing at <code>f=32</code> (13.565) and does not cross 90% of that value until <code>f=16</code> (11.636, 85.8% — so
+in fact not until <code>f=32</code> itself at this sample spacing) — confirming that low <code>k1</code> saturates fast and
+high <code>k1</code> stays sensitive to term frequency far longer.</p>
+<hr />
+<h3>Concept 3 — <code>b</code>: Length Normalization</h3>
+<p><code>b</code> controls how much a document's length relative to <code>avgdl</code> penalizes its score. <code>b=0</code> disables
+length normalization entirely — a 500-word document and a 5-word document with the same term
+frequency score identically. <code>b=1</code> applies full normalization. The BM25 default, <code>b=0.75</code>, is a
+compromise: a longer document is expected to occasionally repeat a term without that repetition
+implying only length inflation.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+def tf_component(f, L, avgdl, k1, b):
+    return (f * (k1 + 1)) / (f + k1 * (1 - b + b * L / avgdl))
+
+print(&quot;TF component vs doc length L (avgdl=15, f=1, k1=1.5):&quot;)
+for b in (0.0, 0.75, 1.0):
+    vals = [round(tf_component(1, L, 15, 1.5, b), 3) for L in (5, 10, 15, 30, 60)]
+    print(f&quot;  b={b:&gt;4}  L=5,10,15,30,60 -&gt; {vals}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>TF component vs doc length L (avgdl=15, f=1, k1=1.5):
+  b= 0.0  L=5,10,15,30,60 -&gt; [1.0, 1.0, 1.0, 1.0, 1.0]
+  b=0.75  L=5,10,15,30,60 -&gt; [1.429, 1.176, 1.0, 0.69, 0.426]
+  b= 1.0  L=5,10,15,30,60 -&gt; [1.667, 1.25, 1.0, 0.625, 0.357]
+</code></pre><p>At <code>b=0</code> the length column is flat — exactly what &quot;disabled&quot; means. At <code>b=0.75</code> a document at
+<code>L=5</code> (a third of <code>avgdl</code>) scores 43% higher than one at <code>L=avgdl</code>, and a document at <code>L=60</code> (4x
+<code>avgdl</code>) scores 43% lower. Concept 1's result — the shortest <code>POL-8842-C</code> document (len 12) beating
+two longer ones (len 14) on an identical single occurrence — is this exact mechanism, measured on
+real text instead of a synthetic sweep.</p>
+<p><strong>Exercise:</strong>
+Re-score Concept 1's three <code>POL-8842-C</code> documents (docs 0, 1, 2; lengths 14, 14, 12) at <code>b=0</code> instead
+of the default 0.75, keeping <code>k1=1.5</code>. Confirm the length-driven ranking gap from Concept 1
+disappears.</p>
+<p><strong>Starting point:</strong> The <code>bm25_score()</code> function from Concept 1, modified to accept <code>b</code> as a parameter (default currently hardcoded to 0.75), plus docs 0, 1, 2 and their token lists.</p>
+<p>Expected output: with <code>b=0</code>, docs 0 and 1 score identically to doc 2 (all three reduce to the same
+TF component since length no longer enters the formula) — the ranking gap that Concept 1 attributed
+to length normalization is gone precisely because <code>b=0</code> is what &quot;no length normalization&quot; means.</p>
+<hr />
+<h3>Concept 4 — Tokenization, <code>BM25Okapi</code> vs <code>BM25Plus</code>, and Negative IDF</h3>
+<p>Two more decisions belong beside <code>k1</code> and <code>b</code>, both with real production consequences.</p>
+<p><strong>Tokenization that does not shred identifiers.</strong> A naive tokenizer that splits on any non-letter
+character turns <code>POL-8842-C</code> into three meaningless tokens (<code>pol</code>, <code>8842</code>, <code>c</code>), each of which then
+matches unrelated documents that merely contain the digits &quot;8842&quot; or the letter &quot;c&quot; somewhere. The
+regex <code>[a-z0-9]+(?:-[a-z0-9]+)*</code> used all week keeps a hyphenated alphanumeric run intact as one
+token.</p>
+<p><strong><code>BM25Okapi</code> vs <code>BM25Plus</code>, and why IDF can go negative.</strong> The smoothed IDF this week uses,
+<code>ln(1 + (N-df+0.5)/(df+0.5))</code>, is always non-negative. <code>rank_bm25</code>'s <code>BM25Okapi</code> — the library this
+environment does not have installed — instead uses the older, unsmoothed ratio
+<code>ln((N-df+0.5)/(df+0.5))</code>. That ratio goes <strong>negative</strong> once a term appears in more than half the
+corpus, because the numerator becomes smaller than the denominator. <code>BM25Okapi</code> floors this with an
+<code>epsilon</code> parameter (default 0.25, multiplied by the corpus's average IDF) rather than letting a
+common term's score actively subtract from a document's total — but a narrow-vocabulary claims
+corpus, where a word like &quot;policy&quot; legitimately appears in every single document, hits this floor
+routinely, not as an edge case. <code>BM25Plus</code> sidesteps the whole problem with a different IDF
+(<code>ln((N+1)/df)</code>, always positive) and additionally adds a <code>delta</code> (default 1.0) to the TF component,
+so a long document with only a middling term frequency is not driven to a score near zero the way
+plain BM25's length normalization can push it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+def idf_smoothed(df, N):
+    return np.log(1 + (N - df + 0.5) / (df + 0.5))
+
+def idf_unsmoothed(df, N):   # rank_bm25&#x27;s BM25Okapi formula, before its epsilon floor
+    return np.log((N - df + 0.5) / (df + 0.5))
+
+N = 6
+# Named df_n, not df -- this file&#x27;s Day 1 Concept 1 defines a `df` dict (term -&gt;
+# document frequency) that later concepts reuse; a loop variable named `df` here
+# would silently overwrite that dict for the rest of the session.
+for df_n in (2, 3, 4, 5, 6):
+    print(f&quot;df={df_n}  smoothed={idf_smoothed(df_n, N):.4f}  unsmoothed={idf_unsmoothed(df_n, N):.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>df=2  smoothed=1.0296  unsmoothed=0.5878
+df=3  smoothed=0.6931  unsmoothed=0.0000
+df=4  smoothed=0.4418  unsmoothed=-0.5878
+df=5  smoothed=0.2412  unsmoothed=-1.2993
+df=6  smoothed=0.0741  unsmoothed=-2.5649
+</code></pre><p>&quot;policy&quot; has <code>df=6</code> in this 6-document corpus — every document contains it — and its unsmoothed IDF
+is -2.5649. <code>BM25Okapi</code> would floor that specific term's contribution at <code>epsilon * average_idf</code>
+rather than let a real document's score go down for containing &quot;policy&quot;, but the smoothed formula
+used all week sidesteps the floor entirely by staying at a small positive 0.0741 instead.</p>
+<p><strong>REAL MODE — requires the <code>rank-bm25</code> package (not installed in this environment):</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from rank_bm25 import BM25Okapi, BM25Plus
+
+tokenized_corpus = [tokenize(doc) for doc in corpus]
+
+bm25 = BM25Okapi(tokenized_corpus, k1=1.5, b=0.75, epsilon=0.25)
+scores = bm25.get_scores(tokenize(&quot;POL-8842-C&quot;))
+
+bm25_plus = BM25Plus(tokenized_corpus, k1=1.5, b=0.75, delta=1.0)
+scores_plus = bm25_plus.get_scores(tokenize(&quot;POL-8842-C&quot;))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (shape only, per this track's REAL MODE convention): two NumPy arrays of length 6
+(one score per document), broadly similar in ranking to this week's from-scratch implementation but
+not numerically identical, since <code>BM25Okapi</code>'s unsmoothed-then-floored IDF and <code>BM25Plus</code>'s
+<code>ln((N+1)/df)</code> IDF are both different formulas from the smoothed IDF this week computes by hand.</p>
+<p><strong>Exercise:</strong>
+Compute the unsmoothed IDF for <code>df = 1</code> and <code>df = 6</code> at <code>N = 6</code>, and state which of this week's
+three real terms (<code>pol-8842-c</code> at df=3, <code>water</code> at df=2, <code>policy</code> at df=6) would actually trigger
+<code>BM25Okapi</code>'s epsilon floor in this corpus.</p>
+<p><strong>Starting point:</strong> The <code>idf_unsmoothed(df, N)</code> function from this concept's Example, and the three terms' df values from Concept 1 (<code>pol-8842-c</code>: df=3, <code>water</code>: df=2, <code>policy</code>: df=6).</p>
+<p>Expected output: <code>idf_unsmoothed(1, 6) = 1.3218</code> (comfortably positive) and <code>idf_unsmoothed(6, 6) = -2.5649</code> (negative). Of the three real terms, only <code>policy</code> (df=6) goes negative and would hit the
+epsilon floor; <code>pol-8842-c</code> (df=3, unsmoothed 0.0) and <code>water</code> (df=2, unsmoothed 0.5878) do not.</p>
+<hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> A core claims system's free-text notes field is exactly the &quot;narrow vocabulary,
+every document repeats the same words&quot; corpus that breaks unsmoothed IDF. Words like &quot;policy&quot;,
+&quot;claim&quot; and &quot;damage&quot; appear in nearly every record because adjusters were trained to write in fixed
+templates. That is precisely the corpus shape where the smoothed-vs-unsmoothed IDF choice stops being
+academic.</p>
+<p><strong>Compliance angle:</strong> A tokenizer that shreds <code>POL-8842-C</code> into <code>pol</code>/<code>8842</code>/<code>c</code> does not just hurt
+recall — it can produce spurious matches: a customer's exact-identifier lookup surfacing an unrelated
+claim that happens to share the digits &quot;8842&quot;. In a regulated workflow where &quot;which record did this
+system surface, and why&quot; needs a clean answer, an identifier-preserving tokenizer is not a nicety.</p>
+<p><strong>What breaks in production:</strong> <code>k1</code> and <code>b</code> left at library defaults tuned for web-search-style
+corpora (long, varied documents) rather than short, templated claims notes. Nothing errors — scores
+simply rank in a way nobody validated against this corpus's actual length distribution.</p>
+<hr />
+<h2 id="day-2">Day 2 — Where Semantic Search Fails</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="05-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=mLD4sA5pUAI" target="_blank" rel="noopener"><b>The Product Exists. Why Can’t Search Find It? | Keyword vs Semantic Search | Week 3/12 FREE AI 3.2</b><small>BuildLifeandAI | Sai Gayatri Vadali · 12:43</small></a></li><li><a href="https://www.youtube.com/watch?v=oC5YVj_TSw4" target="_blank" rel="noopener"><b>Why 95% of AI Projects Fail (And How to Fix It with Semantic Search)</b><small>CareerlinkAI · 12:36</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=why%20semantic%20search%20fails%20keyword%20search%20exact%20match%20retrieval" target="_blank" rel="noopener">Search YouTube: why semantic search fails keyword search exact match retrieval</a></p></div>
+<hr />
+<h3>Concept 1 — The Identifier Failure, Measured</h3>
+<p>Dense embeddings are trained to place semantically similar text near each other. An exact identifier
+like <code>POL-8842-C</code> is not a semantic concept — it is an arbitrary string, and a model has no reason to
+treat it specially unless it was explicitly trained to. To see this failure without needing a real
+embedding model (none is available offline in this environment), this week uses a deterministic
+stand-in: character trigrams of the text, each hashed with <code>zlib.crc32</code> to seed a small Gaussian
+projection, summed and L2-normalized. It is not a real embedding model, but it reproduces the
+property that matters here — it is sensitive to surface text, not to the meaning of an identifier as
+a single unit.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import zlib
+import numpy as np
+
+corpus = [
+    &quot;Policy POL-8842-C: water damage claim, ceiling leak from upstairs pipe burst reported by tenant&quot;,
+    &quot;Claim under policy POL-8842-C for escape of water damage to kitchen ceiling, adjuster assigned&quot;,
+    &quot;Policy POL-8842-C renewal notice, no open claims, premium payment received on schedule&quot;,
+    &quot;Policy POL-9013-A rear-end collision claim, minor bumper damage, two vehicles involved&quot;,
+    &quot;Policy POL-7754-D theft of laptop and jewelry from parked vehicle, police report filed&quot;,
+    &quot;Policy POL-6620-B fire damage to garage roof, contractor estimate attached to claim file&quot;,
+]
+
+DIM = 32
+
+def trigrams(text):
+    t = &quot;  &quot; + text.lower() + &quot;  &quot;   # pad so short strings still produce a trigram
+    return [t[i:i+3] for i in range(len(t) - 2)]
+
+def embed(text, dim=DIM):
+    vec = np.zeros(dim)
+    for gram in trigrams(text):
+        seed = zlib.crc32(gram.encode(&quot;utf-8&quot;))
+        rng = np.random.default_rng(seed)
+        vec += rng.normal(size=dim)
+    norm = np.linalg.norm(vec)
+    return vec / norm if norm &gt; 0 else vec
+
+doc_vecs = np.array([embed(d) for d in corpus])
+
+def cosine_rank(query_text):
+    q = embed(query_text)
+    scores = doc_vecs @ q
+    order = np.argsort(-scores)
+    print(f&quot;query: {query_text!r}&quot;)
+    for rank, i in enumerate(order):
+        print(f&quot;  rank {rank+1}  doc {i}  cos={scores[i]:.4f}  {corpus[i][:55]}&quot;)
+
+cosine_rank(&quot;POL-8842-C&quot;)
+cosine_rank(&quot;escape of water damage to a ceiling&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>query: &#x27;POL-8842-C&#x27;
+  rank 1  doc 0  cos=0.5246  Policy POL-8842-C: water damage claim, ceiling leak from ups
+  rank 2  doc 4  cos=0.5201  Policy POL-7754-D theft of laptop and jewelry from parked ve
+  rank 3  doc 2  cos=0.4844  Policy POL-8842-C renewal notice, no open claims, premium pa
+  rank 4  doc 3  cos=0.4457  Policy POL-9013-A rear-end collision claim, minor bumper dam
+  rank 5  doc 1  cos=0.4416  Claim under policy POL-8842-C for escape of water damage to 
+  rank 6  doc 5  cos=0.0753  Policy POL-6620-B fire damage to garage roof, contractor est
+
+query: &#x27;escape of water damage to a ceiling&#x27;
+  rank 1  doc 0  cos=0.4930  Policy POL-8842-C: water damage claim, ceiling leak from ups
+  rank 2  doc 1  cos=0.4409  Claim under policy POL-8842-C for escape of water damage to 
+  rank 3  doc 5  cos=0.4212  Policy POL-6620-B fire damage to garage roof, contractor est
+  rank 4  doc 4  cos=0.1185  Policy POL-7754-D theft of laptop and jewelry from parked ve
+  rank 5  doc 2  cos=0.0008  Policy POL-8842-C renewal notice, no open claims, premium pa
+  rank 6  doc 3  cos=-0.0543  Policy POL-9013-A rear-end collision claim, minor bumper dam
+</code></pre><p>This is the week's spine, produced with the same corpus and the same embedder in both queries.
+Searching for the identifier <code>POL-8842-C</code>, rank 2 is doc 4 — <code>POL-7754-D</code>, the <strong>wrong policy
+entirely</strong> — beating doc 2, which genuinely holds <code>POL-8842-C</code>, and pushing doc 1 (which also holds
+it) all the way down to rank 5 of 6. Searching for the concept &quot;escape of water damage to a ceiling&quot;,
+the two genuinely matching documents (0 and 1) land at rank 1 and 2 exactly where they belong. Same
+corpus, same embedder: reliable on concepts, broken on identifiers.</p>
+<p><strong>Exercise:</strong>
+Re-run <code>cosine_rank(&quot;POL-8842-C&quot;)</code> with <code>DIM</code> set to 64 and then 128 instead of 32, and report where
+doc 4 (the wrong-policy document) ranks at each width.</p>
+<p><strong>Starting point:</strong> The <code>trigrams()</code>/<code>embed()</code> functions and <code>corpus</code> from this concept's Example, with <code>DIM</code> as a parameter instead of a fixed constant.</p>
+<p>Expected output: at <code>DIM=64</code>, doc 4 still intrudes at rank 2 (cos=0.3957, just behind doc 2's
+0.4114). At <code>DIM=128</code>, the specific intrusion changes shape rather than disappearing: doc 4 drops to
+rank 4, but doc 2 (a true match) only reaches rank 1, while doc 1 (also a true match) sits at rank 2
+and doc 0 (a true match) falls to rank 3 — so raising dimensionality moved which correct/incorrect
+documents traded places rather than reliably fixing the identifier confusion.</p>
+<hr />
+<h3>Concept 2 — A Nonsense Query and False Confidence</h3>
+<p>BM25 has a property worth naming explicitly: when a query shares no vocabulary with any document, it
+says so, honestly, with a score of exactly zero everywhere. A dense similarity search has no such
+&quot;nothing matches&quot; signal — cosine similarity always produces a ranked list, because it is measuring
+geometric closeness, not lexical evidence, and closeness is never exactly undefined.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing corpus, tokenize(), bm25_score() from Day 1 Concept 1,
+# and trigrams()/embed()/doc_vecs from Day 2 Concept 1.
+
+query = &quot;xyzquantum assist plan&quot;   # shares no real vocabulary with any document
+q_tokens = tokenize(query)
+bm25_scores = [bm25_score(q_tokens, t, doc_lens[i]) for i, t in enumerate(tokens)]
+print(&quot;bm25 scores (all docs):&quot;, [round(s, 4) for s in bm25_scores])
+
+qv = embed(query)
+cos_scores = doc_vecs @ qv
+order = np.argsort(-cos_scores)
+for rank, i in enumerate(order):
+    print(f&quot;  rank {rank+1}  doc {i}  cos={cos_scores[i]:.4f}  {corpus[i][:55]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>bm25 scores (all docs): [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  rank 1  doc 5  cos=0.1921  Policy POL-6620-B fire damage to garage roof, contracto
+  rank 2  doc 3  cos=0.1249  Policy POL-9013-A rear-end collision claim, minor bumpe
+  rank 3  doc 1  cos=0.0198  Claim under policy POL-8842-C for escape of water damag
+  rank 4  doc 0  cos=-0.0821  Policy POL-8842-C: water damage claim, ceiling leak fro
+  rank 5  doc 4  cos=-0.1099  Policy POL-7754-D theft of laptop and jewelry from park
+  rank 6  doc 2  cos=-0.3022  Policy POL-8842-C renewal notice, no open claims, premi
+</code></pre><p>BM25 correctly reports zero evidence for every document. Cosine still hands back a confident-looking
+top pick (doc 5 at 0.1921) for a query that has nothing to do with any document in the corpus. An
+application that only trusts the vector index's top-k, with no lexical fallback and no score
+threshold, will silently present doc 5 as a relevant result for a query that matches nothing.</p>
+<p><strong>Exercise:</strong>
+Pick your own nonsense query (any string sharing no real words with the corpus) and confirm BM25
+reports all zeros while cosine still returns a non-degenerate ranking. Then state, in one sentence,
+what a production system needs to check before trusting the vector index's top result.</p>
+<p><strong>Starting point:</strong> <code>bm25_score()</code>, <code>embed()</code>, <code>corpus</code>, <code>tokens</code>, <code>doc_lens</code> and <code>doc_vecs</code> from the two concepts above, with your own query string.</p>
+<p>Expected output: bm25 scores of <code>0.0</code> across every document for your chosen nonsense query, and a
+non-trivial cosine ranking regardless. The one-sentence answer should name a concrete guard — e.g. a
+minimum cosine or BM25 score threshold below which the system reports &quot;no match&quot; rather than
+returning a top-k list unconditionally.</p>
+<hr />
+<h3>Concept 3 — Negation and Numeric Thresholds in Coverage Text</h3>
+<p>Bag-of-words scoring, whether BM25 or a bag-of-trigrams embedding, counts term overlap. Neither
+mechanism, by construction, distinguishes &quot;policy covers flood damage&quot; from &quot;policy excludes flood
+damage&quot; — both sentences share the same vocabulary. This matters specifically in coverage text, where
+the entire business meaning of a clause can flip on a single word like &quot;excludes&quot; or a numeric
+threshold like &quot;up to $50,000&quot;.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing tokenize() and bm25_score() from Day 1 Concept 1, extended with one
+# more document -- an exclusion clause that mentions the exact same terms the
+# query does.
+extended_corpus = corpus + [
+    &quot;Policy POL-9013-A excludes flood damage from rising water; covers escape of water from plumbing only&quot;,
+]
+extended_tokens = [tokenize(d) for d in extended_corpus]
+ext_doc_lens = np.array([len(t) for t in extended_tokens])
+ext_avgdl = ext_doc_lens.mean()
+ext_df = {}
+for t in extended_tokens:
+    for w in set(t):
+        ext_df[w] = ext_df.get(w, 0) + 1
+
+def ext_idf(term):
+    n = ext_df.get(term, 0)
+    return np.log(1 + (len(extended_corpus) - n + 0.5) / (n + 0.5))
+
+def ext_bm25(query_terms, doc_tokens, doc_len, k1=1.5, b=0.75):
+    counts = {}
+    for w in doc_tokens:
+        counts[w] = counts.get(w, 0) + 1
+    score = 0.0
+    for term in query_terms:
+        if term not in counts:
+            continue
+        f = counts[term]
+        num = f * (k1 + 1)
+        denom = f + k1 * (1 - b + b * doc_len / ext_avgdl)
+        score += ext_idf(term) * (num / denom)
+    return score
+
+query = tokenize(&quot;flood damage covered&quot;)
+scores = [ext_bm25(query, t, ext_doc_lens[i]) for i, t in enumerate(extended_tokens)]
+order = np.argsort(-np.array(scores))
+for rank, i in enumerate(order):
+    print(f&quot;  rank {rank+1}  doc {i}  bm25={scores[i]:.4f}  {extended_corpus[i][:70]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>  rank 1  doc 6  bm25=1.9262  Policy POL-9013-A excludes flood damage from rising water; covers esca
+  rank 2  doc 3  bm25=0.4044  Policy POL-9013-A rear-end collision claim, minor bumper damage, two v
+  rank 3  doc 5  bm25=0.3765  Policy POL-6620-B fire damage to garage roof, contractor estimate atta
+  rank 4  doc 0  bm25=0.3640  Policy POL-8842-C: water damage claim, ceiling leak from upstairs pipe
+  rank 5  doc 1  bm25=0.3640  Claim under policy POL-8842-C for escape of water damage to kitchen ce
+  rank 6  doc 2  bm25=0.0000  Policy POL-8842-C renewal notice, no open claims, premium payment rece
+  rank 7  doc 4  bm25=0.0000  Policy POL-7754-D theft of laptop and jewelry from parked vehicle, pol
+</code></pre><p>Doc 6 — the clause that <strong>excludes</strong> flood damage — is the top result for &quot;flood damage covered&quot;, by
+a wide margin, because it contains &quot;flood&quot;, &quot;damage&quot; and &quot;covers&quot; all in one short document. Neither
+BM25 nor the trigram embedder reads &quot;excludes... from rising water&quot; as reversing the meaning of the
+words that follow it. A system built only on term overlap will confidently surface an exclusion
+clause as if it were a confirmation of coverage.</p>
+<p><strong>Exercise:</strong>
+Score <code>extended_corpus</code> against the query <code>&quot;policy covers water damage&quot;</code> and check whether doc 6
+(the exclusion clause) again ranks above the two genuine escape-of-water documents (0 and 1).</p>
+<p><strong>Starting point:</strong> <code>extended_corpus</code>, <code>ext_bm25()</code>, <code>ext_doc_lens</code> and <code>ext_df</code> from this concept's Example.</p>
+<p>Expected output: doc 6 again ranks at or near the top on raw term overlap (it shares &quot;policy&quot;,
+&quot;covers&quot;, &quot;water&quot;, &quot;damage&quot; with the query), ahead of or comparable to docs 0 and 1 — confirming the
+failure is not specific to one query wording but general to any query sharing vocabulary with an
+exclusion clause.</p>
+<hr />
+<h3>Concept 4 — Assembling a Deliberate Failure-Case Query Set</h3>
+<p>A single striking example is a demo, not a test suite. A retrieval system needs a small, versioned
+set of queries chosen specifically because they are known to be hard for one retrieval mode or the
+other — identifier lookups, conceptual paraphrases, and queries with no real match — with an assertion
+for what each system should and should not do.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>FAILURE_CASES = [
+    {&quot;query&quot;: &quot;POL-8842-C&quot;, &quot;type&quot;: &quot;id_lookup&quot;,
+     &quot;expect_bm25_top&quot;: {0, 1, 2}, &quot;expect_vector_fails&quot;: True},
+    {&quot;query&quot;: &quot;escape of water damage to a ceiling&quot;, &quot;type&quot;: &quot;conceptual&quot;,
+     &quot;expect_bm25_top&quot;: {0, 1}, &quot;expect_vector_fails&quot;: False},
+    {&quot;query&quot;: &quot;xyzquantum assist plan&quot;, &quot;type&quot;: &quot;no_match&quot;,
+     &quot;expect_bm25_top&quot;: set(), &quot;expect_vector_fails&quot;: True},
+]
+
+def top_n(scores, n):
+    order = np.argsort(-np.array(scores))
+    return set(order[:n].tolist())
+
+for case in FAILURE_CASES:
+    bm25_scores = [bm25_score(tokenize(case[&quot;query&quot;]), t, doc_lens[i]) for i, t in enumerate(tokens)]
+    qv = embed(case[&quot;query&quot;])
+    cos_scores = doc_vecs @ qv
+    bm25_top2 = top_n(bm25_scores, 2)
+    cos_top1 = int(np.argmax(cos_scores))
+    bm25_all_zero = all(s == 0.0 for s in bm25_scores)
+    print(f&quot;query={case[&#x27;query&#x27;]!r:38} type={case[&#x27;type&#x27;]:&lt;11} &quot;
+          f&quot;bm25_top2={bm25_top2}  bm25_all_zero={bm25_all_zero}  cos_top1={cos_top1}&quot;)
+    if case[&quot;expect_bm25_top&quot;]:
+        assert bm25_top2 &amp; case[&quot;expect_bm25_top&quot;], &quot;bm25 did not surface an expected relevant doc&quot;
+    else:
+        assert bm25_all_zero, &quot;expected bm25 to report no lexical evidence&quot;
+
+print(&quot;all failure-case assertions passed&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>query=&#x27;POL-8842-C&#x27;                            type=id_lookup   bm25_top2={0, 2}  bm25_all_zero=False  cos_top1=0
+query=&#x27;escape of water damage to a ceiling&#x27;   type=conceptual  bm25_top2={0, 1}  bm25_all_zero=False  cos_top1=0
+query=&#x27;xyzquantum assist plan&#x27;                type=no_match    bm25_top2={0, 1}  bm25_all_zero=True  cos_top1=5
+all failure-case assertions passed
+</code></pre><p>The assertions are deliberately weak (they check that BM25 surfaces <em>an</em> expected document, not the
+exact ranking) — a regression suite should start permissive and tighten only once the system's actual
+behavior is understood, or every future improvement trips a false alarm.</p>
+<p><strong>Exercise:</strong>
+Add a fourth case to <code>FAILURE_CASES</code> for the negation query from Concept 3
+(<code>&quot;flood damage covered&quot;</code>), with an assertion that captures the failure: doc 6 (the exclusion clause)
+appears in BM25's top 2 even though it should not be considered a coverage confirmation.</p>
+<p><strong>Starting point:</strong> The <code>FAILURE_CASES</code> list, <code>top_n()</code> helper and the loop from this concept's Example, plus <code>extended_corpus</code>/<code>ext_bm25()</code>/<code>ext_doc_lens</code> from Concept 3.</p>
+<p>Expected output: an added case whose assertion passes precisely because it captures a known failure
+(e.g. <code>assert 6 in top_n(scores, 2)</code>), documenting the negation blind spot as an accepted, tracked
+limitation rather than a surprise a later change quietly reintroduces or &quot;fixes&quot; without anyone
+noticing which failure mode moved.</p>
+<hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> A core system's free-text adjuster notes were never written with any retrieval
+system in mind, so exclusion clauses, identifiers and genuine matches all use the same vocabulary in
+the same unstructured blob. There is no clean &quot;coverage confirmed&quot; flag to filter on — the negation
+problem in Concept 3 is not a modeling gap you can engineer away without touching the source data.</p>
+<p><strong>Compliance angle:</strong> Silently surfacing an exclusion clause as if it confirmed coverage, in a
+customer-facing or adjuster-facing tool, is a real misrepresentation risk, not a search-quality nit.
+A failure-case query set like Concept 4's is the artifact that lets a compliance reviewer see the
+known gap was identified and is monitored, rather than discovered by a customer first.</p>
+<p><strong>What breaks in production:</strong> A vector-search demo looks flawless because demo queries are almost
+always conceptual, paraphrased text — exactly what dense embeddings are good at. The identifier and
+negation failures in this lesson do not show up until real users start pasting policy numbers and
+reading exclusion clauses, which is usually after launch, not during the pilot.</p>
+<hr />
+<h2 id="day-3">Day 3 — Rank Fusion with RRF</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="05-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=6dDvfGrxFns" target="_blank" rel="noopener"><b>Understanding Reciprocal Rank Fusion in Hybrid Search [Advanced RAG]</b><small>TechViz - The Data Science Guy · 8:16</small></a></li><li><a href="https://www.youtube.com/watch?v=2uBcjEecr38" target="_blank" rel="noopener"><b>What is reciprocal rank fusion in hybrid search?</b><small>Abhishek Thakur · 7:52</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=reciprocal%20rank%20fusion%20hybrid%20search%20explained" target="_blank" rel="noopener">Search YouTube: reciprocal rank fusion hybrid search explained</a></p></div>
+<hr />
+<h3>Concept 1 — Why BM25 and Cosine Scores Are Not Comparable</h3>
+<p>BM25 and cosine similarity measure fundamentally different things on fundamentally different scales.
+BM25 is unbounded above, exactly 0.0 for a document with no query-term overlap, and its magnitude
+depends on the corpus's IDF distribution and the query's length — a BM25 score of 0.7 means something
+different in a two-document toy corpus than in a ten-million-document production index. Cosine
+similarity is bounded to [-1, 1] and, for real (non-adversarial) text, is rarely close to 0. Adding
+or comparing these two numbers directly is arithmetic on incompatible units — it looks like a valid
+operation because both are floats, but there is no meaningful sense in which &quot;0.7 of BM25&quot; and &quot;0.7
+of cosine&quot; are the same amount of relevance.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+# BM25 scores from Day 1, cosine scores from Day 2, both for query &quot;POL-8842-C&quot;
+bm25_scores = np.array([0.6659, 0.6659, 0.7140, 0.0000, 0.0000, 0.0000])
+cos_scores = np.array([0.5246, 0.4416, 0.4844, 0.4457, 0.5201, 0.0753])
+
+print(&quot;bm25 range:&quot;, bm25_scores.min(), &quot;-&quot;, bm25_scores.max())
+print(&quot;cos  range:&quot;, cos_scores.min(), &quot;-&quot;, cos_scores.max())
+
+raw_sum = bm25_scores + cos_scores
+print(&quot;\nraw untransformed bm25 + cosine sum:&quot;)
+for d in range(6):
+    print(f&quot;  doc {d}  bm25={bm25_scores[d]:.4f}  cos={cos_scores[d]:.4f}  sum={raw_sum[d]:.4f}&quot;)
+print(&quot;ranking by raw sum:&quot;, np.argsort(-raw_sum).tolist())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>bm25 range: 0.0 - 0.714
+cos  range: 0.0753 - 0.5246
+
+raw untransformed bm25 + cosine sum:
+  doc 0  bm25=0.6659  cos=0.5246  sum=1.1905
+  doc 1  bm25=0.6659  cos=0.4416  sum=1.1075
+  doc 2  bm25=0.7140  cos=0.4844  sum=1.1984
+  doc 3  bm25=0.0000  cos=0.4457  sum=0.4457
+  doc 4  bm25=0.0000  cos=0.5201  sum=0.5201
+  doc 5  bm25=0.0000  cos=0.0753  sum=0.0753
+ranking by raw sum: [2, 0, 1, 3, 4, 5]
+</code></pre><p>This particular sum happens to rank sensibly here only because BM25's range (0 to 0.714) is wider
+than cosine's (0.0753 to 0.5246) in this toy, so BM25 dominates the sum almost by accident. Nothing
+in the formula guarantees that relationship — a different query, or a corpus where BM25 scores
+cluster near 0.1, would let cosine dominate instead, for no principled reason. That accidental
+dominance is exactly the problem Concept 2 sidesteps.</p>
+<p><strong>Exercise:</strong>
+State, using the printed ranges above, what would happen to the raw-sum ranking if every cosine score
+were scaled up by 3x before summing (no need to recompute the full ranking by hand — reason about
+which documents' sums would cross which others').</p>
+<p><strong>Starting point:</strong> The printed <code>bm25_scores</code>/<code>cos_scores</code> arrays and their ranges from this concept's Example.</p>
+<p>Expected output: scaling cosine by 3x would push doc 4's contribution to roughly 1.56 (0.52 x 3),
+comfortably exceeding doc 2's current top sum of 1.1984 — doc 4, which holds the <em>wrong</em> policy
+number entirely, would become the top-ranked result purely because of an arbitrary rescaling factor
+with no connection to relevance. That instability is the argument for rank fusion over score fusion.</p>
+<hr />
+<h3>Concept 2 — Reciprocal Rank Fusion</h3>
+<p>Reciprocal Rank Fusion (RRF) sidesteps the score-comparability problem by discarding scores entirely
+and fusing only each system's <em>rank</em> for a document:</p>
+<pre><code>RRF(doc) = sum over systems s of 1 / (k + rank_s(doc))
+</code></pre><p>with <code>k = 60</code>, the constant from Cormack, Clarke &amp; Buettcher's 2009 paper introducing the method. <code>k</code>
+is not a cutoff — every document that appears in either ranking contributes — it is a damping term
+that keeps rank 1 from dominating the sum outright (<code>1/(60+1)</code> vs <code>1/(60+2)</code> differ by much less than
+<code>1/1</code> vs <code>1/2</code> would).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+bm25_scores = np.array([0.6659, 0.6659, 0.7140, 0.0000, 0.0000, 0.0000])
+cos_scores = np.array([0.5246, 0.4416, 0.4844, 0.4457, 0.5201, 0.0753])
+
+def ranks_of(scores):
+    order = np.argsort(-scores)
+    r = np.zeros(len(scores), dtype=int)
+    for pos, doc in enumerate(order):
+        r[doc] = pos + 1   # 1-indexed rank
+    return r
+
+bm25_r = ranks_of(bm25_scores)
+cos_r = ranks_of(cos_scores)
+print(&quot;doc   bm25_rank  cos_rank&quot;)
+for d in range(6):
+    print(f&quot;{d:&gt;3}   {bm25_r[d]:&gt;9}  {cos_r[d]:&gt;8}&quot;)
+
+K = 60
+rrf = 1.0 / (K + bm25_r) + 1.0 / (K + cos_r)
+print(&quot;\nRRF (k=60):&quot;)
+for d in range(6):
+    print(f&quot;  doc {d}  rrf={rrf[d]:.6f}&quot;)
+print(&quot;ranking:&quot;, np.argsort(-rrf).tolist())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>doc   bm25_rank  cos_rank
+  0           2         1
+  1           3         5
+  2           1         3
+  3           4         4
+  4           5         2
+  5           6         6
+
+RRF (k=60):
+  doc 0  rrf=0.032522
+  doc 1  rrf=0.031258
+  doc 2  rrf=0.032266
+  doc 3  rrf=0.031250
+  doc 4  rrf=0.031514
+  doc 5  rrf=0.030303
+ranking: [0, 2, 4, 1, 3, 5]
+</code></pre><p>RRF puts doc 0 first (rank 2 in BM25, rank 1 in cosine — good in both) and doc 2 second (BM25's
+top pick). Doc 4 — the wrong-policy document that beat two genuine matches under cosine alone — still
+climbs to third here, ahead of doc 1, because its strong cosine rank (2nd) outweighs its weak BM25
+rank (5th) in the sum. RRF is more robust than raw score blending, not immune to every failure; a
+document that ranks well under one system and poorly under the other can still surface above one
+that ranks only moderately under both.</p>
+<p><strong>Exercise:</strong>
+Recompute the RRF scores using <code>K = 10</code> instead of <code>60</code>, and describe in one sentence how a smaller
+<code>k</code> changes the relative influence of a document's best rank versus its worst rank.</p>
+<p><strong>Starting point:</strong> The <code>ranks_of()</code> function, <code>bm25_r</code>, <code>cos_r</code> arrays from this concept's Example, with <code>K</code> as a variable.</p>
+<p>Expected output: at <code>K=10</code>, <code>rrf = 1/(10+bm25_r) + 1/(10+cos_r)</code>, giving doc 0 a noticeably larger
+score than at <code>K=60</code> (its strong cos_rank=1 term becomes <code>1/11≈0.0909</code> instead of <code>1/61≈0.0164</code>) while
+doc 5 (worst in both) barely moves in relative terms — a smaller <code>k</code> rewards a document's best rank
+more steeply, making the fusion more sensitive to whichever single system ranked a document highest.</p>
+<hr />
+<h3>Concept 3 — Min-Max vs Z-Score vs a Weighted Alpha Blend</h3>
+<p>Score-based fusion is not automatically wrong — it is unavoidable when a use case genuinely needs
+tunable weighting between lexical and semantic signal, e.g. &quot;trust BM25 twice as much as cosine for
+this query type.&quot; The two common normalizers, min-max and z-score, both attempt to put BM25 and
+cosine on the same footing before blending. Both share the same weakness: they are defined per query,
+from that query's own score distribution, so one outlier score redefines the scale for everyone else
+in the same result set.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+bm25_scores = np.array([0.6659, 0.6659, 0.7140, 0.0000, 0.0000, 0.0000])
+cos_scores = np.array([0.5246, 0.4416, 0.4844, 0.4457, 0.5201, 0.0753])
+
+def minmax(x):
+    lo, hi = x.min(), x.max()
+    return (x - lo) / (hi - lo) if hi &gt; lo else np.zeros_like(x)
+
+def zscore(x):
+    mu, sigma = x.mean(), x.std()
+    return (x - mu) / sigma if sigma &gt; 0 else np.zeros_like(x)
+
+bm25_mm, cos_mm = minmax(bm25_scores), minmax(cos_scores)
+alpha = 0.5
+blend_mm = alpha * bm25_mm + (1 - alpha) * cos_mm
+print(&quot;min-max alpha-blend ranking:&quot;, np.argsort(-blend_mm).tolist())
+
+bm25_z, cos_z = zscore(bm25_scores), zscore(cos_scores)
+blend_z = alpha * bm25_z + (1 - alpha) * cos_z
+print(&quot;z-score alpha-blend ranking:&quot;, np.argsort(-blend_z).tolist())
+
+# Instability check: one outlier BM25 score (e.g. a rare-term exact match) on a DIFFERENT query
+bm25_outlier = np.array([0.6659, 0.6659, 0.7140, 0.0, 0.0, 9.0])
+print(&quot;\ndoc 2&#x27;s min-max score without the outlier:&quot;, round(minmax(bm25_scores)[2], 4))
+print(&quot;doc 2&#x27;s min-max score with doc 5 spiking to 9.0:&quot;, round(minmax(bm25_outlier)[2], 4))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>min-max alpha-blend ranking: [0, 2, 1, 4, 3, 5]
+z-score alpha-blend ranking: [0, 2, 1, 4, 3, 5]
+
+doc 2&#x27;s min-max score without the outlier: 1.0
+doc 2&#x27;s min-max score with doc 5 spiking to 9.0: 0.0793
+</code></pre><p>Both normalizers agree with each other here, and both disagree with RRF's ranking from Concept 2
+(which put doc 4 third; here doc 1 is third). More importantly: doc 2's min-max score collapses from
+a perfect 1.0 to 0.0793 purely because <em>a different document</em> (doc 5) picked up one unusually high
+raw score on a different query. Nothing about doc 2's own relevance changed — the scale it is measured
+against did. RRF, which never touches raw scores, cannot be destabilized this way; that is the
+concrete reason this track treats RRF as the default and score blending as an opt-in for a specific,
+validated use case rather than the other way around.</p>
+<p><strong>Exercise:</strong>
+Compute <code>zscore(bm25_outlier)</code> (the same outlier array used above) and compare doc 2's z-score with
+and without the outlier, the same way the Example did for min-max.</p>
+<p><strong>Starting point:</strong> The <code>zscore()</code> function and <code>bm25_outlier</code> array from this concept's Example.</p>
+<p>Expected output: doc 2's z-score shifts from 1.0928 (no outlier) to -0.3504 (with doc 5 spiking to
+9.0) — a smaller absolute swing than min-max's collapse from 1.0 to 0.0793, but the same failure
+mode: one document's score reshapes every other document's normalized position.</p>
+<hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> A core system migrating from a keyword-only search box to hybrid retrieval usually
+has years of tuned relevance behavior riding on the old BM25-only ranking. RRF's rank-based fusion
+tends to preserve &quot;documents that were already top BM25 hits stay near the top&quot; better than a score
+blend does, which matters when a change in search ranking itself needs a change-control ticket.</p>
+<p><strong>Compliance angle:</strong> A score-blending weight (<code>alpha</code>) is a tunable business decision masquerading
+as an engineering parameter — whoever sets <code>alpha=0.8</code> favoring lexical results over semantic ones is
+making a real policy choice about which claims get surfaced first. Record <code>alpha</code>, and any
+normalization method, as a versioned configuration value, the same way Week 01 treated the embedding
+metric.</p>
+<p><strong>What breaks in production:</strong> Comparing today's blended score against yesterday's for the &quot;same&quot;
+query and treating the difference as a relevance signal. Min-max and z-score are recomputed fresh
+from each query's own result set, so the same document's normalized score is not stable across
+different queries or different corpus states — only RRF's rank-based approach is comparably stable
+across runs.</p>
+<hr />
+<h2 id="day-4">Day 4 — Postgres Full-Text Plus Vector</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="05-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=GRwIa-ce7RA" target="_blank" rel="noopener"><b>Master Postgres Full-text Search in 5 Minutes</b><small>Supabase · 4:42</small></a></li><li><a href="https://www.youtube.com/watch?v=Nyu38VFns4E" target="_blank" rel="noopener"><b>Full-Text Search -Built-in support for full-text search using tsvector and tsquery by Bidesh Mondal</b><small> Hyderabad PostgreSQL User Group · 35:38</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=postgres%20full%20text%20search%20tsvector%20ts_rank%20combined%20with%20pgvector" target="_blank" rel="noopener">Search YouTube: postgres full text search tsvector ts_rank combined with pgvector</a></p></div>
+<hr />
+<h3>Concept 1 — <code>to_tsvector</code>, <code>websearch_to_tsquery</code>, <code>ts_rank_cd</code></h3>
+<p>PostgreSQL's built-in full-text search is a genuinely separate mechanism from BM25 — <code>ts_rank_cd</code>
+(&quot;cover density&quot; ranking) scores based on term proximity and frequency inside a <code>tsvector</code>, not the
+BM25 formula from Days 1-3 — but it is the lexical half of hybrid search for any team already
+standardized on Postgres/pgvector from Week 02, avoiding a second search engine.</p>
+<p><strong>Example:</strong> <em>(REAL MODE — not executed, requires a live PostgreSQL instance with <code>pg_trgm</code>/pgvector installed; none is available in this environment)</em></p>
+<pre><code>-- doc_tsv is generated once, at write time, not recomputed per query.
+ALTER TABLE claims ADD COLUMN doc_tsv tsvector
+    GENERATED ALWAYS AS (to_tsvector(&#x27;english&#x27;, coalesce(claim_note, &#x27;&#x27;))) STORED;
+
+CREATE INDEX claims_tsv_gin ON claims USING GIN (doc_tsv);
+
+-- websearch_to_tsquery understands quoted phrases and a leading &quot;-&quot; for
+-- exclusion, the same syntax a real search box would expect from a user.
+SELECT id, claim_note,
+       ts_rank_cd(doc_tsv, websearch_to_tsquery(&#x27;english&#x27;, &#x27;water damage -flood&#x27;)) AS lex_rank
+FROM claims
+WHERE doc_tsv @@ websearch_to_tsquery(&#x27;english&#x27;, &#x27;water damage -flood&#x27;)
+ORDER BY lex_rank DESC
+LIMIT 10;
+</code></pre><p>Expected output (shape only): up to 10 rows, each with an <code>id</code>, the original <code>claim_note</code>, and a
+<code>lex_rank</code> float — only rows where <code>doc_tsv @@ query</code> matches at all appear; there is no all-zero row
+the way this week's from-scratch BM25 returns for a non-matching document, because the <code>WHERE</code> clause
+filters non-matches out before <code>ts_rank_cd</code> is even computed.</p>
+<p><strong>Exercise:</strong>
+Write the equivalent query for the identifier lookup this week has used throughout,
+<code>websearch_to_tsquery('english', 'POL-8842-C')</code>, and state what <code>to_tsvector</code>'s default English
+dictionary might do to a hyphenated identifier that a hand-written regex tokenizer would not (hint:
+stemming and stop-word removal target English prose, not policy numbers).</p>
+<p><strong>Starting point:</strong> The <code>claims_tsv_gin</code> index and the query shape from this concept's REAL MODE block above, substituting the identifier query text.</p>
+<p>Expected output: a query identical in shape to the Example's, with <code>'water damage -flood'</code> replaced
+by <code>'POL-8842-C'</code>. The stated risk: PostgreSQL's default English text search configuration may split
+or stem a hyphenated token in ways not tested here without a live instance — worth explicitly
+verifying with <code>SELECT to_tsvector('english', 'POL-8842-C');</code> before trusting identifier lookups to
+the default configuration, rather than assuming it behaves like the hand-written tokenizer from Day 1.</p>
+<hr />
+<h3>Concept 2 — A GIN Index Beside an HNSW Index</h3>
+<p>A GIN index over a <code>tsvector</code> column and an HNSW index (Week 01/02) over a <code>vector</code> column are
+independent structures that can live on the same table without conflicting — Postgres already
+supports multiple index types per table for different query patterns, the same way a table
+commonly carries both a B-tree primary key index and a separate index for a foreign key.</p>
+<p><strong>Example:</strong> <em>(REAL MODE — not executed, requires a live PostgreSQL instance with <code>pg_trgm</code>/pgvector installed; none is available in this environment)</em></p>
+<pre><code>CREATE INDEX claims_tsv_gin ON claims USING GIN (doc_tsv);
+CREATE INDEX claims_embedding_hnsw ON claims USING hnsw (embedding vector_cosine_ops);
+
+-- Two independent single-index scans, one per retrieval mode, run separately --
+-- fusion happens afterward, in application code or a CTE (Concept 3), not inside
+-- either index.
+</code></pre><p>Expected output (shape only): two index rows in <code>\d claims</code> (or <code>pg_indexes</code>), one <code>gin</code> on
+<code>doc_tsv</code>, one <code>hnsw</code> on <code>embedding</code>; <code>EXPLAIN</code> on a query that filters on both would show two
+separate index scans rather than one combined index operation, since Postgres has no single index
+type that natively spans both a <code>tsvector</code> and a <code>vector</code> column.</p>
+<p><strong>Exercise:</strong>
+Write the <code>EXPLAIN (ANALYZE, BUFFERS)</code> invocation you would run against the combined query from
+Concept 1's <code>WHERE doc_tsv @@ ...</code> clause to confirm the GIN index is actually used rather than a
+sequential scan, and state which specific line of <code>EXPLAIN</code>'s output would confirm it.</p>
+<p><strong>Starting point:</strong> The <code>claims_tsv_gin</code> index definition from this concept's REAL MODE block, and the filtered query from Concept 1.</p>
+<p>Expected output (shape only): <code>EXPLAIN (ANALYZE, BUFFERS) SELECT ... FROM claims WHERE doc_tsv @@ websearch_to_tsquery(...) ORDER BY lex_rank DESC LIMIT 10;</code> — the confirming line is a <code>Bitmap Index Scan on claims_tsv_gin</code> (or <code>Index Scan</code>, depending on selectivity) rather than a <code>Seq Scan on claims</code> in the plan.</p>
+<hr />
+<h3>Concept 3 — One CTE Returning Both Rankings for Fusion</h3>
+<p><strong>REAL MODE — not executed (requires a live PostgreSQL instance with <code>pg_trgm</code>/pgvector installed; none is available in this environment):</strong></p>
+<p>Both the lexical and semantic candidate sets, and their rank fusion, can be expressed in a single
+query — no application-side round trip needed to fetch two result sets and merge them in Python.</p>
+<pre><code>WITH lexical AS (
+    SELECT id,
+           ts_rank_cd(doc_tsv, websearch_to_tsquery(&#x27;english&#x27;, :query_text)) AS lex_rank
+    FROM claims
+    WHERE doc_tsv @@ websearch_to_tsquery(&#x27;english&#x27;, :query_text)
+),
+semantic AS (
+    SELECT id,
+           1 - (embedding &lt;=&gt; :query_embedding) AS cos_sim
+    FROM claims
+    ORDER BY embedding &lt;=&gt; :query_embedding
+    LIMIT 50
+),
+lex_ranked AS (
+    SELECT id, ROW_NUMBER() OVER (ORDER BY lex_rank DESC) AS lex_pos FROM lexical
+),
+sem_ranked AS (
+    SELECT id, ROW_NUMBER() OVER (ORDER BY cos_sim DESC) AS sem_pos FROM semantic
+)
+SELECT COALESCE(l.id, s.id) AS id,
+       COALESCE(1.0 / (60 + l.lex_pos), 0) + COALESCE(1.0 / (60 + s.sem_pos), 0) AS rrf_score
+FROM lex_ranked l
+FULL OUTER JOIN sem_ranked s ON l.id = s.id
+ORDER BY rrf_score DESC
+LIMIT 10;
+</code></pre><p>Expected output (shape only): up to 10 rows of <code>(id, rrf_score)</code>, ordered highest fusion score first
+— a document appearing in only one of the two candidate sets still gets a score (via <code>COALESCE</code>'s
+0 for the missing side), while a document in neither CTE's result set never appears at all, unlike
+the from-scratch RRF in Day 3 which ranked every document in the corpus regardless of match.</p>
+<p>One deliberate design choice worth naming: <code>lexical</code> only contains rows where <code>doc_tsv @@ query</code>
+actually matched. A document with zero lexical overlap is <strong>absent</strong> from that CTE, not present with
+a rank at the bottom — which is a more accurate reflection of &quot;no lexical evidence&quot; than Day 3's toy,
+where every document received a BM25 rank even when its score was 0.0.</p>
+<p>The pure-Python block below simulates exactly this query's arithmetic — the same <code>ROW_NUMBER()</code> +
+<code>1/(k+rank)</code> fusion, applied to plain Python dicts standing in for what the two CTEs would return —
+so the fusion logic itself is checked even without a live database.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Simulates the CTE above using the same lexical/semantic rankings measured in
+# Day 1/Day 2/Day 3 for query &quot;POL-8842-C&quot; over the 6-doc corpus. No database
+# involved -- this only mirrors the SQL&#x27;s ROW_NUMBER()+RRF arithmetic.
+
+lexical_rows = [   # stands in for the &quot;lexical&quot; CTE: only docs where doc_tsv @@ query matched
+    {&quot;id&quot;: 2, &quot;lex_rank&quot;: 0.7140},
+    {&quot;id&quot;: 0, &quot;lex_rank&quot;: 0.6659},
+    {&quot;id&quot;: 1, &quot;lex_rank&quot;: 0.6659},
+]
+semantic_rows = [  # stands in for the &quot;semantic&quot; CTE: top-50 (here, all 6) by cosine similarity
+    {&quot;id&quot;: 0, &quot;cos_sim&quot;: 0.5246},
+    {&quot;id&quot;: 4, &quot;cos_sim&quot;: 0.5201},
+    {&quot;id&quot;: 2, &quot;cos_sim&quot;: 0.4844},
+    {&quot;id&quot;: 3, &quot;cos_sim&quot;: 0.4457},
+    {&quot;id&quot;: 1, &quot;cos_sim&quot;: 0.4416},
+    {&quot;id&quot;: 5, &quot;cos_sim&quot;: 0.0753},
+]
+
+def with_row_number(rows):
+    return {row[&quot;id&quot;]: pos + 1 for pos, row in enumerate(rows)}   # ROW_NUMBER() OVER (...)
+
+lex_pos = with_row_number(lexical_rows)
+sem_pos = with_row_number(semantic_rows)
+
+K = 60
+all_ids = set(lex_pos) | set(sem_pos)
+fused = []
+for doc_id in all_ids:
+    rrf_score = 0.0
+    if doc_id in lex_pos:
+        rrf_score += 1.0 / (K + lex_pos[doc_id])
+    if doc_id in sem_pos:
+        rrf_score += 1.0 / (K + sem_pos[doc_id])
+    fused.append((doc_id, rrf_score))
+
+fused.sort(key=lambda row: -row[1])
+print(&quot;id  rrf_score  (simulating the CTE&#x27;s FULL OUTER JOIN + fusion)&quot;)
+for doc_id, score in fused:
+    print(f&quot;{doc_id:&gt;3}  {score:.6f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>id  rrf_score  (simulating the CTE&#x27;s FULL OUTER JOIN + fusion)
+  0  0.032522
+  2  0.032266
+  1  0.031258
+  4  0.016129
+  3  0.015625
+  5  0.015152
+</code></pre><p>Compare this to Day 3 Concept 2's RRF ranking (<code>[0, 2, 4, 1, 3, 5]</code>, all computed over every
+document regardless of BM25 match). Here, docs 3, 4 and 5 — which had zero BM25/lexical overlap —
+score noticeably lower (around 0.015-0.016 instead of 0.030-0.031), because they contribute only
+their semantic-side term; the CTE's <code>WHERE doc_tsv @@ query</code> filter correctly excludes them from the
+lexical side entirely rather than assigning them a bottom-of-the-corpus rank. That is a real, if
+subtle, difference between the toy fusion in Day 3 and what a production CTE actually computes.</p>
+<p>One-datastore vs a dedicated search engine is the other decision this day sets up: staying inside
+Postgres (this CTE) avoids a second system to operate, back up and keep consistent with the primary
+data, at the cost of <code>ts_rank_cd</code> being a materially different (and generally less tunable) ranking
+function than a dedicated engine's BM25 implementation.</p>
+<p><strong>Exercise:</strong>
+Modify the simulation so that <code>semantic_rows</code> only includes the top 3 documents by cosine similarity
+(matching a <code>LIMIT 3</code> instead of the full 6), and recompute the fused ranking. State which document's
+fused rank changes the most and why.</p>
+<p><strong>Starting point:</strong> The <code>with_row_number()</code> function and <code>fused</code> computation loop from this concept's Example, with <code>semantic_rows</code> truncated to its first 3 entries.</p>
+<p>Expected output: with only docs <code>{0, 4, 2}</code> present on the semantic side, doc 1 (which was rank 5 of
+6 semantically) loses its semantic contribution entirely and now scores purely on its lexical
+<code>1/(60+3) = 0.01613</code>, a clear drop from its combined score in the full simulation — the document most
+affected is the one whose only strength was a middling-to-poor rank on the side that just got cut off.</p>
+<hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> Many BFSI shops already run Postgres for the system of record and would need a
+change-management case to introduce a dedicated search engine (Elasticsearch/OpenSearch) purely for
+BM25. Staying inside Postgres with <code>tsvector</code>/<code>ts_rank_cd</code> avoids that case entirely, at the cost of a
+materially different, less mature lexical ranking function than a dedicated engine's real BM25.</p>
+<p><strong>Compliance angle:</strong> A single CTE that computes and returns both rankings in one query is also a
+single artifact an auditor can read end-to-end to answer &quot;how was this result ranked&quot; — versus two
+separately-tuned systems (a search engine plus a vector database) whose combined behavior lives partly
+in application code that may not be captured by either system's own audit log.</p>
+<p><strong>What breaks in production:</strong> <code>ts_rank_cd</code> and cosine similarity share the same non-comparability
+problem as BM25 and cosine (Day 3 Concept 1) — a team that swaps this week's RRF fusion for a raw
+<code>lex_rank + cos_sim</code> sum inside the CTE reintroduces exactly the scale-mismatch bug this week spent
+three days establishing, just inside SQL instead of Python.</p>
+<hr />
+<h2 id="day-5">Day 5 — Evaluating Hybrid Retrieval Quality</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="05-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=k1yoGGVMpRg" target="_blank" rel="noopener"><b>RAG Evaluation, Retrieval Metrics Explained: Precision@k, Recall@k, F1, MRR and NDCG</b><small>Slav Kurochkin · 4:06</small></a></li><li><a href="https://www.youtube.com/watch?v=-dIm4EyUrrM" target="_blank" rel="noopener"><b>RAG #10: RAG Retrieval Evaluation Metrics Explained: Recall@K, Precision@K, MRR, MAP, NDCG #rag</b><small>Praveen Reddy Learnings · 11:19</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=evaluating%20retrieval%20nDCG%20MRR%20recall%20information%20retrieval%20metrics" target="_blank" rel="noopener">Search YouTube: evaluating retrieval nDCG MRR recall information retrieval metrics</a></p></div>
+<hr />
+<h3>Concept 1 — Graded Relevance Judgments and nDCG@10</h3>
+<p>A labeled query set needs more than a binary &quot;relevant/not relevant&quot; per document — a document that
+is the exact right claim is worth more than one that is merely topically related. Graded relevance
+(commonly 0-3) captures that, and nDCG (normalized Discounted Cumulative Gain) is the standard metric
+built for graded judgments:</p>
+<pre><code>gain(rel)      = 2^rel - 1
+DCG@k          = sum over positions i=1..k of gain(rel_i) / log2(i + 1)
+nDCG@k         = DCG@k / IDCG@k     (IDCG = DCG of the ideal, relevance-sorted ordering)
+</code></pre><p>The exponential gain rewards a top-graded document heavily; a linear-gain variant (<code>gain = rel</code>
+instead of <code>2^rel - 1</code>) exists in some implementations and treats grade differences more evenly — the
+exponential form is what most published benchmarks use and what this week uses throughout.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+def dcg(order, rel, k):
+    total = 0.0
+    for i, doc in enumerate(order[:k]):
+        gain = (2 ** rel.get(doc, 0)) - 1
+        total += gain / np.log2(i + 2)   # position is i+1 (0-indexed i), discount log2(pos+1)
+    return total
+
+def ndcg_at_k(order, rel, k):
+    ideal_order = sorted(rel.keys(), key=lambda d: -rel[d])
+    idcg = dcg(ideal_order, rel, k)
+    return dcg(order, rel, k) / idcg if idcg &gt; 0 else 0.0
+
+# Query &quot;POL-8842-C&quot;: docs 0 and 1 are the fullest narrative matches (graded 3),
+# doc 2 (the bare renewal notice) is a real but weaker match (graded 2).
+relevance = {0: 3, 1: 3, 2: 2}
+
+bm25_order   = [2, 0, 1, 3, 4, 5]   # from Day 1
+vector_order = [0, 4, 2, 3, 1, 5]   # from Day 2 -- doc 4 (wrong policy) intrudes at rank 2
+hybrid_order = [0, 2, 4, 1, 3, 5]   # from Day 3&#x27;s RRF fusion
+
+for name, order in ((&quot;bm25&quot;, bm25_order), (&quot;vector&quot;, vector_order), (&quot;hybrid&quot;, hybrid_order)):
+    print(f&quot;{name:&lt;7}  nDCG@10 = {ndcg_at_k(order, relevance, 10):.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>bm25     nDCG@10 = 0.8452
+vector   nDCG@10 = 0.8677
+hybrid   nDCG@10 = 0.9219
+</code></pre><p>Hybrid scores highest, as expected — it combines the strengths of both signals for this query.
+Notice, though, that plain vector search actually edges out BM25 here (0.8677 vs 0.8452), even though
+Day 2 showed vector search inserting the wrong-policy document (doc 4) into rank 2. That is not a
+contradiction: nDCG@10 rewards getting <em>a</em> relevant document to the top of the list, and doc 0 (graded
+3) sits at rank 1 for vector search but only rank 2 for BM25 (which put the weaker doc 2 first) — the
+intruding wrong document at rank 2 costs vector search less than BM25's own length-normalization
+choice costs it here. A single aggregate metric can hide the specific failure mode a hands-on example
+made obvious; Concept 3 returns to this.</p>
+<p><strong>Exercise:</strong>
+Compute nDCG@10 for the conceptual query <code>&quot;escape of water damage to a ceiling&quot;</code> using
+<code>relevance = {0: 3, 1: 3}</code> and these three orderings: <code>bm25_order = [1, 0, 2, 3, 4, 5]</code>,
+<code>vector_order = [0, 1, 5, 4, 2, 3]</code>, and <code>hybrid_order</code> computed via RRF (k=60) over those two rank
+lists (reuse Day 3's <code>ranks_of()</code>/RRF pattern).</p>
+<p><strong>Starting point:</strong> The <code>dcg()</code>/<code>ndcg_at_k()</code> functions from this concept's Example, the given <code>bm25_order</code>/<code>vector_order</code>, and Day 3's RRF pattern to derive <code>hybrid_order</code>.</p>
+<p>Expected output: all three systems score nDCG@10 = 1.0000 for this query — both docs 0 and 1 (the
+only relevant documents) occupy ranks 1 and 2 in every ordering, which is the ideal arrangement itself,
+so there is no room for hybrid to improve on an already-perfect ranking for this particular query.</p>
+<hr />
+<h3>Concept 2 — MRR and Recall@50</h3>
+<p>Two simpler, complementary metrics fill gaps nDCG leaves open. <strong>MRR</strong> (Mean Reciprocal Rank) is the
+mean, over queries, of <code>1 / rank of the first relevant result</code> (0 if no relevant result is retrieved
+at all) — it captures &quot;how far down the list until the user sees anything useful,&quot; which matters most
+for queries where any relevant hit is enough (an identifier lookup is the clearest case). <strong>Recall@k</strong>
+is the fraction of all known-relevant documents that appear anywhere in the top k — it captures
+completeness, which nDCG (which only rewards <em>position</em>, not presence) does not directly measure.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def mrr(order, rel):
+    for i, doc in enumerate(order):
+        if rel.get(doc, 0) &gt; 0:
+            return 1.0 / (i + 1)
+    return 0.0
+
+def recall_at_k(order, rel, k):
+    relevant = set(rel.keys())
+    if not relevant:
+        return 0.0
+    return len(set(order[:k]) &amp; relevant) / len(relevant)
+
+relevance = {0: 3, 1: 3, 2: 2}
+bm25_order   = [2, 0, 1, 3, 4, 5]
+vector_order = [0, 4, 2, 3, 1, 5]
+hybrid_order = [0, 2, 4, 1, 3, 5]
+
+for name, order in ((&quot;bm25&quot;, bm25_order), (&quot;vector&quot;, vector_order), (&quot;hybrid&quot;, hybrid_order)):
+    print(f&quot;{name:&lt;7}  MRR = {mrr(order, relevance):.4f}  recall@50 = {recall_at_k(order, relevance, 50):.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>bm25     MRR = 1.0000  recall@50 = 1.0000
+vector   MRR = 1.0000  recall@50 = 1.0000
+hybrid   MRR = 1.0000  recall@50 = 1.0000
+</code></pre><p>Both metrics are identical across all three systems here, and neither shows the wrong-document
+intrusion nDCG partly captured either. MRR is 1.0 for all three simply because each system's rank-1
+result happens to be relevant — MRR cannot see anything about rank 2 onward once rank 1 is relevant.
+Recall@50 is 1.0 for all three because this corpus has only 6 documents total, so &quot;top 50&quot; is the
+entire corpus by construction — at 6 documents, recall@50 cannot discriminate between systems at all.
+This is an honest limitation of a toy-sized corpus, not a property of the metric: at a real corpus
+size of thousands of documents, recall@50 becomes exactly the metric that would expose a system
+missing relevant documents entirely rather than merely mis-ranking ones it did retrieve.</p>
+<p><strong>Exercise:</strong>
+Construct a query and relevance set where MRR would actually differ between two systems — i.e., where
+one system's first relevant result appears later than rank 1. Use the vector-only nonsense-query
+result from Day 2 Concept 2 as a starting idea (no query terms match, so is there a &quot;relevant&quot; result
+at all?).</p>
+<p><strong>Starting point:</strong> <code>mrr()</code> from this concept's Example, and the nonsense-query cosine ranking <code>[5, 3, 1, 0, 4, 2]</code> from Day 2 Concept 2 (bm25 was all zero for that query).</p>
+<p>Expected output: with an empty relevance set (<code>relevance = {}</code>, since the nonsense query genuinely has
+no relevant document), <code>mrr()</code> returns <code>0.0</code> for every system by the function's own definition —
+demonstrating that MRR's &quot;0 if none retrieved&quot; branch is not a degenerate edge case here, it is the
+<em>correct</em> score for a query that has no right answer, and a system that still returns a confident
+top-1 result (vector search, Day 2 Concept 2) gets no credit for that false confidence under MRR
+either.</p>
+<hr />
+<h3>Concept 3 — Per-Query-Type Breakdown and Regression vs the Vector-Only Baseline</h3>
+<p>An aggregate metric across all queries hides exactly the pattern this week has been building toward:
+identifier-lookup queries and conceptual queries fail differently, so they should be reported
+separately, not blended into one mean that a strong showing on one type can mask a weakness on the
+other. The regression check that actually matters before shipping a hybrid system is not &quot;is hybrid's
+aggregate score higher&quot; — it is &quot;is hybrid strictly no worse than the vector-only baseline it is
+replacing, for every query type,&quot; since a hybrid system that trades vector-only's conceptual strength
+for lexical gains elsewhere would be a regression for exactly the queries the system already handled
+well.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># id_lookup: relevance {0:3, 1:3, 2:2}, orders from Day 1/2/3.
+# conceptual: relevance {0:3, 1:3}, orders from Concept 1&#x27;s Exercise (all three orders identical: [0,1,...]).
+id_orders = {&quot;bm25&quot;: [2, 0, 1, 3, 4, 5], &quot;vector&quot;: [0, 4, 2, 3, 1, 5], &quot;hybrid&quot;: [0, 2, 4, 1, 3, 5]}
+concept_orders = {&quot;bm25&quot;: [1, 0, 2, 3, 4, 5], &quot;vector&quot;: [0, 1, 5, 4, 2, 3], &quot;hybrid&quot;: [0, 1, 5, 4, 2, 3]}
+id_rel = {0: 3, 1: 3, 2: 2}
+concept_rel = {0: 3, 1: 3}
+
+print(f&quot;{&#x27;system&#x27;:&lt;7} {&#x27;id_lookup&#x27;:&gt;10} {&#x27;conceptual&#x27;:&gt;11} {&#x27;mean&#x27;:&gt;7}&quot;)
+means = {}
+for system in (&quot;bm25&quot;, &quot;vector&quot;, &quot;hybrid&quot;):
+    id_score = ndcg_at_k(id_orders[system], id_rel, 10)
+    concept_score = ndcg_at_k(concept_orders[system], concept_rel, 10)
+    mean = (id_score + concept_score) / 2
+    means[system] = mean
+    print(f&quot;{system:&lt;7} {id_score:&gt;10.4f} {concept_score:&gt;11.4f} {mean:&gt;7.4f}&quot;)
+
+delta = means[&quot;hybrid&quot;] - means[&quot;vector&quot;]
+print(f&quot;\nhybrid vs vector-only baseline: {delta:+.4f}  ({&#x27;improvement&#x27; if delta &gt; 0 else &#x27;regression&#x27;})&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Measured output:</p>
+<pre><code>system   id_lookup  conceptual    mean
+bm25        0.8452      1.0000  0.9226
+vector      0.8677      1.0000  0.9339
+hybrid      0.9219      1.0000  0.9609
+
+hybrid vs vector-only baseline: +0.0271  (improvement)
+</code></pre><p>The per-query-type breakdown shows conceptual queries perfectly solved by all three systems in this
+toy corpus (masking any difference there), while id_lookup is where the systems actually separate:
+hybrid (0.9219) beats both bm25 (0.8452) and vector-only (0.8677) on the query type Day 2 built this
+week's whole argument around. The aggregate mean (+0.0271 for hybrid over vector-only) is real here,
+but it is the per-query-type row, not the mean, that tells you <em>why</em> — and it is the row a stakeholder
+should see before approving a hybrid rollout, since a mean improvement built entirely on one query
+type while regressing silently on another would not show up in the mean at all if the two roughly
+canceled out.</p>
+<p><strong>Exercise:</strong>
+Using the same <code>id_orders</code>/<code>concept_orders</code>/<code>id_rel</code>/<code>concept_rel</code>, compute each system's mean
+<strong>recall@50</strong> the same way the Example computed mean nDCG@10, and state whether recall@50 is useful
+for distinguishing these three systems at this corpus size.</p>
+<p><strong>Starting point:</strong> <code>recall_at_k()</code> from Concept 2, and the <code>id_orders</code>/<code>concept_orders</code>/<code>id_rel</code>/<code>concept_rel</code> dicts from this concept's Example.</p>
+<p>Expected output: recall@50 is 1.0000 for every system on both query types (the entire 6-document
+corpus is smaller than k=50, so every relevant document is always within the top 50 regardless of
+ranking quality) — confirming recall@50 provides zero discriminating signal at this corpus size, and
+is only meaningful once the corpus is large enough that &quot;top 50&quot; is a genuine subset of the whole.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> Building a graded relevance judgment set requires a domain expert (a claims adjuster
+or underwriter) to label queries, which is real, recurring human cost — not a one-time engineering
+task. A labeled set built once against today's product line goes stale as new coverage types and
+exclusion wordings are added, the same way any test fixture rots against a moving system.</p>
+<p><strong>Compliance angle:</strong> EU AI Act Article 15's declared-accuracy-metric expectation, already raised in
+Week 01, applies directly here: nDCG@10/MRR/recall@50 measured against a versioned, graded judgment
+set is exactly the kind of reproducible retrieval-quality claim that supports a documented accuracy
+statement for a high-risk system, provided the judgment set and the harness are both version-controlled
+artifacts rather than a one-time spreadsheet.</p>
+<p><strong>What breaks in production:</strong> Reporting only the aggregate mean and shipping a change that improves
+it. This lesson's own numbers show a hybrid config beating vector-only on aggregate nDCG@10 while
+being identical to it on the conceptual query type — a real system could just as easily improve on
+aggregate while quietly regressing one query type that a mean, by construction, cannot reveal without
+the per-query-type breakdown Concept 3 insists on.</p>
+<hr />
+<h2>Architecture Decision — Week 05</h2>
+<p><strong>Choosing between:</strong> BM25-only lexical search, vector-only dense search, and hybrid retrieval fused
+by RRF (or, for a use case that genuinely needs it, a tuned score blend).</p>
+<p><strong>Rule of thumb:</strong> use BM25-only when the query population is dominated by exact identifiers, codes,
+or short structured terms where a bag-of-words match is the actual right answer and the added
+infrastructure of a vector index buys nothing — the from-scratch scoring in Day 1 is enough to ship
+that, no embedding model required. Use vector-only when queries are genuinely open-ended natural
+language with no meaningful identifier component and a labeled evaluation set (Day 5) confirms dense
+search alone already meets the bar; this is rarely the right resting point for a claims/policy corpus
+specifically because both query types coexist in the same product. Move to hybrid, fused by RRF at
+<code>k=60</code>, as the default once real queries mix both types — Day 2's measured failure (a wrong-policy
+document beating two genuine matches under cosine alone) is not a corner case for this domain, it is
+the routine shape of an identifier query, and Day 5's per-query-type nDCG showed hybrid winning
+specifically on that query type without losing anything on the conceptual one. Reserve a tuned
+<code>alpha</code>-weighted score blend for the narrow case where a stakeholder has an explicit, documented
+reason to trust one signal more than the other for a specific query class — and even then, treat
+<code>alpha</code> as a versioned configuration value (Day 3's BFSI Reality Check), not a knob tuned once and
+forgotten, because the min-max/z-score instability this week measured means an untracked change
+elsewhere in the score distribution can silently move that blend's behavior without anyone touching
+<code>alpha</code> itself.</p>
+<div class="pager"><a class="btn ghost" href="week-04.html">&larr; Week 04</a><a class="btn ghost" href="week-06.html">Week 06 &rarr;</a></div>
+</main></body></html>

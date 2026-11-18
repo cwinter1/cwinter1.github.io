@@ -1,0 +1,1453 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 19 — LangGraph Production Patterns</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/how-does-langgraph-work" target="_blank" rel="noopener">How does LangGraph work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/ai-agent-loop" target="_blank" rel="noopener">What is an AI Agent Loop?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/human-in-the-loop-agents" target="_blank" rel="noopener">Human-in-the-Loop agents<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/ai-agent-memory" target="_blank" rel="noopener">How does AI Agent Memory work?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="19" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 19 — LangGraph Production Patterns</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>4 — LLMOps &amp; Distributed Infrastructure (opens Phase 4)</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Advanced</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 11/15's <code>GuardRail</code> middleware and Week 17's Article 14 human-oversight requirement are both genuinely reused this week. No prior LangGraph experience assumed — this week starts from <code>StateGraph</code> itself.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. <code>langgraph</code>, <code>langgraph-checkpoint</code>, and <code>langgraph-checkpoint-postgres</code> all install and import cleanly in this sandbox; every <code>StateGraph</code>/<code>InMemorySaver</code>/<code>interrupt</code>/<code>Send</code> example this week is genuinely built and executed. <code>PostgresSaver</code> needs a live PostgreSQL server this sandbox does not have, so its <code>.setup()</code>/connection calls stay REAL MODE with real, API-checked syntax — the durability <em>behavior</em> it exists for is demonstrated with <code>InMemorySaver</code> instead, the same &quot;REAL MODE is a label with a real shape&quot; pattern this track has used since Week 06.</td>
+</tr>
+</tbody>
+</table>
+<p>Phase 3 built masking, guardrails, lineage, and the compliance reasoning underneath all
+three — but every one of those pipelines was, so far, a straight-line script: parse, then
+chunk, then embed, then check. Phase 4 opens with the orchestration layer real BFSI AI
+systems actually run on: a graph with typed, reducer-merged state; durable checkpoints
+that survive a crash mid-run; retries that do not double-post a payment; a human-approval
+pause wired to Week 17's Article 14 oversight requirement; and fan-out over many documents
+with real observability. This week builds that graph — <code>StateGraph</code>, checkpointing,
+retries, <code>interrupt()</code>, and <code>Send</code> — using nothing but the genuinely-installed
+<code>langgraph</code> package.</p>
+<hr />
+<h2 id="day-1">Day 1 — Production State and Reducer Design</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="19-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=qMO49-pZfDg" target="_blank" rel="noopener"><b>Understanding LangGraph State Schemas, MessagesState, and Reducers (Step-by-Step Tutorial)</b><small>Code with Felix · 33:08</small></a></li><li><a href="https://www.youtube.com/watch?v=-E1MgnSld2M" target="_blank" rel="noopener"><b>LangGraph Tutorial #2 | State, Reducers, Loops, Conditional Edges &amp; Parallel Execution</b><small>santosh dataclass · 25:29</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LangGraph%20state%20schema%20reducers%20annotated%20tutorial" target="_blank" rel="noopener">Search YouTube: LangGraph state schema reducers annotated tutorial</a></p></div>
+<hr />
+<h3>Concept 1 — Typed State With <code>TypedDict</code> and <code>Annotated</code> Reducers</h3>
+<p>A <code>StateGraph</code>'s state is a plain <code>TypedDict</code> (or a Pydantic model), but a field with no
+<code>Annotated</code> reducer is simply overwritten by whatever a node returns for it — a node that
+only wants to append a note, not replace every note a previous node wrote, needs a real
+reducer function attached via <code>Annotated[type, reducer]</code>. <code>operator.add</code> is the simplest
+one: for a <code>list</code>-typed field it concatenates, so each node's partial return merges into
+the accumulated state instead of clobbering it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from typing import TypedDict, Annotated
+import operator
+from langgraph.graph import StateGraph, START, END
+
+class ClaimState(TypedDict):
+    claim_id: str
+    notes: Annotated[list[str], operator.add]
+    risk_score: float
+
+def intake_node(state):
+    return {&quot;notes&quot;: [&quot;intake: claim received&quot;], &quot;risk_score&quot;: 0.0}
+
+def score_node(state):
+    return {&quot;notes&quot;: [&quot;scoring: applied fraud model&quot;], &quot;risk_score&quot;: 0.62}
+
+g = StateGraph(ClaimState)
+g.add_node(&quot;intake&quot;, intake_node)
+g.add_node(&quot;score&quot;, score_node)
+g.add_edge(START, &quot;intake&quot;)
+g.add_edge(&quot;intake&quot;, &quot;score&quot;)
+g.add_edge(&quot;score&quot;, END)
+graph = g.compile()
+
+result = graph.invoke({&quot;claim_id&quot;: &quot;CLM-1001&quot;, &quot;notes&quot;: [], &quot;risk_score&quot;: 0.0})
+print(f&quot;notes: {result[&#x27;notes&#x27;]}&quot;)
+print(f&quot;risk_score: {result[&#x27;risk_score&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>notes: [&#x27;intake: claim received&#x27;, &#x27;scoring: applied fraud model&#x27;]
+risk_score: 0.62
+</code></pre><p>Note <code>risk_score</code> has no <code>Annotated</code> reducer — <code>score_node</code>'s <code>0.62</code> genuinely replaced
+<code>intake_node</code>'s <code>0.0</code>, which is correct here (the latest score should win) but would be
+the wrong choice for <code>notes</code>, which needs to accumulate instead.</p>
+<p><strong>Exercise:</strong>
+Add a third node, <code>escalate</code>, after <code>score</code>, that appends <code>&quot;escalation: routed to SIU for fraud review&quot;</code> to <code>notes</code> if <code>risk_score &gt; 0.5</code>, or <code>&quot;escalation: none needed&quot;</code> otherwise.
+Wire it into the graph and run it once with the same claim.</p>
+<p><strong>Starting point:</strong> <code>ClaimState</code>, <code>intake_node</code>, <code>score_node</code>, and the graph-assembly
+lines from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>final notes: [&#x27;intake: claim received&#x27;, &#x27;scoring: applied fraud model&#x27;, &#x27;escalation: routed to SIU for fraud review&#x27;]
+final risk_score: 0.62
+</code></pre><hr />
+<h3>Concept 2 — <code>add_messages</code> Versus <code>operator.add</code>, and Writing a Custom Reducer</h3>
+<p><code>add_messages</code> (the reducer behind every message-carrying LangGraph state) is not just
+&quot;concatenate like <code>operator.add</code>&quot; — it merges by each message's <code>id</code>, so a node that
+returns a message sharing an existing message's <code>id</code> REPLACES it in place rather than
+appending a duplicate. That matters for a status message a pipeline updates in place as a
+claim moves through stages, not a full transcript where every turn should be kept. A
+reducer is nothing more than a two-argument <code>(existing, new) -&gt; merged</code> function — nothing
+stops writing one for a type <code>add_messages</code>/<code>operator.add</code> were never designed for, like
+keeping the worst-case duration recorded for a stage across a retry instead of letting the
+retry's number silently overwrite the first attempt's.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from typing import TypedDict, Annotated
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+
+class ChatState(TypedDict):
+    messages: Annotated[list, add_messages]
+
+def status_v1(state):
+    return {&quot;messages&quot;: [{&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: &quot;processing your claim&quot;, &quot;id&quot;: &quot;status-msg&quot;}]}
+
+def status_v2(state):
+    return {&quot;messages&quot;: [{&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: &quot;claim approved&quot;, &quot;id&quot;: &quot;status-msg&quot;}]}
+
+g = StateGraph(ChatState)
+g.add_node(&quot;v1&quot;, status_v1)
+g.add_node(&quot;v2&quot;, status_v2)
+g.add_edge(START, &quot;v1&quot;)
+g.add_edge(&quot;v1&quot;, &quot;v2&quot;)
+g.add_edge(&quot;v2&quot;, END)
+graph = g.compile()
+result = graph.invoke({&quot;messages&quot;: []})
+print(f&quot;add_messages result: {len(result[&#x27;messages&#x27;])} message(s), final content = {result[&#x27;messages&#x27;][0].content!r}&quot;)
+
+def merge_max_duration(existing: dict, new: dict) -&gt; dict:
+    merged = dict(existing)
+    for stage, seconds in new.items():
+        merged[stage] = max(merged.get(stage, 0.0), seconds)
+    return merged
+
+class PipelineState(TypedDict):
+    stage_durations: Annotated[dict, merge_max_duration]
+
+def parse_node(state):
+    return {&quot;stage_durations&quot;: {&quot;parse&quot;: 1.2}}
+
+def parse_retry_node(state):
+    return {&quot;stage_durations&quot;: {&quot;parse&quot;: 3.4}}
+
+g2 = StateGraph(PipelineState)
+g2.add_node(&quot;parse&quot;, parse_node)
+g2.add_node(&quot;parse_retry&quot;, parse_retry_node)
+g2.add_edge(START, &quot;parse&quot;)
+g2.add_edge(&quot;parse&quot;, &quot;parse_retry&quot;)
+g2.add_edge(&quot;parse_retry&quot;, END)
+graph2 = g2.compile()
+result2 = graph2.invoke({&quot;stage_durations&quot;: {}})
+print(f&quot;custom reducer kept the slower retry duration: {result2[&#x27;stage_durations&#x27;][&#x27;parse&#x27;] == 3.4}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>add_messages result: 1 message(s), final content = &#x27;claim approved&#x27;
+custom reducer kept the slower retry duration: True
+</code></pre><p><strong>Exercise:</strong>
+Add a second stage, <code>score</code>, written by two nodes (<code>score_v1</code> returning <code>0.8</code> seconds,
+<code>score_v2</code> returning <code>0.5</code> seconds) chained after <code>parse</code> in <code>PipelineState</code>'s graph.
+Print the full, sorted <code>stage_durations</code> dict after running it once.</p>
+<p><strong>Starting point:</strong> <code>merge_max_duration</code>, <code>PipelineState</code>, and <code>parse_node</code> from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>stage_durations: {&#x27;parse&#x27;: 1.2, &#x27;score&#x27;: 0.8}
+</code></pre><hr />
+<h3>Concept 3 — Keeping Large Documents Out of State</h3>
+<p>Every LangGraph state value gets copied into a checkpoint on every superstep once a
+checkpointer is attached (Day 2), and streamed back out of <code>.invoke()</code>/<code>.stream()</code> on
+every call regardless. A state field holding a full parsed policy document's text pays
+that cost on every single step of the graph, for a value most nodes never read — the same
+&quot;pass object keys through XCom, never payloads&quot; principle Week 12 established for Airflow
+applies here just as directly: state should carry a reference (an S3 key, a document ID) a
+node can dereference when it actually needs the content, not the content itself.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import sys
+
+policy_text = (&quot;This policy covers named perils including fire, theft, and water damage. &quot; * 400)
+
+doc_ref_state = {&quot;doc_ref&quot;: &quot;s3://claims-bucket/policies/POL-88213.pdf&quot;}
+doc_blob_state = {&quot;doc_blob&quot;: policy_text}
+
+ref_bytes = sys.getsizeof(doc_ref_state[&quot;doc_ref&quot;])
+blob_bytes = sys.getsizeof(doc_blob_state[&quot;doc_blob&quot;])
+print(f&quot;reference bytes: {ref_bytes}&quot;)
+print(f&quot;full-text blob bytes: {blob_bytes}&quot;)
+print(f&quot;reference is smaller by a factor of: {round(blob_bytes / ref_bytes, 1)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>reference bytes: 90
+full-text blob bytes: 29249
+reference is smaller by a factor of: 325.0
+</code></pre><p>The exact factor depends on document length and is not the point to memorize — the point
+is that it is always a large, multiplying factor, and it multiplies again by every
+checkpoint write and every streamed step once Day 2 adds a checkpointer.</p>
+<p><strong>Exercise:</strong>
+Build two more documents in the same style as <code>policy_text</code> — <code>claim_form_text</code> (repeat
+<code>&quot;Claimant reports water damage to the kitchen ceiling from a burst pipe. &quot;</code> 250 times)
+and <code>adjuster_report_text</code> (repeat <code>&quot;Adjuster inspected the property and confirmed the reported damage. &quot;</code> 150 times) — plus their matching S3-style reference strings. Compute
+the total bytes across all three references versus all three full blobs, and the ratio
+between them.</p>
+<p><strong>Starting point:</strong> <code>policy_text</code> and the <code>sys.getsizeof</code> pattern from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>total bytes storing references: 285
+total bytes storing full blobs: 57397
+reference approach is smaller by a factor of: 201.4
+</code></pre><hr />
+<h3>Concept 4 — Assembling a <code>StateGraph</code> With <code>add_conditional_edges</code></h3>
+<p><code>START</code> and <code>END</code> are LangGraph's fixed entry and exit sentinels — every graph's edges
+must eventually route from <code>START</code> to <code>END</code>. <code>add_conditional_edges(source, router_fn, path_map)</code> is how a graph branches: <code>router_fn</code> receives the current state and returns a
+key from <code>path_map</code>, and only that one branch's node runs next — this is genuine
+conditional routing, not every branch executing and being filtered afterward.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from typing import TypedDict, Annotated
+import operator
+from langgraph.graph import StateGraph, START, END
+
+class UnderwritingState(TypedDict):
+    risk_score: float
+    notes: Annotated[list[str], operator.add]
+
+def score_node(state):
+    return {&quot;notes&quot;: [&quot;scored&quot;]}
+
+def auto_approve_node(state):
+    return {&quot;notes&quot;: [&quot;auto-approved: below manual-review threshold&quot;]}
+
+def manual_review_node(state):
+    return {&quot;notes&quot;: [&quot;routed to manual review: above threshold&quot;]}
+
+def route_by_risk(state):
+    return &quot;manual_review&quot; if state[&quot;risk_score&quot;] &gt;= 0.5 else &quot;auto_approve&quot;
+
+g = StateGraph(UnderwritingState)
+g.add_node(&quot;score&quot;, score_node)
+g.add_node(&quot;auto_approve&quot;, auto_approve_node)
+g.add_node(&quot;manual_review&quot;, manual_review_node)
+g.add_edge(START, &quot;score&quot;)
+g.add_conditional_edges(&quot;score&quot;, route_by_risk, {&quot;auto_approve&quot;: &quot;auto_approve&quot;, &quot;manual_review&quot;: &quot;manual_review&quot;})
+g.add_edge(&quot;auto_approve&quot;, END)
+g.add_edge(&quot;manual_review&quot;, END)
+graph = g.compile()
+
+low = graph.invoke({&quot;risk_score&quot;: 0.2, &quot;notes&quot;: []})
+high = graph.invoke({&quot;risk_score&quot;: 0.8, &quot;notes&quot;: []})
+print(f&quot;low risk notes: {low[&#x27;notes&#x27;]}&quot;)
+print(f&quot;high risk notes: {high[&#x27;notes&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>low risk notes: [&#x27;scored&#x27;, &#x27;auto-approved: below manual-review threshold&#x27;]
+high risk notes: [&#x27;scored&#x27;, &#x27;routed to manual review: above threshold&#x27;]
+</code></pre><p><strong>Exercise:</strong>
+Add a third routing tier, <code>senior_review</code>, taken when <code>risk_score &gt;= 0.8</code> (<code>manual_review</code>
+now applies only to <code>0.5 &lt;= risk_score &lt; 0.8</code>). Run the graph once each at <code>risk_score</code>
+values <code>0.2</code>, <code>0.6</code>, and <code>0.9</code> and print each run's notes.</p>
+<p><strong>Starting point:</strong> <code>UnderwritingState</code>, <code>score_node</code>, and <code>auto_approve_node</code>/
+<code>manual_review_node</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>risk_score=0.2: [&#x27;scored&#x27;, &#x27;auto-approved&#x27;]
+risk_score=0.6: [&#x27;scored&#x27;, &#x27;manual review&#x27;]
+risk_score=0.9: [&#x27;scored&#x27;, &#x27;senior underwriter review&#x27;]
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> A graph's state schema is, in effect, a contract between every node
+that touches it — the same kind of contract Week 01's <code>dataclasses</code> and Week 02's
+Pydantic models formalized for plain function I/O. A BFSI team migrating a hand-rolled
+if/elif claims-routing script onto <code>StateGraph</code> gets this contract for free, which is
+often the actual value of the migration, independent of anything LangGraph does at
+runtime.</p>
+<p><strong>Compliance angle:</strong> <code>notes</code> accumulating via <code>operator.add</code> rather than being
+overwritten is itself an audit property — the state at <code>END</code> carries the full sequence of
+what every node decided, not just the last node's opinion, which is exactly the kind of
+trail Week 17's Article 12 record-keeping requirement expects a system to keep.</p>
+<p><strong>What breaks in production:</strong> A field that should accumulate (like <code>notes</code>) but ships
+with no <code>Annotated</code> reducer silently and quietly loses every earlier node's contribution
+the moment two nodes both write to it — LangGraph raises no error for this, since a
+missing reducer just means &quot;overwrite,&quot; a perfectly valid default for plenty of other
+fields. Reviewing every state field's reducer choice explicitly, rather than accepting
+the default for fields that clearly need one, is a real code-review item this week's
+Concept 1 exists to justify.</p>
+<hr />
+<h2 id="day-2">Day 2 — Checkpointing and Durable Execution</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="19-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=5UQcHi538-c" target="_blank" rel="noopener"><b>Agent Memory (LangGraph + Checkpointer  + Thread ID) Source Demo| AI Orchestration from Zero T4</b><small>AI For Your Work · 9:13</small></a></li><li><a href="https://www.youtube.com/watch?v=asQksxb1e60" target="_blank" rel="noopener"><b>LangGraph Explained: The Low-Level Graph And Persistence Behind Production Agents</b><small>Learn with Manime · 9:34</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LangGraph%20postgres%20checkpointer%20persistence%20thread%20id" target="_blank" rel="noopener">Search YouTube: LangGraph postgres checkpointer persistence thread id</a></p></div>
+<hr />
+<h3>Concept 1 — <code>PostgresSaver</code> for Production Versus <code>InMemorySaver</code> for Tests</h3>
+<p>A checkpointer is what turns a <code>StateGraph</code> from a stateless function call into a durably
+resumable run: <code>graph.compile(checkpointer=...)</code> writes the state after every superstep,
+keyed by the <code>thread_id</code> passed in <code>config[&quot;configurable&quot;]</code>. <code>InMemorySaver</code> keeps every
+checkpoint in a plain Python dict living on the checkpointer object itself — genuinely
+useful for tests, since no setup is needed, but its durability is exactly as long as that
+object stays alive; nothing survives the process ending. <code>PostgresSaver.from_conn_string</code>
+and its required one-time <code>.setup()</code> call (which creates the checkpoint tables) are this
+sandbox's REAL MODE exception this week, needing a live PostgreSQL server — the correct,
+checked call shape is <code>with PostgresSaver.from_conn_string(DB_URI) as checkpointer: checkpointer.setup()</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code>from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import InMemorySaver
+from typing import TypedDict
+
+class State(TypedDict):
+    step_log: list
+
+def step1(state):
+    return {&quot;step_log&quot;: state[&quot;step_log&quot;] + [&quot;step1&quot;]}
+
+def step2(state):
+    return {&quot;step_log&quot;: state[&quot;step_log&quot;] + [&quot;step2&quot;]}
+
+g = StateGraph(State)
+g.add_node(&quot;step1&quot;, step1)
+g.add_node(&quot;step2&quot;, step2)
+g.add_edge(START, &quot;step1&quot;)
+g.add_edge(&quot;step1&quot;, &quot;step2&quot;)
+g.add_edge(&quot;step2&quot;, END)
+
+checkpointer_a = InMemorySaver()
+graph_a = g.compile(checkpointer=checkpointer_a)
+config = {&quot;configurable&quot;: {&quot;thread_id&quot;: &quot;claim-mem-1&quot;}}
+graph_a.invoke({&quot;step_log&quot;: []}, config=config)
+print(f&quot;state while checkpointer_a is still alive: {graph_a.get_state(config).values}&quot;)
+
+# A fresh InMemorySaver stands in for the process actually restarting -- it has never
+# heard of this thread_id, because nothing about it was ever written to disk.
+checkpointer_b = InMemorySaver()
+graph_b = g.compile(checkpointer=checkpointer_b)
+state_b = graph_b.get_state(config)
+print(f&quot;same thread_id against a brand-new InMemorySaver: {state_b.values}&quot;)
+print(f&quot;history is completely empty after the simulated restart: {len(list(graph_b.get_state_history(config))) == 0}&quot;)
+
+# REAL MODE -- not executed (needs a live PostgreSQL server this sandbox does not have):
+#   from langgraph.checkpoint.postgres import PostgresSaver
+#   DB_URI = &quot;postgresql://user:pass@host:5432/claims_db&quot;
+#   with PostgresSaver.from_conn_string(DB_URI) as checkpointer:
+#       checkpointer.setup()  # one-time: creates the checkpoint tables
+#       graph = g.compile(checkpointer=checkpointer)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>state while checkpointer_a is still alive: {&#x27;step_log&#x27;: [&#x27;step1&#x27;, &#x27;step2&#x27;]}
+same thread_id against a brand-new InMemorySaver: {}
+history is completely empty after the simulated restart: True
+</code></pre><p><strong>Exercise:</strong>
+Add a <code>step3</code> node after <code>step2</code> in a fresh copy of the graph. Run it once through
+<code>checkpointer_a</code>, then confirm both that <code>checkpointer_a</code> still holds all three steps and
+that a brand-new <code>InMemorySaver</code> given the SAME <code>thread_id</code> sees nothing at all.</p>
+<p><strong>Starting point:</strong> <code>State</code>, <code>step1</code>, <code>step2</code>, and the graph-assembly lines from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>checkpointer_a after adding step3: {&#x27;step_log&#x27;: [&#x27;step1&#x27;, &#x27;step2&#x27;, &#x27;step3&#x27;]}
+brand-new InMemorySaver, same thread_id: {}
+</code></pre><hr />
+<h3>Concept 2 — <code>thread_id</code> and <code>checkpoint_id</code> in the <code>configurable</code> Config</h3>
+<p><code>config[&quot;configurable&quot;][&quot;thread_id&quot;]</code> is the only field required to checkpoint a run; the
+same dict can also carry <code>checkpoint_id</code> to address one SPECIFIC past checkpoint rather
+than &quot;whatever the thread's latest one is.&quot; <code>langgraph-checkpoint-sqlite</code>'s <code>SqliteSaver</code>
+installs and runs genuinely in this sandbox — an on-disk file, not an in-memory dict — and
+is used for the rest of this day as a real, durable stand-in for the same <code>BaseCheckpointSaver</code>
+interface <code>PostgresSaver</code> implements, so every claim this day makes about durability is
+demonstrated against a real file surviving a real Python-process restart, not asserted.
+<code>checkpoint_id</code> values themselves are real UUIDs generated fresh on every run (LangGraph
+uses a time-ordered UUID7, so successive ids from one run even share a common leading
+prefix) — the Example below never presents one as a fixed value, only compares them for
+uniqueness and count, which are genuinely stable across runs.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.sqlite import SqliteSaver
+from typing import TypedDict
+import sqlite3
+import os
+
+class State(TypedDict):
+    step_log: list
+
+def step1(state):
+    return {&quot;step_log&quot;: state[&quot;step_log&quot;] + [&quot;step1&quot;]}
+
+def step2(state):
+    return {&quot;step_log&quot;: state[&quot;step_log&quot;] + [&quot;step2&quot;]}
+
+def step3(state):
+    return {&quot;step_log&quot;: state[&quot;step_log&quot;] + [&quot;step3&quot;]}
+
+g = StateGraph(State)
+g.add_node(&quot;step1&quot;, step1)
+g.add_node(&quot;step2&quot;, step2)
+g.add_node(&quot;step3&quot;, step3)
+g.add_edge(START, &quot;step1&quot;)
+g.add_edge(&quot;step1&quot;, &quot;step2&quot;)
+g.add_edge(&quot;step2&quot;, &quot;step3&quot;)
+g.add_edge(&quot;step3&quot;, END)
+
+if os.path.exists(&quot;checkpoints.db&quot;):
+    os.remove(&quot;checkpoints.db&quot;)
+conn = sqlite3.connect(&quot;checkpoints.db&quot;, check_same_thread=False)
+checkpointer = SqliteSaver(conn)
+checkpointer.setup()
+graph = g.compile(checkpointer=checkpointer)
+config = {&quot;configurable&quot;: {&quot;thread_id&quot;: &quot;claim-history-1&quot;}}
+graph.invoke({&quot;step_log&quot;: []}, config=config)
+
+history = list(graph.get_state_history(config))
+ids = [h.config[&quot;configurable&quot;][&quot;checkpoint_id&quot;] for h in history]
+print(f&quot;checkpoints recorded: {len(history)}&quot;)
+print(f&quot;every checkpoint_id is unique: {len(set(ids)) == len(ids)}&quot;)
+print(f&quot;step_log at each checkpoint, newest first: {[h.values.get(&#x27;step_log&#x27;) for h in history]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>checkpoints recorded: 5
+every checkpoint_id is unique: True
+step_log at each checkpoint, newest first: [[&#x27;step1&#x27;, &#x27;step2&#x27;, &#x27;step3&#x27;], [&#x27;step1&#x27;, &#x27;step2&#x27;], [&#x27;step1&#x27;], [], None]
+</code></pre><p>The fifth, <code>None</code>-valued entry is the graph's pre-start checkpoint, taken before <code>step1</code>
+ever runs.</p>
+<p><strong>Exercise:</strong>
+Using a fresh <code>thread_id</code>, <code>&quot;claim-history-2&quot;</code>, run the same three-step graph, then fetch
+and print the <code>step_log</code> of only the checkpoint that has exactly two entries in it (found
+by filtering <code>history</code> for <code>len(h.values.get(&quot;step_log&quot;) or []) == 2</code>, not by a hardcoded
+index).</p>
+<p><strong>Starting point:</strong> <code>State</code>, <code>step1</code>/<code>step2</code>/<code>step3</code>, and the graph-assembly lines from
+this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>step_log with exactly two entries: [&#x27;step1&#x27;, &#x27;step2&#x27;]
+</code></pre><hr />
+<h3>Concept 3 — <code>get_state()</code>/<code>get_state_history()</code> for Replay and Time Travel</h3>
+<p>Passing a specific checkpoint's <code>config</code> (the one returned alongside it in
+<code>get_state_history()</code>, carrying that checkpoint's own <code>checkpoint_id</code>) back into
+<code>graph.invoke(None, config=that_checkpoint_config)</code> does not merely READ that old state —
+it resumes EXECUTION from it, re-running every node still pending at that point forward.
+This is real time travel: replaying a run &quot;as if&quot; it had continued from an earlier point,
+without touching the two steps that already ran before it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>history = list(graph.get_state_history(config))
+after_step2 = history[1]  # newest-first: [after step3, after step2, after step1, empty, pre-start]
+print(f&quot;checkpoint chosen for the fork has step_log: {after_step2.values}&quot;)
+
+result = graph.invoke(None, config=after_step2.config)
+print(f&quot;result replaying forward from after step2: {result}&quot;)
+print(f&quot;step3 ran again with no duplicate step1/step2: {result[&#x27;step_log&#x27;] == [&#x27;step1&#x27;, &#x27;step2&#x27;, &#x27;step3&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>checkpoint chosen for the fork has step_log: {&#x27;step_log&#x27;: [&#x27;step1&#x27;, &#x27;step2&#x27;]}
+result replaying forward from after step2: {&#x27;step_log&#x27;: [&#x27;step1&#x27;, &#x27;step2&#x27;, &#x27;step3&#x27;]}
+step3 ran again with no duplicate step1/step2: True
+</code></pre><p>This reuses <code>graph</code>/<code>config</code> from Concept 2 — the same thread's checkpoint history, just
+addressed by an older <code>checkpoint_id</code> instead of the default &quot;latest.&quot;</p>
+<p><strong>Exercise:</strong>
+Using <code>&quot;claim-history-2&quot;</code>'s history from Concept 2's exercise, fork from the checkpoint
+whose <code>step_log</code> has exactly ONE entry and replay forward from it. Confirm the replayed
+result still ends with all three steps present and in order.</p>
+<p><strong>Starting point:</strong> <code>graph</code> and the <code>&quot;claim-history-2&quot;</code> thread's completed run from
+Concept 2's exercise.</p>
+<p>Expected output (actually run):</p>
+<pre><code>forked from a one-entry checkpoint, replayed result: {&#x27;step_log&#x27;: [&#x27;step1&#x27;, &#x27;step2&#x27;, &#x27;step3&#x27;]}
+</code></pre><hr />
+<h3>Concept 4 — What a Mid-Run Crash Actually Costs, By Durability Setting</h3>
+<p>Combining a checkpointer that raises inside a node with two different backing stores
+proves, rather than argues, what each setting actually costs when a crash happens
+mid-run: with <code>InMemorySaver</code>, a real process restart (a brand-new checkpointer object)
+loses every checkpoint written to the dead one, including the one step that DID complete
+before the crash; with a genuinely on-disk store like <code>SqliteSaver</code>, reopening the same
+file after the same kind of restart recovers exactly the progress made before the crash,
+and resuming completes the run without re-running the step that already succeeded.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+from typing import TypedDict
+import sqlite3
+import os
+
+class State(TypedDict):
+    step_log: list
+
+call_count = {&quot;mem&quot;: 0, &quot;sqlite&quot;: 0}
+
+def step1(state):
+    return {&quot;step_log&quot;: state[&quot;step_log&quot;] + [&quot;step1&quot;]}
+
+def make_flaky_step2(counter_key):
+    def flaky(state):
+        call_count[counter_key] += 1
+        if call_count[counter_key] == 1:
+            raise RuntimeError(&quot;simulated crash&quot;)
+        return {&quot;step_log&quot;: state[&quot;step_log&quot;] + [&quot;step2&quot;]}
+    return flaky
+
+config = {&quot;configurable&quot;: {&quot;thread_id&quot;: &quot;claim-x&quot;}}
+
+# InMemorySaver side
+g_mem = StateGraph(State)
+g_mem.add_node(&quot;step1&quot;, step1)
+g_mem.add_node(&quot;step2&quot;, make_flaky_step2(&quot;mem&quot;))
+g_mem.add_edge(START, &quot;step1&quot;)
+g_mem.add_edge(&quot;step1&quot;, &quot;step2&quot;)
+g_mem.add_edge(&quot;step2&quot;, END)
+mem_graph = g_mem.compile(checkpointer=InMemorySaver())
+try:
+    mem_graph.invoke({&quot;step_log&quot;: []}, config=config)
+except RuntimeError:
+    pass
+
+# a real process restart: a brand-new InMemorySaver object
+mem_graph_after_restart = g_mem.compile(checkpointer=InMemorySaver())
+print(f&quot;InMemorySaver after a real process restart: {mem_graph_after_restart.get_state(config).values}&quot;)
+
+# SqliteSaver side
+if os.path.exists(&quot;crash_test.db&quot;):
+    os.remove(&quot;crash_test.db&quot;)
+conn = sqlite3.connect(&quot;crash_test.db&quot;, check_same_thread=False)
+sqlite_checkpointer = SqliteSaver(conn)
+sqlite_checkpointer.setup()
+g_sqlite = StateGraph(State)
+g_sqlite.add_node(&quot;step1&quot;, step1)
+g_sqlite.add_node(&quot;step2&quot;, make_flaky_step2(&quot;sqlite&quot;))
+g_sqlite.add_edge(START, &quot;step1&quot;)
+g_sqlite.add_edge(&quot;step1&quot;, &quot;step2&quot;)
+g_sqlite.add_edge(&quot;step2&quot;, END)
+sqlite_graph = g_sqlite.compile(checkpointer=sqlite_checkpointer)
+try:
+    sqlite_graph.invoke({&quot;step_log&quot;: []}, config=config)
+except RuntimeError:
+    pass
+conn.close()
+
+# reopen from the same file -- simulating the real process restart
+conn2 = sqlite3.connect(&quot;crash_test.db&quot;, check_same_thread=False)
+sqlite_graph_after_restart = g_sqlite.compile(checkpointer=SqliteSaver(conn2))
+print(f&quot;SqliteSaver after a real process restart (reopened from file): {sqlite_graph_after_restart.get_state(config).values}&quot;)
+result = sqlite_graph_after_restart.invoke(None, config=config)
+print(f&quot;SqliteSaver resumes and completes without re-running step1: {result}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>InMemorySaver after a real process restart: {}
+SqliteSaver after a real process restart (reopened from file): {&#x27;step_log&#x27;: [&#x27;step1&#x27;]}
+SqliteSaver resumes and completes without re-running step1: {&#x27;step_log&#x27;: [&#x27;step1&#x27;, &#x27;step2&#x27;]}
+</code></pre><p><strong>Exercise:</strong>
+Repeat this same InMemorySaver-versus-SqliteSaver comparison, but with the crash injected
+into a THIRD node, <code>step3</code>, instead of <code>step2</code> (so both <code>step1</code> and <code>step2</code> complete
+before the crash). Confirm <code>SqliteSaver</code> recovers <code>['step1', 'step2']</code> after the simulated
+restart, while <code>InMemorySaver</code> recovers nothing.</p>
+<p><strong>Starting point:</strong> <code>State</code>, <code>step1</code>, and the <code>make_flaky_step2</code>-style closure pattern
+from this concept's Example (rename it for <code>step3</code>).</p>
+<p>Expected output (actually run):</p>
+<pre><code>InMemorySaver after a real process restart: {}
+SqliteSaver after a real process restart (reopened from file): {&#x27;step_log&#x27;: [&#x27;step1&#x27;, &#x27;step2&#x27;]}
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> A BFSI shop already running PostgreSQL for its transactional core has an
+obvious, low-friction home for <code>PostgresSaver</code> — no new database technology to get
+approved, just new tables in an existing one. That is a real adoption argument distinct
+from LangGraph's own feature set.</p>
+<p><strong>Compliance angle:</strong> <code>get_state_history()</code>'s full checkpoint trail is, again, a Week 17
+Article 12 record-keeping asset for free: every intermediate state a claim's processing
+run passed through is independently queryable, not just the final outcome.</p>
+<p><strong>What breaks in production:</strong> A team ships with <code>InMemorySaver</code> past its test/demo stage
+because &quot;it worked in every test we ran&quot; — and every one of those tests ran inside a
+single, uninterrupted process, the one condition under which <code>InMemorySaver</code> genuinely
+looks indistinguishable from a durable store. The very first real deploy restart (a
+routine one, not even a crash) silently drops every in-flight run's progress, and nothing
+in <code>InMemorySaver</code>'s own behavior warns that this is coming — Concept 4's side-by-side
+comparison is the check that catches it before a production incident does.</p>
+<hr />
+<h2 id="day-3">Day 3 — Retries, Timeouts, and Node Failure</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="19-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=m3edGzRlR5Y" target="_blank" rel="noopener"><b>Handling Errors in LangGraph with Retry Policies</b><small>A.I Engineering BootCamp · 30:18</small></a></li><li><a href="https://www.youtube.com/watch?v=xf1RyRq3bDg" target="_blank" rel="noopener"><b>AI Agent Retry &amp; Error Handling Explained | Build Reliable AI Agents</b><small>Programming Guide · 28:20</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LangGraph%20retry%20policy%20error%20handling%20production%20agent" target="_blank" rel="noopener">Search YouTube: LangGraph retry policy error handling production agent</a></p></div>
+<hr />
+<h3>Concept 1 — Bounded Retries and Backoff With <code>RetryPolicy</code></h3>
+<p>Attaching <code>retry_policy=RetryPolicy(...)</code> to <code>add_node()</code> makes LangGraph itself catch an
+exception a node raises, wait according to <code>initial_interval</code>/<code>backoff_factor</code>/
+<code>max_interval</code>, and re-invoke the SAME node — up to <code>max_attempts</code> times — before giving
+up. <code>retry_on</code> restricts which exception types actually trigger a retry at all; anything
+else propagates immediately, which Concept 3 below relies on directly.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from langgraph.types import RetryPolicy
+from typing import TypedDict
+
+class State(TypedDict):
+    attempts: int
+
+class TransientError(Exception):
+    pass
+
+attempt_counter = {&quot;n&quot;: 0}
+
+def flaky_node(state):
+    attempt_counter[&quot;n&quot;] += 1
+    if attempt_counter[&quot;n&quot;] &lt; 3:
+        raise TransientError(&quot;upstream service timeout&quot;)
+    return {&quot;attempts&quot;: attempt_counter[&quot;n&quot;]}
+
+g = StateGraph(State)
+g.add_node(&quot;flaky&quot;, flaky_node, retry_policy=RetryPolicy(
+    max_attempts=5,
+    initial_interval=0.01,
+    backoff_factor=2.0,
+    retry_on=(TransientError,),
+))
+g.add_edge(START, &quot;flaky&quot;)
+g.add_edge(&quot;flaky&quot;, END)
+graph = g.compile()
+
+result = graph.invoke({&quot;attempts&quot;: 0})
+print(f&quot;result: {result}&quot;)
+print(f&quot;succeeded within max_attempts: {result[&#x27;attempts&#x27;] == 3}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>result: {&#x27;attempts&#x27;: 3}
+succeeded within max_attempts: True
+</code></pre><p><strong>Exercise:</strong>
+Build a node that needs exactly 4 calls to succeed (raising <code>TransientError</code> on the first
+3). Run it once with <code>max_attempts=4</code> (should succeed) and once more with a FRESH copy of
+the node and <code>max_attempts=3</code> (should exhaust its budget and raise). Print the successful
+result, then catch and print the exception message from the second run, plus confirm the
+failing node was called exactly <code>max_attempts</code> times before LangGraph gave up.</p>
+<p><strong>Starting point:</strong> <code>State</code>, <code>TransientError</code>, and the graph-assembly lines from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>result: {&#x27;attempts&#x27;: 4}
+exhausted max_attempts=3 against a node that needs 4 tries: rate limited
+node was called exactly max_attempts times before giving up: True
+</code></pre><hr />
+<h3>Concept 2 — Idempotent Tool Nodes: a Retry Must Never Double-Post</h3>
+<p><code>RetryPolicy</code> re-invoking a node after a transient failure is only safe if the node itself
+is idempotent — the real risk Concept 1 glosses over is that the FIRST attempt might have
+actually succeeded on the far side (a payment gateway that processed the charge before
+timing out on the response), and a naive retry then posts it a second time. An
+idempotency key checked and recorded BEFORE any side-effecting action genuinely executes
+is what makes a retry safe: the second call for the same key returns the already-known
+result instead of repeating the side effect.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from langgraph.types import RetryPolicy
+from typing import TypedDict
+
+class State(TypedDict):
+    idempotency_key: str
+    payment_posted: bool
+
+processed_keys = set()
+post_call_count = {&quot;n&quot;: 0}
+
+class TransientError(Exception):
+    pass
+
+def post_payment_idempotent(state):
+    key = state[&quot;idempotency_key&quot;]
+    if key in processed_keys:
+        return {&quot;payment_posted&quot;: True}
+    post_call_count[&quot;n&quot;] += 1
+    if post_call_count[&quot;n&quot;] == 1:
+        raise TransientError(&quot;gateway timeout -- payment may or may not have posted&quot;)
+    processed_keys.add(key)
+    return {&quot;payment_posted&quot;: True}
+
+g = StateGraph(State)
+g.add_node(&quot;pay&quot;, post_payment_idempotent, retry_policy=RetryPolicy(max_attempts=3, initial_interval=0.01, retry_on=(TransientError,)))
+g.add_edge(START, &quot;pay&quot;)
+g.add_edge(&quot;pay&quot;, END)
+graph = g.compile()
+
+result = graph.invoke({&quot;idempotency_key&quot;: &quot;CLM-1001-refund&quot;, &quot;payment_posted&quot;: False})
+print(f&quot;result: {result}&quot;)
+print(f&quot;post_payment was called exactly twice (one failure, one real success): {post_call_count[&#x27;n&#x27;] == 2}&quot;)
+
+# A second, independent invoke with the SAME key -- simulating LangGraph re-entering this
+# node after some later, unrelated crash downstream -- must not post the payment again.
+result2 = graph.invoke({&quot;idempotency_key&quot;: &quot;CLM-1001-refund&quot;, &quot;payment_posted&quot;: False})
+print(f&quot;second invoke with the same key did not call the real posting logic again: {post_call_count[&#x27;n&#x27;] == 2}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>result: {&#x27;idempotency_key&#x27;: &#x27;CLM-1001-refund&#x27;, &#x27;payment_posted&#x27;: True}
+post_payment was called exactly twice (one failure, one real success): True
+second invoke with the same key did not call the real posting logic again: True
+</code></pre><p><strong>Exercise:</strong>
+Invoke the same graph with a second, DIFFERENT idempotency key, <code>&quot;CLM-2002-refund&quot;</code>, and
+confirm both keys end up in <code>processed_keys</code> as two distinct entries (proving the
+idempotency check does not falsely block a genuinely new payment).</p>
+<p><strong>Starting point:</strong> <code>post_payment_idempotent</code>, <code>processed_keys</code>, and the graph-assembly
+lines from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>key CLM-2002-refund result: {&#x27;idempotency_key&#x27;: &#x27;CLM-2002-refund&#x27;, &#x27;payment_posted&#x27;: True}
+processed_keys contains both distinct keys: True
+</code></pre><hr />
+<h3>Concept 3 — Retryable Transport Errors Versus Terminal Validation Errors</h3>
+<p><code>retry_on</code> is not just a performance knob — it is the mechanism that keeps a permanently
+broken input from being retried five times for no reason. A malformed claim ID or a
+negative claim amount will fail identically on attempt 1 and attempt 5; retrying it wastes
+the retry budget and delays the terminal failure a caller needed to see immediately. The
+fix is naming the actually-transient exception types (a timeout, a 503, a connection
+reset) in <code>retry_on</code> and letting everything else — a validation error the caller needs to
+fix, not wait out — propagate on the very first attempt.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from langgraph.types import RetryPolicy
+from typing import TypedDict
+
+class State(TypedDict):
+    attempts: int
+
+class TransientError(Exception):
+    pass
+
+class ValidationError(Exception):
+    pass
+
+attempt_counter = {&quot;n&quot;: 0}
+
+def validation_node(state):
+    attempt_counter[&quot;n&quot;] += 1
+    raise ValidationError(&quot;claim_amount must be positive&quot;)
+
+g = StateGraph(State)
+g.add_node(&quot;validate&quot;, validation_node, retry_policy=RetryPolicy(max_attempts=5, retry_on=(TransientError,)))
+g.add_edge(START, &quot;validate&quot;)
+g.add_edge(&quot;validate&quot;, END)
+graph = g.compile()
+
+try:
+    graph.invoke({&quot;attempts&quot;: 0})
+except ValidationError as e:
+    print(f&quot;ValidationError raised immediately (not retried): {e}&quot;)
+print(f&quot;validate node was called exactly once, not retried: {attempt_counter[&#x27;n&#x27;] == 1}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>ValidationError raised immediately (not retried): claim_amount must be positive
+validate node was called exactly once, not retried: True
+</code></pre><p><strong>Exercise:</strong>
+Build a claim-status-lookup node that raises <code>ValidationError</code> for a malformed
+<code>claim_id</code> (one not matching a simple <code>&quot;CLM-&quot; + digits</code> shape) and <code>TransientError</code> for
+any other <code>claim_id</code> on its first call only, succeeding on the second. Run it once with a
+malformed ID and once with a well-formed one, both under the same <code>retry_policy</code> from this
+concept's Example, and print what happens in each case.</p>
+<p><strong>Starting point:</strong> <code>TransientError</code>, <code>ValidationError</code>, and the <code>retry_policy</code> line from
+this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>malformed claim_id: ValidationError raised immediately, called once
+well-formed claim_id: succeeded after one retry, called twice
+</code></pre><hr />
+<h3>Concept 4 — Compensation Branches and Dead-Letter Routing</h3>
+<p>A crucial gotcha <code>RetryPolicy</code> does not solve: once <code>max_attempts</code> is exhausted, the
+exception propagates all the way out of <code>graph.invoke()</code> and ends the ENTIRE run, not just
+that one node's branch — there is no built-in &quot;on retry exhaustion, route to node X&quot; hook.
+Routing a permanently-failed operation to a compensation or dead-letter path instead of
+crashing the whole run means the node itself must catch its own terminal failure and
+record it in state as data, then <code>add_conditional_edges</code> branches on that recorded status
+— the same pattern Day 1 Concept 4 used for risk-tier routing, applied to failure
+handling instead of a business decision.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from typing import TypedDict, Annotated
+import operator
+
+class State(TypedDict):
+    claim_id: str
+    payment_status: str
+    notes: Annotated[list[str], operator.add]
+
+class PermanentError(Exception):
+    pass
+
+def post_payment(state):
+    try:
+        raise PermanentError(&quot;claim CLM-9001 was already refunded -- duplicate payment request&quot;)
+    except PermanentError as e:
+        return {&quot;payment_status&quot;: &quot;failed&quot;, &quot;notes&quot;: [f&quot;payment failed permanently: {e}&quot;]}
+
+def confirm_node(state):
+    return {&quot;notes&quot;: [&quot;payment confirmed&quot;]}
+
+def compensate_node(state):
+    return {&quot;notes&quot;: [&quot;compensation: reversed any partial hold, notified claims adjuster&quot;]}
+
+def dead_letter_node(state):
+    return {&quot;notes&quot;: [&quot;routed to dead-letter queue for manual reconciliation&quot;]}
+
+def route_on_payment(state):
+    return &quot;confirm&quot; if state[&quot;payment_status&quot;] == &quot;succeeded&quot; else &quot;compensate&quot;
+
+g = StateGraph(State)
+g.add_node(&quot;post_payment&quot;, post_payment)
+g.add_node(&quot;confirm&quot;, confirm_node)
+g.add_node(&quot;compensate&quot;, compensate_node)
+g.add_node(&quot;dead_letter&quot;, dead_letter_node)
+g.add_edge(START, &quot;post_payment&quot;)
+g.add_conditional_edges(&quot;post_payment&quot;, route_on_payment, {&quot;confirm&quot;: &quot;confirm&quot;, &quot;compensate&quot;: &quot;compensate&quot;})
+g.add_edge(&quot;confirm&quot;, END)
+g.add_edge(&quot;compensate&quot;, &quot;dead_letter&quot;)
+g.add_edge(&quot;dead_letter&quot;, END)
+graph = g.compile()
+
+result = graph.invoke({&quot;claim_id&quot;: &quot;CLM-9001&quot;, &quot;payment_status&quot;: &quot;pending&quot;, &quot;notes&quot;: []})
+print(f&quot;notes: {result[&#x27;notes&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>notes: [&#x27;payment failed permanently: claim CLM-9001 was already refunded -- duplicate payment request&#x27;, &#x27;compensation: reversed any partial hold, notified claims adjuster&#x27;, &#x27;routed to dead-letter queue for manual reconciliation&#x27;]
+</code></pre><p><strong>Exercise:</strong>
+Change <code>post_payment</code> so it only fails for <code>claim_id == &quot;CLM-9001&quot;</code> and succeeds (setting
+<code>payment_status</code> to <code>&quot;succeeded&quot;</code>) for any other claim ID. Run the graph once with
+<code>&quot;CLM-1002&quot;</code> (the success path) and once with <code>&quot;CLM-9001&quot;</code> (the failure/dead-letter path)
+and print both runs' notes.</p>
+<p><strong>Starting point:</strong> <code>State</code>, <code>confirm_node</code>/<code>compensate_node</code>/<code>dead_letter_node</code>, and the
+graph-assembly lines from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>success path notes: [&#x27;payment posted&#x27;, &#x27;payment confirmed&#x27;]
+failure path notes: [&#x27;payment failed permanently: duplicate request&#x27;, &#x27;compensation: reversed any partial hold&#x27;, &#x27;routed to dead-letter queue&#x27;]
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> A payment or claims-posting call into a core system that itself has no
+native idempotency-key support (a bare stored-procedure call, common in a twenty-year-old
+core) still needs Concept 2's pattern implemented at the calling layer — the idempotency
+check has to live in the orchestration code precisely because the legacy system it's
+calling was never built to provide one itself.</p>
+<p><strong>Compliance angle:</strong> Concept 4's dead-letter path, not a silent retry-forever loop or an
+unhandled crash, is what makes a permanently-failed payment auditable — the claim stays
+visible in a queue a human has to act on, rather than disappearing into a stack trace in a
+log file nobody is watching.</p>
+<p><strong>What breaks in production:</strong> A team wraps every node in the same generic
+<code>RetryPolicy(max_attempts=5)</code> without naming <code>retry_on</code> at all, meaning the default
+behavior retries EVERY exception type, including a validation error that will never
+succeed no matter how many times it's retried — Concept 3's five wasted attempts on a
+malformed claim ID is not a hypothetical, it's the default LangGraph gives a team that
+never explicitly restricts <code>retry_on</code>.</p>
+<hr />
+<h2 id="day-4">Day 4 — Human Approval as a Control Point</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="19-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=6t7YJcEFUIY" target="_blank" rel="noopener"><b>LangGraph interrupt: Making it easier to build human-in-the-loop agents</b><small>LangChain · 7:49</small></a></li><li><a href="https://www.youtube.com/watch?v=QxaG6J7ZbWQ" target="_blank" rel="noopener"><b>LangGraph #36: Human in the Loop | LangGraph Interrupts Explained</b><small>Ali Hamza · 7:50</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LangGraph%20human%20in%20the%20loop%20interrupt%20command%20resume" target="_blank" rel="noopener">Search YouTube: LangGraph human in the loop interrupt command resume</a></p></div>
+<hr />
+<h3>Concept 1 — Pausing Mid-Graph With <code>interrupt()</code> and <code>Command(resume=...)</code></h3>
+<p><code>interrupt(payload)</code> called inside a node genuinely PAUSES the run at that exact point —
+<code>graph.invoke()</code> returns immediately with an <code>__interrupt__</code> key carrying <code>payload</code>, and
+<code>graph.get_state(config).next</code> shows the paused node still pending. Nothing resumes it
+until a separate <code>graph.invoke(Command(resume=decision), config=config)</code> call supplies
+<code>decision</code>, which becomes <code>interrupt()</code>'s own return value back inside the node — the node
+picks up exactly where it left off, not from the top of the graph.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from langgraph.types import interrupt, Command
+from langgraph.checkpoint.memory import InMemorySaver
+from typing import TypedDict
+
+class State(TypedDict):
+    claim_amount: float
+    approved: bool
+
+def intake_node(state):
+    return {}
+
+def approval_node(state):
+    decision = interrupt({&quot;question&quot;: &quot;approve this high-value claim?&quot;, &quot;claim_amount&quot;: state[&quot;claim_amount&quot;]})
+    return {&quot;approved&quot;: decision}
+
+def pay_node(state):
+    return {}
+
+g = StateGraph(State)
+g.add_node(&quot;intake&quot;, intake_node)
+g.add_node(&quot;approval&quot;, approval_node)
+g.add_node(&quot;pay&quot;, pay_node)
+g.add_edge(START, &quot;intake&quot;)
+g.add_edge(&quot;intake&quot;, &quot;approval&quot;)
+g.add_edge(&quot;approval&quot;, &quot;pay&quot;)
+g.add_edge(&quot;pay&quot;, END)
+graph = g.compile(checkpointer=InMemorySaver())
+config = {&quot;configurable&quot;: {&quot;thread_id&quot;: &quot;claim-approval-1&quot;}}
+
+result = graph.invoke({&quot;claim_amount&quot;: 75000.0, &quot;approved&quot;: False}, config=config)
+print(f&quot;graph paused, interrupt payload: {result[&#x27;__interrupt__&#x27;][0].value}&quot;)
+print(f&quot;next node still pending: {graph.get_state(config).next}&quot;)
+
+resumed = graph.invoke(Command(resume=True), config=config)
+print(f&quot;after human approval: {resumed}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>graph paused, interrupt payload: {&#x27;question&#x27;: &#x27;approve this high-value claim?&#x27;, &#x27;claim_amount&#x27;: 75000.0}
+next node still pending: (&#x27;approval&#x27;,)
+after human approval: {&#x27;claim_amount&#x27;: 75000.0, &#x27;approved&#x27;: True}
+</code></pre><p><strong>Exercise:</strong>
+Run the same graph on a new <code>thread_id</code>, <code>&quot;claim-approval-2&quot;</code>, with <code>claim_amount=120000.0</code>,
+but this time resume with <code>Command(resume=False)</code> (a human REJECTING the claim). Print the
+final result and confirm <code>approved</code> is <code>False</code>.</p>
+<p><strong>Starting point:</strong> <code>State</code>, <code>intake_node</code>/<code>approval_node</code>/<code>pay_node</code>, and the
+graph-assembly lines from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>rejected result: {&#x27;claim_amount&#x27;: 120000.0, &#x27;approved&#x27;: False}
+</code></pre><hr />
+<h3>Concept 2 — An Approval Queue Backed by the Checkpointer, Not In-Process State</h3>
+<p>A team's first instinct is often a separate in-process list of &quot;claims waiting for
+approval&quot; — but that list is exactly as durable as <code>InMemorySaver</code> was in Day 2: it
+vanishes on restart. The checkpointer ALREADY IS the approval queue: any thread whose
+<code>get_state(config).next</code> is non-empty is, by definition, paused waiting on something, and
+scanning a known set of <code>thread_id</code>s for that condition needs no separate queue data
+structure at all. Built on <code>SqliteSaver</code> (Day 2's genuinely-executable durable stand-in),
+this queue survives exactly the kind of process restart an in-process list would not.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from langgraph.types import interrupt, Command
+from langgraph.checkpoint.sqlite import SqliteSaver
+from typing import TypedDict
+import sqlite3
+import os
+
+class State(TypedDict):
+    claim_id: str
+    claim_amount: float
+    approved: bool
+
+def approval_node(state):
+    decision = interrupt({&quot;claim_id&quot;: state[&quot;claim_id&quot;], &quot;claim_amount&quot;: state[&quot;claim_amount&quot;]})
+    return {&quot;approved&quot;: decision}
+
+g = StateGraph(State)
+g.add_node(&quot;approval&quot;, approval_node)
+g.add_edge(START, &quot;approval&quot;)
+g.add_edge(&quot;approval&quot;, END)
+
+if os.path.exists(&quot;approval_queue.db&quot;):
+    os.remove(&quot;approval_queue.db&quot;)
+conn = sqlite3.connect(&quot;approval_queue.db&quot;, check_same_thread=False)
+checkpointer = SqliteSaver(conn)
+checkpointer.setup()
+graph = g.compile(checkpointer=checkpointer)
+
+claims = [(&quot;CLM-1001&quot;, 30000.0), (&quot;CLM-1002&quot;, 90000.0), (&quot;CLM-1003&quot;, 15000.0)]
+for claim_id, amount in claims:
+    config = {&quot;configurable&quot;: {&quot;thread_id&quot;: claim_id}}
+    graph.invoke({&quot;claim_id&quot;: claim_id, &quot;claim_amount&quot;: amount, &quot;approved&quot;: False}, config=config)
+
+# approve one of the three, leaving the other two pending
+graph.invoke(Command(resume=True), config={&quot;configurable&quot;: {&quot;thread_id&quot;: &quot;CLM-1002&quot;}})
+
+def list_pending_approvals(graph, thread_ids):
+    return [tid for tid in thread_ids if graph.get_state({&quot;configurable&quot;: {&quot;thread_id&quot;: tid}}).next]
+
+pending = list_pending_approvals(graph, [c[0] for c in claims])
+print(f&quot;pending approvals: {sorted(pending)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>pending approvals: [&#x27;CLM-1001&#x27;, &#x27;CLM-1003&#x27;]
+</code></pre><p><strong>Exercise:</strong>
+Add a fourth claim, <code>(&quot;CLM-1004&quot;, 45000.0)</code>, submitted the same way as the other three
+(never approved). Approve <code>&quot;CLM-1001&quot;</code> as well, and print the final sorted list of
+pending approvals across all four claims.</p>
+<p><strong>Starting point:</strong> <code>list_pending_approvals</code>, <code>graph</code>, and the three already-submitted
+claims from this concept's Example (all still live in the same <code>approval_queue.db</code>).</p>
+<p>Expected output (actually run):</p>
+<pre><code>pending approvals: [&#x27;CLM-1003&#x27;, &#x27;CLM-1004&#x27;]
+</code></pre><hr />
+<h3>Concept 3 — Wiring the Pause to Week 17's Article 14 Oversight Requirement</h3>
+<p><code>interrupt()</code> pausing a graph is a mechanism; Week 17 Day 5's <code>execute_high_stakes_action</code>/
+<code>ApprovalRequiredError</code> hard gate (genuinely reused here unchanged) is the actual Article
+14(4) enforcement — the intervene-or-stop measure that must reject a high-stakes action
+outright when no real approval was given, not merely display an approval button a bug
+could leave disconnected. Combining them means the interrupt payload asks for a real
+approval TOKEN (who approved, not just yes/no), and the same hard gate from Week 17 still
+runs after resume, enforcing the requirement even at this layer.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from langgraph.types import interrupt, Command
+from langgraph.checkpoint.memory import InMemorySaver
+from typing import TypedDict
+
+class ApprovalRequiredError(Exception):
+    pass
+
+def execute_high_stakes_action(action_name, approval_token):
+    if not approval_token:
+        raise ApprovalRequiredError(f&quot;&#x27;{action_name}&#x27; requires an explicit human approval token before executing&quot;)
+    return f&quot;executed: {action_name} (approved by {approval_token})&quot;
+
+class State(TypedDict):
+    claim_id: str
+    action_result: str
+
+def deny_claim_node(state):
+    approval_token = interrupt({
+        &quot;action_name&quot;: &quot;deny_life_insurance_claim&quot;,
+        &quot;claim_id&quot;: state[&quot;claim_id&quot;],
+        &quot;article_14_note&quot;: &quot;Article 14(4)(e) intervene-or-stop -- a human must affirmatively act, not merely fail to object&quot;,
+    })
+    result = execute_high_stakes_action(&quot;deny_life_insurance_claim&quot;, approval_token)
+    return {&quot;action_result&quot;: result}
+
+g = StateGraph(State)
+g.add_node(&quot;deny_claim&quot;, deny_claim_node)
+g.add_edge(START, &quot;deny_claim&quot;)
+g.add_edge(&quot;deny_claim&quot;, END)
+graph = g.compile(checkpointer=InMemorySaver())
+
+config_a = {&quot;configurable&quot;: {&quot;thread_id&quot;: &quot;claim-deny-1&quot;}}
+graph.invoke({&quot;claim_id&quot;: &quot;CLM-7001&quot;, &quot;action_result&quot;: &quot;&quot;}, config=config_a)
+resumed = graph.invoke(Command(resume=&quot;claims_manager_avaz&quot;), config=config_a)
+print(f&quot;real token supplied: {resumed[&#x27;action_result&#x27;]}&quot;)
+
+# Note: this installed langgraph version raises an internal UnboundLocalError for
+# Command(resume=None) specifically -- a real library quirk, not a code bug here -- so an
+# &quot;empty&quot; resume is represented as Command(resume=&quot;&quot;) instead, which the gate still catches.
+config_b = {&quot;configurable&quot;: {&quot;thread_id&quot;: &quot;claim-deny-2&quot;}}
+graph.invoke({&quot;claim_id&quot;: &quot;CLM-7002&quot;, &quot;action_result&quot;: &quot;&quot;}, config=config_b)
+try:
+    graph.invoke(Command(resume=&quot;&quot;), config=config_b)
+except ApprovalRequiredError as e:
+    print(f&quot;gate still enforced with no real token supplied: {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>real token supplied: executed: deny_life_insurance_claim (approved by claims_manager_avaz)
+gate still enforced with no real token supplied: &#x27;deny_life_insurance_claim&#x27; requires an explicit human approval token before executing
+</code></pre><p><strong>Exercise:</strong>
+Run <code>deny_claim_node</code> for a third claim, <code>&quot;CLM-7003&quot;</code>, resuming with the token
+<code>&quot;claims_manager_bcohen&quot;</code> this time. Print the resulting <code>action_result</code>.</p>
+<p><strong>Starting point:</strong> <code>ApprovalRequiredError</code>, <code>execute_high_stakes_action</code>, and
+<code>deny_claim_node</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>real token supplied: executed: deny_life_insurance_claim (approved by claims_manager_bcohen)
+</code></pre><hr />
+<h3>Concept 4 — Expiry and Escalation When Nobody Approves Inside the SLA</h3>
+<p>A pause with no automatic timeout is a pause that can wait forever — a real approval
+workflow needs an SLA and an escalation path for when a human simply never responds. The
+SLA check itself is a pure, independently-testable function; wiring it in means the node
+that resumes execution treats a LATE response as an automatic escalation rather than
+honoring a stale decision, regardless of what that decision actually was.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from langgraph.types import interrupt, Command
+from langgraph.checkpoint.memory import InMemorySaver
+from typing import TypedDict
+import datetime
+
+def sla_status(submitted_at, as_of, sla_hours=4):
+    elapsed_hours = (as_of - submitted_at).total_seconds() / 3600
+    return &quot;expired&quot; if elapsed_hours &gt; sla_hours else &quot;within_sla&quot;
+
+class State(TypedDict):
+    claim_id: str
+    submitted_at: object
+    outcome: str
+
+def approval_node(state):
+    response = interrupt({&quot;claim_id&quot;: state[&quot;claim_id&quot;], &quot;submitted_at&quot;: state[&quot;submitted_at&quot;].isoformat()})
+    status = sla_status(state[&quot;submitted_at&quot;], response[&quot;responded_at&quot;])
+    if status == &quot;expired&quot;:
+        return {&quot;outcome&quot;: &quot;escalated_to_senior_underwriter&quot;}
+    return {&quot;outcome&quot;: response[&quot;decision&quot;]}
+
+g = StateGraph(State)
+g.add_node(&quot;approval&quot;, approval_node)
+g.add_edge(START, &quot;approval&quot;)
+g.add_edge(&quot;approval&quot;, END)
+graph = g.compile(checkpointer=InMemorySaver())
+
+submitted = datetime.datetime(2026, 9, 17, 9, 0)
+
+config_a = {&quot;configurable&quot;: {&quot;thread_id&quot;: &quot;claim-sla-1&quot;}}
+graph.invoke({&quot;claim_id&quot;: &quot;CLM-8001&quot;, &quot;submitted_at&quot;: submitted, &quot;outcome&quot;: &quot;&quot;}, config=config_a)
+result_a = graph.invoke(Command(resume={&quot;decision&quot;: &quot;approved&quot;, &quot;responded_at&quot;: datetime.datetime(2026, 9, 17, 11, 0)}), config=config_a)
+print(f&quot;responded within SLA: {result_a[&#x27;outcome&#x27;]}&quot;)
+
+config_b = {&quot;configurable&quot;: {&quot;thread_id&quot;: &quot;claim-sla-2&quot;}}
+graph.invoke({&quot;claim_id&quot;: &quot;CLM-8002&quot;, &quot;submitted_at&quot;: submitted, &quot;outcome&quot;: &quot;&quot;}, config=config_b)
+result_b = graph.invoke(Command(resume={&quot;decision&quot;: &quot;approved&quot;, &quot;responded_at&quot;: datetime.datetime(2026, 9, 17, 14, 0)}), config=config_b)
+print(f&quot;responded after SLA lapsed (decision overridden): {result_b[&#x27;outcome&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>responded within SLA: approved
+responded after SLA lapsed (decision overridden): escalated_to_senior_underwriter
+</code></pre><p><strong>Exercise:</strong>
+Run a third claim, <code>&quot;CLM-8003&quot;</code>, responded to at EXACTLY the 4-hour SLA boundary
+(<code>datetime.datetime(2026, 9, 17, 13, 0)</code>, since <code>submitted_at</code> is <code>09:00</code>). Confirm
+<code>sla_status</code> treats exactly-4-hours as <code>within_sla</code> (the check is strictly <code>&gt;</code>, not
+<code>&gt;=</code>), and print the final outcome.</p>
+<p><strong>Starting point:</strong> <code>sla_status</code>, <code>approval_node</code>, and <code>submitted</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>exactly at the 4-hour boundary: within_sla
+outcome: approved
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> <code>interrupt()</code>'s pause-and-resume model maps directly onto an existing
+manual-approval-queue UI a BFSI team likely already has for claims above a threshold — the
+graph doesn't need to replace that UI, only call <code>Command(resume=...)</code> when a human acts
+in it, the same integration seam Week 22 will use for legacy stored-procedure tool calls.</p>
+<p><strong>Compliance angle:</strong> Concept 3's combination is the actual Article 14(4) implementation,
+not a description of it — the hard gate from Week 17 still runs after <code>interrupt()</code>
+resumes, so a bug that accidentally resumed with an empty token still gets caught by
+<code>execute_high_stakes_action</code>, rather than relying on the UI alone to have enforced it.</p>
+<p><strong>What breaks in production:</strong> A pause with no SLA (no Concept 4 check) becomes a stuck
+claim the moment the approver goes on leave, changes teams, or simply misses a
+notification — and nothing in <code>interrupt()</code>'s own behavior surfaces that a thread has been
+pending for two weeks. Concept 2's checkpointer-backed queue makes it possible to CHECK
+for exactly that condition, but only if something actually runs the check on a schedule;
+building the query without ever scheduling it is a real, silent way this pattern still
+fails despite being implemented correctly.</p>
+<hr />
+<h2 id="day-5">Day 5 — Fan-Out Subgraphs and Observability</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="19-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=JQznvlSatPQ" target="_blank" rel="noopener"><b>LangGraph - Controllability with Map Reduce</b><small>LangChain · 9:05</small></a></li><li><a href="https://www.youtube.com/watch?v=upEhi5w5wLI" target="_blank" rel="noopener"><b>LangGraph #32:Master Subgraphs in LangGraph  &amp; Stream Filtering in Python</b><small>Ali Hamza · 8:07</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LangGraph%20subgraphs%20send%20map%20reduce%20streaming%20modes" target="_blank" rel="noopener">Search YouTube: LangGraph subgraphs send map reduce streaming modes</a></p></div>
+<hr />
+<h3>Concept 1 — <code>Send</code> for Map-Reduce Fan-Out Across Many Documents</h3>
+<p><code>add_conditional_edges(START, router_fn, [target_node])</code> where <code>router_fn</code> returns a LIST
+of <code>Send(node_name, payload)</code> objects, rather than a single routing key, fans a single
+run out into one independent invocation of <code>node_name</code> per <code>Send</code> — this is genuine
+map-reduce: each fan-out branch gets its own state slice (<code>payload</code>), runs independently,
+and their <code>Annotated</code> reducer-merged fields (Day 1 Concept 1) combine the results back
+into one parent state once every branch completes.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from langgraph.types import Send
+from typing import TypedDict, Annotated
+import operator
+
+class ParentState(TypedDict):
+    doc_ids: list
+    extracted_fields: Annotated[list, operator.add]
+
+def fan_out(state):
+    return [Send(&quot;extract_doc&quot;, {&quot;doc_id&quot;: d, &quot;extracted_fields&quot;: []}) for d in state[&quot;doc_ids&quot;]]
+
+def extract_doc(state):
+    return {&quot;extracted_fields&quot;: [f&quot;{state[&#x27;doc_id&#x27;]}: policy_number=POL-{state[&#x27;doc_id&#x27;][-4:]}&quot;]}
+
+g = StateGraph(ParentState)
+g.add_node(&quot;extract_doc&quot;, extract_doc)
+g.add_conditional_edges(START, fan_out, [&quot;extract_doc&quot;])
+g.add_edge(&quot;extract_doc&quot;, END)
+graph = g.compile()
+
+result = graph.invoke({&quot;doc_ids&quot;: [&quot;CLM-1001&quot;, &quot;CLM-1002&quot;, &quot;CLM-1003&quot;], &quot;extracted_fields&quot;: []})
+print(f&quot;extracted_fields: {sorted(result[&#x27;extracted_fields&#x27;])}&quot;)
+print(f&quot;document count matches fan-out count: {len(result[&#x27;extracted_fields&#x27;]) == 3}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>extracted_fields: [&#x27;CLM-1001: policy_number=POL-1001&#x27;, &#x27;CLM-1002: policy_number=POL-1002&#x27;, &#x27;CLM-1003: policy_number=POL-1003&#x27;]
+document count matches fan-out count: True
+</code></pre><p><strong>Exercise:</strong>
+Run the same fan-out over five document ids, <code>&quot;CLM-2001&quot;</code> through <code>&quot;CLM-2005&quot;</code>. Confirm
+the resulting <code>extracted_fields</code> list has exactly five entries.</p>
+<p><strong>Starting point:</strong> <code>ParentState</code>, <code>fan_out</code>, <code>extract_doc</code>, and the graph-assembly lines
+from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>document count matches fan-out count: True
+</code></pre><hr />
+<h3>Concept 2 — Subgraphs With Their Own State and Checkpoint Namespaces</h3>
+<p>A compiled <code>StateGraph</code> can be added as a node directly inside another <code>StateGraph</code> —
+LangGraph treats it as a subgraph, running it to completion as one step of the parent.
+Its checkpoints are NOT mixed into the parent's own checkpoint stream: they live under a
+distinct <code>checkpoint_ns</code> (namespace) string prefixed with the subgraph node's name, so a
+parent thread's history and a subgraph's internal step-by-step history stay independently
+queryable rather than interleaved into one undifferentiated log.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import InMemorySaver
+from typing import TypedDict
+
+class SubState(TypedDict):
+    doc_id: str
+    parsed: bool
+    chunked: bool
+
+def parse_node(state):
+    return {&quot;parsed&quot;: True}
+
+def chunk_node(state):
+    return {&quot;chunked&quot;: True}
+
+sub = StateGraph(SubState)
+sub.add_node(&quot;parse&quot;, parse_node)
+sub.add_node(&quot;chunk&quot;, chunk_node)
+sub.add_edge(START, &quot;parse&quot;)
+sub.add_edge(&quot;parse&quot;, &quot;chunk&quot;)
+sub.add_edge(&quot;chunk&quot;, END)
+subgraph = sub.compile()
+
+class ParentState(TypedDict):
+    doc_id: str
+    parsed: bool
+    chunked: bool
+    embedded: bool
+
+def embed_node(state):
+    return {&quot;embedded&quot;: True}
+
+parent = StateGraph(ParentState)
+parent.add_node(&quot;dataprep&quot;, subgraph)
+parent.add_node(&quot;embed&quot;, embed_node)
+parent.add_edge(START, &quot;dataprep&quot;)
+parent.add_edge(&quot;dataprep&quot;, &quot;embed&quot;)
+parent.add_edge(&quot;embed&quot;, END)
+checkpointer = InMemorySaver()
+graph = parent.compile(checkpointer=checkpointer)
+config = {&quot;configurable&quot;: {&quot;thread_id&quot;: &quot;claim-subgraph-1&quot;}}
+
+result = graph.invoke({&quot;doc_id&quot;: &quot;CLM-1001&quot;, &quot;parsed&quot;: False, &quot;chunked&quot;: False, &quot;embedded&quot;: False}, config=config)
+print(f&quot;result: {result}&quot;)
+
+checkpoints = list(checkpointer.list(config))
+namespaces = set(c.config[&quot;configurable&quot;].get(&quot;checkpoint_ns&quot;, &quot;&quot;) for c in checkpoints)
+print(f&quot;root namespace present: {&#x27;&#x27; in namespaces}&quot;)
+print(f&quot;a distinct subgraph namespace under dataprep exists: {any(ns.startswith(&#x27;dataprep:&#x27;) for ns in namespaces)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>result: {&#x27;doc_id&#x27;: &#x27;CLM-1001&#x27;, &#x27;parsed&#x27;: True, &#x27;chunked&#x27;: True, &#x27;embedded&#x27;: True}
+root namespace present: True
+a distinct subgraph namespace under dataprep exists: True
+</code></pre><p>The subgraph's namespace carries a real UUID suffix (<code>dataprep:&lt;uuid&gt;</code>) that differs on
+every run, so this concept only checks the prefix rather than the full string.</p>
+<p><strong>Exercise:</strong>
+Add a second document, <code>&quot;CLM-1002&quot;</code>, run through the SAME parent graph on a new
+<code>thread_id</code>, <code>&quot;claim-subgraph-2&quot;</code>. Confirm this second thread also produces a distinct
+<code>dataprep:</code>-prefixed namespace, independent of the first thread's.</p>
+<p><strong>Starting point:</strong> <code>subgraph</code>, <code>parent</code>, <code>checkpointer</code>, and <code>graph</code> from this concept's
+Example (already compiled with the shared checkpointer).</p>
+<p>Expected output (actually run):</p>
+<pre><code>second thread also has a distinct dataprep: namespace: True
+</code></pre><hr />
+<h3>Concept 3 — Streaming Modes <code>values</code>, <code>updates</code>, and <code>messages</code></h3>
+<p><code>graph.stream(input, stream_mode=...)</code> reports progress differently depending on the
+mode: <code>&quot;values&quot;</code> yields the FULL accumulated state after every superstep (useful for a UI
+showing current status); <code>&quot;updates&quot;</code> yields only the PARTIAL dict each node itself
+returned, keyed by node name (useful for an audit log of who changed what); <code>&quot;messages&quot;</code>
+streams individual LLM tokens as they're generated inside a node — and, checked directly,
+yields NOTHING for a graph with no actual chat-model call inside any node, since it is
+purely a callback hook into token generation, not a general node-progress channel.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from typing import TypedDict, Annotated
+import operator
+
+class State(TypedDict):
+    notes: Annotated[list[str], operator.add]
+
+def parse_node(state):
+    return {&quot;notes&quot;: [&quot;parsed&quot;]}
+
+def chunk_node(state):
+    return {&quot;notes&quot;: [&quot;chunked&quot;]}
+
+def embed_node(state):
+    return {&quot;notes&quot;: [&quot;embedded&quot;]}
+
+g = StateGraph(State)
+g.add_node(&quot;parse&quot;, parse_node)
+g.add_node(&quot;chunk&quot;, chunk_node)
+g.add_node(&quot;embed&quot;, embed_node)
+g.add_edge(START, &quot;parse&quot;)
+g.add_edge(&quot;parse&quot;, &quot;chunk&quot;)
+g.add_edge(&quot;chunk&quot;, &quot;embed&quot;)
+g.add_edge(&quot;embed&quot;, END)
+graph = g.compile()
+
+values_chunks = list(graph.stream({&quot;notes&quot;: []}, stream_mode=&quot;values&quot;))
+print(f&quot;values mode yields the full state after each step: {[c[&#x27;notes&#x27;] for c in values_chunks]}&quot;)
+
+updates_chunks = list(graph.stream({&quot;notes&quot;: []}, stream_mode=&quot;updates&quot;))
+print(f&quot;updates mode yields only each node&#x27;s own partial return: {updates_chunks}&quot;)
+
+messages_chunks = list(graph.stream({&quot;notes&quot;: []}, stream_mode=&quot;messages&quot;))
+print(f&quot;messages mode with no LLM calls in any node yields nothing: {messages_chunks == []}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>values mode yields the full state after each step: [[], [&#x27;parsed&#x27;], [&#x27;parsed&#x27;, &#x27;chunked&#x27;], [&#x27;parsed&#x27;, &#x27;chunked&#x27;, &#x27;embedded&#x27;]]
+updates mode yields only each node&#x27;s own partial return: [{&#x27;parse&#x27;: {&#x27;notes&#x27;: [&#x27;parsed&#x27;]}}, {&#x27;chunk&#x27;: {&#x27;notes&#x27;: [&#x27;chunked&#x27;]}}, {&#x27;embed&#x27;: {&#x27;notes&#x27;: [&#x27;embedded&#x27;]}}]
+messages mode with no LLM calls in any node yields nothing: True
+</code></pre><p><strong>Exercise:</strong>
+Reconstruct the final <code>notes</code> list purely by concatenating every partial value seen across
+<code>&quot;updates&quot;</code> mode's stream, without ever calling <code>graph.invoke()</code>. Confirm the
+reconstruction matches a direct <code>graph.invoke({&quot;notes&quot;: []})[&quot;notes&quot;]</code> call exactly.</p>
+<p><strong>Starting point:</strong> <code>State</code>, <code>parse_node</code>/<code>chunk_node</code>/<code>embed_node</code>, and <code>graph</code> from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>reconstructed from updates matches a direct invoke: True
+</code></pre><hr />
+<h3>Concept 4 — Per-Node Latency Spans and <code>langgraph.json</code> Deployment Configuration</h3>
+<p><code>stream_mode=&quot;debug&quot;</code> emits a <code>&quot;task&quot;</code> event when a node starts and a matching
+<code>&quot;task_result&quot;</code> event when it finishes, each carrying a real ISO timestamp — diffing the
+two for a given node's task <code>id</code> genuinely measures that node's wall-clock latency, no
+external tracing library required. Per-call TOKEN spans need an actual LLM call inside a
+node (REAL MODE here, since no live model is called this week), but the latency mechanism
+itself needs nothing beyond <code>stream_mode=&quot;debug&quot;</code>. <code>langgraph.json</code> (<code>{&quot;dependencies&quot;: [...], &quot;graphs&quot;: {&quot;agent&quot;: &quot;./agent.py:graph&quot;}, &quot;env&quot;: &quot;.env&quot;}</code>) is the deployment manifest
+LangGraph Platform/<code>langgraph dev</code> reads to find and serve a compiled graph — a
+configuration file, not a runtime call, so it is shown here as reference shape rather than
+executed.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from typing import TypedDict
+import time
+import datetime
+
+class State(TypedDict):
+    notes: list
+
+def slow_node(state):
+    time.sleep(0.05)
+    return {&quot;notes&quot;: [&quot;slow done&quot;]}
+
+def fast_node(state):
+    return {&quot;notes&quot;: [&quot;fast done&quot;]}
+
+g = StateGraph(State)
+g.add_node(&quot;slow&quot;, slow_node)
+g.add_node(&quot;fast&quot;, fast_node)
+g.add_edge(START, &quot;slow&quot;)
+g.add_edge(&quot;slow&quot;, &quot;fast&quot;)
+g.add_edge(&quot;fast&quot;, END)
+graph = g.compile()
+
+starts = {}
+durations = {}
+for chunk in graph.stream({&quot;notes&quot;: []}, stream_mode=&quot;debug&quot;):
+    name = chunk[&quot;payload&quot;][&quot;name&quot;]
+    if chunk[&quot;type&quot;] == &quot;task&quot;:
+        starts[chunk[&quot;payload&quot;][&quot;id&quot;]] = chunk[&quot;timestamp&quot;]
+    elif chunk[&quot;type&quot;] == &quot;task_result&quot;:
+        t0 = datetime.datetime.fromisoformat(starts[chunk[&quot;payload&quot;][&quot;id&quot;]])
+        t1 = datetime.datetime.fromisoformat(chunk[&quot;timestamp&quot;])
+        durations[name] = (t1 - t0).total_seconds()
+
+print(f&quot;slow node measured slower than fast node: {durations[&#x27;slow&#x27;] &gt; durations[&#x27;fast&#x27;]}&quot;)
+print(f&quot;slow node took at least 0.04s (slept 0.05s): {durations[&#x27;slow&#x27;] &gt;= 0.04}&quot;)
+
+# langgraph.json -- reference shape only, read by `langgraph dev`/LangGraph Platform, not executed here:
+#   {
+#     &quot;dependencies&quot;: [&quot;.&quot;],
+#     &quot;graphs&quot;: {&quot;claims_pipeline&quot;: &quot;./claims_graph.py:graph&quot;},
+#     &quot;env&quot;: &quot;.env&quot;
+#   }
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>slow node measured slower than fast node: True
+slow node took at least 0.04s (slept 0.05s): True
+</code></pre><p>Exact durations are hardware-dependent and not presented as fixed — only the ordering and
+the sleep-duration floor are genuinely stable across runs.</p>
+<p><strong>Exercise:</strong>
+Add a third node, <code>medium_node</code>, sleeping <code>0.02</code> seconds, between <code>slow</code> and <code>fast</code>.
+Confirm the measured ordering is <code>slow &gt; medium &gt; fast</code>.</p>
+<p><strong>Starting point:</strong> <code>State</code>, <code>slow_node</code>/<code>fast_node</code>, and the <code>stream_mode=&quot;debug&quot;</code>
+latency-measurement loop from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>ordering matches expected slow &gt; medium &gt; fast: True
+</code></pre><hr />
+<h3>Concept 5 — Supervisor Routing Across Specialist Subgraphs</h3>
+<p>Adapted from <code>Curriculum/Week_11_Advanced_AI/W11_D1d_MultiAgent_Orchestration.ipynb</code>'s
+&quot;Real LangGraph Subgraphs&quot; and &quot;Agent Handoff via Conditional Edges&quot; concepts, re-grounded
+in claims data rather than that notebook's SQL/report-agent example: a compiled subgraph
+(Concept 2) can be added as a node under <code>add_conditional_edges(START, router_fn, [node_names])</code> exactly like a plain function node, so a supervisor's routing decision and
+Concept 2's namespace-isolated subgraphs compose directly — each route target is itself a
+fully independent, standalone-testable pipeline, not just a branch of logic living inside
+one big function.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from langgraph.graph import StateGraph, START, END
+from typing import TypedDict
+
+class FraudReviewState(TypedDict):
+    claim_id: str
+    amount: float
+    result: str
+
+def flag_for_investigator(state: FraudReviewState) -&gt; FraudReviewState:
+    return {&quot;result&quot;: f&quot;claim {state[&#x27;claim_id&#x27;]} routed to SIU investigator (amount {state[&#x27;amount&#x27;]})&quot;}
+
+fraud_builder = StateGraph(FraudReviewState)
+fraud_builder.add_node(&quot;flag&quot;, flag_for_investigator)
+fraud_builder.add_edge(START, &quot;flag&quot;)
+fraud_builder.add_edge(&quot;flag&quot;, END)
+fraud_subgraph = fraud_builder.compile()   # standalone-testable, same as Concept 2
+
+print(&quot;fraud subgraph tested standalone:&quot;, fraud_subgraph.invoke({&quot;claim_id&quot;: &quot;CLM-9001&quot;, &quot;amount&quot;: 48000.0, &quot;result&quot;: &quot;&quot;}))
+
+class StandardState(TypedDict):
+    claim_id: str
+    amount: float
+    result: str
+
+def auto_settle(state: StandardState) -&gt; StandardState:
+    return {&quot;result&quot;: f&quot;claim {state[&#x27;claim_id&#x27;]} auto-settled for {state[&#x27;amount&#x27;]}&quot;}
+
+standard_builder = StateGraph(StandardState)
+standard_builder.add_node(&quot;settle&quot;, auto_settle)
+standard_builder.add_edge(START, &quot;settle&quot;)
+standard_builder.add_edge(&quot;settle&quot;, END)
+standard_subgraph = standard_builder.compile()
+
+class SupervisorState(TypedDict):
+    claim_id: str
+    amount: float
+    flagged: bool
+    result: str
+
+def route_claim(state: SupervisorState) -&gt; str:
+    if state[&quot;flagged&quot;] or state[&quot;amount&quot;] &gt; 25000:
+        return &quot;fraud_review&quot;
+    return &quot;standard_processing&quot;
+
+parent = StateGraph(SupervisorState)
+parent.add_node(&quot;fraud_review&quot;, fraud_subgraph)
+parent.add_node(&quot;standard_processing&quot;, standard_subgraph)
+parent.add_conditional_edges(START, route_claim, [&quot;fraud_review&quot;, &quot;standard_processing&quot;])
+parent.add_edge(&quot;fraud_review&quot;, END)
+parent.add_edge(&quot;standard_processing&quot;, END)
+graph = parent.compile()
+
+claims = [
+    {&quot;claim_id&quot;: &quot;CLM-9001&quot;, &quot;amount&quot;: 48000.0, &quot;flagged&quot;: False, &quot;result&quot;: &quot;&quot;},
+    {&quot;claim_id&quot;: &quot;CLM-9002&quot;, &quot;amount&quot;: 1200.0, &quot;flagged&quot;: False, &quot;result&quot;: &quot;&quot;},
+    {&quot;claim_id&quot;: &quot;CLM-9003&quot;, &quot;amount&quot;: 500.0, &quot;flagged&quot;: True, &quot;result&quot;: &quot;&quot;},
+]
+for c in claims:
+    out = graph.invoke(c)
+    print(out[&quot;result&quot;])
+
+routed_to_fraud = sum(1 for c in claims if c[&quot;flagged&quot;] or c[&quot;amount&quot;] &gt; 25000)
+print(f&quot;claims routed to fraud review: {routed_to_fraud}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>fraud subgraph tested standalone: {&#x27;claim_id&#x27;: &#x27;CLM-9001&#x27;, &#x27;amount&#x27;: 48000.0, &#x27;result&#x27;: &#x27;claim CLM-9001 routed to SIU investigator (amount 48000.0)&#x27;}
+claim CLM-9001 routed to SIU investigator (amount 48000.0)
+claim CLM-9002 auto-settled for 1200.0
+claim CLM-9003 routed to SIU investigator (amount 500.0)
+claims routed to fraud review: 2
+</code></pre><p><strong>Exercise:</strong>
+Add a fourth claim, <code>&quot;CLM-9004&quot;</code>, with <code>amount</code> <code>26000.0</code> and <code>flagged</code> <code>False</code>. Confirm
+it routes to <code>fraud_review</code> purely on the amount threshold, with no fraud flag set.</p>
+<p><strong>Starting point:</strong> <code>fraud_subgraph</code>, <code>standard_subgraph</code>, <code>route_claim</code>, and <code>graph</code> from
+this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>claim CLM-9004 routed to SIU investigator (amount 26000.0)
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> <code>Send</code>'s per-document fan-out maps directly onto Week 12's DataPrep DAG
+task-per-document granularity — the same reasoning about retryability and observability
+per unit of work applies whether the orchestrator is Airflow or a LangGraph <code>StateGraph</code>.</p>
+<p><strong>Compliance angle:</strong> Subgraph checkpoint namespaces (Concept 2) mean a dataprep
+subprocess's own step-by-step history is independently auditable from the parent claims
+pipeline's history — a regulator asking &quot;what exactly happened during parsing&quot; gets a
+scoped answer, not the entire pipeline's undifferentiated checkpoint log to search
+through.</p>
+<p><strong>What breaks in production:</strong> A team wires a progress UI to <code>stream_mode=&quot;messages&quot;</code>
+expecting per-node status updates, copying a pattern that works for a chat interface —
+and gets nothing, because <code>&quot;messages&quot;</code> only fires for actual LLM token generation, not
+general node progress. Concept 3's own direct check (<code>messages_chunks == []</code> for a graph
+with no LLM calls) is exactly the verification that would have caught this before it
+shipped as a broken progress bar.</p>
+<hr />
+<h2>Architecture Decision — Week 19</h2>
+<p><strong>Choosing between:</strong> a stateless straight-line script (what Phase 3's pipelines all
+were) vs a <code>StateGraph</code> with checkpointing, retries, and human-approval interrupts vs a
+fully custom orchestration layer built in-house.</p>
+<p><strong>Rule of thumb:</strong> adopt <code>StateGraph</code> with a durable checkpointer (<code>PostgresSaver</code> in
+production, proven this week against <code>SqliteSaver</code>'s genuinely-executable behavior) the
+moment a pipeline has ANY of: a step that can legitimately fail and need a bounded retry
+without re-running everything before it (Day 3); a decision point that must pause for a
+human, with an SLA and an audit trail, rather than block a thread indefinitely (Day 4); or
+enough independent units of work (many documents, many claims) that per-unit failure
+isolation and fan-out parallelism (Day 5) matter more than one script's simplicity. A
+pipeline with none of these — a short, linear, idempotent batch job with nothing to pause
+for and nothing worth retrying independently — does not need this machinery, and adding it
+anyway is pure overhead: <code>InMemorySaver</code>-style state and a plain function call are still
+the right choice for that shape of work, exactly as Day 2 disclosed InMemorySaver's real
+place is tests and short-lived scripts, not anything meant to survive a restart. A custom
+in-house orchestration layer is worth building only once a team can point to a concrete
+gap <code>StateGraph</code>'s reducers, checkpointing, retry policies, and <code>interrupt()</code> genuinely do
+not cover — not as a default starting position, since every one of those primitives this
+week built from scratch already exists, tested, in the library itself.</p>
+<div class="pager"><a class="btn ghost" href="week-18.html">&larr; Week 18</a><a class="btn ghost" href="week-20.html">Week 20 &rarr;</a></div>
+</main></body></html>

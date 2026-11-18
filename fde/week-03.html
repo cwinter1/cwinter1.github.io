@@ -1,0 +1,1002 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 03 — Milvus &amp; Qdrant</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/how-does-a-vector-database-work" target="_blank" rel="noopener">How does a Vector Database work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/how-does-hybrid-search-work" target="_blank" rel="noopener">How does Hybrid Search work?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="03" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 03 — Milvus &amp; Qdrant</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>1 — Real-Time Vector Infrastructure &amp; Streaming</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Expert</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 01 (brute-force k-NN, the HNSW mental model) and Week 02 (pgvector in Production — indexes, metadata filtering, query plans). Day 4's REAL MODE deployment work additionally wants a working Docker daemon.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>W03_Milvus_And_Qdrant.ipynb. Every Milvus/Qdrant REAL MODE call needs a running server this sandbox doesn't have, so those cells are commented-out reference code, never executed — only the pure-Python sizing arithmetic (EXECUTED) actually runs.</td>
+</tr>
+</tbody>
+</table>
+<p>Week 02 left you with a working vector search inside Postgres, which is the right place to
+start and the place most BFSI teams should stay. This week is about the other side of that
+decision: what a dedicated vector store actually buys you, what it charges you in
+operational surface area, and how to tell which side of the line your workload is on. The
+honest summary up front is that &quot;dedicated vector database&quot; mostly buys you two things —
+horizontal scale past one machine's memory, and filtering that stays fast at high
+selectivity — and charges you a distributed system to run.</p>
+<p>Every Milvus and Qdrant snippet below is marked <strong>REAL MODE</strong>: API-correct, and requiring a
+running instance. None of them were executed while writing this file, and their expected
+outputs are described by shape rather than by invented values. The arithmetic blocks are
+different — those are plain Python, they were run, and the numbers quoted are the genuine
+output.</p>
+<hr />
+<h2 id="day-1">Day 1 — Dedicated Vector DB Architecture</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="03-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=aF9-25n0tXw" target="_blank" rel="noopener"><b>Milvus Database Architecture Deep Dive</b><small>Palash sarkar · 7:21</small></a></li><li><a href="https://www.youtube.com/watch?v=2Vsux5UJ0G4" target="_blank" rel="noopener"><b>Milvus Data Ingestion | Create Database, Index, Schema, Collection in Milvus | Full Code RAG | GenAI</b><small>At A Glance! · 34:01</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Milvus%20architecture%20explained%20query%20node%20data%20node%20segments" target="_blank" rel="noopener">Search YouTube: Milvus architecture explained query node data node segments</a></p></div>
+<hr />
+<h3>Concept 1 — Four Worker Roles and Three Dependencies</h3>
+<p>pgvector is one process. Milvus is a cluster of specialised roles, and reading its
+architecture is mostly a matter of noticing that each role owns one verb.</p>
+<ul>
+<li><strong>Proxy</strong> — the stateless front door. Clients connect here. It validates requests, routes
+them, and reduces the per-node result sets into the single top-k you asked for. Being
+stateless, it is the easy thing to scale horizontally.</li>
+<li><strong>Query node</strong> — serves searches. It loads sealed segments and their indexes into memory,
+and separately subscribes to the write stream so it can also serve data too recent to
+have been sealed.</li>
+<li><strong>Data node</strong> — consumes the write log, accumulates incoming rows, and flushes them to
+object storage as immutable sealed segments. It also executes compaction.</li>
+<li><strong>Index node</strong> — builds index files over sealed segments and writes those files back to
+object storage.</li>
+</ul>
+<p>Behind those sit three dependencies Milvus does not implement itself: <strong>etcd</strong> for metadata
+and coordination, a <strong>log broker</strong> (Pulsar or Kafka; a local embedded broker in the
+standalone image) as the write-ahead log, and <strong>object storage</strong> (MinIO or S3) for segment
+and index files. A set of coordinator services assigns work to the workers; recent Milvus
+versions let you run them as one mixed coordinator process rather than four.</p>
+<p>The write path is worth committing to memory, because every later concept this week is a
+consequence of it: client to proxy, proxy appends to the log broker, data node consumes the
+log and builds a growing segment, flush turns that into a sealed segment in object storage,
+index node indexes it, query node loads it.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># REAL MODE -- requires a running Milvus instance. Not executed in this sandbox.
+from pymilvus import connections, utility
+
+connections.connect(alias=&quot;default&quot;, host=&quot;milvus.internal&quot;, port=&quot;19530&quot;)
+
+print(&quot;server version :&quot;, utility.get_server_version())
+print(&quot;collections    :&quot;, utility.list_collections())
+
+# The query nodes&#x27; own view of what they are currently serving.
+for seg in utility.get_query_segment_info(&quot;claim_notes&quot;):
+    print(seg)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p><strong>Exercise:</strong>
+Draw the write path for a single claim note, from the client call to the moment a query
+node can return it, naming which of the four worker roles touches it at each step and which
+of the three dependencies it lands in. Then mark the one step where the row is durable but
+not yet searchable by an index.</p>
+<p><strong>Starting point:</strong> No code. The four worker roles and three dependencies named in this concept's Example.</p>
+<p>Expected output: a six-step path ending at the query node, with durability established once
+the log broker has the write, and the index only existing after the index node has run over
+a sealed segment. The gap between those two points is the subject of Concept 2.</p>
+<hr />
+<h3>Concept 2 — Growing Segments and Sealed Segments</h3>
+<p>A segment is Milvus's unit of storage and of work. Segments come in two states, and the
+distinction drives both freshness and latency.</p>
+<p>A <strong>growing</strong> segment is still accepting writes. It lives in memory, it is not indexed, and
+a query node searches it by brute-force scan. A <strong>sealed</strong> segment is immutable, flushed to
+object storage, and indexed. Sealing is triggered by policy — most visibly a size threshold
+(<code>dataCoord.segment.maxSize</code>, expressed in MB and commonly 512 by default, though you should
+read it from your own deployment's config rather than trusting a number in a document), and
+also by lifetime and idle-time policies.</p>
+<p>This is why a freshly-written row can be found immediately but slightly more expensively:
+it is being scanned, not indexed. It is also why a collection under heavy write load with
+sealing misconfigured develops large unindexed growing segments and mysteriously slow
+searches.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Plain Python -- this one runs anywhere. Sealed-segment arithmetic.
+dim, bytes_per = 1024, 4
+vector_bytes = dim * bytes_per
+segment_max_mb = 512
+vectors_per_segment = (segment_max_mb * 1024**2) // vector_bytes
+print(f&quot;bytes per vector          : {vector_bytes:,}&quot;)
+print(f&quot;vectors per 512 MB segment: {vectors_per_segment:,}&quot;)
+
+for n in (1_000_000, 20_000_000, 200_000_000):
+    segs = -(-n // vectors_per_segment)
+    print(f&quot;{n:&gt;12,} vectors -&gt; {segs:&gt;6,} sealed segments&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output from running the above:</p>
+<pre><code>bytes per vector          : 4,096
+vectors per 512 MB segment: 131,072
+   1,000,000 vectors -&gt;      8 sealed segments
+  20,000,000 vectors -&gt;    153 sealed segments
+ 200,000,000 vectors -&gt;  1,526 sealed segments
+</code></pre><p><strong>Exercise:</strong>
+Re-run the arithmetic at 768 dimensions and at <code>float16</code> storage, and describe what happens
+to the segment count in each case. Then answer the operational question: does a larger
+segment count make index builds more parallelisable, or does it make them slower?</p>
+<p><strong>Starting point:</strong> The segment arithmetic from this concept's Example (1024-dim float32, 4,096 bytes/vector, 131,072 vectors per 512 MB segment), re-run at 768 dimensions and at <code>float16</code>.</p>
+<p>Expected output: smaller vectors mean more vectors per segment and therefore fewer segments
+for the same row count. The follow-up has a genuine trade in it — more segments means more
+independently buildable units and better parallelism across index nodes, but also more
+per-segment metadata and more result sets for the proxy to reduce.</p>
+<hr />
+<h3>Concept 3 — Deletes Are Tombstones, and Compaction Is the Reaper</h3>
+<p>Milvus does not delete in place. A delete writes a record marking the entity gone; searches
+then filter it out at query time. The row's vector is still sitting in its sealed segment,
+still occupying memory on every query node that has loaded it, until a <strong>compaction</strong> run
+rewrites the segment without it.</p>
+<p>An upsert is the same story told twice, since it is a delete followed by an insert. A
+collection under steady correction traffic — which is exactly what a claims system is —
+accumulates dead weight that shows up as memory pressure long before anyone thinks to look
+at deletion volume.</p>
+<p>This should feel familiar rather than exotic: it is the same design as Postgres dead tuples
+and <code>VACUUM</code>, which is a useful anchor for anyone arriving from Week 02.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># REAL MODE -- requires a running Milvus instance. Not executed in this sandbox.
+from pymilvus import Collection
+
+claims = Collection(&quot;claim_notes&quot;)
+
+# Soft delete: writes a delete record, does not reclaim space.
+claims.delete(expr=&quot;claim_id in [880412, 880417, 880431]&quot;)
+
+# Compaction is what actually reclaims it.
+job = claims.compact()
+print(&quot;compaction state:&quot;, claims.get_compaction_state())
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p><strong>Exercise:</strong>
+For a claims collection taking 40,000 inserts and 6,000 corrections a day, work out how many
+entities are logically live and how many are physically resident after 30 days with no
+compaction. State the ratio, and say which metric you would alarm on to catch this before it
+becomes a memory incident.</p>
+<p><strong>Starting point:</strong> No code beyond simple arithmetic: 40,000 inserts and 6,000 corrections a day over 30 days, and the tombstone/compaction model from this concept's Example.</p>
+<p>Expected output: a physical row count meaningfully above the live count, with the gap
+growing linearly in correction volume. The alarm belongs on the ratio of deleted to live
+entities, or on segment-level compaction lag, not on raw collection size — raw size grows for
+legitimate reasons too and so makes a poor signal.</p>
+<hr />
+<h3>Concept 4 — Compute-Storage Separation Pays Off at Reindex Time</h3>
+<p>Milvus keeps segments and index files in object storage, not on the query node's local disk.
+Query nodes hold a loaded copy in memory. That separation sounds like an abstract design
+virtue right up until you have to change an index parameter, at which point it becomes the
+whole argument.</p>
+<p>Changing <code>M</code> on an HNSW index means a rebuild, not a reconfigure — Week 01 established this
+and it stays true here. Because the segments live in object storage independently of any
+serving node, an index node can build the new index files by reading from object storage
+without touching the copy the query nodes are currently serving from. The switchover then
+becomes a load operation rather than a data migration.</p>
+<p>Contrast that with the pgvector case from Week 02, where the index lives in the same
+instance that is serving queries, and a <code>REINDEX</code> competes for the same buffers, the same
+CPU and the same disk as production traffic.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># REAL MODE -- requires a running Milvus instance. Not executed in this sandbox.
+from pymilvus import Collection
+
+claims = Collection(&quot;claim_notes&quot;)
+
+# Rebuild under a new graph degree. The build reads segments from object storage.
+claims.release()                       # free query-node memory first
+claims.drop_index()
+claims.create_index(
+    field_name=&quot;embedding&quot;,
+    index_params={
+        &quot;index_type&quot;: &quot;HNSW&quot;,
+        &quot;metric_type&quot;: &quot;COSINE&quot;,
+        &quot;params&quot;: {&quot;M&quot;: 32, &quot;efConstruction&quot;: 256},
+    },
+)
+claims.load()                          # reload, now serving the new index
+print(claims.index().params)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p><strong>Exercise:</strong>
+Write down the two windows this rebuild has: the window where the new index is being built,
+and the window where the collection is released and therefore unsearchable. State which one
+you can overlap with production traffic and which one you cannot, and propose one way to
+shrink the second.</p>
+<p><strong>Starting point:</strong> No code. The compute-storage separation described in this concept's Example, and a collection large enough that <code>load_collection</code> is not instant.</p>
+<p>Expected output: the build window overlaps with serving because it happens on index nodes
+against object storage; the released window does not, because a released collection cannot
+be searched at all. Shrinking it means either loading partitions incrementally or running a
+second collection and cutting over by alias.</p>
+<hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> Milvus's three dependencies are three more things your on-prem platform
+team has to own. etcd, a Kafka or Pulsar cluster and a MinIO deployment are each a
+production system with its own upgrade path, backup story and on-call rota. In a bank where
+Kafka is already run by a different team on a different change calendar, &quot;we need a topic&quot;
+is not a config line, it is a quarter.</p>
+<p><strong>Compliance angle:</strong> Soft deletes collide directly with erasure obligations. If a customer
+exercises a deletion right, a delete record that leaves the vector physically resident for
+an indeterminate period until compaction runs is difficult to describe as erasure. The
+defensible position is an explicit compaction step tied to the erasure workflow, with the
+completion recorded — not a background process nobody schedules.</p>
+<p><strong>What breaks in production:</strong> Growing segments that never seal. Someone tunes the sealing
+policy for a bulk-load window, the workload changes to steady trickle-writes, and segments
+sit growing and unindexed. Nothing errors. Search latency simply climbs as an increasing
+share of every query is served by brute-force scan over the unsealed portion.</p>
+<hr />
+<h2 id="day-2">Day 2 — Milvus Collections and Consistency</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="03-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=2Vsux5UJ0G4" target="_blank" rel="noopener"><b>Milvus Data Ingestion | Create Database, Index, Schema, Collection in Milvus | Full Code RAG | GenAI</b><small>At A Glance! · 34:01</small></a></li><li><a href="https://www.youtube.com/watch?v=Ik3EYgy7xqk" target="_blank" rel="noopener"><b>Part 1- Getting Started with Milvus Vector  DB | RAG With Example | Milvus Consistency Level</b><small>KW TechWorld · 16:35</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Milvus%20collections%20partitions%20consistency%20level%20tutorial" target="_blank" rel="noopener">Search YouTube: Milvus collections partitions consistency level tutorial</a></p></div>
+<hr />
+<h3>Concept 1 — Field Schema and the Partition Key</h3>
+<p>A Milvus collection is declared, not inferred: a primary key, one or more vector fields with
+fixed dimension, and scalar fields for anything you want to filter on. So far this is a
+table definition.</p>
+<p>The interesting field is the <strong>partition key</strong>. Mark one scalar field (INT64 or VARCHAR) with
+<code>is_partition_key=True</code> and Milvus hashes its value to route each entity into one of
+<code>num_partitions</code> physical partitions, defaulting to 16. A search that filters on that field
+can then be restricted to the relevant partition rather than scanning all of them.</p>
+<p>This is the multi-tenancy primitive. For a broker platform holding many carriers' claims in
+one collection, <code>carrier_id</code> as the partition key gives you tenant isolation without
+managing partitions by hand. Two constraints worth knowing before you design around it: one
+partition key per collection, and the pruning only happens if the query actually filters on
+that field — a query without it fans out across every partition.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># REAL MODE -- requires a running Milvus instance. Not executed in this sandbox.
+from pymilvus import CollectionSchema, FieldSchema, DataType, Collection
+
+fields = [
+    FieldSchema(&quot;claim_id&quot;,    DataType.INT64,       is_primary=True, auto_id=False),
+    FieldSchema(&quot;carrier_id&quot;,  DataType.VARCHAR,     max_length=32, is_partition_key=True),
+    FieldSchema(&quot;policy_type&quot;, DataType.VARCHAR,     max_length=32),
+    FieldSchema(&quot;claim_date&quot;,  DataType.INT64),      # epoch seconds, filterable
+    FieldSchema(&quot;embedding&quot;,   DataType.FLOAT_VECTOR, dim=1024),
+]
+schema = CollectionSchema(fields, description=&quot;claim notes, partitioned by carrier&quot;)
+
+claims = Collection(&quot;claim_notes&quot;, schema=schema, num_partitions=32)
+print(claims.schema)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p><strong>Exercise:</strong>
+Pick the partition key for a collection holding claim notes from 8 carriers, where one
+carrier is 60% of the volume. Then state what the hash-based routing does with that skew,
+and whether raising <code>num_partitions</code> fixes it.</p>
+<p><strong>Starting point:</strong> No code. A claims collection over 8 carriers with one at 60 % of volume, and the <code>partition_key_field</code> / <code>num_partitions</code> behaviour from this concept's Example.</p>
+<p>Expected output: <code>carrier_id</code> is still the right key for isolation, but hashing does not
+break up a single hot value — that carrier's entities all land in one partition regardless
+of how many partitions exist. Raising <code>num_partitions</code> spreads the small carriers and leaves
+the skew untouched, which is the honest answer.</p>
+<hr />
+<h3>Concept 2 — load_collection Is the Real Capacity Limit</h3>
+<p>Milvus will happily ingest more data than it can search. Data lives in object storage;
+searching it requires it to be <strong>loaded</strong> into query-node memory first. <code>load_collection</code>
+(or <code>load_partitions</code> for a subset) is what does that, and available query-node RAM is
+therefore the true capacity ceiling — not disk, not object-storage cost.</p>
+<p><code>replica_number</code> multiplies that cost directly. Two in-memory replicas of a collection
+occupy twice the memory across the cluster, which is the price of surviving a query node
+failure without losing searchability.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Plain Python -- this one runs anywhere. Resident memory for a loaded collection.
+def resident_gib(n, dim, bytes_per=4, graph_m=16, replicas=1):
+    vectors = n * dim * bytes_per
+    graph = n * graph_m * 2 * 4          # HNSW edges, ~2M ids at layer 0, 4-byte ids
+    return (vectors + graph) * replicas / 1024**3
+
+for n in (2_000_000, 20_000_000):
+    for r in (1, 2, 3):
+        print(f&quot;{n:&gt;11,} vectors  replicas={r}  resident ~{resident_gib(n,1024,replicas=r):7.2f} GiB&quot;)
+
+budget = 64
+n = 20_000_000
+print(f&quot;query-node RAM budget {budget} GiB, corpus {n:,} @1024d float32&quot;)
+print(f&quot;  one replica needs      : {resident_gib(n,1024):.2f} GiB&quot;)
+print(f&quot;  query nodes to hold it : {-(-resident_gib(n,1024)//budget):.0f} (before any replica)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output from running the above:</p>
+<pre><code>  2,000,000 vectors  replicas=1  resident ~   7.87 GiB
+  2,000,000 vectors  replicas=2  resident ~  15.74 GiB
+  2,000,000 vectors  replicas=3  resident ~  23.60 GiB
+ 20,000,000 vectors  replicas=1  resident ~  78.68 GiB
+ 20,000,000 vectors  replicas=2  resident ~ 157.36 GiB
+ 20,000,000 vectors  replicas=3  resident ~ 236.03 GiB
+
+query-node RAM budget 64 GiB, corpus 20,000,000 @1024d float32
+  one replica needs      : 78.68 GiB
+  query nodes to hold it : 2 (before any replica)
+</code></pre><p>That 78.68 GiB figure is the single most useful number this week. It is the reason a 20
+million vector corpus is not a pgvector-on-one-box workload, and it is the input to every
+sizing conversation on Day 4.</p>
+<p><strong>Example note:</strong> the load itself is a one-line REAL MODE call.</p>
+<div class="code"><pre><code># REAL MODE -- requires a running Milvus instance. Not executed in this sandbox.
+claims.load(replica_number=2)
+# ... serve queries ...
+claims.release()                       # the only way the memory comes back
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p><strong>Exercise:</strong>
+Your query nodes have 64 GiB each and you want two replicas of the 20M corpus. Compute the
+minimum number of query nodes, then recompute assuming you load only the two most recent
+years, which are 35% of the corpus. State the operational lever that second number
+represents.</p>
+<p><strong>Starting point:</strong> The residency arithmetic from this concept's Example — 20M vectors at 1024 dimensions, 78.68 GiB per replica — plus 64 GiB query nodes and a 35 % partial load.</p>
+<p>Expected output: the full two-replica figure needs substantially more than three 64 GiB
+nodes, while the 35% partial load fits far more comfortably. The lever is
+<code>load_partitions</code> — loading a time-scoped subset instead of the whole collection, which is
+the cheapest capacity decision available and the one most often left on the table.</p>
+<hr />
+<h3>Concept 3 — Four Consistency Levels and What GuaranteeTs Does</h3>
+<p>Milvus offers four consistency levels, and they are all the same mechanism with one number
+changed. Every search request carries a <strong>guarantee timestamp</strong>. Each query node tracks a
+service timestamp reflecting how far through the write stream it has consumed. Before
+executing, the node waits until its service timestamp reaches the request's guarantee
+timestamp. The level just decides what the guarantee timestamp is set to.</p>
+<ul>
+<li><strong>Strong</strong> — set to the current system timestamp. The node waits for everything written
+before the request to become visible. Correct, and the slowest.</li>
+<li><strong>Bounded</strong> — set to the current timestamp minus a tolerance (the graceful-time setting).
+Recent writes within that window may be missed. This is the default in current versions;
+confirm against your own deployment.</li>
+<li><strong>Session</strong> — set to this client's own last write. You always read your own writes, with
+no guarantee about anyone else's.</li>
+<li><strong>Eventually</strong> — set to the minimum. No waiting at all, lowest latency, weakest guarantee.</li>
+</ul>
+<p>The level can be set on the collection and overridden per request, which matters because a
+single application usually needs more than one. Framed as a BFSI question: an adjuster
+searching for duplicates of the claim they just filed needs Session at minimum. A monthly
+portfolio analytics sweep is fine on Eventually. A fraud check that must not miss a
+transaction written seconds ago wants Strong, and should pay for it.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># REAL MODE -- requires a running Milvus instance. Not executed in this sandbox.
+from pymilvus import Collection
+
+claims = Collection(&quot;claim_notes&quot;)
+
+# Per-request override: the adjuster must see the claim they just wrote.
+hits = claims.search(
+    data=[query_vector],
+    anns_field=&quot;embedding&quot;,
+    param={&quot;metric_type&quot;: &quot;COSINE&quot;, &quot;params&quot;: {&quot;ef&quot;: 64}},
+    limit=10,
+    expr=&#x27;carrier_id == &quot;IL-CARRIER-04&quot; and policy_type == &quot;MOTOR&quot;&#x27;,
+    output_fields=[&quot;claim_id&quot;, &quot;policy_type&quot;],
+    consistency_level=&quot;Session&quot;,
+)
+for hit in hits[0]:
+    print(hit.id, hit.distance, hit.entity.get(&quot;policy_type&quot;))
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output: one result set of at most 10 hits, each carrying an id, a distance and the
+requested output fields. The shape is what matters here; the values depend entirely on the
+corpus loaded.</p>
+<p><strong>Exercise:</strong>
+Assign a consistency level to each of these four paths and justify each in one sentence:
+overnight portfolio analytics; an adjuster's duplicate-claim check immediately after filing;
+a real-time sanctions screen on an outbound payment; a customer-facing &quot;similar claims&quot;
+panel on a servicing portal.</p>
+<p><strong>Starting point:</strong> No code. The four consistency levels and the <code>GuaranteeTs</code> model from this concept's Example, and the four access paths named in the prompt.</p>
+<p>Expected output: Eventually, Session, Strong, and Bounded respectively — with the sanctions
+case being the one where the latency cost is not negotiable, since a screen that misses a
+just-written record is a control failure rather than a stale cache.</p>
+<hr />
+<h3>Concept 4 — IVF_FLAT vs HNSW, Chosen Per Vector Field</h3>
+<p>Milvus indexes are declared per vector field, so the choice is made per collection rather
+than globally. Two index types cover most of the ground.</p>
+<p><strong>IVF_FLAT</strong> clusters the vectors with k-means into <code>nlist</code> buckets and stores the full
+vectors inside them. At search time <code>nprobe</code> decides how many buckets to examine. It builds
+quickly, its memory footprint is essentially the raw vectors plus centroids, and its recall
+is tuned entirely by <code>nprobe</code>.</p>
+<p><strong>HNSW</strong> builds the layered proximity graph from Week 01, parameterised by <code>M</code> and
+<code>efConstruction</code>, searched with <code>ef</code>. It costs more memory — the graph edges are real, as the
+Concept 2 arithmetic showed — and considerably more build time, and it generally gives a
+better latency-versus-recall curve at query time.</p>
+<p>The practical rule: HNSW where query latency is the binding constraint and the corpus fits
+in memory with its graph; IVF_FLAT where build time or memory is binding, or where the
+collection is rebuilt often enough that build cost dominates. Week 04 tunes both properly.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># REAL MODE -- requires a running Milvus instance. Not executed in this sandbox.
+hnsw = {
+    &quot;index_type&quot;: &quot;HNSW&quot;,
+    &quot;metric_type&quot;: &quot;COSINE&quot;,
+    &quot;params&quot;: {&quot;M&quot;: 16, &quot;efConstruction&quot;: 200},
+}
+ivf_flat = {
+    &quot;index_type&quot;: &quot;IVF_FLAT&quot;,
+    &quot;metric_type&quot;: &quot;COSINE&quot;,
+    &quot;params&quot;: {&quot;nlist&quot;: 4096},
+}
+
+claims.create_index(field_name=&quot;embedding&quot;, index_params=hnsw)
+print(claims.index().params)
+
+# Search params differ per index type: HNSW takes ef, IVF_FLAT takes nprobe.
+hnsw_search = {&quot;metric_type&quot;: &quot;COSINE&quot;, &quot;params&quot;: {&quot;ef&quot;: 64}}
+ivf_search  = {&quot;metric_type&quot;: &quot;COSINE&quot;, &quot;params&quot;: {&quot;nprobe&quot;: 16}}
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p><strong>Exercise:</strong>
+For each of these three collections, choose an index type and name the constraint that drove
+the choice: a 400,000-row policy-wording collection rebuilt nightly from source documents; a
+20M-row transaction-memo collection serving an interactive fraud console; a 3M-row claims
+collection on a node with barely enough RAM for the raw vectors.</p>
+<p><strong>Starting point:</strong> No code. The <code>IVF_FLAT</code> vs <code>HNSW</code> trade from this concept's Example, and the three collections described in the prompt.</p>
+<p>Expected output: IVF_FLAT for the nightly rebuild because build cost dominates, HNSW for the
+interactive console because query latency is binding, and IVF_FLAT for the memory-constrained
+node because the HNSW graph is exactly the overhead there is no room for.</p>
+<hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> The partition key wants a clean tenant identifier, and legacy cores rarely
+have one. Carrier identity is often implied by a branch code range, or by which nightly file
+the row arrived in, and the same carrier can appear under two identifiers after an
+acquisition. Deriving a stable partition key is an upstream data-modelling job that has to
+finish before the collection schema is fixed, because changing the partition key means
+recreating the collection.</p>
+<p><strong>Compliance angle:</strong> Consistency level is an auditable property of a control. If a sanctions
+or fraud screen runs at Bounded consistency, there is a defined window in which a
+just-written record is invisible to it, and that window is a control gap you would rather
+document deliberately than have an auditor discover. Record the level per query path
+alongside the rest of the retrieval configuration.</p>
+<p><strong>What breaks in production:</strong> The collection is loaded during a quiet migration, everything
+is fast, and nobody records that <code>load</code> was ever called. Months later a restart brings the
+cluster back with the collection released, searches fail or return nothing, and the runbook
+does not mention loading because the person who ran it did so interactively.</p>
+<hr />
+<h2 id="day-3">Day 3 — Qdrant Payload Filtering</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="03-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=FoFuf6vQgNA" target="_blank" rel="noopener"><b>Qdrant Metadata Filtering: Fast HNSW Payload Indexing</b><small>Lets learn with Ajay · 17:37</small></a></li><li><a href="https://www.youtube.com/watch?v=VJVHU47IAik" target="_blank" rel="noopener"><b>Qdrant Essentials | Combine Search &amp; Filtering with Qdrant Filterable HNSW</b><small>Qdrant Vector Search · 4:46</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Qdrant%20payload%20filtering%20indexing%20tutorial" target="_blank" rel="noopener">Search YouTube: Qdrant payload filtering indexing tutorial</a></p></div>
+<hr />
+<h3>Concept 1 — Payload Indexes Are Not Optional</h3>
+<p>Qdrant attaches arbitrary JSON — the <strong>payload</strong> — to each point, and lets you filter on it.
+Filtering works without any index; it just works by checking the condition against points as
+they are considered, which is fine at small scale and quietly terrible at large scale.</p>
+<p>A <strong>payload index</strong> on a field changes that from a check into a lookup, and it is what makes
+the query planner's cardinality estimate possible at all (Concept 3 depends on this). Index
+types are per field and typed: <code>keyword</code> for categorical strings like <code>policy_type</code>,
+<code>integer</code>, <code>float</code>, <code>bool</code>, <code>datetime</code> for ranges like <code>claim_date</code>, <code>geo</code>, <code>text</code> for
+full-text conditions, and <code>uuid</code>.</p>
+<p>The rule is simple and worth stating flatly: if you filter on a field in production, index
+it. The cost is memory and a small write-path overhead; the alternative is a filter that
+degrades as the collection grows.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># REAL MODE -- requires a running Qdrant instance. Not executed in this sandbox.
+from qdrant_client import QdrantClient, models
+
+client = QdrantClient(url=&quot;http://qdrant.internal:6333&quot;)
+
+client.create_collection(
+    collection_name=&quot;claims&quot;,
+    vectors_config=models.VectorParams(size=1024, distance=models.Distance.COSINE),
+)
+
+client.create_payload_index(
+    collection_name=&quot;claims&quot;,
+    field_name=&quot;policy_type&quot;,
+    field_schema=models.PayloadSchemaType.KEYWORD,
+)
+client.create_payload_index(
+    collection_name=&quot;claims&quot;,
+    field_name=&quot;claim_date&quot;,
+    field_schema=models.PayloadSchemaType.DATETIME,
+)
+
+print(client.get_collection(&quot;claims&quot;))
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output: a collection description object reporting the vector configuration, point
+counts and the payload schema now carrying both indexed fields. Shape, not specific counts.</p>
+<p><strong>Exercise:</strong>
+List every field your claims search filters on, and assign each the correct Qdrant payload
+index type. Then identify any field you filter on that is currently unindexed, and estimate
+its selectivity — that estimate is the input to Concept 3.</p>
+<p><strong>Starting point:</strong> No code. Your own claims search: the fields it filters on today, and the Qdrant payload index types from this concept's Example.</p>
+<p>Expected output: a field-to-index-type mapping with <code>keyword</code> for categoricals and
+<code>datetime</code> for date ranges, plus at least one field that turns out to be filtered but not
+indexed, which is the common finding on a real system.</p>
+<hr />
+<h3>Concept 2 — must, should and must_not</h3>
+<p>Qdrant's filter language is three clause lists, and they map onto boolean logic directly:</p>
+<ul>
+<li><strong><code>must</code></strong> — every condition has to hold. This is AND.</li>
+<li><strong><code>should</code></strong> — at least one has to hold. This is OR. If a filter contains only <code>should</code>
+clauses, at least one of them must match for a point to qualify.</li>
+<li><strong><code>must_not</code></strong> — none may hold. This is NOT.</li>
+</ul>
+<p>Conditions are built from <code>FieldCondition</code> with a matcher: <code>MatchValue</code> for exact equality,
+<code>MatchAny</code> for set membership, <code>Range</code> for numeric bounds, <code>DatetimeRange</code> for dates. They
+nest — a <code>Filter</code> can itself appear inside a clause list — which is how you express anything
+resembling <code>(A OR B) AND NOT C</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># REAL MODE -- requires a running Qdrant instance. Not executed in this sandbox.
+from qdrant_client import models
+
+# Motor or property claims, filed since 2026-01-01, excluding closed and fraudulent ones.
+claim_filter = models.Filter(
+    must=[
+        models.FieldCondition(
+            key=&quot;claim_date&quot;,
+            range=models.DatetimeRange(gte=&quot;2026-01-01T00:00:00Z&quot;),
+        ),
+    ],
+    should=[
+        models.FieldCondition(key=&quot;policy_type&quot;, match=models.MatchValue(value=&quot;MOTOR&quot;)),
+        models.FieldCondition(key=&quot;policy_type&quot;, match=models.MatchValue(value=&quot;PROPERTY&quot;)),
+    ],
+    must_not=[
+        models.FieldCondition(key=&quot;status&quot;, match=models.MatchAny(any=[&quot;CLOSED&quot;, &quot;FRAUD&quot;])),
+    ],
+)
+
+hits = client.query_points(
+    collection_name=&quot;claims&quot;,
+    query=query_vector,
+    query_filter=claim_filter,
+    limit=10,
+    with_payload=True,
+).points
+
+for point in hits:
+    print(point.id, point.score, point.payload.get(&quot;policy_type&quot;))
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p><strong>Exercise:</strong>
+Rewrite the <code>should</code> pair above using a single <code>MatchAny</code> condition inside <code>must</code>, and state
+whether the two forms are equivalent. Then express a genuinely harder predicate: motor claims
+over a reserve threshold, or any claim at all flagged for large-loss review.</p>
+<p><strong>Starting point:</strong> The <code>must</code> / <code>should</code> / <code>must_not</code> filter from this concept's Example, plus <code>MatchAny</code> and a <code>Range</code> condition on a reserve threshold.</p>
+<p>Expected output: the <code>MatchAny</code> form is equivalent for this case and simpler; the harder
+predicate needs a nested <code>Filter</code> inside a <code>should</code> clause, because the two branches have
+different conditions rather than different values of one field.</p>
+<hr />
+<h3>Concept 3 — Filterable HNSW: payload_m and full_scan_threshold</h3>
+<p>Here is the problem a dedicated vector store solves that Week 02 had to work around. Filter a
+graph index hard enough and the graph stops working: traversal moves between neighbours, and
+if almost every neighbour fails the filter, the walk has nowhere to go and recall collapses.
+Week 02 met this as the pre-filter versus post-filter dilemma.</p>
+<p>Qdrant's answer has two parts. First, the query planner uses payload indexes to <strong>estimate the
+cardinality</strong> of the filter before choosing a strategy. If the filtered subset is small, it
+prefers a filtered full scan over just those points, which is exact and cheap at that size.
+If the subset is large, it uses graph traversal with the filter applied during the walk.
+<code>full_scan_threshold</code> in <code>hnsw_config</code> is the knob that sets where that switch happens; it is
+expressed in KB, so it is a size threshold rather than a point count.</p>
+<p>Second, <code>payload_m</code> builds additional payload-aware links into the graph. Where <code>m</code> is the
+ordinary edge count per node, <code>payload_m</code> governs extra links constructed for payload values,
+so that a filtered traversal still has somewhere to go. This is what makes per-tenant
+subgraphs viable, and it is the direct structural answer to the recall collapse above.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Plain Python -- this one runs anywhere. Filter selectivity against a size threshold.
+dim = 1024
+raw = dim * 4
+n = 8_000_000
+print(&quot;Filter selectivity vs a filtered-full-scan decision, corpus 8,000,000&quot;)
+for name, sel in [(&quot;policy_type=MOTOR&quot;, 0.34),
+                  (&quot;claim_date in last 7d&quot;, 0.004),
+                  (&quot;branch=IL-042&quot;, 0.00012)]:
+    hits = int(n * sel)
+    kb = hits * raw / 1024
+    print(f&quot;  {name:&lt;24} sel={sel:&lt;8} -&gt; {hits:&gt;9,} points, {kb:&gt;12,.0f} KB of vectors&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output from running the above:</p>
+<pre><code>Filter selectivity vs a filtered-full-scan decision, corpus 8,000,000
+  policy_type=MOTOR        sel=0.34     -&gt; 2,720,000 points,   10,880,000 KB of vectors
+  claim_date in last 7d    sel=0.004    -&gt;    32,000 points,      128,000 KB of vectors
+  branch=IL-042            sel=0.00012  -&gt;       960 points,        3,840 KB of vectors
+</code></pre><p>The spread is the lesson. A branch filter leaves 960 points, which any machine will scan
+exactly in negligible time — graph traversal there is pure overhead. A policy-type filter
+leaves 2.7 million, where the graph is clearly the right tool. The middle case is the one
+worth measuring rather than guessing.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># REAL MODE -- requires a running Qdrant instance. Not executed in this sandbox.
+client.create_collection(
+    collection_name=&quot;claims&quot;,
+    vectors_config=models.VectorParams(size=1024, distance=models.Distance.COSINE),
+    hnsw_config=models.HnswConfigDiff(
+        m=16,
+        ef_construct=200,
+        full_scan_threshold=10000,   # KB; below this, prefer a filtered full scan
+        payload_m=16,                # extra payload-aware links for filtered traversal
+    ),
+)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p><strong>Exercise:</strong>
+Using the three selectivities above, decide for each whether you want the planner taking the
+full-scan path or the graph path, and say what that implies for <code>full_scan_threshold</code>. Then
+explain why setting the threshold very high is not a free way to guarantee exactness.</p>
+<p><strong>Starting point:</strong> The three selectivities computed in this concept's Example (<code>policy_type=MOTOR</code> 0.34, <code>claim_date</code> last 7d 0.004, <code>branch=IL-042</code> 0.00012) and <code>full_scan_threshold</code>.</p>
+<p>Expected output: full scan for the branch filter, graph for the policy-type filter, and the
+weekly-date filter as the judgement call. Setting the threshold very high forces exact scans
+over increasingly large subsets, trading the recall problem for a latency problem — which is
+the same trade Week 01 made and not a way out of it.</p>
+<hr />
+<h3>Concept 4 — Scalar and Binary Quantization</h3>
+<p>Quantization shrinks vectors by storing them at lower precision. Qdrant offers scalar
+quantization (typically float32 to int8), binary quantization (one bit per dimension), and
+product quantization. The compression is not subtle.</p>
+<p>Both scalar and binary quantization are designed to be used with <strong>rescoring</strong>: search the
+compressed representation to get a candidate set cheaply, then re-rank those candidates
+against the original full-precision vectors. <code>oversampling</code> widens the candidate set to feed
+that re-rank. This is how you recover most of the accuracy the compression cost you, and it
+is why quantization is usually a better first move than dropping dimensions.</p>
+<p>Binary quantization is aggressive and works best on high-dimensional embeddings from models
+whose vectors tolerate it. It is not a universal setting, and it needs measuring on your own
+corpus against a full-precision baseline — the Week 01 recall harness is exactly the tool.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Plain Python -- this one runs anywhere. Per-vector footprint by representation.
+dim = 1024
+raw = dim * 4
+print(&quot;Quantization footprint per vector, dim=1024&quot;)
+print(f&quot;  float32 : {raw:&gt;6,} bytes  (1.0x)&quot;)
+print(f&quot;  int8 SQ : {dim:&gt;6,} bytes  ({raw/dim:.0f}x smaller)&quot;)
+print(f&quot;  binary  : {dim//8:&gt;6,} bytes  ({raw/(dim/8):.0f}x smaller)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output from running the above:</p>
+<pre><code>Quantization footprint per vector, dim=1024
+  float32 :  4,096 bytes  (1.0x)
+  int8 SQ :  1,024 bytes  (4x smaller)
+  binary  :    128 bytes  (32x smaller)
+</code></pre><p>The REAL MODE configuration, with rescoring enabled at query time:</p>
+<div class="code"><pre><code># REAL MODE -- requires a running Qdrant instance. Not executed in this sandbox.
+client.update_collection(
+    collection_name=&quot;claims&quot;,
+    quantization_config=models.ScalarQuantization(
+        scalar=models.ScalarQuantizationConfig(
+            type=models.ScalarType.INT8,
+            quantile=0.99,
+            always_ram=True,
+        ),
+    ),
+)
+
+hits = client.query_points(
+    collection_name=&quot;claims&quot;,
+    query=query_vector,
+    limit=10,
+    search_params=models.SearchParams(
+        quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0),
+    ),
+).points
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p><strong>Exercise:</strong>
+Take the 78.68 GiB single-replica figure from Day 2 and recompute the vector portion under
+int8 and under binary quantization. Then state what you would have to measure before
+shipping either, and against what baseline.</p>
+<p><strong>Starting point:</strong> The 78.68 GiB single-replica figure from Day 2, and the quantization table from this concept's Example (float32 4,096 B, int8 1,024 B, binary 128 B per vector).</p>
+<p>Expected output: roughly a quarter of the vector bytes under int8 and roughly a
+thirty-second under binary, which moves the corpus from &quot;needs multiple nodes&quot; to &quot;fits one&quot;
+in the binary case. What has to be measured first is recall@k with rescoring enabled,
+against the full-precision result set as ground truth — the Week 01 harness, unchanged.</p>
+<hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> Payload fields inherit legacy encodings wholesale. <code>policy_type</code> off a
+mainframe extract is a two-character code, not &quot;MOTOR&quot;, and the same logical product carries
+different codes across systems merged in an acquisition. A <code>keyword</code> index over an
+un-normalised code space produces filters that silently miss whole populations, which looks
+like a relevance problem and is actually a data-modelling one.</p>
+<p><strong>Compliance angle:</strong> Quantization changes which records are retrieved. For a retrieval path
+feeding a regulated decision, that is a model-affecting change and belongs under the same
+change control as swapping the embedding model — declared, measured against a baseline, and
+recorded, per the accuracy-declaration expectations Week 01 met in its own Day 5.</p>
+<p><strong>What breaks in production:</strong> A filter on a field nobody indexed. It works in test against
+50,000 points, ships, and degrades continuously as the collection grows, because the planner
+has no cardinality estimate and cannot choose a sensible strategy. There is no error at any
+point — only a latency graph that trends the wrong way for months.</p>
+<hr />
+<h2 id="day-4">Day 4 — Sharding and Replication on Docker</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="03-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=q3giwTsMyuc" target="_blank" rel="noopener"><b>Install Milvus with Docker Compose — Vector DB Setup for RAG Apps</b><small>Osego Codes · 9:04</small></a></li><li><a href="https://www.youtube.com/watch?v=WwDzFtBopsk" target="_blank" rel="noopener"><b>🚀 Production-Ready Qdrant Cluster | 3-Node Qdrant + NGINX + Docker Step-by-Step Guide</b><small>DevOps in Action · 24:56</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Milvus%20Qdrant%20docker%20compose%20self%20hosted%20deployment%20sharding%20replication" target="_blank" rel="noopener">Search YouTube: Milvus Qdrant docker compose self hosted deployment sharding replication</a></p></div>
+<hr />
+<h3>Concept 1 — RAM Per Million Vectors Is the Sizing Driver</h3>
+<p>Every deployment conversation this week reduces to one number: how much memory a million
+vectors need once loaded and indexed. Get that right and sharding, replication and node
+count all follow arithmetically. Get it wrong and no amount of cluster topology rescues you.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Plain Python -- this one runs anywhere. Corpus footprint and per-shard split.
+n, dim = 20_000_000, 1024
+per_vec = dim * 4 + 16 * 2 * 4        # vector bytes + HNSW edge bytes
+total = n * per_vec / 1024**3
+print(f&quot;corpus {n:,} @{dim}d  -&gt;  {total:.1f} GiB of vectors+graph (one copy)&quot;)
+
+for shards in (3, 6, 12):
+    print(f&quot;shard_number={shards:&lt;3} -&gt; {total/shards:6.2f} GiB per shard&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output from running the above:</p>
+<pre><code>corpus 20,000,000 @1024d  -&gt;  78.7 GiB of vectors+graph (one copy)
+
+shard_number=3   -&gt;  26.23 GiB per shard
+shard_number=6   -&gt;  13.11 GiB per shard
+shard_number=12  -&gt;   6.56 GiB per shard
+</code></pre><p>Note what sharding does and does not do here. It divides the data so no single node has to
+hold all of it. It does not reduce the total, which is why the replication arithmetic in
+Concept 2 multiplies the same 78.7 GiB rather than the per-shard figure.</p>
+<p><strong>Exercise:</strong>
+Recompute the corpus total for 1536-dimensional embeddings and for a corpus that grows to 50
+million rows, then find the <code>shard_number</code> that keeps each shard under 20 GiB in the worst of
+those cases. State one reason not to simply pick a very large shard count.</p>
+<p><strong>Starting point:</strong> The shard arithmetic from this concept's Example (20M at 1024d = 78.7 GiB, <code>shard_number</code> 3/6/12), re-run at 1536 dimensions and at 50 million rows.</p>
+<p>Expected output: a substantially larger total in both directions and a shard count in the
+low tens to stay under 20 GiB. The reason against very high shard counts is that every
+search fans out to every shard and the results must be merged, so shard count buys capacity
+at the cost of per-query coordination.</p>
+<hr />
+<h3>Concept 2 — shard_number and replication_factor</h3>
+<p>The two parameters answer two different questions, and conflating them is the classic sizing
+error.</p>
+<p><strong><code>shard_number</code></strong> divides a collection's data across nodes. It is a capacity decision: it
+determines whether the collection fits at all, and how much of it any one node must hold. In
+Qdrant it is fixed at collection creation for the default sharding method, so it is a
+decision made against a growth forecast rather than today's row count.</p>
+<p><strong><code>replication_factor</code></strong> keeps N copies of each shard on different nodes. It is an
+availability decision: with a factor of 1 a node loss takes part of the collection offline;
+with 2 you survive one loss; with 3 you survive two. It multiplies total storage exactly.</p>
+<p>Qdrant additionally exposes <code>write_consistency_factor</code>, governing how many replicas must
+acknowledge a write — the same trade Milvus expresses through consistency levels, made at
+the write side rather than the read side.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Plain Python -- this one runs anywhere. Node count and failure tolerance.
+total = 78.7                           # GiB, one copy, from Concept 1
+node_ram = 64
+for rf in (1, 2, 3):
+    stored = total * rf
+    nodes = -(-stored // node_ram)
+    print(f&quot;replication_factor={rf}  stored={stored:7.1f} GiB  &quot;
+          f&quot;nodes@{node_ram}GiB&gt;={nodes:.0f}  tolerates {rf-1} node loss&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output from running the above:</p>
+<pre><code>replication_factor=1  stored=   78.7 GiB  nodes@64GiB&gt;=2  tolerates 0 node loss
+replication_factor=2  stored=  157.4 GiB  nodes@64GiB&gt;=3  tolerates 1 node loss
+replication_factor=3  stored=  236.0 GiB  nodes@64GiB&gt;=4  tolerates 2 node loss
+</code></pre><p>The REAL MODE collection creation carrying both parameters:</p>
+<div class="code"><pre><code># REAL MODE -- requires a running Qdrant cluster. Not executed in this sandbox.
+client.create_collection(
+    collection_name=&quot;claims&quot;,
+    vectors_config=models.VectorParams(size=1024, distance=models.Distance.COSINE),
+    shard_number=6,
+    replication_factor=2,
+    write_consistency_factor=1,
+)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p><strong>Exercise:</strong>
+Size a cluster for a 12M-vector claims collection at 1024 dimensions that must survive one
+node failure, on nodes with 32 GiB usable for vectors. Give <code>shard_number</code>,
+<code>replication_factor</code> and node count, and state which of the three you would revisit first if
+the corpus doubled.</p>
+<p><strong>Starting point:</strong> The capacity and failure-tolerance table from this concept's Example, at 12M vectors, 1024 dimensions, 32 GiB usable per node, surviving one node loss.</p>
+<p>Expected output: a replication factor of 2, a shard count that keeps each shard comfortably
+inside 32 GiB, and a node count derived from the doubled total rather than the single copy.
+Shard number is the one to revisit first, since it is fixed at creation and therefore the
+expensive one to get wrong.</p>
+<hr />
+<h3>Concept 3 — Single-Node Compose Versus a Three-Node Cluster</h3>
+<p>Both systems run single-node from Docker, and both single-node deployments are misleading in
+the same way: they work perfectly and teach you nothing about the failure modes you will
+actually meet.</p>
+<p>Qdrant's single node is genuinely a single container. Milvus standalone is a compose file
+with three services, because even standalone Milvus needs its etcd, its object storage and
+its embedded log broker — which is itself the honest preview of the operational cost.</p>
+<p>The gap between single-node and cluster is where the real work is: coordinating replica
+placement, handling a node rejoining with stale data, and — most often overlooked — the fact
+that a single-node deployment has no <code>replication_factor</code> worth setting, so nothing in your
+development environment ever exercises the replication paths that production depends on.</p>
+<p><strong>Example:</strong></p>
+<pre><code># REAL MODE -- requires a Docker daemon. Not executed in this sandbox.
+# Qdrant, single node. The whole deployment.
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - &quot;6333:6333&quot;     # REST
+      - &quot;6334:6334&quot;     # gRPC
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+
+# Milvus standalone needs three services, not one:
+#   etcd    -- metadata and coordination
+#   minio   -- object storage for segments and index files
+#   milvus  -- the standalone server itself, embedding the log broker
+# Pull the official compose file rather than hand-writing it; the version
+# pinning between the three has to match the Milvus release.
+</code></pre><p><strong>Exercise:</strong>
+Bring up a single-node Qdrant with the compose file above, create the <code>claims</code> collection
+from Day 3, and confirm it is serving. Then write down which of the following you can
+exercise on this deployment and which you cannot: payload filtering, <code>replication_factor</code>,
+<code>shard_number</code> behaviour under node loss, quantization.</p>
+<p><strong>Starting point:</strong> The single-node <code>docker-compose.yml</code> from this concept's Example, a working Docker daemon, and the <code>claims</code> collection schema from Day 3. REAL MODE — nothing here runs in the sandbox.</p>
+<p>Expected output: <code>docker compose ps</code> shows the container running and the collection call
+returns a description object. Payload filtering and quantization are fully exercisable
+single-node; replication and shard-under-failure behaviour are not, which is precisely the
+gap that makes a staging cluster necessary rather than optional.</p>
+<hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> On-prem means the node count is set by a procurement cycle, not by a
+config value. The Concept 2 arithmetic is the input to a capital request that will be
+answered in months, and the corpus will have grown by then. Size against the forecast rather
+than today's row count, because the cost of being one node short is a quarter, not an
+afternoon.</p>
+<p><strong>Compliance angle:</strong> Data residency is what removes the managed-service escape hatch
+entirely. When claims data must stay in-country and on infrastructure you control, &quot;move to
+a hosted vector service&quot; is not a fallback available to you at any price, and the sizing
+arithmetic has to close on hardware you actually own. This constraint deserves its own axis
+in the Day 5 decision, and it gets one.</p>
+<p><strong>What breaks in production:</strong> <code>replication_factor=1</code> in an environment everyone describes
+as highly available. A node is lost during a routine patch, part of the collection goes
+unsearchable, and the retrieval layer starts returning thin result sets rather than errors —
+which downstream consumers cannot distinguish from a genuinely small result.</p>
+<hr />
+<h2 id="day-5">Day 5 — Choosing a Vector Store — ADR</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="03-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=EZAIOZ84CpM" target="_blank" rel="noopener"><b>Qdrant vs Weaviate vs Milvus vs pgvector: Which One?</b><small>Sublimity Soft · 8:20</small></a></li><li><a href="https://www.youtube.com/watch?v=Oq3pq6-UlV8" target="_blank" rel="noopener"><b>Vector Database Comparison: Qdrant vs Milvus vs Weaviate + PostgreSQL with pgai</b><small>Vamaze Tech · 6:18</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=choosing%20a%20vector%20database%20comparison%20pgvector%20Milvus%20Qdrant" target="_blank" rel="noopener">Search YouTube: choosing a vector database comparison pgvector Milvus Qdrant</a></p></div>
+<hr />
+<h3>Concept 1 — The Four Axes That Actually Decide</h3>
+<p>Most vector-database comparisons are benchmark tables, and benchmark tables are close to
+useless for this decision, because the thing that sinks a choice is almost never queries per
+second. Four axes carry the actual weight.</p>
+<ul>
+<li><strong>Corpus size</strong> — does it fit one machine's memory, now and on the growth forecast? Day 2's
+78.68 GiB is what this axis is really asking about.</li>
+<li><strong>Ops headcount</strong> — who runs it at 03:00? Milvus's three dependencies from Day 1 are three
+more systems that a two-person team does not have the capacity to own.</li>
+<li><strong>Transactional-join need</strong> — do you need the vector search result joined to authoritative
+policy or customer state in one consistent read? Postgres does this natively; a separate
+vector store makes it two systems and a consistency problem you now own.</li>
+<li><strong>Self-host and data residency</strong> — is a managed service available to you at all? Day 4's
+compliance angle makes this a hard constraint rather than a preference for many BFSI
+workloads.</li>
+</ul>
+<p>Writing them down with explicit weights is the discipline. The weights are where the
+judgement lives, and leaving them implicit is how a comparison table smuggles in a
+conclusion.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Plain Python -- this one runs anywhere. The axes, weighted explicitly.
+axes = {
+    &quot;corpus size&quot;:            0.30,
+    &quot;ops headcount&quot;:          0.30,
+    &quot;transactional joins&quot;:    0.25,
+    &quot;self-host / residency&quot;:  0.15,
+}
+assert abs(sum(axes.values()) - 1.0) &lt; 1e-9, &quot;weights must sum to 1&quot;
+for axis, w in axes.items():
+    print(f&quot;{axis:&lt;24} {w:.2f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Assign your own weights to these four axes for a system you actually work on, and justify the
+largest one in a sentence. Then name a fifth axis your context needs that this list omits,
+and say what it would displace.</p>
+<p><strong>Starting point:</strong> No code. The four axes from this concept's Example (corpus size, ops headcount, transactional joins, self-host/residency) and a system you actually work on.</p>
+<p>Expected output: four weights summing to 1, with the largest defended by a constraint rather
+than a preference. A common fifth axis is existing team familiarity, which usually displaces
+part of the ops-headcount weight because it is measuring a closely related thing.</p>
+<hr />
+<h3>Concept 2 — Scoring the Three Candidates</h3>
+<p>Score each candidate 1 to 5 on each axis, multiply by the weights, and read the total. The
+point of doing it numerically is not precision — it is that disagreements become locatable.
+When two engineers disagree about the outcome, the matrix shows whether they disagree about a
+score or about a weight, and those are very different arguments.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Plain Python -- this one runs anywhere. Two weightings, same scores.
+axes_a = {&quot;corpus size&quot;:0.30, &quot;ops headcount&quot;:0.30,
+          &quot;transactional joins&quot;:0.25, &quot;self-host / residency&quot;:0.15}
+axes_b = {&quot;corpus size&quot;:0.50, &quot;ops headcount&quot;:0.30,
+          &quot;transactional joins&quot;:0.05, &quot;self-host / residency&quot;:0.15}
+scores = {
+ &quot;pgvector&quot;:{&quot;corpus size&quot;:2,&quot;ops headcount&quot;:5,&quot;transactional joins&quot;:5,&quot;self-host / residency&quot;:5},
+ &quot;Milvus&quot;:  {&quot;corpus size&quot;:5,&quot;ops headcount&quot;:2,&quot;transactional joins&quot;:1,&quot;self-host / residency&quot;:4},
+ &quot;Qdrant&quot;:  {&quot;corpus size&quot;:4,&quot;ops headcount&quot;:4,&quot;transactional joins&quot;:1,&quot;self-host / residency&quot;:5},
+}
+def total(axes, c):
+    return sum(scores[c][a] * w for a, w in axes.items())
+
+for label, axes in ((&quot;A: small team, joins matter&quot;, axes_a),
+                    (&quot;B: corpus dominates, joins do not&quot;, axes_b)):
+    t = {c: total(axes, c) for c in scores}
+    print(label)
+    for c in scores:
+        print(f&quot;   {c:&lt;10} {t[c]:.2f}&quot;)
+    print(f&quot;   winner -&gt; {max(t, key=t.get)}&quot;)
+    print()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output from running the above:</p>
+<pre><code>A: small team, joins matter
+   pgvector   4.10
+   Milvus     2.95
+   Qdrant     3.40
+   winner -&gt; pgvector
+
+B: corpus dominates, joins do not
+   pgvector   3.50
+   Milvus     3.75
+   Qdrant     4.00
+   winner -&gt; Qdrant
+</code></pre><p>Read that carefully, because it is the actual lesson of the week and it is easy to
+mis-summarise. <strong>The same scores produce different winners under different weights.</strong> Nothing
+about the three systems changed between run A and run B — only the relative importance of
+corpus size and transactional joins. A matrix like this does not discover which vector
+database is best; it encodes the weights you brought to it and computes their consequence
+consistently.</p>
+<p>Which means the output is only as defensible as the weights, and the weights are the part
+that belongs in the ADR. A table showing Qdrant winning, with the weighting omitted, is not
+evidence — it is an opinion wearing arithmetic.</p>
+<p>Worth noticing too: under weighting A, pgvector wins outright. For a two-engineer BFSI team
+with a corpus that still fits one machine and real joins against policy state, the answer is
+genuinely &quot;stay where Week 02 left you&quot;. That is the most common correct answer, and the one
+a vector-database comparison is least likely to give you.</p>
+<p><strong>Exercise:</strong>
+Find the weight on &quot;corpus size&quot; at which pgvector and Qdrant tie under otherwise-A
+weightings, holding the other three weights in their original proportions. Then state what
+that crossover number means operationally.</p>
+<p><strong>Starting point:</strong> The weighted scoring code and both weightings from this concept's Example (A: 0.30/0.30/0.25/0.15 -&gt; pgvector 4.10; B: 0.50/0.30/0.05/0.15 -&gt; Qdrant 4.00).</p>
+<p>Expected output: a crossover weight somewhere between the 0.30 of weighting A and the 0.50 of
+weighting B. Operationally it is the point at which corpus growth has become the dominant
+constraint on the decision — which is a thing you can monitor, making the ADR reviewable on
+evidence rather than on vibe.</p>
+<hr />
+<h3>Concept 3 — Migration Cost If the Choice Is Wrong</h3>
+<p>Every ADR should carry the cost of being wrong, because that cost is what determines how much
+analysis is worth doing up front. For a vector store the migration has two components, and
+they differ by two orders of magnitude.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Plain Python -- this one runs anywhere. Migration cost, both components.
+n = 20_000_000
+embed_per_sec = 1200          # measured throughput of your own embedding service
+index_build_per_sec = 25_000  # sealed-segment index build rate, one index node
+print(f&quot;corpus: {n:,} vectors&quot;)
+print(f&quot;  re-embed from source text : {n/embed_per_sec/3600:8.1f} h&quot;)
+print(f&quot;  index build               : {n/index_build_per_sec/3600:8.1f} h&quot;)
+print(f&quot;  dual-write window         : the sum, &quot;
+      f&quot;{n/embed_per_sec/3600 + n/index_build_per_sec/3600:.1f} h, plus verification&quot;)
+print()
+print(&quot;If vectors are retained, re-embedding drops out:&quot;)
+print(f&quot;  index build only          : {n/index_build_per_sec/3600:8.1f} h&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output from running the above:</p>
+<pre><code>corpus: 20,000,000 vectors
+  re-embed from source text :      4.6 h
+  index build               :      0.2 h
+  dual-write window         : the sum, 4.9 h, plus verification
+</code></pre><pre><code>If vectors are retained, re-embedding drops out:
+  index build only          :      0.2 h
+</code></pre><p>The gap between 4.6 hours and 0.2 hours is the entire argument for one specific engineering
+decision: <strong>keep your vectors somewhere the vector store does not own</strong>. If the embeddings
+exist in object storage or in a Postgres table alongside their source text, changing vector
+store is an index rebuild measured in minutes. If they exist only inside the vector store you
+are trying to leave, you are re-running your embedding pipeline over the whole corpus.</p>
+<p>That one decision does more to reduce the cost of being wrong than any amount of up-front
+comparison, which is why it belongs in the ADR as a mitigation rather than in a runbook as an
+afterthought.</p>
+<p><strong>Exercise:</strong>
+Work out where your own embeddings physically live today, and whether you could rebuild a
+vector index without re-embedding. If you could not, write the one-sentence change that would
+make it possible, and estimate its storage cost using the Day 2 arithmetic.</p>
+<p><strong>Starting point:</strong> No code. Your own embedding pipeline, and the Day 2 residency arithmetic for the cost estimate.</p>
+<p>Expected output: either a confirmation that vectors are retained outside the store, or the
+identification of a real lock-in you did not know you had. The storage cost of retaining them
+is roughly the raw vector bytes with no graph overhead, which is the cheaper half of the Day 2
+figure.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> The decision is rarely made on a blank slate. There is an existing Postgres
+that the core system already writes to, an existing Kafka owned by another team, and an
+existing procurement relationship that makes one vendor dramatically easier to buy than
+another. Those are real inputs, and an ADR that pretends the choice was made purely on
+technical merit will not survive contact with the people who have to approve it.</p>
+<p><strong>Compliance angle:</strong> An ADR is a governance artifact, not an engineering note. Under EU AI
+Act Article 11 documentation duties, the retrieval component of a high-risk system needs its
+design decisions recorded with their rationale — which is exactly what the weighting in
+Concept 2 provides, and exactly what a bare comparison table does not. Record the weights,
+not just the winner.</p>
+<p><strong>What breaks in production:</strong> The decision is made once, correctly, for a 2M-vector corpus,
+and never revisited. Three years later the corpus is 30M, the weights that produced the
+answer no longer describe reality, and nobody re-runs the matrix because the ADR reads as
+settled. Put the crossover number from the Concept 2 exercise into a monitored metric and the
+ADR becomes reviewable rather than archaeological.</p>
+<hr />
+<h2>Architecture Decision — Week 03</h2>
+<p><strong>Choosing between:</strong> pgvector, Milvus and Qdrant as the vector store for a BFSI retrieval
+workload, scored on corpus size, ops headcount, transactional-join need, and
+self-host/data-residency constraints.</p>
+<p><strong>Rule of thumb:</strong> stay on <strong>pgvector</strong> while the corpus fits comfortably in one machine's
+memory with its index — in practice into the low millions of vectors — and especially where
+the retrieval result must be joined transactionally to authoritative policy or customer
+state, since that join is free in Postgres and becomes a distributed consistency problem the
+moment the vectors live elsewhere. Move to <strong>Qdrant</strong> when filtering is the binding
+constraint rather than raw scale: its filterable HNSW, payload indexes and cardinality-driven
+planner solve the high-selectivity filtering problem directly, and it carries markedly less
+operational surface than Milvus for a small team. Move to <strong>Milvus</strong> when the corpus genuinely
+exceeds what one machine can hold — the 78.68 GiB single-replica figure from Day 2 is the
+concrete form of this — and you have the platform headcount to run etcd, a log broker and
+object storage as production systems, since those three dependencies, not Milvus itself, are
+what the decision actually commits you to. Where data residency forbids a managed service,
+score self-hosting operability as a hard constraint rather than a preference, because it
+removes the escape hatch every other option quietly assumes. Above all, record the weights
+alongside the choice: the Day 5 matrix produced pgvector as the winner at one weighting and
+Qdrant at another from identical scores, so an ADR that states a winner without stating its
+weights has documented a conclusion while omitting the entire argument.</p>
+<div class="pager"><a class="btn ghost" href="week-02.html">&larr; Week 02</a><a class="btn ghost" href="week-04.html">Week 04 &rarr;</a></div>
+</main></body></html>

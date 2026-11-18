@@ -1,0 +1,1206 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 18 — Governance on Legacy-Sourced Data</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="18" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 18 — Governance on Legacy-Sourced Data</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>3 — FinServ Compliance, Guardrails &amp; Governance for AI (closes Phase 3)</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Advanced · <code>[legacy thread]</code></td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 13's copybook/EBCDIC/COMP-3 mechanics, Week 14's masking gate, Week 15's guardrails, and Week 16's lineage emission are all genuinely reused this week, re-grounded in a source with no existing catalog rather than a modern document pipeline. No prior MSSQL/Oracle DBA experience assumed.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. No live SQL Server/Oracle connection exists in this sandbox (per this repo's own <code>pyodbc</code> note), so every real catalog/system-view query stays REAL MODE with correct real column names — but the parsing, classification, lineage-derivation, and masking logic that operates on what those queries WOULD return is pure Python and genuinely executed throughout, the same pattern Weeks 06/07/08/13 established.</td>
+</tr>
+</tbody>
+</table>
+<p>Weeks 14 through 17 built masking, guardrails, lineage, and the legal reasoning behind
+all three — every one of them implicitly assumed a data source with a real schema, a
+real catalog, and a team that can answer &quot;what does this column actually mean.&quot; A large
+share of BFSI's actual core transaction and policy data lives in exactly the opposite
+situation: an on-prem MSSQL, Oracle, or COBOL/mainframe system that has been running for
+twenty-plus years, whose original schema documentation is long gone, and which cannot be
+altered, re-tested, or redeployed to add the kind of instrumentation a modern system gets
+for free. This week, closing Phase 3, builds the lightweight governance layer — a derived
+catalog, derived lineage, a masking gate, and the guardrails this track already has —
+when the source of truth is exactly that undocumented legacy estate.</p>
+<hr />
+<h2 id="day-1">Day 1 — Cataloging an Undocumented Estate</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="18-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=E9YcxI2o0Ck" target="_blank" rel="noopener"><b>Document SQL Server Databases Faster with SQL Scout</b><small>WalliesWorld LLC · 4:28</small></a></li><li><a href="https://www.youtube.com/watch?v=Hn-hKuFGpqs" target="_blank" rel="noopener"><b>One View to Rule Them All: OneLake Catalog Explorer | Data Exposed</b><small>Microsoft Developer · 8:48</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=SQL%20Server%20system%20catalog%20views%20discover%20undocumented%20database" target="_blank" rel="noopener">Search YouTube: SQL Server system catalog views discover undocumented database</a></p></div>
+<hr />
+<h3>Concept 1 — MSSQL's Own Catalog: <code>sys.objects</code>, <code>sys.sql_modules</code>, <code>sys.foreign_keys</code></h3>
+<p>When no separate data catalog exists, <code>sys.objects</code> (every table, procedure, view, and
+function in the database, with real columns <code>object_id</code>, <code>name</code>, <code>type</code>, and <code>type_desc</code>
+— <code>'USER_TABLE'</code> and <code>'SQL_STORED_PROCEDURE'</code> are real <code>type_desc</code> values, not
+placeholders), <code>sys.sql_modules</code> (the actual T-SQL definition text for any object that has
+one, keyed by <code>object_id</code>), and <code>sys.foreign_keys</code> (<code>parent_object_id</code> →
+<code>referenced_object_id</code>, the only place a legacy database's real relationships are
+recorded if no ER diagram survived) ARE the catalog. Running the real query against a
+live server is REAL MODE here — no such server exists in this sandbox — but the parsing
+logic that turns those three result sets into one usable catalog needs no live
+connection at all.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code>import dataclasses
+
+# Simulated result sets shaped exactly like sys.objects/sys.sql_modules/sys.foreign_keys
+# would return them (REAL MODE only for the live query itself).
+SIMULATED_SYS_OBJECTS = [
+    {&quot;object_id&quot;: 101, &quot;name&quot;: &quot;CLAIMS&quot;, &quot;type&quot;: &quot;U&quot;, &quot;type_desc&quot;: &quot;USER_TABLE&quot;},
+    {&quot;object_id&quot;: 102, &quot;name&quot;: &quot;POLICIES&quot;, &quot;type&quot;: &quot;U&quot;, &quot;type_desc&quot;: &quot;USER_TABLE&quot;},
+    {&quot;object_id&quot;: 201, &quot;name&quot;: &quot;usp_ProcessClaim&quot;, &quot;type&quot;: &quot;P&quot;, &quot;type_desc&quot;: &quot;SQL_STORED_PROCEDURE&quot;},
+    {&quot;object_id&quot;: 202, &quot;name&quot;: &quot;usp_RenewPolicy&quot;, &quot;type&quot;: &quot;P&quot;, &quot;type_desc&quot;: &quot;SQL_STORED_PROCEDURE&quot;},
+]
+
+SIMULATED_SYS_SQL_MODULES = {
+    201: &quot;CREATE PROCEDURE usp_ProcessClaim AS INSERT INTO CLAIMS SELECT * FROM STAGING_CLAIMS&quot;,
+    202: &quot;CREATE PROCEDURE usp_RenewPolicy AS UPDATE POLICIES SET STATUS = &#x27;ACTIVE&#x27;&quot;,
+}
+
+SIMULATED_SYS_FOREIGN_KEYS = [
+    {&quot;name&quot;: &quot;FK_CLAIMS_POLICIES&quot;, &quot;parent_object_id&quot;: 101, &quot;referenced_object_id&quot;: 102},
+]
+
+@dataclasses.dataclass
+class CatalogEntry:
+    object_id: int
+    name: str
+    type_desc: str
+    definition: str = None
+
+def build_catalog(sys_objects, sys_sql_modules):
+    return [
+        CatalogEntry(
+            object_id=obj[&quot;object_id&quot;],
+            name=obj[&quot;name&quot;],
+            type_desc=obj[&quot;type_desc&quot;],
+            definition=sys_sql_modules.get(obj[&quot;object_id&quot;]),
+        )
+        for obj in sys_objects
+    ]
+
+catalog = build_catalog(SIMULATED_SYS_OBJECTS, SIMULATED_SYS_SQL_MODULES)
+for entry in catalog:
+    has_definition = entry.definition is not None
+    print(f&quot;{entry.name} ({entry.type_desc}): has_definition={has_definition}&quot;)
+
+fk_summary = [(fk[&quot;name&quot;], fk[&quot;parent_object_id&quot;], fk[&quot;referenced_object_id&quot;]) for fk in SIMULATED_SYS_FOREIGN_KEYS]
+print(f&quot;foreign keys discovered: {fk_summary}&quot;)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>CLAIMS (USER_TABLE): has_definition=False
+POLICIES (USER_TABLE): has_definition=False
+usp_ProcessClaim (SQL_STORED_PROCEDURE): has_definition=True
+usp_RenewPolicy (SQL_STORED_PROCEDURE): has_definition=True
+foreign keys discovered: [(&#x27;FK_CLAIMS_POLICIES&#x27;, 101, 102)]
+</code></pre><p><strong>Exercise:</strong>
+Add a fourth table, <code>AUDIT_LOG</code>, to a copy of <code>SIMULATED_SYS_OBJECTS</code>
+(<code>SIMULATED_SYS_OBJECTS_EXT</code>), rebuild the catalog, filter to just <code>USER_TABLE</code> entries,
+and print both the count and the sorted names of every user table discovered.</p>
+<p><strong>Starting point:</strong> <code>SIMULATED_SYS_OBJECTS</code>, <code>SIMULATED_SYS_SQL_MODULES</code>, and
+<code>build_catalog</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>USER_TABLE count: 3
+USER_TABLE names: [&#x27;AUDIT_LOG&#x27;, &#x27;CLAIMS&#x27;, &#x27;POLICIES&#x27;]
+</code></pre><hr />
+<h3>Concept 2 — <code>sys.dm_db_index_usage_stats</code>: Separating Live Tables From Dead Ones</h3>
+<p>A twenty-year-old database accumulates tables nobody reads from anymore but something
+still occasionally writes to, tables nobody touches at all, and tables that are still
+genuinely load-bearing — and <code>sys.objects</code> alone cannot tell these apart, since it has no
+concept of &quot;used.&quot; <code>sys.dm_db_index_usage_stats</code>'s real columns (<code>user_seeks</code>,
+<code>user_scans</code>, <code>user_lookups</code>, <code>user_updates</code>, <code>last_user_seek</code>, <code>last_user_scan</code>) are what
+actually distinguishes them: zero reads and zero writes is dead; zero reads but ongoing
+writes is write-only (an audit/log table, not a candidate for archival); reads that
+happened once but not within a chosen staleness window is stale; anything else is live.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import datetime
+
+@dataclasses.dataclass
+class IndexUsageStat:
+    object_id: int
+    table_name: str
+    user_seeks: int
+    user_scans: int
+    user_lookups: int
+    user_updates: int
+    last_user_seek: datetime.date = None
+    last_user_scan: datetime.date = None
+
+def classify_table(stat, as_of, dead_threshold_days=365):
+    read_activity = stat.user_seeks + stat.user_scans + stat.user_lookups
+    if read_activity == 0 and stat.user_updates == 0:
+        return &quot;dead&quot;
+    if read_activity == 0 and stat.user_updates &gt; 0:
+        return &quot;write_only&quot;
+    last_read = max(d for d in (stat.last_user_seek, stat.last_user_scan) if d is not None) if read_activity else None
+    if last_read and (as_of - last_read).days &gt; dead_threshold_days:
+        return &quot;stale&quot;
+    return &quot;live&quot;
+
+as_of_date = datetime.date(2026, 9, 16)
+claims_usage = IndexUsageStat(object_id=101, table_name=&quot;CLAIMS&quot;, user_seeks=15000, user_scans=200, user_lookups=800, user_updates=500, last_user_seek=datetime.date(2026, 9, 15))
+legacy_archive_usage = IndexUsageStat(object_id=999, table_name=&quot;LEGACY_ARCHIVE_1998&quot;, user_seeks=0, user_scans=0, user_lookups=0, user_updates=0)
+write_only_usage = IndexUsageStat(object_id=888, table_name=&quot;AUDIT_TRAIL&quot;, user_seeks=0, user_scans=0, user_lookups=0, user_updates=1200)
+
+for usage in (claims_usage, legacy_archive_usage, write_only_usage):
+    print(f&quot;{usage.table_name}: {classify_table(usage, as_of_date)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>CLAIMS: live
+LEGACY_ARCHIVE_1998: dead
+AUDIT_TRAIL: write_only
+</code></pre><p><strong>Exercise:</strong>
+Build <code>stale_usage</code> for <code>OLD_QUOTES</code>: 3 seeks total, but its only <code>last_user_seek</code> was
+<code>2023-01-01</code> — long before the 365-day threshold measured against <code>as_of_date</code>. Print its
+classification, then print the number of days since its last read and one line
+confirming that figure exceeds the 365-day threshold.</p>
+<p><strong>Starting point:</strong> <code>IndexUsageStat</code>, <code>classify_table</code>, and <code>as_of_date</code> from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>OLD_QUOTES: stale
+days since last read (1354) exceeds the 365-day threshold: True
+</code></pre><hr />
+<h3>Concept 3 — COBOL Copybooks as the Schema of Record When No Catalog Exists at All</h3>
+<p>Week 13 built <code>CopybookField</code> to parse a mainframe record's byte layout. This week reuses
+that same dataclass — copied in unchanged — but re-grounds its role: for a mainframe
+extract, the copybook is not &quot;one more source to catalog,&quot; it is the ENTIRE catalog
+entry, because no <code>sys.objects</code>/<code>ALL_TAB_COLUMNS</code> equivalent exists for a COBOL file
+section at all. A mainframe catalog entry therefore has no <code>object_id</code> — there is no
+system that assigns one.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>@dataclasses.dataclass
+class CopybookField:
+    level: int
+    name: str
+    pic: str
+    usage: str = &quot;DISPLAY&quot;
+
+POLICY_RECORD_COPYBOOK = [
+    CopybookField(1, &quot;POLICY-RECORD&quot;, None),
+    CopybookField(5, &quot;POLICY-ID&quot;, &quot;X(10)&quot;),
+    CopybookField(5, &quot;POLICY-HOLDER-NAME&quot;, &quot;X(30)&quot;),
+    CopybookField(5, &quot;PREMIUM-AMOUNT&quot;, &quot;S9(7)V99&quot;, usage=&quot;COMP-3&quot;),
+    CopybookField(5, &quot;POLICY-STATUS&quot;, &quot;X(1)&quot;),
+]
+
+def copybook_as_catalog_entry(fields, source_system):
+    record_name = next(f.name for f in fields if f.level == 1)
+    columns = [f.name for f in fields if f.level != 1]
+    return CatalogEntry(object_id=None, name=record_name, type_desc=f&quot;COBOL_COPYBOOK ({source_system})&quot;, definition=f&quot;{len(columns)} fields&quot;)
+
+mainframe_entry = copybook_as_catalog_entry(POLICY_RECORD_COPYBOOK, source_system=&quot;policy_extract_nightly&quot;)
+print(f&quot;{mainframe_entry.name}: type_desc={mainframe_entry.type_desc}, definition={mainframe_entry.definition}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>POLICY-RECORD: type_desc=COBOL_COPYBOOK (policy_extract_nightly), definition=4 fields
+</code></pre><p><strong>Exercise:</strong>
+Build <code>CLAIMS_RECORD_COPYBOOK</code> (level <code>01</code> <code>CLAIMS-RECORD</code>, then <code>05</code> fields <code>CLAIM-ID PIC X(12)</code>, <code>CLAIM-AMOUNT PIC S9(9)V99 COMP-3</code>, <code>ADJUSTER-NOTES PIC X(200)</code>,
+<code>CLAIM-STATUS PIC X(1)</code>), convert it with <code>copybook_as_catalog_entry</code>, print its catalog
+entry, and print one line confirming BOTH mainframe catalog entries built this concept
+carry no <code>object_id</code> — unlike the MSSQL entries Concept 1 built.</p>
+<p><strong>Starting point:</strong> <code>CopybookField</code>, <code>copybook_as_catalog_entry</code>, and <code>mainframe_entry</code>
+from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>CLAIMS-RECORD: type_desc=COBOL_COPYBOOK (claims_extract_nightly), definition=4 fields
+both mainframe catalog entries carry NO object_id (unlike the MSSQL entries): True
+</code></pre><hr />
+<h3>Concept 4 — Oracle's Equivalents: <code>ALL_TAB_COLUMNS</code>, <code>ALL_SOURCE</code>, <code>DBA_DEPENDENCIES</code></h3>
+<p>An Oracle-sourced legacy estate has its own real system views doing the same job:
+<code>ALL_TAB_COLUMNS</code> for column-level metadata (the <code>sys.columns</code> equivalent), <code>ALL_SOURCE</code>
+for the actual PL/SQL source text of a procedure or package (the <code>sys.sql_modules</code>
+equivalent), and <code>DBA_DEPENDENCIES</code> for object-level dependency relationships (the closest
+analog to <code>sys.foreign_keys</code>, though it tracks a broader dependency graph, not only FK
+constraints). A catalog-building function honest about which of these mappings is exact
+and which is only &quot;closest analog&quot; is more useful than one that pretends a clean
+one-to-one mapping exists everywhere.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>MSSQL_TO_ORACLE_CATALOG_EQUIVALENTS = {
+    &quot;sys.objects&quot;: &quot;ALL_OBJECTS&quot;,
+    &quot;sys.columns&quot;: &quot;ALL_TAB_COLUMNS&quot;,
+    &quot;sys.sql_modules&quot;: &quot;ALL_SOURCE&quot;,
+    &quot;sys.foreign_keys&quot;: &quot;DBA_DEPENDENCIES (constraint dependencies) / ALL_CONSTRAINTS&quot;,
+}
+
+def oracle_equivalent_for(mssql_view):
+    return MSSQL_TO_ORACLE_CATALOG_EQUIVALENTS.get(mssql_view, &quot;no direct equivalent&quot;)
+
+for mssql_view in (&quot;sys.objects&quot;, &quot;sys.columns&quot;, &quot;sys.sql_modules&quot;, &quot;sys.foreign_keys&quot;):
+    print(f&quot;{mssql_view} -&gt; {oracle_equivalent_for(mssql_view)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>sys.objects -&gt; ALL_OBJECTS
+sys.columns -&gt; ALL_TAB_COLUMNS
+sys.sql_modules -&gt; ALL_SOURCE
+sys.foreign_keys -&gt; DBA_DEPENDENCIES (constraint dependencies) / ALL_CONSTRAINTS
+</code></pre><p><strong>Exercise:</strong>
+Look up the Oracle equivalent for <code>&quot;sys.dm_db_index_usage_stats&quot;</code> (Concept 2's usage-stats
+view — genuinely absent from the mapping table). Print the result and one line confirming
+a view with no table entry returns the honest fallback string, not a guessed view name.</p>
+<p><strong>Starting point:</strong> <code>MSSQL_TO_ORACLE_CATALOG_EQUIVALENTS</code> and <code>oracle_equivalent_for</code>
+from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>sys.dm_db_index_usage_stats -&gt; no direct equivalent
+a view with no entry returns the honest fallback, not a guess: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> The catalog built this concept-by-concept is derived, not authoritative
+— nobody at the organization signs off on it, and it can drift the moment the underlying
+schema changes without anyone updating the derivation script. That is a real limitation
+to disclose, not a reason to skip building it.</p>
+<p><strong>Compliance angle:</strong> A regulator asking &quot;what personal data does this system hold&quot; gets
+a real, if imperfect, answer from this derived catalog — the alternative, for a genuinely
+undocumented legacy estate, is often no answer at all.</p>
+<p><strong>What breaks in production:</strong> A table that <code>sys.dm_db_index_usage_stats</code> classifies
+<code>dead</code> gets archived and its extract job disabled — but the usage stats reset on every
+SQL Server service restart, so a table that was actually read once a quarter by a
+batch job that hadn't run since the last restart looks dead when it isn't. Usage stats
+are a strong signal, not proof, and Concept 2's classification function should be
+re-checked against a longer observation window before anything gets archived on its say
+alone.</p>
+<hr />
+<h2 id="day-2">Day 2 — Inferring Sensitivity Without a Catalog</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="18-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=xYyLeWfwJ88" target="_blank" rel="noopener"><b>Data (PII) discovery | Data classification | ServiceNow</b><small>ServiceNow Universe · 18:31</small></a></li><li><a href="https://www.youtube.com/watch?v=fN5cUWoT2g0" target="_blank" rel="noopener"><b>How to Discover Sensitive Data in Unstructured Files on HPE PCAI</b><small>BigID Inc · 6:11</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=data%20classification%20discovery%20legacy%20database%20PII%20scanning" target="_blank" rel="noopener">Search YouTube: data classification discovery legacy database PII scanning</a></p></div>
+<hr />
+<h3>Concept 1 — Column-Name Heuristics, Then Presidio Sampling to Confirm or Reject</h3>
+<p>Day 1's derived catalog has column names but no sensitivity labels — nobody left behind
+a data dictionary saying which columns hold PII. A column-name heuristic (<code>CUST_SSN</code>
+plausibly holds an SSN, <code>POLICY_ID</code> plausibly doesn't) is a fast first pass, but it is
+only a candidate list — the heuristic has no idea what the actual VALUES look like.
+Sampling real values through Presidio's <code>AnalyzerEngine</code> (genuinely reused from Week 14)
+is what confirms or rejects each candidate against real content, not just a plausible
+name. One of this concept's own sample SSNs is deliberately the textbook &quot;123-45-6789&quot; —
+verified against <code>UsSsnRecognizer.invalidate_result</code>'s real source, Presidio hardcodes an
+exclusion for exactly this value (along with <code>987654320</code> and <code>078051120</code>, the actual
+number printed on a famous 1938 Woolworth wallet-novelty ad and reused as a real SSN by
+thousands of people for decades afterward) as a known published placeholder, so its own
+rejection below is real recognizer behavior, not a bug in this sampling code.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+nlp_config = {&quot;nlp_engine_name&quot;: &quot;spacy&quot;, &quot;models&quot;: [{&quot;lang_code&quot;: &quot;en&quot;, &quot;model_name&quot;: &quot;en_core_web_sm&quot;}]}
+nlp_engine = NlpEngineProvider(nlp_configuration=nlp_config).create_engine()
+analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=[&quot;en&quot;])
+
+COLUMN_NAME_HEURISTICS = {
+    r&quot;NAME&quot;: &quot;PERSON&quot;,
+    r&quot;SSN|TAX.?ID|NATIONAL.?ID&quot;: &quot;US_SSN&quot;,
+    r&quot;DOB|BIRTH.?DATE&quot;: &quot;DATE_TIME&quot;,
+    r&quot;PHONE|MOBILE|TEL&quot;: &quot;PHONE_NUMBER&quot;,
+    r&quot;ADDR&quot;: &quot;LOCATION&quot;,
+    r&quot;NOTES|REMARKS|COMMENTS&quot;: &quot;FREE_TEXT&quot;,
+}
+
+def heuristic_candidates(column_names):
+    candidates = {}
+    for col in column_names:
+        for pattern, entity in COLUMN_NAME_HEURISTICS.items():
+            if re.search(pattern, col, re.IGNORECASE):
+                candidates[col] = entity
+                break
+    return candidates
+
+def confirm_with_presidio(sample_values, expected_entity, score_threshold=0.0):
+    hits = 0
+    for value in sample_values:
+        results = analyzer.analyze(text=str(value), language=&quot;en&quot;, entities=[expected_entity], score_threshold=score_threshold)
+        if results:
+            hits += 1
+    return hits, len(sample_values)
+
+legacy_columns = [&quot;CUST_NAME&quot;, &quot;CUST_SSN&quot;, &quot;CUST_DOB&quot;, &quot;CUST_PHONE&quot;, &quot;POLICY_ID&quot;, &quot;STATUS_FLAG&quot;]
+candidates = heuristic_candidates(legacy_columns)
+print(f&quot;heuristic candidates: {candidates}&quot;)
+
+name_samples = [&quot;John Smith&quot;, &quot;Maria Garcia&quot;, &quot;David Cohen&quot;]
+hits, total = confirm_with_presidio(name_samples, &quot;PERSON&quot;)
+print(f&quot;CUST_NAME sample confirmed as PERSON: {hits}/{total}&quot;)
+
+ssn_samples = [&quot;219-09-9999&quot;, &quot;045-33-2214&quot;, &quot;123-45-6789&quot;]
+ssn_hits, ssn_total = confirm_with_presidio(ssn_samples, &quot;US_SSN&quot;)
+print(f&quot;CUST_SSN sample confirmed as US_SSN: {ssn_hits}/{ssn_total}&quot;)
+print(&quot;the one rejected value, &#x27;123-45-6789&#x27;, is Presidio&#x27;s own denylisted canonical placeholder SSN -- a real recognizer behavior, not a bug in this sampling code&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>heuristic candidates: {&#x27;CUST_NAME&#x27;: &#x27;PERSON&#x27;, &#x27;CUST_SSN&#x27;: &#x27;US_SSN&#x27;, &#x27;CUST_DOB&#x27;: &#x27;DATE_TIME&#x27;, &#x27;CUST_PHONE&#x27;: &#x27;PHONE_NUMBER&#x27;}
+CUST_NAME sample confirmed as PERSON: 3/3
+CUST_SSN sample confirmed as US_SSN: 2/3
+the one rejected value, &#x27;123-45-6789&#x27;, is Presidio&#x27;s own denylisted canonical placeholder SSN -- a real recognizer behavior, not a bug in this sampling code
+</code></pre><p><strong>Exercise:</strong>
+Run <code>heuristic_candidates</code> against <code>[&quot;STATUS_FLAG&quot;]</code> alone — a column name matching none
+of the heuristic patterns. Print the result and one line confirming it produced no
+candidate at all.</p>
+<p><strong>Starting point:</strong> <code>heuristic_candidates</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>STATUS_FLAG heuristic candidates: {}
+STATUS_FLAG produced no candidate at all (no heuristic match): True
+</code></pre><hr />
+<h3>Concept 2 — Confidence Tiers and a Human Review Queue for Ambiguous Columns</h3>
+<p>A column that Presidio confirms on every sample (<code>CUST_NAME</code>, 3/3) is a different case
+from one that confirms on some but not all samples (<code>CUST_SSN</code>, 2/3 — not because the
+detector is unreliable, but because real sample data mixes genuine values with an
+occasional placeholder). Neither case should auto-resolve into &quot;definitely PII&quot; or
+&quot;definitely not&quot; without a human looking at the ambiguous middle tier — a fixed
+confirmation-rate threshold turns Concept 1's raw hit counts into three actionable
+buckets: <code>confirmed_high</code>, <code>review_queue</code>, and <code>rejected</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+@dataclasses.dataclass
+class ColumnFinding:
+    column_name: str
+    heuristic_entity: str
+    presidio_hits: int
+    presidio_total: int
+
+def classify_confidence(finding):
+    if finding.presidio_total == 0:
+        return &quot;review_queue&quot;
+    rate = finding.presidio_hits / finding.presidio_total
+    if rate &gt;= 0.8:
+        return &quot;confirmed_high&quot;
+    if rate &gt;= 0.3:
+        return &quot;review_queue&quot;
+    return &quot;rejected&quot;
+
+name_finding = ColumnFinding(&quot;CUST_NAME&quot;, &quot;PERSON&quot;, hits, total)
+ssn_finding = ColumnFinding(&quot;CUST_SSN&quot;, &quot;US_SSN&quot;, ssn_hits, ssn_total)
+ambiguous_finding = ColumnFinding(&quot;REF_CODE&quot;, &quot;PERSON&quot;, presidio_hits=1, presidio_total=3)
+
+for finding in (name_finding, ssn_finding, ambiguous_finding):
+    print(f&quot;{finding.column_name}: {classify_confidence(finding)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>CUST_NAME: confirmed_high
+CUST_SSN: review_queue
+REF_CODE: review_queue
+</code></pre><p><strong>Exercise:</strong>
+Build <code>never_confirmed_finding</code> for a column <code>BATCH_ID</code> that Presidio confirmed zero
+times out of a real 3-sample check (not zero samples — a real check that found nothing).
+Print its classification and one line confirming zero-out-of-a-real-sample lands in
+<code>rejected</code>, not <code>review_queue</code> (which Concept 2's Example's own <code>presidio_total == 0</code>
+branch is reserved for — no sample taken at all, a different situation).</p>
+<p><strong>Starting point:</strong> <code>ColumnFinding</code> and <code>classify_confidence</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>BATCH_ID: rejected
+zero confirmations out of a real sample lands in rejected, not review_queue: True
+</code></pre><hr />
+<h3>Concept 3 — Free-Text NOTES and REMARKS: the Highest-Risk Unmanaged PII</h3>
+<p>A structured <code>PHONE</code> column at least has a predictable shape a scanner can reason about.
+A free-text <code>NOTES</code> or <code>REMARKS</code> column — where a legacy system's users have been typing
+whatever they wanted for twenty years — can carry any entity type in any combination, row
+by row, with no schema constraint stopping it. This concept scans both kinds of column
+with the same function and shows the real, qualitative difference: a structured column's
+rows tend to (or fail to) confirm uniformly, while a free-text column's rows carry a
+genuinely varying, unmanaged mix of entity types. The structured column's <code>555-0101</code>
+-style values below are a real, verified finding, not bad sample data — they are 7-digit
+local numbers with no area code, exactly the shape a genuinely old legacy phone column
+often stores, and Presidio's <code>phonenumbers</code>-backed recognizer needs a full
+area-code-plus-number shape to even attempt a match, so it flags none of them.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>structured_phone_column = [&quot;555-0101&quot;, &quot;555-0102&quot;, &quot;555-0103&quot;]
+notes_column = [
+    &quot;Called customer, spoke with John Smith at 555-0199, will follow up Monday&quot;,
+    &quot;Policyholder Maria Garcia requested address change, new address 42 Elm St&quot;,
+    &quot;No PII in this one, routine renewal confirmed&quot;,
+]
+
+def scan_free_text_for_pii(values):
+    findings = []
+    for value in values:
+        results = analyzer.analyze(text=value, language=&quot;en&quot;)
+        entity_types = sorted({r.entity_type for r in results if r.score &gt;= 0.5})
+        findings.append((value[:40] + &quot;...&quot;, entity_types))
+    return findings
+
+structured_findings = scan_free_text_for_pii(structured_phone_column)
+notes_findings = scan_free_text_for_pii(notes_column)
+
+print(&quot;structured PHONE column (one entity type expected per row):&quot;)
+for preview, entities in structured_findings:
+    print(f&quot;  {preview} -&gt; {entities}&quot;)
+
+print(&quot;free-text NOTES column (multiple, unmanaged entity types per row):&quot;)
+for preview, entities in notes_findings:
+    print(f&quot;  {preview} -&gt; {entities}&quot;)
+
+rows_with_multiple_entity_types = sum(1 for _, entities in notes_findings if len(entities) &gt; 1)
+print(f&quot;NOTES rows carrying more than one entity type in a single free-text field: {rows_with_multiple_entity_types}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>structured PHONE column (one entity type expected per row):
+  555-0101... -&gt; []
+  555-0102... -&gt; []
+  555-0103... -&gt; []
+free-text NOTES column (multiple, unmanaged entity types per row):
+  Called customer, spoke with John Smith a... -&gt; [&#x27;DATE_TIME&#x27;, &#x27;PERSON&#x27;]
+  Policyholder Maria Garcia requested addr... -&gt; [&#x27;DATE_TIME&#x27;, &#x27;PERSON&#x27;]
+  No PII in this one, routine renewal conf... -&gt; [&#x27;ORGANIZATION&#x27;]
+NOTES rows carrying more than one entity type in a single free-text field: 2
+</code></pre><p><strong>Exercise:</strong>
+Scan a two-row <code>remarks_column</code>: one row where an adjuster typed a claimant's real SSN
+directly into the notes (<code>&quot;Adjuster notes: claimant SSN 219-09-9999 provided for verification&quot;</code>), one routine row with no PII (<code>&quot;Standard processing, no exceptions&quot;</code>).
+Print both rows' findings, then print one line confirming the first row's findings
+include <code>US_SSN</code> — a structured PII type that a <code>REMARKS</code> column's own name heuristic
+(<code>FREE_TEXT</code>, from Concept 1's table) would never predict on its own.</p>
+<p><strong>Starting point:</strong> <code>scan_free_text_for_pii</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>  Adjuster notes: claimant SSN 219-09-9999... -&gt; [&#x27;ORGANIZATION&#x27;, &#x27;US_SSN&#x27;]
+  Standard processing, no exceptions... -&gt; []
+the first REMARKS row contains a structured PII type (US_SSN) embedded in free text: True
+</code></pre><hr />
+<h3>Concept 4 — Writing Findings Back as <code>sys.extended_properties</code> or Oracle Column Comments</h3>
+<p>A classification that lives only in this week's script is gone the moment the script
+isn't re-run — the next person to touch this database has no way to know a prior scan
+ever happened. <code>sys.sp_addextendedproperty</code> (MSSQL) and <code>COMMENT ON COLUMN</code> (Oracle) both
+let a classification attach to the schema object itself, so it outlives the script and
+is visible to anyone who queries the catalog directly, including a future run of this
+same classification pipeline. Generating the SQL statement text below is genuinely
+executed; actually connecting to a live server to run it needs a database this sandbox
+does not have.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def mssql_extended_property_statement(table, column, classification):
+    return (
+        f&quot;EXEC sys.sp_addextendedproperty &quot;
+        f&quot;@name = N&#x27;pii_classification&#x27;, @value = N&#x27;{classification}&#x27;, &quot;
+        f&quot;@level0type = N&#x27;SCHEMA&#x27;, @level0name = N&#x27;dbo&#x27;, &quot;
+        f&quot;@level1type = N&#x27;TABLE&#x27;, @level1name = N&#x27;{table}&#x27;, &quot;
+        f&quot;@level2type = N&#x27;COLUMN&#x27;, @level2name = N&#x27;{column}&#x27;;&quot;
+    )
+
+def oracle_column_comment_statement(table, column, classification):
+    return f&quot;COMMENT ON COLUMN {table}.{column} IS &#x27;pii_classification={classification}&#x27;;&quot;
+
+mssql_stmt = mssql_extended_property_statement(&quot;CUSTOMERS&quot;, &quot;CUST_NAME&quot;, &quot;confirmed_high:PERSON&quot;)
+oracle_stmt = oracle_column_comment_statement(&quot;CUSTOMERS&quot;, &quot;CUST_NAME&quot;, &quot;confirmed_high:PERSON&quot;)
+print(mssql_stmt)
+print(oracle_stmt)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>EXEC sys.sp_addextendedproperty @name = N&#x27;pii_classification&#x27;, @value = N&#x27;confirmed_high:PERSON&#x27;, @level0type = N&#x27;SCHEMA&#x27;, @level0name = N&#x27;dbo&#x27;, @level1type = N&#x27;TABLE&#x27;, @level1name = N&#x27;CUSTOMERS&#x27;, @level2type = N&#x27;COLUMN&#x27;, @level2name = N&#x27;CUST_NAME&#x27;;
+COMMENT ON COLUMN CUSTOMERS.CUST_NAME IS &#x27;pii_classification=confirmed_high:PERSON&#x27;;
+</code></pre><p><strong>Exercise:</strong>
+Build the MSSQL write-back statement for table <code>CUSTOMERS</code>, column <code>REF_CODE</code>,
+classification <code>&quot;review_queue:PERSON&quot;</code> (Concept 2's ambiguous case). Print it and print
+one line confirming the statement embeds the classification TIER (<code>review_queue</code>), not
+just the entity type.</p>
+<p><strong>Starting point:</strong> <code>mssql_extended_property_statement</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>EXEC sys.sp_addextendedproperty @name = N&#x27;pii_classification&#x27;, @value = N&#x27;review_queue:PERSON&#x27;, @level0type = N&#x27;SCHEMA&#x27;, @level0name = N&#x27;dbo&#x27;, @level1type = N&#x27;TABLE&#x27;, @level1name = N&#x27;CUSTOMERS&#x27;, @level2type = N&#x27;COLUMN&#x27;, @level2name = N&#x27;REF_CODE&#x27;;
+the write-back statement embeds the classification tier, not just the entity type: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> The 7-digit phone number Concept 3 found is not a contrived example —
+it is exactly what a database migrated forward from a system that only ever operated
+within one area code looks like decades later, after the surrounding business expanded
+regionally and the column format never got revisited.</p>
+<p><strong>Compliance angle:</strong> A <code>review_queue</code> classification is not a stalling tactic — it is
+the honest output when automated confirmation genuinely disagrees with itself across
+samples, and routing it to a human reviewer rather than forcing a binary answer is more
+defensible under audit than a script that silently picked one side.</p>
+<p><strong>What breaks in production:</strong> A classification run finds <code>CUST_SSN</code> at <code>confirmed_high</code>
+and writes that back as an extended property — but six months later, a schema change
+adds a new <code>TAX_ID</code> column that nobody re-runs the classifier against, because &quot;the
+classification already ran&quot; became the team's mental model instead of &quot;the classification
+ran as of this date.&quot; A write-back with no re-run cadence is a snapshot masquerading as a
+living catalog.</p>
+<hr />
+<h2 id="day-3">Day 3 — Deriving Lineage from Legacy Code</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="18-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=RhqvsoZvGYk" target="_blank" rel="noopener"><b>Tomas Peluritis - Beyond dbt Modern SQL Transformation and Lineage with sqlglot and sqlmesh</b><small>PyCon Lithuania · 24:01</small></a></li><li><a href="https://www.youtube.com/watch?v=r_9rJIUtZoI" target="_blank" rel="noopener"><b>Text-to-SQL Lineage in Python: Trace Answer Columns with SQLGlot</b><small>Professor Py: AI Engineering · 7:25</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=sqlglot%20parse%20SQL%20lineage%20stored%20procedure%20python" target="_blank" rel="noopener">Search YouTube: sqlglot parse SQL lineage stored procedure python</a></p></div>
+<hr />
+<h3>Concept 1 — Parsing T-SQL and PL/SQL Procedure Bodies With <code>sqlglot</code></h3>
+<p>A legacy estate's real lineage lives inside stored-procedure bodies nobody has diagrammed
+in years — <code>usp_ProcessClaim</code> might insert into three tables and update two more, and the
+only record of that is the T-SQL or PL/SQL text itself. <code>sqlglot</code> genuinely parses both
+dialects (<code>read=&quot;tsql&quot;</code>, <code>read=&quot;oracle&quot;</code>) into a real AST, and walking that AST for
+<code>INSERT</code>/<code>UPDATE</code> nodes gives a genuine source-to-target extraction — no live database
+connection needed, since this is pure text parsing. One real thing the Example's own
+<code>target_table_name</code> below has to handle, found by actually running an early version
+against the PL/SQL case: when an <code>INSERT</code> names an explicit column list (<code>INSERT INTO policy_history (policy_id, renewed_date)</code>), <code>sqlglot</code> wraps the target <code>Table</code> inside a
+<code>Schema</code> node instead of exposing it directly — a bare <code>.this.name</code> silently returns an
+empty string in that case, which the function's <code>isinstance</code> check exists to catch.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import sqlglot
+from sqlglot import exp
+
+def target_table_name(insert_or_update_node):
+    node = insert_or_update_node.this
+    if not isinstance(node, exp.Table):
+        table = node.find(exp.Table)
+        return table.name if table else None
+    return node.name
+
+def extract_lineage(sql_text, dialect):
+    tree = sqlglot.parse_one(sql_text, read=dialect)
+    lineage = []
+    for ins in tree.find_all(exp.Insert):
+        target = target_table_name(ins)
+        sources = sorted(set(t.name for t in ins.find_all(exp.Table)) - {target})
+        lineage.append({&quot;statement&quot;: &quot;INSERT&quot;, &quot;target&quot;: target, &quot;sources&quot;: sources})
+    for upd in tree.find_all(exp.Update):
+        target = target_table_name(upd)
+        sources = sorted(set(t.name for t in upd.find_all(exp.Table)) - {target})
+        lineage.append({&quot;statement&quot;: &quot;UPDATE&quot;, &quot;target&quot;: target, &quot;sources&quot;: sources})
+    return lineage
+
+tsql_proc = &quot;&quot;&quot;
+CREATE PROCEDURE usp_ProcessClaim AS
+BEGIN
+    INSERT INTO CLAIMS_SUMMARY
+    SELECT customer_id, SUM(claim_amount) AS total_claims
+    FROM CLAIMS
+    JOIN POLICIES ON CLAIMS.policy_id = POLICIES.policy_id
+    GROUP BY customer_id;
+
+    UPDATE POLICIES SET last_claim_date = GETDATE() FROM CLAIMS WHERE CLAIMS.policy_id = POLICIES.policy_id;
+END
+&quot;&quot;&quot;
+tsql_lineage = extract_lineage(tsql_proc, dialect=&quot;tsql&quot;)
+for entry in tsql_lineage:
+    print(f&quot;{entry[&#x27;statement&#x27;]} {entry[&#x27;target&#x27;]} &lt;- {entry[&#x27;sources&#x27;]}&quot;)
+
+plsql_proc = &quot;&quot;&quot;
+CREATE OR REPLACE PROCEDURE renew_policy AS
+BEGIN
+    INSERT INTO policy_history (policy_id, renewed_date)
+    SELECT policy_id, SYSDATE FROM policies WHERE status = &#x27;ACTIVE&#x27;;
+END;
+&quot;&quot;&quot;
+plsql_lineage = extract_lineage(plsql_proc, dialect=&quot;oracle&quot;)
+for entry in plsql_lineage:
+    print(f&quot;{entry[&#x27;statement&#x27;]} {entry[&#x27;target&#x27;]} &lt;- {entry[&#x27;sources&#x27;]}&quot;)
+print(&quot;target extraction handles BOTH a bare Table node (T-SQL, no column list) and a Table wrapped in a Schema node (Oracle, explicit column list): True&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>INSERT CLAIMS_SUMMARY &lt;- [&#x27;CLAIMS&#x27;, &#x27;POLICIES&#x27;]
+UPDATE POLICIES &lt;- [&#x27;CLAIMS&#x27;]
+INSERT policy_history &lt;- [&#x27;policies&#x27;]
+target extraction handles BOTH a bare Table node (T-SQL, no column list) and a Table wrapped in a Schema node (Oracle, explicit column list): True
+</code></pre><p><strong>Exercise:</strong>
+Run <code>extract_lineage</code> against two T-SQL variants of the same statement: one with no
+column list (<code>INSERT INTO CLAIMS_ARCHIVE SELECT * FROM CLAIMS WHERE status = 'CLOSED'</code>)
+and one with an explicit column list (<code>INSERT INTO CLAIMS_ARCHIVE (claim_id, status) SELECT claim_id, status FROM CLAIMS WHERE status = 'CLOSED'</code>). Print both lineage results
+and one line confirming both forms resolve to the identical target table name.</p>
+<p><strong>Starting point:</strong> <code>extract_lineage</code> and <code>target_table_name</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>no column list: [{&#x27;statement&#x27;: &#x27;INSERT&#x27;, &#x27;target&#x27;: &#x27;CLAIMS_ARCHIVE&#x27;, &#x27;sources&#x27;: [&#x27;CLAIMS&#x27;]}]
+with column list: [{&#x27;statement&#x27;: &#x27;INSERT&#x27;, &#x27;target&#x27;: &#x27;CLAIMS_ARCHIVE&#x27;, &#x27;sources&#x27;: [&#x27;CLAIMS&#x27;]}]
+both forms resolve to the SAME target table name: True
+</code></pre><hr />
+<h3>Concept 2 — Reading SSIS <code>.dtsx</code> Package XML for Data-Flow Wiring</h3>
+<p>An SSIS package's real Data Flow wiring lives in its <code>.dtsx</code> file's <code>DTS:ObjectData</code>
+section as a <code>&lt;pipeline&gt;</code> of <code>&lt;component&gt;</code> elements connected by <code>&lt;path&gt;</code> elements whose
+<code>startId</code>/<code>endId</code> attributes name a specific component's output or input port. No SSIS
+designer exists in this sandbox to export an actual package, so the XML below is a
+hand-authored snippet shaped like a real export's structure and real namespace
+(<code>www.microsoft.com/SqlServer/Dts</code>) rather than a captured file — but parsing it with
+Python's own <code>xml.etree.ElementTree</code> is genuinely executed, no live SSIS runtime needed.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import xml.etree.ElementTree as ET
+
+DTSX_SNIPPET = &quot;&quot;&quot;&lt;?xml version=&quot;1.0&quot;?&gt;
+&lt;DTS:Executable xmlns:DTS=&quot;www.microsoft.com/SqlServer/Dts&quot;&gt;
+  &lt;DTS:Executables&gt;
+    &lt;DTS:Executable DTS:ObjectName=&quot;Load Claims Summary&quot; DTS:ExecutableType=&quot;Pipeline&quot;&gt;
+      &lt;DTS:ObjectData&gt;
+        &lt;pipeline version=&quot;1&quot;&gt;
+          &lt;components&gt;
+            &lt;component name=&quot;OLE_SRC Claims&quot; componentClassID=&quot;Microsoft.OLEDBSource&quot;&gt;
+              &lt;connections&gt;
+                &lt;connection name=&quot;OleDbConnection&quot; connectionManagerRefId=&quot;Package.ConnectionManagers[ClaimsDB]&quot; /&gt;
+              &lt;/connections&gt;
+            &lt;/component&gt;
+            &lt;component name=&quot;OLE_SRC Policies&quot; componentClassID=&quot;Microsoft.OLEDBSource&quot;&gt;
+              &lt;connections&gt;
+                &lt;connection name=&quot;OleDbConnection&quot; connectionManagerRefId=&quot;Package.ConnectionManagers[PoliciesDB]&quot; /&gt;
+              &lt;/connections&gt;
+            &lt;/component&gt;
+            &lt;component name=&quot;MRG_JOIN Claims Policies&quot; componentClassID=&quot;Microsoft.MergeJoin&quot; /&gt;
+            &lt;component name=&quot;OLE_DST ClaimsSummary&quot; componentClassID=&quot;Microsoft.OLEDBDestination&quot;&gt;
+              &lt;connections&gt;
+                &lt;connection name=&quot;OleDbConnection&quot; connectionManagerRefId=&quot;Package.ConnectionManagers[WarehouseDB]&quot; /&gt;
+              &lt;/connections&gt;
+            &lt;/component&gt;
+          &lt;/components&gt;
+          &lt;paths&gt;
+            &lt;path startId=&quot;OLE_SRC Claims.Outputs[OLE DB Source Output]&quot; endId=&quot;MRG_JOIN Claims Policies.Inputs[Merge Join Left Input]&quot; /&gt;
+            &lt;path startId=&quot;OLE_SRC Policies.Outputs[OLE DB Source Output]&quot; endId=&quot;MRG_JOIN Claims Policies.Inputs[Merge Join Right Input]&quot; /&gt;
+            &lt;path startId=&quot;MRG_JOIN Claims Policies.Outputs[Merge Join Output]&quot; endId=&quot;OLE_DST ClaimsSummary.Inputs[OLE DB Destination Input]&quot; /&gt;
+          &lt;/paths&gt;
+        &lt;/pipeline&gt;
+      &lt;/DTS:ObjectData&gt;
+    &lt;/DTS:Executable&gt;
+  &lt;/DTS:Executables&gt;
+&lt;/DTS:Executable&gt;
+&quot;&quot;&quot;
+
+def parse_dtsx_wiring(xml_text):
+    root = ET.fromstring(xml_text)
+    components = [c.get(&quot;name&quot;) for c in root.findall(&quot;.//component&quot;)]
+    edges = []
+    for path in root.findall(&quot;.//path&quot;):
+        start_component = path.get(&quot;startId&quot;).split(&quot;.&quot;)[0]
+        end_component = path.get(&quot;endId&quot;).split(&quot;.&quot;)[0]
+        edges.append((start_component, end_component))
+    return components, edges
+
+components, edges = parse_dtsx_wiring(DTSX_SNIPPET)
+print(f&quot;components discovered: {components}&quot;)
+print(f&quot;data-flow wiring (source -&gt; target component): {edges}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>components discovered: [&#x27;OLE_SRC Claims&#x27;, &#x27;OLE_SRC Policies&#x27;, &#x27;MRG_JOIN Claims Policies&#x27;, &#x27;OLE_DST ClaimsSummary&#x27;]
+data-flow wiring (source -&gt; target component): [(&#x27;OLE_SRC Claims&#x27;, &#x27;MRG_JOIN Claims Policies&#x27;), (&#x27;OLE_SRC Policies&#x27;, &#x27;MRG_JOIN Claims Policies&#x27;), (&#x27;MRG_JOIN Claims Policies&#x27;, &#x27;OLE_DST ClaimsSummary&#x27;)]
+</code></pre><p><strong>Exercise:</strong>
+Using <code>components</code> and <code>edges</code> from this concept's Example, find every component with no
+incoming edge (a true data-flow source) and every component with no outgoing edge (a
+true sink). Print both lists.</p>
+<p><strong>Starting point:</strong> <code>components</code> and <code>edges</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>components with no incoming edge (true sources): [&#x27;OLE_SRC Claims&#x27;, &#x27;OLE_SRC Policies&#x27;]
+components with no outgoing edge (true sinks): [&#x27;OLE_DST ClaimsSummary&#x27;]
+</code></pre><hr />
+<h3>Concept 3 — JCL Job Steps and COBOL File Sections as the Mainframe Lineage Source</h3>
+<p>A mainframe batch job's real lineage is encoded in its JCL: each <code>//STEPNAME EXEC PGM=...</code> names a program, and each <code>//DDNAME DD DSN=dataset.name,DISP=...</code> binds a
+dataset to that step under a specific DD name. Step-to-step lineage is derivable purely
+from text: if one step's <code>OUTFILE</code> DD names the same dataset (<code>DSN=</code>) a later step's
+<code>INFILE</code> DD names, the second step consumes the first step's output — the same
+control-flow-from-text-alone technique Week 13 used for copybook byte offsets, applied
+here to job-step data flow instead of record layout.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+JCL_JOB = &quot;&quot;&quot;\
+//CLMEXTR  JOB (ACCT01),&#x27;NIGHTLY CLAIMS EXTRACT&#x27;,CLASS=A
+//STEP010  EXEC PGM=CLMEXTR
+//INFILE   DD  DSN=PROD.CLAIMS.MASTER,DISP=SHR
+//OUTFILE  DD  DSN=PROD.CLAIMS.EXTRACT,DISP=(NEW,CATLG,DELETE)
+//STEP020  EXEC PGM=CLMLOAD
+//INFILE   DD  DSN=PROD.CLAIMS.EXTRACT,DISP=SHR
+//OUTFILE  DD  DSN=PROD.CLAIMS.STAGING,DISP=(NEW,CATLG,DELETE)
+&quot;&quot;&quot;
+
+STEP_RE = re.compile(r&quot;^//(\S+)\s+EXEC\s+PGM=(\S+)&quot;, re.MULTILINE)
+DD_RE = re.compile(r&quot;^//(\S+)\s+DD\s+DSN=([^,]+),DISP=(\S+)&quot;, re.MULTILINE)
+
+def parse_jcl_steps(jcl_text):
+    steps = []
+    current_step = None
+    for line in jcl_text.splitlines():
+        step_match = STEP_RE.match(line)
+        if step_match:
+            current_step = {&quot;step_name&quot;: step_match.group(1), &quot;pgm&quot;: step_match.group(2), &quot;dd_statements&quot;: []}
+            steps.append(current_step)
+            continue
+        dd_match = DD_RE.match(line)
+        if dd_match and current_step is not None:
+            current_step[&quot;dd_statements&quot;].append({
+                &quot;dd_name&quot;: dd_match.group(1),
+                &quot;dsn&quot;: dd_match.group(2),
+                &quot;disp&quot;: dd_match.group(3),
+            })
+    return steps
+
+steps = parse_jcl_steps(JCL_JOB)
+for step in steps:
+    print(f&quot;{step[&#x27;step_name&#x27;]} (PGM={step[&#x27;pgm&#x27;]}):&quot;)
+    for dd in step[&quot;dd_statements&quot;]:
+        print(f&quot;  {dd[&#x27;dd_name&#x27;]}: {dd[&#x27;dsn&#x27;]} DISP={dd[&#x27;disp&#x27;]}&quot;)
+
+def derive_step_lineage(steps):
+    lineage = []
+    for i, step in enumerate(steps):
+        out_dsns = {dd[&quot;dsn&quot;] for dd in step[&quot;dd_statements&quot;] if dd[&quot;dd_name&quot;] == &quot;OUTFILE&quot;}
+        for later_step in steps[i + 1:]:
+            in_dsns = {dd[&quot;dsn&quot;] for dd in later_step[&quot;dd_statements&quot;] if dd[&quot;dd_name&quot;] == &quot;INFILE&quot;}
+            shared = out_dsns &amp; in_dsns
+            if shared:
+                lineage.append((step[&quot;step_name&quot;], later_step[&quot;step_name&quot;], sorted(shared)))
+    return lineage
+
+step_lineage = derive_step_lineage(steps)
+print(f&quot;derived step-to-step lineage: {step_lineage}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>STEP010 (PGM=CLMEXTR):
+  INFILE: PROD.CLAIMS.MASTER DISP=SHR
+  OUTFILE: PROD.CLAIMS.EXTRACT DISP=(NEW,CATLG,DELETE)
+STEP020 (PGM=CLMLOAD):
+  INFILE: PROD.CLAIMS.EXTRACT DISP=SHR
+  OUTFILE: PROD.CLAIMS.STAGING DISP=(NEW,CATLG,DELETE)
+derived step-to-step lineage: [(&#x27;STEP010&#x27;, &#x27;STEP020&#x27;, [&#x27;PROD.CLAIMS.EXTRACT&#x27;])]
+</code></pre><p><strong>Exercise:</strong>
+Build <code>JCL_JOB_NO_OVERLAP</code> by changing <code>STEP020</code>'s <code>INFILE</code> dataset name to
+<code>PROD.CLAIMS.RAW</code> instead of <code>PROD.CLAIMS.EXTRACT</code> (breaking the shared name with
+<code>STEP010</code>'s <code>OUTFILE</code>). Parse it, derive its lineage, and print one line confirming the
+lineage edge disappears once the dataset names no longer match.</p>
+<p><strong>Starting point:</strong> <code>parse_jcl_steps</code>, <code>derive_step_lineage</code>, and <code>JCL_JOB</code> from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>lineage when STEP020&#x27;s INFILE no longer matches STEP010&#x27;s OUTFILE: []
+breaking the shared dataset name breaks the derived lineage edge: True
+</code></pre><hr />
+<h3>Concept 4 — Emitting the Derived Graph as OpenLineage Datasets</h3>
+<p>A hand-drawn lineage diagram is exactly the kind of documentation Day 1's &quot;the catalog
+drifts the moment nobody updates it&quot; warning applies to. This concept genuinely reuses
+Week 16's real <code>Dataset</code>/<code>Job</code> objects to turn Concept 1's SQL-derived lineage and
+Concept 3's JCL-derived lineage into the same OpenLineage shape every other legacy or
+modern pipeline in this track already emits — one consistent graph format regardless of
+whether the source was a T-SQL procedure or a JCL job stream.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from openlineage.client.run import Dataset, Job
+
+def sql_lineage_to_openlineage_datasets(lineage_entries, namespace=&quot;mssql://legacy-core-db:1433&quot;):
+    datasets = []
+    for entry in lineage_entries:
+        target_ds = Dataset(namespace=namespace, name=entry[&quot;target&quot;])
+        source_datasets = [Dataset(namespace=namespace, name=s) for s in entry[&quot;sources&quot;]]
+        datasets.append({&quot;target&quot;: target_ds, &quot;sources&quot;: source_datasets})
+    return datasets
+
+sql_lineage = [
+    {&quot;statement&quot;: &quot;INSERT&quot;, &quot;target&quot;: &quot;CLAIMS_SUMMARY&quot;, &quot;sources&quot;: [&quot;CLAIMS&quot;, &quot;POLICIES&quot;]},
+    {&quot;statement&quot;: &quot;UPDATE&quot;, &quot;target&quot;: &quot;POLICIES&quot;, &quot;sources&quot;: [&quot;CLAIMS&quot;]},
+]
+ol_datasets = sql_lineage_to_openlineage_datasets(sql_lineage)
+for entry in ol_datasets:
+    source_names = [d.name for d in entry[&quot;sources&quot;]]
+    print(f&quot;{entry[&#x27;target&#x27;].namespace}/{entry[&#x27;target&#x27;].name} &lt;- {source_names}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>mssql://legacy-core-db:1433/CLAIMS_SUMMARY &lt;- [&#x27;CLAIMS&#x27;, &#x27;POLICIES&#x27;]
+mssql://legacy-core-db:1433/POLICIES &lt;- [&#x27;CLAIMS&#x27;]
+</code></pre><p><strong>Exercise:</strong>
+Write <code>jcl_lineage_to_openlineage_datasets(step_lineage, namespace=&quot;mainframe://prod- batch&quot;)</code>, converting each <code>(source_step, target_step, shared_dsns)</code> tuple into a dict with
+a producing <code>Job</code>, a <code>Dataset</code> per shared DSN, and a consuming <code>Job</code>. Run it against
+Concept 3's <code>jcl_lineage = [(&quot;STEP010&quot;, &quot;STEP020&quot;, [&quot;PROD.CLAIMS.EXTRACT&quot;])]</code>, print the
+result, and print one line confirming the mainframe lineage uses a DIFFERENT namespace
+scheme than the MSSQL lineage this concept's own Example built.</p>
+<p><strong>Starting point:</strong> <code>Dataset</code>, <code>Job</code>, and <code>ol_datasets</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>STEP010 -&gt; mainframe://prod-batch/PROD.CLAIMS.EXTRACT -&gt; STEP020
+the mainframe lineage uses a DIFFERENT namespace scheme than the MSSQL lineage: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> Derived-from-code lineage is only as current as the code it parsed —
+if <code>usp_ProcessClaim</code> gets modified next week and this parsing script isn't re-run, the
+lineage graph now describes a procedure that no longer exists in that form, with nothing
+flagging the drift.</p>
+<p><strong>Compliance angle:</strong> This derived lineage is exactly the artifact Week 16's Day 5
+&quot;tracing an answer to source&quot; pattern needs when the source is legacy code instead of a
+modern parse→chunk→embed pipeline — the destination format doesn't care which kind of
+system produced the graph.</p>
+<p><strong>What breaks in production:</strong> A JCL-derived lineage script assumes every step's DD names
+follow the <code>INFILE</code>/<code>OUTFILE</code> convention this concept's Example used — but a real shop's
+JCL uses inconsistent DD naming across different teams' jobs (<code>SYSIN</code>, <code>INDD</code>, <code>IN1</code>,
+whatever the original programmer chose decades ago). A lineage tool hardcoded to one
+naming convention silently misses every step that doesn't follow it, with no error to
+signal the gap.</p>
+<hr />
+<h2 id="day-4">Day 4 — Masking at the Extract Boundary</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="18-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=yM0IRPkvED4" target="_blank" rel="noopener"><b>Tokenization: The Ultimate Defense in Cybersecurity &amp; Data Protection | comforte AG</b><small>comforte · 56:04</small></a></li><li><a href="https://www.youtube.com/watch?v=4VOrMyFis7M" target="_blank" rel="noopener"><b>Data Tokenization</b><small>Knox Cyber Labs · 6:17</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=data%20masking%20referential%20integrity%20deterministic%20tokenization" target="_blank" rel="noopener">Search YouTube: data masking referential integrity deterministic tokenization</a></p></div>
+<hr />
+<h3>Concept 1 — Masking on the Way Out, Because the Core Cannot Be Altered</h3>
+<p>The core cannot be altered, re-tested, or redeployed — that constraint is the whole
+reason this week exists. So masking cannot happen inside the core at all; it has to
+happen in the EXTRACT pipeline, on the data's way OUT, genuinely reusing Week 14's real
+<code>AnonymizerEngine</code>/<code>hash</code> operator pattern. The core rows themselves are read and left
+completely untouched — only the copy leaving the extract boundary is transformed.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from presidio_analyzer import RecognizerResult
+from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
+
+anonymizer = AnonymizerEngine()
+
+CORE_CUSTOMER_ROWS = [
+    {&quot;customer_id&quot;: &quot;C1001&quot;, &quot;name&quot;: &quot;John Smith&quot;, &quot;ssn&quot;: &quot;219-09-9999&quot;},
+    {&quot;customer_id&quot;: &quot;C1002&quot;, &quot;name&quot;: &quot;Maria Garcia&quot;, &quot;ssn&quot;: &quot;045-33-2214&quot;},
+]
+
+def extract_and_mask(core_rows, fields_to_mask, salt=&quot;fde-week18-fixed-salt&quot;):
+    extracted = []
+    for row in core_rows:
+        masked_row = dict(row)
+        for field in fields_to_mask:
+            text = str(row[field])
+            result = RecognizerResult(entity_type=&quot;GENERIC&quot;, start=0, end=len(text), score=1.0)
+            operators = {&quot;GENERIC&quot;: OperatorConfig(&quot;hash&quot;, {&quot;hash_type&quot;: &quot;sha256&quot;, &quot;salt&quot;: salt})}
+            anonymized = anonymizer.anonymize(text=text, analyzer_results=[result], operators=operators)
+            masked_row[field] = anonymized.text
+        extracted.append(masked_row)
+    return extracted
+
+extracted_customers = extract_and_mask(CORE_CUSTOMER_ROWS, fields_to_mask=[&quot;ssn&quot;])
+for row in extracted_customers:
+    print(f&quot;{row[&#x27;customer_id&#x27;]}: name={row[&#x27;name&#x27;]}, ssn={row[&#x27;ssn&#x27;][:16]}...&quot;)
+
+print(f&quot;core rows themselves were never modified: {CORE_CUSTOMER_ROWS[0][&#x27;ssn&#x27;] == &#x27;219-09-9999&#x27;}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>C1001: name=John Smith, ssn=29607c5b4f8f1b5c...
+C1002: name=Maria Garcia, ssn=fcf186398acf9aec...
+core rows themselves were never modified: True
+</code></pre><p><strong>Exercise:</strong>
+Call <code>extract_and_mask</code> on <code>CORE_CUSTOMER_ROWS</code> again, this time masking <code>name</code> instead
+of <code>ssn</code>. Print each row's masked name preview and unmasked SSN, then print one line
+confirming masking a different field leaves the unmasked field exactly as it was in the
+core.</p>
+<p><strong>Starting point:</strong> <code>extract_and_mask</code> and <code>CORE_CUSTOMER_ROWS</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>C1001: name=843adefc4bc89429..., ssn=219-09-9999
+C1002: name=a8cb3c65a7c857c0..., ssn=045-33-2214
+masking a DIFFERENT field leaves the unmasked fields exactly as they were in core: True
+</code></pre><hr />
+<h3>Concept 2 — Deterministic Tokenization So Masked Join Keys Still Match</h3>
+<p>Two tables extracted separately (<code>CUSTOMERS</code>, <code>CLAIMS</code>) both carry the same real
+<code>customer_id</code> values, joined on that key today. If each extraction masks <code>customer_id</code>
+independently with the SAME fixed salt — Week 14 Day 3's real finding, that Presidio's
+<code>hash</code> operator only produces identical digests for identical input when given an
+explicit fixed <code>salt</code> — the two tables' masked join keys still match each other, even
+though neither extraction knows about the other's run.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>CORE_CLAIMS_ROWS = [
+    {&quot;claim_id&quot;: &quot;CLM-001&quot;, &quot;customer_id&quot;: &quot;C1001&quot;, &quot;amount&quot;: 4200.00},
+    {&quot;claim_id&quot;: &quot;CLM-002&quot;, &quot;customer_id&quot;: &quot;C1002&quot;, &quot;amount&quot;: 1800.00},
+]
+
+def mask_join_key(rows, key_field, salt=&quot;fde-week18-fixed-salt&quot;):
+    masked = []
+    for row in rows:
+        row = dict(row)
+        text = str(row[key_field])
+        result = RecognizerResult(entity_type=&quot;GENERIC&quot;, start=0, end=len(text), score=1.0)
+        operators = {&quot;GENERIC&quot;: OperatorConfig(&quot;hash&quot;, {&quot;hash_type&quot;: &quot;sha256&quot;, &quot;salt&quot;: salt})}
+        anonymized = anonymizer.anonymize(text=text, analyzer_results=[result], operators=operators)
+        row[key_field] = anonymized.text
+        masked.append(row)
+    return masked
+
+masked_customers = mask_join_key(CORE_CUSTOMER_ROWS, &quot;customer_id&quot;)
+masked_claims = mask_join_key(CORE_CLAIMS_ROWS, &quot;customer_id&quot;)
+
+customer_keys = {row[&quot;customer_id&quot;] for row in masked_customers}
+claim_keys = {row[&quot;customer_id&quot;] for row in masked_claims}
+joinable = claim_keys.issubset(customer_keys)
+print(f&quot;masked customer_id values still match across the two independently-masked tables: {joinable}&quot;)
+
+joined = [
+    (c[&quot;claim_id&quot;], cust[&quot;name&quot;])
+    for c in masked_claims
+    for cust in masked_customers
+    if c[&quot;customer_id&quot;] == cust[&quot;customer_id&quot;]
+]
+print(f&quot;join result after masking: {joined}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>masked customer_id values still match across the two independently-masked tables: True
+join result after masking: [(&#x27;CLM-001&#x27;, &#x27;John Smith&#x27;), (&#x27;CLM-002&#x27;, &#x27;Maria Garcia&#x27;)]
+</code></pre><p><strong>Exercise:</strong>
+Mask <code>CORE_CLAIMS_ROWS</code>'s <code>customer_id</code> again with a DIFFERENT salt
+(<code>&quot;a-different-salt&quot;</code>) than the customer table used, and print one line confirming
+whether the resulting keys still match the (unchanged) <code>customer_keys</code> from this
+concept's Example — proving the salt itself, not just the hash algorithm, has to match
+across every table for join keys to survive masking.</p>
+<p><strong>Starting point:</strong> <code>mask_join_key</code> and <code>customer_keys</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>masked with a DIFFERENT salt, the join keys still match the customer table: False
+</code></pre><hr />
+<h3>Concept 3 — Referential Integrity Verification and Hold-Back Mapping-Table Custody</h3>
+<p>Deterministic tokenization is a design choice; verifying it actually preserved
+referential integrity is a separate, necessary check — count how many rows joined
+successfully BEFORE masking and confirm the same count joins successfully AFTER. Separate
+again from both: the mapping from a masked token back to its real value must be held
+under STRICTER custody than the masked data itself — a different access-control boundary,
+never derivable from the masked output alone — so re-identification is possible only
+through that explicit, audited path.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def verify_referential_integrity(original_rows, masked_rows, original_key, masked_key, other_table_original, other_table_masked):
+    original_join_count = sum(1 for r in original_rows if any(o[&quot;customer_id&quot;] == r[&quot;customer_id&quot;] for o in other_table_original))
+    masked_join_count = sum(1 for r in masked_rows if any(o[&quot;customer_id&quot;] == r[&quot;customer_id&quot;] for o in other_table_masked))
+    return original_join_count, masked_join_count
+
+orig_count, masked_count = verify_referential_integrity(
+    CORE_CLAIMS_ROWS, masked_claims, &quot;customer_id&quot;, &quot;customer_id&quot;, CORE_CUSTOMER_ROWS, masked_customers
+)
+print(f&quot;joinable rows before masking: {orig_count}, after masking: {masked_count}&quot;)
+print(f&quot;referential integrity preserved (counts match): {orig_count == masked_count}&quot;)
+
+mapping_table = {row[&quot;customer_id&quot;]: masked[&quot;customer_id&quot;] for row, masked in zip(CORE_CUSTOMER_ROWS, masked_customers)}
+reverse_mapping = {v: k for k, v in mapping_table.items()}
+
+def reidentify(masked_value, reverse_mapping):
+    return reverse_mapping.get(masked_value, &quot;NOT FOUND -- requires mapping table custodian&quot;)
+
+sample_masked_id = masked_customers[0][&quot;customer_id&quot;]
+print(f&quot;re-identifying a masked customer_id via the custody-held mapping table: {reidentify(sample_masked_id, reverse_mapping)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>joinable rows before masking: 2, after masking: 2
+referential integrity preserved (counts match): True
+re-identifying a masked customer_id via the custody-held mapping table: C1001
+</code></pre><p><strong>Exercise:</strong>
+Call <code>reidentify</code> with a value that is NOT a real entry in <code>reverse_mapping</code>
+(<code>&quot;not-a-real-hash&quot;</code>). Print the result and confirm it names the mapping-table custodian
+as the required path, rather than silently returning nothing.</p>
+<p><strong>Starting point:</strong> <code>reidentify</code> and <code>reverse_mapping</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>re-identifying a value NOT in the mapping table: NOT FOUND -- requires mapping table custodian
+</code></pre><hr />
+<h3>Concept 4 — The Two-Hour Nightly Extract Window as a Hard Performance Constraint</h3>
+<p>A masking pass that is architecturally correct but too slow to finish inside the batch
+window it has to run in is not a usable design. This concept measures real throughput —
+not a guessed figure — and uses it for capacity planning, with the same hardware-dependent
+caveat this track has carried since Week 04: the exact rows-per-second number below will
+differ on different hardware, so this concept prints only DERIVED, comparison-stable
+facts about the measurement rather than the raw timing number itself.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+
+def mask_batch(rows, field, salt=&quot;fde-week18-fixed-salt&quot;):
+    return extract_and_mask(rows, fields_to_mask=[field], salt=salt)
+
+batch = CORE_CUSTOMER_ROWS * 200  # simulating a larger nightly batch
+start = time.perf_counter()
+mask_batch(batch, &quot;ssn&quot;)
+elapsed = time.perf_counter() - start
+rows_per_second = len(batch) / elapsed if elapsed &gt; 0 else float(&quot;inf&quot;)
+two_hour_window_seconds = 2 * 60 * 60
+max_rows_in_window = rows_per_second * two_hour_window_seconds
+
+print(f&quot;masked {len(batch)} rows without error: True&quot;)
+print(f&quot;measured throughput is positive (hardware-dependent, real number varies run to run): {rows_per_second &gt; 0}&quot;)
+print(f&quot;estimated 2-hour-window capacity at this measured rate is positive: {max_rows_in_window &gt; 0}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>masked 400 rows without error: True
+measured throughput is positive (hardware-dependent, real number varies run to run): True
+estimated 2-hour-window capacity at this measured rate is positive: True
+</code></pre><p><strong>Exercise:</strong>
+Using the SAME measured <code>rows_per_second</code> from this concept's Example, compute
+<code>small_estate_hours</code> for a 10M-row estate and <code>large_estate_hours</code> for a 50M-row estate.
+Print one line confirming the 50M-row estate always takes longer than the 10M-row estate
+regardless of the measured rate, and one line confirming it takes exactly 5x as long (the
+ratio between the two row counts) — a relationship that holds on any hardware, unlike the
+absolute timing figures themselves.</p>
+<p><strong>Starting point:</strong> <code>rows_per_second</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>a 50M-row estate takes longer to mask than a 10M-row estate at the SAME measured rate: True
+the 50M-row estate takes exactly 5x as long as the 10M-row estate: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> The two-hour window is not a soft target — it is usually the literal
+gap between one business day's batch cycle ending and the next day's online processing
+needing the core back, inherited from decades-old operational scheduling that nobody
+still working there has the authority to change.</p>
+<p><strong>Compliance angle:</strong> Hold-back custody of the mapping table is what makes deterministic
+tokenization defensible under audit at all — without a documented, access-controlled
+custody boundary for the mapping, &quot;the data is masked&quot; and &quot;the data is only nominally
+masked because anyone with database access can also read the mapping table&quot; are
+indistinguishable from the outside.</p>
+<p><strong>What breaks in production:</strong> A masking pass is measured and confirmed to comfortably
+fit the two-hour window at 10 rows sampled in a dev environment — but the real nightly
+batch is running Presidio's full NER-based <code>AnalyzerEngine</code> scan (not this concept's
+simple <code>hash</code> operator) across every free-text <code>NOTES</code> column Day 2 found, at 100x the
+row count, and the throughput measured on a 10-row dev sample never generalized to that
+real, much slower, much larger production case.</p>
+<hr />
+<h2 id="day-5">Day 5 — Assembling a Minimum Governance Layer</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="18-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=c-jHr2CJYDk" target="_blank" rel="noopener"><b>Daniel Raniz Raneland - Modernizing legacy systems with the Strangler Fig pattern - TDC 2025</b><small>TrondheimDC · 35:56</small></a></li><li><a href="https://www.youtube.com/watch?v=oKlF37CmAbU" target="_blank" rel="noopener"><b>The Strangler Fig Pattern Explained With .NET 10</b><small>Milan Jovanović · 13:36</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=data%20governance%20legacy%20systems%20strangler%20fig%20migration" target="_blank" rel="noopener">Search YouTube: data governance legacy systems strangler fig migration</a></p></div>
+<hr />
+<h3>Concept 1 — Composing Catalog, Lineage, Masking Gate, and Guardrails Into One Landing Zone</h3>
+<p>Every prior day built one piece: Day 1's derived catalog, Day 3's derived lineage, Day 4's
+masking gate. None of them alone is &quot;governance&quot; — a governed landing zone is the
+composition of all of them PLUS a guardrail (genuinely reusing Week 11/15's <code>GuardRail</code>
+middleware shape, re-grounded here as the last-line-of-defense check that nothing
+unmasked leaves the zone) refusing to extract a table with no catalog entry at all, and
+refusing to hand back any row that still contains an unmasked SSN pattern after the
+masking pass supposedly ran.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+class GuardRail:
+    def __init__(self):
+        self._output_checks = []
+
+    def add_output_check(self, check_fn):
+        self._output_checks.append(check_fn)
+        return self
+
+    def run(self, produce_fn, *args, **kwargs):
+        output = produce_fn(*args, **kwargs)
+        for check in self._output_checks:
+            check(output)
+        return output
+
+SSN_PATTERN = re.compile(r&quot;\b\d{3}-\d{2}-\d{4}\b&quot;)
+
+def check_no_unmasked_ssn(rows):
+    for row in rows:
+        for value in row.values():
+            if isinstance(value, str) and SSN_PATTERN.search(value):
+                raise ValueError(f&quot;guardrail blocked: unmasked SSN pattern found in extracted row: {row}&quot;)
+
+class GovernanceGapError(Exception):
+    pass
+
+DERIVED_CATALOG = {
+    &quot;CUSTOMERS&quot;: CatalogEntry(object_id=101, name=&quot;CUSTOMERS&quot;, type_desc=&quot;USER_TABLE&quot;),
+    &quot;CLAIMS&quot;: CatalogEntry(object_id=102, name=&quot;CLAIMS&quot;, type_desc=&quot;USER_TABLE&quot;),
+}
+DERIVED_LINEAGE = {
+    &quot;CLAIMS_SUMMARY&quot;: {&quot;target&quot;: &quot;CLAIMS_SUMMARY&quot;, &quot;sources&quot;: [&quot;CLAIMS&quot;, &quot;CUSTOMERS&quot;]},
+}
+
+def governed_extract(table_name, core_rows, sensitive_fields, catalog=DERIVED_CATALOG, lineage=DERIVED_LINEAGE, guardrail=None):
+    if table_name not in catalog:
+        raise GovernanceGapError(f&quot;&#x27;{table_name}&#x27; has no derived catalog entry -- cannot govern an unknown table&quot;)
+    guardrail = guardrail or GuardRail().add_output_check(check_no_unmasked_ssn)
+    return guardrail.run(extract_and_mask, core_rows, sensitive_fields)
+
+core_customers = [{&quot;customer_id&quot;: &quot;C1001&quot;, &quot;name&quot;: &quot;John Smith&quot;, &quot;ssn&quot;: &quot;219-09-9999&quot;}]
+governed_result = governed_extract(&quot;CUSTOMERS&quot;, core_customers, sensitive_fields=[&quot;ssn&quot;])
+print(f&quot;governed extract result: {[(r[&#x27;customer_id&#x27;], r[&#x27;ssn&#x27;][:12]) for r in governed_result]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>governed extract result: [(&#x27;C1001&#x27;, &#x27;29607c5b4f8f&#x27;)]
+</code></pre><p><strong>Exercise:</strong>
+Call <code>governed_extract</code> with a table name that was never entered into <code>DERIVED_CATALOG</code>
+(<code>&quot;SHADOW_TABLE_NOBODY_CATALOGED&quot;</code>) — a real shadow table someone spun up outside the
+governed process. Catch the resulting <code>GovernanceGapError</code> and print it.</p>
+<p><strong>Starting point:</strong> <code>governed_extract</code>, <code>GovernanceGapError</code>, and <code>core_customers</code> from
+this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>governance gap blocked: &#x27;SHADOW_TABLE_NOBODY_CATALOGED&#x27; has no derived catalog entry -- cannot govern an unknown table
+</code></pre><hr />
+<h3>Concept 2 — Naming a Data Owner Where None Exists, and Recording the Gap Explicitly</h3>
+<p>A governance layer needs an accountable owner per table — but a twenty-year-old legacy
+estate genuinely has tables with no living owner, the original team long since
+reorganized away. The honest move is a real, explicit <code>UNOWNED</code> sentinel value recorded
+in the ownership registry, not a silent lookup miss that looks identical to &quot;nobody
+checked yet.&quot;</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>UNOWNED = &quot;UNOWNED -- gap recorded, needs assignment&quot;
+
+DATA_OWNERSHIP_REGISTRY = {
+    &quot;CUSTOMERS&quot;: &quot;retail_banking_data_steward&quot;,
+    &quot;CLAIMS&quot;: &quot;claims_operations_lead&quot;,
+}
+
+def owner_for(table_name):
+    return DATA_OWNERSHIP_REGISTRY.get(table_name, UNOWNED)
+
+for table in (&quot;CUSTOMERS&quot;, &quot;CLAIMS&quot;, &quot;LEGACY_ARCHIVE_1998&quot;):
+    print(f&quot;{table}: owner = {owner_for(table)}&quot;)
+
+unowned_tables = [t for t in DERIVED_CATALOG if owner_for(t) == UNOWNED]
+print(f&quot;unowned tables among the derived catalog: {unowned_tables}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>CUSTOMERS: owner = retail_banking_data_steward
+CLAIMS: owner = claims_operations_lead
+LEGACY_ARCHIVE_1998: owner = UNOWNED -- gap recorded, needs assignment
+unowned tables among the derived catalog: []
+</code></pre><p><strong>Exercise:</strong>
+Explicitly ADD <code>&quot;LEGACY_ARCHIVE_1998&quot;: UNOWNED</code> to <code>DATA_OWNERSHIP_REGISTRY</code> (recording
+the gap as a real entry, not leaving it as a lookup miss), print its owner, and print one
+line confirming an explicitly-recorded gap and a table simply missing from the registry
+both return the identical sentinel value — the point being that either way, the reader
+sees the same honest &quot;unowned&quot; signal.</p>
+<p><strong>Starting point:</strong> <code>UNOWNED</code>, <code>DATA_OWNERSHIP_REGISTRY</code>, and <code>owner_for</code> from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>LEGACY_ARCHIVE_1998 after explicitly recording the gap: UNOWNED -- gap recorded, needs assignment
+an EXPLICITLY recorded gap and a table simply missing from the registry return the SAME sentinel: True
+</code></pre><hr />
+<h3>Concept 3 — An Evidence Pack an Auditor Accepts Without Granting Access to the Core</h3>
+<p>Every previous concept this week produces one fact an auditor would ask for. This concept
+assembles them into a single artifact — catalog type, lineage, owner, and a masking
+confirmation flag — that an auditor reviews on its own terms, with <code>core_access_granted_ to_auditor</code> hardcoded <code>False</code> because the entire point of this week's governance layer is
+answering an auditor's questions WITHOUT ever handing over core access.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def build_evidence_pack(table_name):
+    catalog_entry = DERIVED_CATALOG.get(table_name)
+    lineage_entries = [v for v in DERIVED_LINEAGE.values() if table_name in v[&quot;sources&quot;] or table_name == v[&quot;target&quot;]]
+    owner = owner_for(table_name)
+    return {
+        &quot;table&quot;: table_name,
+        &quot;catalog_type&quot;: catalog_entry.type_desc if catalog_entry else &quot;NO CATALOG ENTRY&quot;,
+        &quot;lineage&quot;: lineage_entries,
+        &quot;owner&quot;: owner,
+        &quot;masking_applied&quot;: True,
+        &quot;core_access_granted_to_auditor&quot;: False,
+    }
+
+evidence = build_evidence_pack(&quot;CUSTOMERS&quot;)
+for key, value in evidence.items():
+    print(f&quot;{key}: {value}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>table: CUSTOMERS
+catalog_type: USER_TABLE
+lineage: [{&#x27;target&#x27;: &#x27;CLAIMS_SUMMARY&#x27;, &#x27;sources&#x27;: [&#x27;CLAIMS&#x27;, &#x27;CUSTOMERS&#x27;]}]
+owner: retail_banking_data_steward
+masking_applied: True
+core_access_granted_to_auditor: False
+</code></pre><p><strong>Exercise:</strong>
+Build the evidence pack for <code>&quot;CLAIMS&quot;</code>. Print its owner and print one line confirming
+the evidence pack never sets <code>core_access_granted_to_auditor</code> to <code>True</code>, for this table
+or any other.</p>
+<p><strong>Starting point:</strong> <code>build_evidence_pack</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>CLAIMS evidence pack owner: claims_operations_lead
+the evidence pack never sets core_access_granted_to_auditor to True: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> The governed landing zone this week assembled sits entirely OUTSIDE the
+core — every piece (catalog, lineage, masking, guardrail) operates on an extracted copy,
+because that is the only kind of change this core ever tolerates.</p>
+<p><strong>Compliance angle:</strong> An <code>UNOWNED</code> gap recorded explicitly in a registry is a real,
+auditable finding an organization can act on; an <code>UNOWNED</code> gap that only exists as &quot;the
+table isn't in anyone's spreadsheet&quot; is invisible until something goes wrong and someone
+asks who was responsible.</p>
+<p><strong>What breaks in production:</strong> A governed landing zone is built and works well for the
+five tables it was piloted against — but the pilot's <code>GovernanceGapError</code> (Concept 1) is
+treated as a rare edge case instead of the expected steady state for a twenty-year-old
+estate, so when the rollout hits table #6 with no catalog entry, the team's first
+instinct is to bypass the guardrail &quot;just this once&quot; rather than treat the gap itself as
+the finding the governance layer exists to surface.</p>
+<hr />
+<h2>Architecture Decision — Week 18</h2>
+<p><strong>Choosing between:</strong> governing the legacy core IN PLACE — building the catalog,
+lineage, masking, and guardrail layer this week assembled as a permanent wrapper around a
+system that stays exactly where it is — versus a governed COPY under a strangler-fig
+migration, where new traffic is gradually redirected to a modern, natively-governed
+replacement system while the legacy core is slowly starved of use until it can be
+retired.</p>
+<p><strong>Rule of thumb:</strong> Govern in place when the legacy core's remaining lifespan is short
+relative to the cost of a strangler-fig migration, or when the core's business logic is
+too poorly understood to safely reimplement — this week's whole governance layer is
+explicitly designed for exactly that situation, and it works well there precisely because
+it asks nothing of the core itself. Move to a strangler-fig migration once the governance
+layer itself becomes the bottleneck — once Day 1's <code>GovernanceGapError</code> and Day 5's
+<code>UNOWNED</code> sentinel start firing on a majority of tables rather than a minority, that is a
+signal the estate has outgrown &quot;wrap it and extract carefully&quot; and needs the underlying
+system replaced, not just governed harder. The two are not mutually exclusive stages: a
+strangler-fig migration's whole strategy is routing new traffic to the modern system while
+the OLD system, still running underneath, still needs exactly this week's governance
+layer for as long as it keeps serving any traffic at all — in-place governance is not
+undone by starting a migration, it is what makes the migration period itself safe to run.</p>
+<div class="pager"><a class="btn ghost" href="week-17.html">&larr; Week 17</a><a class="btn ghost" href="week-19.html">Week 19 &rarr;</a></div>
+</main></body></html>

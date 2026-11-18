@@ -1,0 +1,1160 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 13 — DataPrep for COBOL/Mainframe-Sourced Documents</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="13" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 13 — DataPrep for COBOL/Mainframe-Sourced Documents</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>2 — Advanced AI Data Pipelines / DataPrep for LLMs (closes Phase 2)</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Expert</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 08 layout-aware document parsing (chunk/embed/upsert shape); Week 12 idempotent pipeline orchestration (deterministic IDs, upsert semantics). No prior COBOL or mainframe experience assumed.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. Every genuinely new mechanic this week — copybook byte-offset arithmetic, EBCDIC code-page conversion, COMP-3/zoned-decimal packing, fixed-width record and report parsing — is pure Python/stdlib plus <code>pandas</code>, and every code block below except two is EXECUTED here, with real captured output. The two exceptions are marked REAL MODE: pulling the raw extract off an actual z/OS dataset over a live mainframe connection (Day 2), and an actual embedding-API network call (Day 5) — neither is something this sandbox can do without a live external service, but the copybook/EBCDIC/COMP-3 mechanics themselves never needed one.</td>
+</tr>
+</tbody>
+</table>
+<p>Weeks 08 through 12 built a DataPrep pipeline that assumes its input source is a
+reasonably modern document: a scanned form, a PDF, a database row, a JSON payload. Real
+BFSI DataPrep does not get to assume that. A large share of core transaction and policy
+data still lives in COBOL copybook-defined records on a mainframe, written in EBCDIC, with
+numeric fields packed into binary nibbles that are not human-readable in any text editor.
+This week closes Phase 2 by treating that source as a first-class DataPrep input rather
+than an edge case: reading the copybook that defines a record's shape, decoding the bytes
+it actually contains, and turning the result into the same parse→chunk→embed→upsert shape
+the rest of this phase already built.</p>
+<hr />
+<h2 id="day-1">Day 1 — Reading a COBOL Copybook</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=CHmogO1-2_k" target="_blank" rel="noopener"><b>COBOL REDEFINES Explained | COBOL for beginners.</b><small>Topictrick · 4:04</small></a></li><li><a href="https://www.youtube.com/watch?v=XbYteTi9d28" target="_blank" rel="noopener"><b>COBOL REDEFINES Clause</b><small>Vivek Mayinkar · 7:41</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=COBOL%20copybook%20PIC%20clause%20OCCURS%20REDEFINES%20explained" target="_blank" rel="noopener">Search YouTube: COBOL copybook PIC clause OCCURS REDEFINES explained</a></p></div>
+<hr />
+<h3>Concept 1 — Level Numbers, and Group vs. Elementary Items</h3>
+<p>A copybook is COBOL's record-layout language, and its structure is a tree encoded purely
+through indentation and <strong>level numbers</strong>: <code>01</code> is the record's top-level group item, and
+subordinate items are numbered <code>05</code>, <code>10</code>, <code>15</code>, and so on (the gaps are convention, not a
+rule — they leave room to insert a level between two existing ones later without
+renumbering everything). A <strong>group item</strong> has no <code>PIC</code> clause of its own and no storage of
+its own; its &quot;value&quot; is just the concatenation of whatever its subordinate items hold. An
+<strong>elementary item</strong> carries a <code>PIC</code> clause and is where the actual bytes live. Only
+elementary items ever get a byte offset — a group item's offset and length are derived
+entirely from its children.</p>
+<p>The practical test for &quot;is this a group or an elementary item&quot; is not the level number in
+isolation, it is whether any later field in the copybook has a <strong>higher</strong> level number
+before the next field at the same or lower level. A <code>05</code> item followed immediately by
+another <code>05</code> item is elementary; a <code>05</code> item followed by a <code>10</code> item is a group, because
+that <code>10</code> item is subordinate to it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+@dataclasses.dataclass
+class CopybookField:
+    level: int
+    name: str
+    pic: str
+    usage: str = &quot;DISPLAY&quot;
+
+# ACCOUNT-RECORD copybook (as it would appear in COBOL source):
+# 01 ACCOUNT-RECORD.
+#    05 ACCOUNT-ID        PIC X(10).
+#    05 CUSTOMER-NAME     PIC X(20).
+#    05 ACCOUNT-BALANCE   PIC S9(7)V99 COMP-3.
+#    05 ACCOUNT-STATUS    PIC X(1).
+#    05 TRANSACTION-COUNT PIC 9(3).
+#    05 FILLER            PIC X(5).
+account_record_fields = [
+    CopybookField(1, &quot;ACCOUNT-RECORD&quot;, None),
+    CopybookField(5, &quot;ACCOUNT-ID&quot;, &quot;X(10)&quot;),
+    CopybookField(5, &quot;CUSTOMER-NAME&quot;, &quot;X(20)&quot;),
+    CopybookField(5, &quot;ACCOUNT-BALANCE&quot;, &quot;S9(7)V99&quot;, usage=&quot;COMP-3&quot;),
+    CopybookField(5, &quot;ACCOUNT-STATUS&quot;, &quot;X(1)&quot;),
+    CopybookField(5, &quot;TRANSACTION-COUNT&quot;, &quot;9(3)&quot;),
+    CopybookField(5, &quot;FILLER&quot;, &quot;X(5)&quot;),
+]
+
+def group_items(fields):
+    return [f for f in fields if f.level == 1]
+
+def elementary_items(fields):
+    return [f for f in fields if f.level != 1]
+
+groups = group_items(account_record_fields)
+elems = elementary_items(account_record_fields)
+print(f&quot;group items (level 01): {[f.name for f in groups]}&quot;)
+print(f&quot;elementary items (level 05): {[f.name for f in elems]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>group items (level 01): [&#x27;ACCOUNT-RECORD&#x27;]
+elementary items (level 05): [&#x27;ACCOUNT-ID&#x27;, &#x27;CUSTOMER-NAME&#x27;, &#x27;ACCOUNT-BALANCE&#x27;, &#x27;ACCOUNT-STATUS&#x27;, &#x27;TRANSACTION-COUNT&#x27;, &#x27;FILLER&#x27;]
+</code></pre><p><strong>Exercise:</strong>
+Insert a nested group <code>ADDRESS-INFO</code> (level <code>05</code>, no <code>PIC</code>) between <code>CUSTOMER-NAME</code> and
+<code>ACCOUNT-BALANCE</code>, itself holding two level-<code>10</code> elementary items <code>STREET PIC X(15)</code> and
+<code>CITY PIC X(15)</code>. Write a <code>classify_items(fields)</code> function using the &quot;does a later field
+have a higher level before the next same-or-lower one&quot; rule (not simply &quot;level == 1&quot;) and
+run it over the whole extended field list, confirming <code>ADDRESS-INFO</code> now classifies as a
+group despite being a level <code>05</code> item like its elementary siblings.</p>
+<p><strong>Starting point:</strong> The <code>CopybookField</code> dataclass and <code>account_record_fields</code> list from
+this concept's Example, with <code>ADDRESS-INFO</code>/<code>STREET</code>/<code>CITY</code> inserted as described.</p>
+<p>Expected output (actually run):</p>
+<pre><code>ACCOUNT-RECORD       group
+ACCOUNT-ID           elementary
+CUSTOMER-NAME        elementary
+ADDRESS-INFO         group
+STREET               elementary
+CITY                 elementary
+ACCOUNT-BALANCE      elementary
+ACCOUNT-STATUS       elementary
+TRANSACTION-COUNT    elementary
+FILLER               elementary
+</code></pre><p><code>ADDRESS-INFO</code> is correctly identified as a group purely from its position relative to
+<code>STREET</code>'s higher level number — nothing about the level number <code>05</code> itself distinguishes
+it from <code>ACCOUNT-ID</code>, which is also <code>05</code> but elementary.</p>
+<hr />
+<h3>Concept 2 — PIC Clauses and Byte-Length Arithmetic</h3>
+<p><code>PIC X(n)</code> is straightforward: an alphanumeric field occupying exactly <code>n</code> bytes,
+one character per byte. Numeric clauses need more care. <code>PIC S9(7)V99</code> describes a signed
+number with 7 integer digit positions and 2 decimal digit positions — the <code>V</code> marks an
+<strong>implied</strong> decimal point that consumes no storage of its own, it only tells the reader
+where to place the point when interpreting the digits. The <code>S</code> marks the field as signed;
+an unsigned field simply omits it.</p>
+<p>Storage cost depends on <code>USAGE</code>, not on the <code>PIC</code> clause alone. <strong>DISPLAY</strong> (the default,
+also called zoned decimal) spends one full byte per digit, sign included — the sign rides
+in the zone nibble of the last digit's byte at no extra cost (Day 3 covers exactly how).
+<strong>COMP-3</strong> (packed decimal) is denser: two decimal digits share one byte via nibbles, plus
+one more nibble for the sign, so an <code>n</code>-digit COMP-3 field needs <code>ceil((n + 1) / 2)</code> bytes.
+<code>S9(7)V99 COMP-3</code> has 9 total digit positions (7 + 2), so <code>ceil(10 / 2) = 5</code> bytes — a
+number worth memorizing, because it is the single most common COMP-3 field size in a real
+financial copybook.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import math
+import re
+
+_PIC_ALPHANUM = re.compile(r&quot;^X\((\d+)\)$&quot;)
+_PIC_NUMERIC = re.compile(r&quot;^(S)?9\((\d+)\)(?:V9\((\d+)\)|V(9+))?$&quot;)
+
+def pic_digit_counts(pic):
+    &quot;&quot;&quot;Return (integer_digits, decimal_digits, signed) for a numeric PIC clause.&quot;&quot;&quot;
+    m = _PIC_NUMERIC.match(pic)
+    if not m:
+        raise ValueError(f&quot;not a numeric PIC clause: {pic}&quot;)
+    signed = m.group(1) == &quot;S&quot;
+    int_digits = int(m.group(2))
+    if m.group(3) is not None:
+        dec_digits = int(m.group(3))
+    elif m.group(4) is not None:
+        dec_digits = len(m.group(4))
+    else:
+        dec_digits = 0
+    return int_digits, dec_digits, signed
+
+def pic_length_bytes(pic, usage=&quot;DISPLAY&quot;):
+    &quot;&quot;&quot;Byte length of a single PIC clause, given its USAGE.&quot;&quot;&quot;
+    m = _PIC_ALPHANUM.match(pic)
+    if m:
+        return int(m.group(1))
+    int_digits, dec_digits, _signed = pic_digit_counts(pic)
+    total_digits = int_digits + dec_digits
+    if usage == &quot;COMP-3&quot;:
+        # packed decimal: one nibble per digit plus one nibble for the sign,
+        # two nibbles per byte, rounded up.
+        return math.ceil((total_digits + 1) / 2)
+    if usage == &quot;DISPLAY&quot;:
+        # zoned decimal: one byte per digit; the sign rides in the zone
+        # nibble of the last digit&#x27;s byte, so it costs no extra bytes.
+        return total_digits
+    raise ValueError(f&quot;unhandled usage: {usage}&quot;)
+
+print(f&quot;X(10)              -&gt; {pic_length_bytes(&#x27;X(10)&#x27;)} bytes&quot;)
+print(f&quot;X(20)              -&gt; {pic_length_bytes(&#x27;X(20)&#x27;)} bytes&quot;)
+print(f&quot;S9(7)V99 COMP-3    -&gt; {pic_length_bytes(&#x27;S9(7)V99&#x27;, usage=&#x27;COMP-3&#x27;)} bytes&quot;)
+print(f&quot;X(1)               -&gt; {pic_length_bytes(&#x27;X(1)&#x27;)} bytes&quot;)
+print(f&quot;9(3)                -&gt; {pic_length_bytes(&#x27;9(3)&#x27;)} bytes&quot;)
+print(f&quot;X(5)               -&gt; {pic_length_bytes(&#x27;X(5)&#x27;)} bytes&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>X(10)              -&gt; 10 bytes
+X(20)              -&gt; 20 bytes
+S9(7)V99 COMP-3    -&gt; 5 bytes
+X(1)               -&gt; 1 bytes
+9(3)                -&gt; 3 bytes
+X(5)               -&gt; 5 bytes
+</code></pre><p><strong>Exercise:</strong>
+A <code>CLAIM-RECORD</code> copybook has five fields: <code>CLAIM-ID PIC X(12)</code>,
+<code>CLAIM-AMOUNT PIC S9(9)V99 COMP-3</code>, <code>ADJUSTER-CODE PIC 9(4)</code>, <code>CLAIM-DATE PIC X(8)</code>, and
+<code>FILLER PIC X(9)</code>. Compute each field's byte length with <code>pic_length_bytes</code> and sum them
+into the record's total LRECL.</p>
+<p><strong>Starting point:</strong> The <code>pic_length_bytes</code> function from this concept's Example, and the
+five <code>(name, pic, usage)</code> tuples listed above.</p>
+<p>Expected output (actually run):</p>
+<pre><code>CLAIM-ID        X(12)      DISPLAY   12 bytes
+CLAIM-AMOUNT    S9(9)V99   COMP-3     6 bytes
+ADJUSTER-CODE   9(4)       DISPLAY    4 bytes
+CLAIM-DATE      X(8)       DISPLAY    8 bytes
+FILLER          X(9)       DISPLAY    9 bytes
+computed record length (LRECL): 39
+</code></pre><p><code>CLAIM-AMOUNT</code>'s 11 total digit positions (9 + 2) pack into <code>ceil(12 / 2) = 6</code> bytes —
+not 5, because this field has two more integer digits than the worked S9(7)V99 example.</p>
+<hr />
+<h3>Concept 3 — <code>OCCURS</code>, <code>REDEFINES</code>, and Offsets That Must Sum to <code>LRECL</code></h3>
+<p><code>OCCURS n TIMES</code> repeats an elementary or group item's storage <code>n</code> times in place — a
+fixed-size array with no delimiter between elements, so its total length is simply its
+single-element length times <code>n</code>. <code>REDEFINES</code> does the opposite of consuming new bytes: it
+declares that a field occupies the <strong>same</strong> storage as an earlier field, interpreted
+differently — the classic use is storing a date as <code>PIC X(8)</code> for display purposes while a
+<code>REDEFINES</code> gives the same eight bytes a <code>PIC 9(8)</code> numeric view for arithmetic. A
+redefining field's start offset equals the start offset of the field it redefines, not the
+running cursor position, and it must not advance the cursor for anything declared after it.</p>
+<p>The check that catches almost every copybook-transcription mistake: every elementary
+item's <code>(start, end)</code> offsets, laid end to end (skipping redefined bytes, which overlap
+deliberately), must sum to exactly the record's declared <code>LRECL</code>. A copybook that is
+off by even one byte here will silently misread every field after the error.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def layout_offsets(fields):
+    &quot;&quot;&quot;Assign (start, end) byte offsets to elementary items in declaration order.
+    A REDEFINES field does not consume new bytes -- it starts back at the
+    offset of the field it redefines. An OCCURS field&#x27;s total length is its
+    element length times its occurrence count.&quot;&quot;&quot;
+    offsets = []
+    cursor = 0
+    named_offsets = {}
+    for f in fields:
+        if f.level == 1:
+            continue
+        if f.redefines:
+            start = named_offsets[f.redefines]
+        else:
+            start = cursor
+        length = pic_length_bytes(f.pic, usage=f.usage) * f.occurs
+        end = start + length
+        offsets.append((f.name, start, end, length))
+        named_offsets[f.name] = start
+        if not f.redefines:
+            cursor = end
+    return offsets, cursor
+
+@dataclasses.dataclass
+class LayoutField:
+    level: int
+    name: str
+    pic: str
+    usage: str = &quot;DISPLAY&quot;
+    occurs: int = 1
+    redefines: str = None
+
+# POLICY-RECORD copybook, illustrating OCCURS and REDEFINES together:
+# 01 POLICY-RECORD.
+#    05 POLICY-ID              PIC X(9).
+#    05 PREMIUM-HISTORY OCCURS 3 TIMES PIC 9(5)V99.
+#    05 LAST-CLAIM-DATE        PIC X(8).
+#    05 LAST-CLAIM-DATE-R REDEFINES LAST-CLAIM-DATE PIC 9(8).
+#    05 FILLER                 PIC X(3).
+policy_record_fields = [
+    LayoutField(1, &quot;POLICY-RECORD&quot;, None),
+    LayoutField(5, &quot;POLICY-ID&quot;, &quot;X(9)&quot;),
+    LayoutField(5, &quot;PREMIUM-HISTORY&quot;, &quot;9(5)V99&quot;, occurs=3),
+    LayoutField(5, &quot;LAST-CLAIM-DATE&quot;, &quot;X(8)&quot;),
+    LayoutField(5, &quot;LAST-CLAIM-DATE-R&quot;, &quot;9(8)&quot;, redefines=&quot;LAST-CLAIM-DATE&quot;),
+    LayoutField(5, &quot;FILLER&quot;, &quot;X(3)&quot;),
+]
+
+offsets, lrecl = layout_offsets(policy_record_fields)
+for name, start, end, length in offsets:
+    print(f&quot;{name:&lt;20} start={start:&gt;3} end={end:&gt;3} length={length:&gt;3}&quot;)
+print(f&quot;computed LRECL (cursor after last non-redefining field): {lrecl}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>POLICY-ID            start=  0 end=  9 length=  9
+PREMIUM-HISTORY      start=  9 end= 30 length= 21
+LAST-CLAIM-DATE      start= 30 end= 38 length=  8
+LAST-CLAIM-DATE-R    start= 30 end= 38 length=  8
+FILLER               start= 38 end= 41 length=  3
+computed LRECL (cursor after last non-redefining field): 41
+</code></pre><p><code>LAST-CLAIM-DATE-R</code> shares <code>LAST-CLAIM-DATE</code>'s exact <code>(30, 38)</code> window rather than starting
+at 38 — that overlap is the whole point of <code>REDEFINES</code> — and <code>FILLER</code> correctly resumes at
+38, not 46, because the redefining field never advanced the cursor.</p>
+<p><strong>Exercise:</strong>
+Append one more field to <code>POLICY-RECORD</code> after <code>FILLER</code>: <code>CLAIM-HISTORY OCCURS 4 TIMES PIC X(6)</code>. Recompute the full offset table and the record's LRECL with <code>layout_offsets</code>.</p>
+<p><strong>Starting point:</strong> The <code>layout_offsets</code> function, <code>LayoutField</code> dataclass, and
+<code>policy_record_fields</code> list from this concept's Example, with the new <code>CLAIM-HISTORY</code>
+field appended.</p>
+<p>Expected output (actually run):</p>
+<pre><code>POLICY-ID            start=  0 end=  9 length=  9
+PREMIUM-HISTORY      start=  9 end= 30 length= 21
+LAST-CLAIM-DATE      start= 30 end= 38 length=  8
+LAST-CLAIM-DATE-R    start= 30 end= 38 length=  8
+FILLER               start= 38 end= 41 length=  3
+CLAIM-HISTORY        start= 41 end= 65 length= 24
+computed LRECL: 65
+</code></pre><p><code>CLAIM-HISTORY</code>'s 24 bytes are <code>6 bytes x 4 occurrences</code>, and the record grows from 41 to
+65 bytes total — a single new <code>OCCURS</code> field, correctly costed as one element length times
+its occurrence count, not miscounted as one flat 6-byte field.</p>
+<hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> The copybook is usually the <em>only</em> documentation of a mainframe record's
+shape that still exists, and it belongs to the mainframe application team, not to whoever
+is building the DataPrep pipeline. A copybook change (a new field, a widened <code>PIC</code> clause)
+is a COBOL recompile on their side that silently breaks every downstream offset table that
+was hand-derived from an older version.</p>
+<p><strong>Compliance angle:</strong> <code>ACCOUNT-BALANCE</code>, <code>CUSTOMER-NAME</code>, and similar fields are exactly
+the same regulated customer data whether they live in a modern Postgres row or a COMP-3
+byte range on a mainframe. A data-subject access or erasure request scoped only to the
+&quot;modern&quot; systems and blind to the mainframe copybook record has not actually covered the
+data.</p>
+<p><strong>What breaks in production:</strong> A copybook is updated to insert one new field in the middle
+of a record (not appended at the end), and nobody regenerates the downstream offset table
+from it. Every field after the insertion point is read from the wrong byte range — not an
+error, a silently wrong value, for every record in the file.</p>
+<hr />
+<h2 id="day-2">Day 2 — Fixed-Width Record Parsing</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=dUpyC40cF6Q" target="_blank" rel="noopener"><b>Reading in Files in Pandas | Python Pandas Tutorials</b><small>Alex The Analyst · 19:17</small></a></li><li><a href="https://www.youtube.com/watch?v=sTXr73fqybc" target="_blank" rel="noopener"><b>Python pandas read_csv // Load a CSV into pandas from a file or URL // index_col, na_values, nrows</b><small>Kimberly Fessel · 13:43</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=parse%20fixed%20width%20file%20python%20pandas%20read_fwf%20copybook" target="_blank" rel="noopener">Search YouTube: parse fixed width file python pandas read_fwf copybook</a></p></div>
+<hr />
+<h3>Concept 1 — Colspecs Generated From the Copybook, Not Hand-Typed</h3>
+<p><code>pandas.read_fwf</code>'s <code>colspecs</code> argument is exactly the <code>(start, end)</code> offset table Day 1
+built — and it should always be <strong>generated</strong> from a parsed copybook layout, never
+hand-typed against the raw text. A hand-typed colspec list is a second, independent place
+the same arithmetic can go wrong, with no automatic check that it still agrees with the
+copybook it is supposed to describe. This concept's record — <code>TRANSACTION-RECORD</code> — is
+deliberately all <code>DISPLAY</code>/alphanumeric fields with no <code>COMP-3</code>; a packed-decimal field is
+binary, not text, and <code>pandas.read_fwf</code> cannot parse it as a string column at all (Day 3
+handles those fields by raw byte slicing instead).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># TRANSACTION-RECORD copybook, DISPLAY-only fields (COMP-3/binary fields need
+# raw byte slicing instead of text colspecs -- Day 3 covers that; this record
+# is deliberately all zoned/alphanumeric so pandas.read_fwf applies cleanly).
+# 01 TRANSACTION-RECORD.
+#    05 TRAN-ID       PIC X(8).
+#    05 ACCOUNT-ID    PIC X(10).
+#    05 TRAN-DATE     PIC X(8).
+#    05 TRAN-AMOUNT   PIC 9(9)V99.
+#    05 TRAN-TYPE     PIC X(1).
+#    05 FILLER        PIC X(6).
+transaction_record_fields = [
+    LayoutField(1, &quot;TRANSACTION-RECORD&quot;, None),
+    LayoutField(5, &quot;TRAN-ID&quot;, &quot;X(8)&quot;),
+    LayoutField(5, &quot;ACCOUNT-ID&quot;, &quot;X(10)&quot;),
+    LayoutField(5, &quot;TRAN-DATE&quot;, &quot;X(8)&quot;),
+    LayoutField(5, &quot;TRAN-AMOUNT&quot;, &quot;9(9)V99&quot;),
+    LayoutField(5, &quot;TRAN-TYPE&quot;, &quot;X(1)&quot;),
+    LayoutField(5, &quot;FILLER&quot;, &quot;X(6)&quot;),
+]
+
+def colspecs_from_layout(fields):
+    offsets, lrecl = layout_offsets(fields)
+    names = [name for name, _s, _e, _l in offsets]
+    colspecs = [(s, e) for _n, s, e, _l in offsets]
+    return names, colspecs, lrecl
+
+tran_names, tran_colspecs, TRAN_LRECL = colspecs_from_layout(transaction_record_fields)
+print(f&quot;field names: {tran_names}&quot;)
+print(f&quot;colspecs:    {tran_colspecs}&quot;)
+print(f&quot;LRECL:       {TRAN_LRECL}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>field names: [&#x27;TRAN-ID&#x27;, &#x27;ACCOUNT-ID&#x27;, &#x27;TRAN-DATE&#x27;, &#x27;TRAN-AMOUNT&#x27;, &#x27;TRAN-TYPE&#x27;, &#x27;FILLER&#x27;]
+colspecs:    [(0, 8), (8, 18), (18, 26), (26, 37), (37, 38), (38, 44)]
+LRECL:       44
+</code></pre><p><strong>Exercise:</strong>
+Build the same <code>colspecs_from_layout</code> derivation for a different record,
+<code>CUSTOMER-RECORD</code>: <code>CUSTOMER-ID PIC X(9)</code>, <code>CUSTOMER-NAME PIC X(25)</code>,
+<code>SIGNUP-DATE PIC X(8)</code>, <code>RISK-SCORE PIC 9(3)</code>, <code>FILLER PIC X(3)</code>.</p>
+<p><strong>Starting point:</strong> The <code>colspecs_from_layout</code> function and <code>LayoutField</code> dataclass from
+this concept's Example, with a new <code>customer_record_fields</code> list built from the five
+fields above.</p>
+<p>Expected output (actually run):</p>
+<pre><code>field names: [&#x27;CUSTOMER-ID&#x27;, &#x27;CUSTOMER-NAME&#x27;, &#x27;SIGNUP-DATE&#x27;, &#x27;RISK-SCORE&#x27;, &#x27;FILLER&#x27;]
+colspecs:    [(0, 9), (9, 34), (34, 42), (42, 45), (45, 48)]
+LRECL:       48
+</code></pre><hr />
+<h3>Concept 2 — <code>RECFM=FB</code> Blocking and Record-Length Validation</h3>
+<p><code>RECFM=FB</code> (fixed-block) is the defining trait of a classic mainframe sequential extract:
+there is <strong>no line terminator anywhere</strong> in the file. A record's boundary is purely a byte
+count — after <code>LRECL</code> bytes, the next record starts, with nothing to search for. That means
+the very first thing any parser must do is validate that the raw stream's total length is
+an exact multiple of <code>LRECL</code>; if it is not, the extract is truncated or the wrong copybook
+is being used against it, and guessing where record boundaries fall from that point on
+would silently misalign every field in every following record.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import io
+
+def make_transaction_record(tran_id, account_id, tran_date, amount_cents, tran_type):
+    &quot;&quot;&quot;Build one 44-byte FB record by hand, DISPLAY (zoned) encoding throughout.&quot;&quot;&quot;
+    amount_str = str(amount_cents).zfill(11)  # 9(9)V99 = 11 total digit positions
+    row = (tran_id.ljust(8) + account_id.ljust(10) + tran_date.ljust(8)
+           + amount_str + tran_type.ljust(1) + &quot;&quot;.ljust(6))
+    assert len(row) == TRAN_LRECL, f&quot;record is {len(row)} bytes, expected {TRAN_LRECL}&quot;
+    return row
+
+records = [
+    make_transaction_record(&quot;TXN00001&quot;, &quot;ACC0000001&quot;, &quot;20260301&quot;, 123456, &quot;D&quot;),
+    make_transaction_record(&quot;TXN00002&quot;, &quot;ACC0000002&quot;, &quot;20260301&quot;, 500000, &quot;C&quot;),
+    make_transaction_record(&quot;TXN00003&quot;, &quot;ACC0000001&quot;, &quot;20260302&quot;, 7500, &quot;D&quot;),
+]
+
+# RECFM=FB: fixed-block, no line terminators at all -- the raw stream is one
+# unbroken run of LRECL-byte records. Simulate that raw stream, then deblock
+# it by slicing every LRECL bytes rather than by looking for a delimiter.
+raw_fb_stream = &quot;&quot;.join(records)
+print(f&quot;raw FB stream length: {len(raw_fb_stream)} bytes, no separators present&quot;)
+
+def validate_and_deblock(raw_stream, lrecl):
+    if len(raw_stream) % lrecl != 0:
+        raise ValueError(
+            f&quot;stream length {len(raw_stream)} is not a multiple of LRECL {lrecl} &quot;
+            &quot;-- truncated or misconfigured extract, refuse to guess record boundaries&quot;
+        )
+    return [raw_stream[i:i + lrecl] for i in range(0, len(raw_stream), lrecl)]
+
+deblocked = validate_and_deblock(raw_fb_stream, TRAN_LRECL)
+print(f&quot;deblocked into {len(deblocked)} records of {TRAN_LRECL} bytes each&quot;)
+
+try:
+    validate_and_deblock(raw_fb_stream[:-1], TRAN_LRECL)
+except ValueError as e:
+    print(f&quot;truncated stream correctly rejected: {e}&quot;)
+
+import pandas as pd
+# Deblocking already split the stream on real byte boundaries, so joining the
+# fixed-length records with &#x27;\n&#x27; for read_fwf is safe -- it adds no ambiguity,
+# every record is already exactly LRECL characters wide.
+buf = io.StringIO(&quot;\n&quot;.join(deblocked))
+df = pd.read_fwf(buf, colspecs=tran_colspecs, names=tran_names, dtype=str, keep_default_na=False)
+print(df.to_string(index=False))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>REAL MODE — not executed here; requires a live z/OS mainframe connection:</strong></p>
+<pre><code>Retrieving the raw FB extract itself needs a real z/OS environment -- typically an FTP
+(or IBM Connect:Direct / NDM) transfer in BINARY mode from a cataloged dataset, driven by
+a scheduled JCL job on the mainframe side. This sandbox has no such connection; everything
+above this line operates on a raw byte stream built here as a stand-in for exactly what
+that transfer would deliver, and every mechanic downstream of &quot;the bytes have arrived&quot; is
+genuinely executed.
+</code></pre><p>Expected output (actually run):</p>
+<pre><code>raw FB stream length: 132 bytes, no separators present
+deblocked into 3 records of 44 bytes each
+truncated stream correctly rejected: stream length 131 is not a multiple of LRECL 44 -- truncated or misconfigured extract, refuse to guess record boundaries
+ TRAN-ID ACCOUNT-ID TRAN-DATE TRAN-AMOUNT TRAN-TYPE FILLER
+TXN00001 ACC0000001  20260301 00000123456         D       
+TXN00002 ACC0000002  20260301 00000500000         C       
+TXN00003 ACC0000001  20260302 00000007500         D       
+</code></pre><p><strong>Exercise:</strong>
+Build two <code>CUSTOMER-RECORD</code> rows (48 bytes each, per Concept 1's layout) by hand, join
+them into one raw FB stream with no separators, deblock it with <code>validate_and_deblock</code>,
+and confirm that appending one extra stray character to the stream causes the same
+function to correctly reject it.</p>
+<p><strong>Starting point:</strong> The <code>validate_and_deblock</code> function from this concept's Example, the
+<code>CUSTOMER-RECORD</code> colspecs/LRECL from Concept 1's exercise, and two hand-built 48-byte
+records for <code>CUS000001</code>/<code>&quot;ACME HOLDINGS LTD&quot;</code>/<code>20240115</code>/risk score <code>42</code>, and
+<code>CUS000002</code>/<code>&quot;GLOBAL RISK PARTNERS&quot;</code>/<code>20250630</code>/risk score <code>7</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>raw FB stream length: 96 bytes
+deblocked into 2 records of 48 bytes each
+over-length stream correctly rejected: stream length 97 is not a multiple of LRECL 48 -- truncated or misconfigured extract, refuse to guess record boundaries
+</code></pre><hr />
+<h3>Concept 3 — Trailing Filler and Zero-Padded Numerics</h3>
+<p>Two habits carry over from every mainframe extract. First, a <code>DISPLAY</code> numeric field is
+always written <strong>zero-padded to its full declared width</strong> — <code>9(9)V99</code> storing the value
+<code>1234.56</code> is the literal text <code>00000123456</code>, never <code>123456</code> with leading spaces, because
+a numeric <code>PIC</code> clause has no concept of a variable-width representation. Decoding it means
+placing the implied decimal point (from the <code>V</code>'s position) after stripping nothing.
+Second, <code>FILLER</code> fields exist purely to pad a record out to its declared <code>LRECL</code> — they
+carry no business meaning and no field name a downstream consumer should ever reference;
+the correct handling is to parse past them and discard the result, never to try to make
+sense of what is in them.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from decimal import Decimal
+
+def decode_zoned_unsigned(raw_digits, decimal_digits):
+    &quot;&quot;&quot;9(n)V9(m) DISPLAY, unsigned: strip nothing, just place the implied
+    decimal point -- the zero padding on the left is exactly how a mainframe
+    writes a fixed-width unsigned numeric, never stripped before parsing.&quot;&quot;&quot;
+    scale = Decimal(10) ** decimal_digits
+    return Decimal(raw_digits) / scale
+
+df[&quot;TRAN-AMOUNT-DECIMAL&quot;] = df[&quot;TRAN-AMOUNT&quot;].apply(lambda s: decode_zoned_unsigned(s, 2))
+df[&quot;FILLER&quot;] = df[&quot;FILLER&quot;].apply(lambda s: s.rstrip())
+print(df[[&quot;TRAN-ID&quot;, &quot;TRAN-AMOUNT&quot;, &quot;TRAN-AMOUNT-DECIMAL&quot;, &quot;FILLER&quot;]].to_string(index=False))
+print(f&quot;FILLER column after stripping trailing spaces: {df[&#x27;FILLER&#x27;].tolist()} &quot;
+      f&quot;(all blank -- filler carries no data, only reserved padding to hit LRECL)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code> TRAN-ID TRAN-AMOUNT TRAN-AMOUNT-DECIMAL FILLER
+TXN00001 00000123456             1234.56       
+TXN00002 00000500000                5000       
+TXN00003 00000007500                  75       
+FILLER column after stripping trailing spaces: [&#x27;&#x27;, &#x27;&#x27;, &#x27;&#x27;] (all blank -- filler carries no data, only reserved padding to hit LRECL)
+</code></pre><p><strong>Exercise:</strong>
+Using the two-row <code>CUSTOMER-RECORD</code> DataFrame from Concept 2's exercise (reparsed with
+<code>pandas.read_fwf</code>), convert <code>RISK-SCORE</code> (a zero-padded <code>9(3)</code> field, no decimal point) to
+a plain integer column and strip the <code>FILLER</code> column.</p>
+<p><strong>Starting point:</strong> The deblocked two-<code>CUSTOMER-RECORD</code> list from Concept 2's exercise,
+re-parsed via <code>pandas.read_fwf</code> with the <code>CUSTOMER-RECORD</code> colspecs/names from Concept 1.</p>
+<p>Expected output (actually run):</p>
+<pre><code>CUSTOMER-ID RISK-SCORE  RISK-SCORE-INT FILLER
+  CUS000001        042              42       
+  CUS000002        007               7       
+</code></pre><p><code>042</code> and <code>007</code> both convert cleanly to <code>42</code> and <code>7</code> with a plain <code>int()</code> call — no special
+handling needed once the field has been correctly sliced by its colspec, which is the
+entire point of generating colspecs from the copybook rather than guessing them.</p>
+<hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> <code>RECFM=FB</code> with no delimiters is not a legacy quirk to be worked around
+once and forgotten — every single extract from that source shares it, forever, because the
+mainframe application was never rewritten to emit anything else. A parser that silently
+assumes a modern record-terminated format the first time it meets a differently-configured
+extract (<code>RECFM=VB</code>, variable-block, with its own 4-byte record-descriptor-word framing)
+will misparse the entire file with no error.</p>
+<p><strong>Compliance angle:</strong> A record-length validation failure that gets silently swallowed
+(caught and ignored rather than raised) can quietly drop or corrupt an entire batch of
+customer financial records with nothing in any log to show it happened — exactly the kind
+of gap an audit later asks &quot;how do you know this never occurred?&quot; about.</p>
+<p><strong>What breaks in production:</strong> Someone regenerates a copybook-derived colspec table but
+forgets one field was widened by the mainframe team's last release. The colspecs still sum
+to the <em>old</em> LRECL, the record-length validation still passes because the file itself was
+generated with the old LRECL too — until the day the mainframe team's change actually ships,
+at which point every field after the widened one silently shifts by exactly the width
+difference, with no exception raised anywhere.</p>
+<hr />
+<h2 id="day-3">Day 3 — EBCDIC and Packed Decimal</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=H4l42nbYmrU" target="_blank" rel="noopener"><b>ASCII Code and Binary</b><small>The Organic Chemistry Tutor · 8:16</small></a></li><li><a href="https://www.youtube.com/watch?v=0UVSPwzGw4U" target="_blank" rel="noopener"><b>Lec-16: Introduction to Binary code | ASCII, UNICODE, EBCDIC, BCD | Number System</b><small>Gate Smashers · 7:31</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=EBCDIC%20to%20ASCII%20conversion%20packed%20decimal%20COMP-3%20python" target="_blank" rel="noopener">Search YouTube: EBCDIC to ASCII conversion packed decimal COMP-3 python</a></p></div>
+<hr />
+<h3>Concept 1 — <code>cp037</code> vs. <code>cp500</code>, and the Wrong-Code-Page Trap</h3>
+<p>EBCDIC is not one fixed byte-to-character mapping — it is a family of code pages, and the
+two most commonly met in BFSI mainframe extracts are <code>cp037</code> (US/Canada EBCDIC) and <code>cp500</code>
+(International EBCDIC). Python's <code>bytes.decode()</code> handles both for real, with no external
+library needed. The two code pages agree on letters and digits, which is exactly what makes
+the trap dangerous: a file transcoded with the wrong one of the two still looks <em>mostly</em>
+right — names and account numbers decode correctly — while a handful of punctuation
+characters silently come out as the wrong character, an error easy to miss in a spot check
+that only glances at the alphanumeric fields.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># cp037 (US/Canada EBCDIC) and cp500 (International EBCDIC) agree on letters
+# and digits but disagree on a handful of punctuation code points -- exactly
+# the trap: a file transcoded with the wrong one of the two still &quot;works&quot;
+# for names and amounts, and only the punctuation-bearing fields come out
+# corrupted, which is easy to miss in a spot check.
+text = &quot;REF[07]!&quot;
+ebcdic_bytes = text.encode(&quot;cp037&quot;)
+print(f&quot;&#x27;{text}&#x27; encoded as cp037: {ebcdic_bytes.hex()}&quot;)
+print(f&quot;decoded correctly as cp037:  {ebcdic_bytes.decode(&#x27;cp037&#x27;)!r}&quot;)
+print(f&quot;decoded WRONGLY as cp500:    {ebcdic_bytes.decode(&#x27;cp500&#x27;)!r}&quot;)
+print(f&quot;decoded WRONGLY as latin-1: {ebcdic_bytes.decode(&#x27;latin-1&#x27;)!r}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>&#x27;REF[07]!&#x27; encoded as cp037: d9c5c6baf0f7bb5a
+decoded correctly as cp037:  &#x27;REF[07]!&#x27;
+decoded WRONGLY as cp500:    &#x27;REF¬07|]&#x27;
+decoded WRONGLY as latin-1: &#x27;ÙÅÆºð÷»Z&#x27;
+</code></pre><p>Every letter and digit survives the wrong <code>cp500</code> decode intact — <code>REF</code>, <code>0</code>, <code>7</code> all read
+correctly — but <code>[</code>, <code>]</code>, and <code>!</code> each land on the wrong character, and the <code>latin-1</code>
+misread (treating EBCDIC bytes as if they were already ASCII/Latin text) corrupts
+everything, which is the failure mode when a mainframe extract is handled by code that
+never knew it needed a code-page conversion at all.</p>
+<p><strong>Exercise:</strong>
+Encode a different punctuation-bearing string, <code>&quot;PCT[5]!&quot;</code>, as <code>cp037</code>, then decode the
+resulting bytes both correctly (as <code>cp037</code>) and incorrectly (as <code>cp500</code>), confirming which
+characters diverge.</p>
+<p><strong>Starting point:</strong> The same encode/decode pattern from this concept's Example, applied to
+the string <code>&quot;PCT[5]!&quot;</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>&#x27;PCT[5]!&#x27; encoded as cp037: d7c3e3baf5bb5a
+decoded correctly as cp037:  &#x27;PCT[5]!&#x27;
+decoded WRONGLY as cp500:    &#x27;PCT¬5|]&#x27;
+</code></pre><p><code>P</code>, <code>C</code>, <code>T</code>, and <code>5</code> all decode identically under both code pages; <code>[</code>, <code>]</code>, and <code>!</code> each
+diverge, the same three characters that diverged in the concept's own worked example — this
+is not a coincidence, it is the fixed, small set of punctuation code points on which <code>cp037</code>
+and <code>cp500</code> actually disagree.</p>
+<hr />
+<h3>Concept 2 — COMP-3 Packed-Decimal Nibble Unpacking</h3>
+<p>Packed decimal (<code>COMP-3</code>) stores two decimal digits per byte as nibbles, with one final
+nibble reserved for the sign — <code>0xC</code> or <code>0xF</code> for positive, <code>0xD</code> (or <code>0xB</code>) for negative.
+Unpacking means splitting every byte into its high and low nibble, reading all nibbles but
+the last as decimal digits, and reading the last nibble as the sign. A worked example
+grounds this precisely: <code>PIC S9(7)V99 COMP-3</code> holding the value <code>-1234.56</code> has 9 total
+digit positions, so its zero-padded digit string is <code>&quot;000123456&quot;</code>. Appending the negative
+sign nibble <code>D</code> gives ten nibbles — <code>0 0 0 1 2 3 4 5 6 D</code> — which pack two-per-byte into
+five bytes: <code>0x00 0x01 0x23 0x45 0x6D</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def unpack_comp3(raw, scale):
+    &quot;&quot;&quot;raw: packed-decimal bytes. scale: digits after the implied decimal
+    point (the PIC clause&#x27;s V position). Last nibble is the sign: C/F =
+    positive, D/B = negative.&quot;&quot;&quot;
+    nibbles = []
+    for byte in raw:
+        nibbles.append((byte &gt;&gt; 4) &amp; 0xF)
+        nibbles.append(byte &amp; 0xF)
+    sign_nibble = nibbles[-1]
+    digit_str = &quot;&quot;.join(str(n) for n in nibbles[:-1])
+    magnitude = Decimal(digit_str)
+    if scale:
+        magnitude = magnitude / (Decimal(10) ** scale)
+    sign = -1 if sign_nibble in (0xD, 0xB) else 1
+    return sign * magnitude
+
+def pack_comp3(value, total_digits, scale, negative_nibble=0xD, positive_nibble=0xC):
+    &quot;&quot;&quot;Inverse of unpack_comp3 -- builds packed-decimal bytes from a Decimal.&quot;&quot;&quot;
+    scaled = int((abs(value) * (Decimal(10) ** scale)).to_integral_value())
+    digit_str = str(scaled).zfill(total_digits)
+    sign_nibble = negative_nibble if value &lt; 0 else positive_nibble
+    nibbles = [int(c) for c in digit_str] + [sign_nibble]
+    if len(nibbles) % 2 != 0:
+        nibbles.insert(0, 0)
+    raw = bytearray()
+    for i in range(0, len(nibbles), 2):
+        raw.append((nibbles[i] &lt;&lt; 4) | nibbles[i + 1])
+    return bytes(raw)
+
+# Hand-worked example: PIC S9(7)V99 COMP-3, value -1234.56.
+# Digit string (7 integer + 2 decimal = 9 digits): &quot;000123456&quot;.
+# Nibbles: 0 0 0 1 2 3 4 5 6 D  -&gt; bytes 00 01 23 45 6D (5 bytes).
+worked_example_bytes = bytes.fromhex(&quot;00012345&quot;) + bytes([0x6D])
+print(f&quot;worked-example packed bytes: {worked_example_bytes.hex()}&quot;)
+unpacked = unpack_comp3(worked_example_bytes, scale=2)
+print(f&quot;unpacked value (scale=2):    {unpacked}&quot;)
+
+repacked = pack_comp3(Decimal(&quot;-1234.56&quot;), total_digits=9, scale=2)
+print(f&quot;repacked bytes match hand-worked bytes: {repacked == worked_example_bytes}&quot;)
+print(f&quot;round trip: unpack(pack(-1234.56)) == -1234.56 -&gt; &quot;
+      f&quot;{unpack_comp3(repacked, scale=2) == Decimal(&#x27;-1234.56&#x27;)}&quot;)
+
+positive_example = pack_comp3(Decimal(&quot;789.01&quot;), total_digits=9, scale=2)
+print(f&quot;positive value 789.01 packed: {positive_example.hex()}  &quot;
+      f&quot;unpacked back: {unpack_comp3(positive_example, scale=2)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>worked-example packed bytes: 000123456d
+unpacked value (scale=2):    -1234.56
+repacked bytes match hand-worked bytes: True
+round trip: unpack(pack(-1234.56)) == -1234.56 -&gt; True
+positive value 789.01 packed: 000078901c  unpacked back: 789.01
+</code></pre><p><code>unpack_comp3</code> reconstructs exactly <code>-1234.56</code> from the hand-worked byte sequence
+<code>00 01 23 45 6D</code>, confirming the nibble-splitting logic against a byte sequence computed by
+hand rather than only checking that <code>pack</code> and <code>unpack</code> agree with each other.</p>
+<p><strong>Exercise:</strong>
+Pack and unpack two more COMP-3 values against an 8-digit-total <code>PIC S9(5)V999</code>: <code>+42.875</code>
+and <code>-7.5</code>, at <code>scale=3</code>.</p>
+<p><strong>Starting point:</strong> The <code>pack_comp3</code> and <code>unpack_comp3</code> functions from this concept's
+Example, with <code>total_digits=8, scale=3</code> for both values.</p>
+<p>Expected output (actually run):</p>
+<pre><code>+42.875 packed: 000042875c  unpacked: 42.875
+-7.5    packed: 000007500d  unpacked: -7.5
+round trip both match: True
+</code></pre><p><code>-7.5</code> at <code>scale=3</code> zero-pads to the digit string <code>&quot;00000750&quot;</code> internally (7.500, not 7.5)
+before packing, which is exactly why the PIC clause's declared decimal-digit count, not the
+value's own natural precision, decides how many digits get packed.</p>
+<hr />
+<h3>Concept 3 — Zoned-Decimal Sign Overpunch, and the Implied Decimal From <code>V</code></h3>
+<p>Zoned decimal (plain <code>DISPLAY</code> usage) uses a different sign convention than <code>COMP-3</code>: every
+digit still occupies its own full byte, but the <strong>zone nibble</strong> (the top four bits) of only
+the <em>last</em> digit's byte carries the sign — <code>0xC</code> for positive, <code>0xD</code> for negative — while
+every other digit's byte uses zone <code>0xF</code>. This is called sign overpunch because, on an
+actual EBCDIC terminal, that last byte's character glyph visibly changes (a <code>0</code>-<code>9</code> digit
+becomes one of a handful of alternate symbol characters) to show the sign is folded in.
+Combined with Concept 2's <code>V</code>-position scale, decoding any signed numeric field — <code>COMP-3</code>
+or zoned — always comes down to the same two steps: recover the unscaled integer, then
+divide by <code>10 ** decimal_digits</code> from the <code>PIC</code> clause's <code>V</code> position.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def pack_zoned(value, digits):
+    &quot;&quot;&quot;Zoned decimal: each digit occupies a full byte, one byte per digit.
+    The sign is folded into the zone nibble (top 4 bits) of the LAST digit&#x27;s
+    byte: 0xC = positive, 0xD = negative. Every other digit uses zone 0xF.&quot;&quot;&quot;
+    scaled = abs(value)
+    digit_str = str(scaled).zfill(digits)
+    raw = bytearray()
+    for i, ch in enumerate(digit_str):
+        d = int(ch)
+        is_last = (i == len(digit_str) - 1)
+        zone = (0xD if value &lt; 0 else 0xC) if is_last else 0xF
+        raw.append((zone &lt;&lt; 4) | d)
+    return bytes(raw)
+
+def unpack_zoned(raw):
+    digits = []
+    sign = 1
+    for i, byte in enumerate(raw):
+        zone = (byte &gt;&gt; 4) &amp; 0xF
+        digit = byte &amp; 0xF
+        digits.append(str(digit))
+        if i == len(raw) - 1 and zone in (0xD, 0xB):
+            sign = -1
+    return sign * int(&quot;&quot;.join(digits))
+
+positive_zoned = pack_zoned(123, digits=3)
+negative_zoned = pack_zoned(-123, digits=3)
+print(f&quot;+123 zoned bytes: {positive_zoned.hex()}  unpacked: {unpack_zoned(positive_zoned)}&quot;)
+print(f&quot;-123 zoned bytes: {negative_zoned.hex()}  unpacked: {unpack_zoned(negative_zoned)}&quot;)
+
+def decode_field(pic, usage, raw):
+    int_digits, dec_digits, _signed = pic_digit_counts(pic)
+    if usage == &quot;COMP-3&quot;:
+        return unpack_comp3(raw, scale=dec_digits)
+    if usage == &quot;ZONED&quot;:
+        value = unpack_zoned(raw)
+        return Decimal(value) / (Decimal(10) ** dec_digits)
+    raise ValueError(usage)
+
+account_balance_raw = worked_example_bytes  # S9(7)V99 COMP-3, -1234.56
+print(f&quot;ACCOUNT-BALANCE PIC S9(7)V99 COMP-3 decoded: &quot;
+      f&quot;{decode_field(&#x27;S9(7)V99&#x27;, &#x27;COMP-3&#x27;, account_balance_raw)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>+123 zoned bytes: f1f2c3  unpacked: 123
+-123 zoned bytes: f1f2d3  unpacked: -123
+ACCOUNT-BALANCE PIC S9(7)V99 COMP-3 decoded: -1234.56
+</code></pre><p>The only byte that differs between <code>+123</code> and <code>-123</code> is the last one — <code>c3</code> vs. <code>d3</code> — and
+<code>decode_field</code> recovers Day 1's <code>ACCOUNT-BALANCE</code> value exactly by combining
+<code>unpack_comp3</code> with the scale read straight from the <code>PIC</code> clause's <code>V99</code>, the same two
+steps this concept opened with.</p>
+<p><strong>Exercise:</strong>
+Pack and unpack <code>PIC S9(4)V99</code> zoned-decimal value <code>-12.34</code>, and <code>PIC 9(4)V99</code> (unsigned)
+zoned-decimal value <code>99.01</code>, both as 6-digit-total fields, applying the scale-2 division at
+the end to recover the decimal value.</p>
+<p><strong>Starting point:</strong> The <code>pack_zoned</code> and <code>unpack_zoned</code> functions from this concept's
+Example, with <code>digits=6</code> for both values (<code>-1234</code> and <code>9901</code> as the unscaled integers).</p>
+<p>Expected output (actually run):</p>
+<pre><code>-12.34 (raw digits -001234) zoned bytes: f0f0f1f2f3d4  unpacked raw int: -1234  with scale 2 -&gt; -12.34
+99.01  (raw digits  009901) zoned bytes: f0f0f9f9f0c1  unpacked raw int: 9901  with scale 2 -&gt; 99.01
+</code></pre><p>Both round-trip correctly once the scale-2 division is applied after <code>unpack_zoned</code> — the
+sign nibble on the <em>last</em> byte alone (<code>d4</code> vs. <code>c1</code>) is the only structural difference
+between the negative and positive case, exactly as Concept 3's rule states.</p>
+<hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> Which EBCDIC code page a given mainframe shop actually uses is
+institutional knowledge, not something discoverable from the file itself — there is no
+header, no magic byte, nothing in a raw FB extract that names its own code page. Getting it
+wrong is a decision someone made years ago and never had to revisit, until a new pipeline
+built against the wrong assumption meets a punctuation character the alphanumeric spot
+check never happened to include.</p>
+<p><strong>Compliance angle:</strong> A COMP-3 or zoned-decimal amount field is regulated financial data
+the moment it is decoded, exactly as much as it was before decoding — an unpacking bug that
+silently produces a wrong balance (a misplaced decimal point, a flipped sign) is a data
+integrity failure with the same downstream consequences as any other corrupted financial
+record, just harder to spot because the wrong number still looks plausible.</p>
+<p><strong>What breaks in production:</strong> A COMP-3 field's <code>PIC</code> clause's decimal-digit count is
+copied wrong by one digit when a copybook is manually transcribed into a Python constant.
+Every value decodes without error — the unpacking arithmetic runs fine — but every amount is
+off by a factor of 10, silently, until someone notices a reconciliation total that is
+consistently ten times too large or too small.</p>
+<hr />
+<h2 id="day-4">Day 4 — Mainframe Report Extraction</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=1dp1Lg_sz_Q" target="_blank" rel="noopener"><b>WRKSPLF - Work with Spool Files</b><small>Nick Litten Technology - IBM i - AS400 - iSeries · 10:02</small></a></li><li><a href="https://www.youtube.com/watch?v=ndoLTHtZX8Q" target="_blank" rel="noopener"><b>Ultimate Log Parsing Guide With Python | Extract  information and create a report</b><small>Cyber Creed · 31:40</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=parse%20mainframe%20report%20spool%20output%20control%20breaks%20python" target="_blank" rel="noopener">Search YouTube: parse mainframe report spool output control breaks python</a></p></div>
+<hr />
+<h3>Concept 1 — Page Headers and Footers Stripped by Position</h3>
+<p>A mainframe batch report — the kind a COBOL report-writer program spools to JES2 output —
+is plain fixed-width text, but it is not a data file: it repeats a page header (title,
+running page number) and a page footer (a page-level total) at a <strong>fixed line position
+within every page</strong>, because the report program's line-count logic, not the report's
+content, decides where each page breaks. That means header and footer lines must be
+identified and stripped by their <em>position</em> in the page, never by matching their text — the
+same header line's page number changes every page, and the footer's total changes every
+page, so text-matching would have to special-case exactly the parts of the line that most
+need to be excluded from that comparison in the first place.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># A synthetic mainframe spool report: DAILY BRANCH TRANSACTION REPORT.
+# Each page is exactly 6 lines: 2 header lines, 3 data lines, 1 page-total
+# footer line -- fixed by the report program&#x27;s line count, not by content.
+LINES_PER_PAGE = 6
+report_lines = [
+    &quot;DAILY BRANCH TRANSACTION REPORT           PAGE 1&quot;,
+    &quot;BRANCH   ACCOUNT-ID   AMOUNT&quot;,
+    &quot;100      ACC0000001   1500.00&quot;,
+    &quot;100      ACC0000002    250.75&quot;,
+    &quot;200      ACC0000003   4000.00&quot;,
+    &quot;PAGE TOTAL:                   5750.75&quot;,
+    &quot;DAILY BRANCH TRANSACTION REPORT           PAGE 2&quot;,
+    &quot;BRANCH   ACCOUNT-ID   AMOUNT&quot;,
+    &quot;200      ACC0000004    999.99&quot;,
+    &quot;300      ACC0000005   2200.00&quot;,
+    &quot;300      ACC0000006    100.00&quot;,
+    &quot;PAGE TOTAL:                   3299.99&quot;,
+]
+
+def split_pages(lines, lines_per_page):
+    return [lines[i:i + lines_per_page] for i in range(0, len(lines), lines_per_page)]
+
+def strip_headers_and_footers(lines, lines_per_page, header_lines=2, footer_lines=1):
+    &quot;&quot;&quot;Header/footer lines are identified by their fixed POSITION within each
+    page -- not by matching text -- because report text (page numbers,
+    running totals) changes page to page while the position never does.&quot;&quot;&quot;
+    data_lines = []
+    for page in split_pages(lines, lines_per_page):
+        data_lines.extend(page[header_lines: lines_per_page - footer_lines])
+    return data_lines
+
+data_lines = strip_headers_and_footers(report_lines, LINES_PER_PAGE)
+print(f&quot;{len(report_lines)} raw lines across {len(report_lines)//LINES_PER_PAGE} pages &quot;
+      f&quot;-&gt; {len(data_lines)} data lines after stripping headers/footers&quot;)
+for line in data_lines:
+    print(f&quot;  {line!r}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>12 raw lines across 2 pages -&gt; 6 data lines after stripping headers/footers
+  &#x27;100      ACC0000001   1500.00&#x27;
+  &#x27;100      ACC0000002    250.75&#x27;
+  &#x27;200      ACC0000003   4000.00&#x27;
+  &#x27;200      ACC0000004    999.99&#x27;
+  &#x27;300      ACC0000005   2200.00&#x27;
+  &#x27;300      ACC0000006    100.00&#x27;
+</code></pre><p><strong>Exercise:</strong>
+Add a third page (2 header lines, 3 data lines under branch <code>400</code>, 1 footer line totalling
+<code>150.00</code>) to <code>report_lines</code> and confirm <code>strip_headers_and_footers</code> produces the right
+count of data lines across all three pages.</p>
+<p><strong>Starting point:</strong> The <code>report_lines</code> list and <code>strip_headers_and_footers</code> function from
+this concept's Example, with the third page's 6 lines appended.</p>
+<p>Expected output (actually run):</p>
+<pre><code>18 raw lines across 3 pages -&gt; 9 data lines
+</code></pre><hr />
+<h3>Concept 2 — Column Offsets and Control-Break Grouping</h3>
+<p>Report text is parsed by fixed column offsets exactly like a data record — there is no
+delimiter, just position — but a report additionally carries an <em>implicit</em> grouping that a
+data file's colspecs never need: a <strong>control break</strong>. The report's rows are already sorted
+by branch code, and the &quot;group boundary&quot; is nothing more than the point where the leading
+column's value changes from the row immediately before it. There is no explicit marker for
+where one branch's rows end and the next begins; the change in that column's value <strong>is</strong>
+the marker.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>REPORT_COLSPECS = {&quot;branch&quot;: (0, 9), &quot;account_id&quot;: (9, 22), &quot;amount&quot;: (22, 32)}
+
+def parse_report_line(line):
+    branch = line[REPORT_COLSPECS[&quot;branch&quot;][0]:REPORT_COLSPECS[&quot;branch&quot;][1]].strip()
+    account_id = line[REPORT_COLSPECS[&quot;account_id&quot;][0]:REPORT_COLSPECS[&quot;account_id&quot;][1]].strip()
+    amount = Decimal(line[REPORT_COLSPECS[&quot;amount&quot;][0]:REPORT_COLSPECS[&quot;amount&quot;][1]].strip())
+    return branch, account_id, amount
+
+parsed_rows = [parse_report_line(l) for l in data_lines]
+for row in parsed_rows:
+    print(f&quot;  branch={row[0]:&lt;5} account={row[1]:&lt;12} amount={row[2]}&quot;)
+
+def control_break_groups(rows):
+    &quot;&quot;&quot;Group consecutive rows by branch code -- there is no explicit grouping
+    structure in the report text, the group boundary IS the point where the
+    leading column&#x27;s value changes from the row before it.&quot;&quot;&quot;
+    groups = []
+    current_branch = None
+    current_group = []
+    for branch, account_id, amount in rows:
+        if branch != current_branch and current_group:
+            groups.append((current_branch, current_group))
+            current_group = []
+        current_branch = branch
+        current_group.append((account_id, amount))
+    if current_group:
+        groups.append((current_branch, current_group))
+    return groups
+
+groups = control_break_groups(parsed_rows)
+for branch, rows in groups:
+    subtotal = sum(amount for _acct, amount in rows)
+    print(f&quot;  control break: branch {branch} -&gt; {len(rows)} row(s), subtotal={subtotal}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>  branch=100   account=ACC0000001   amount=1500.00
+  branch=100   account=ACC0000002   amount=250.75
+  branch=200   account=ACC0000003   amount=4000.00
+  branch=200   account=ACC0000004   amount=999.99
+  branch=300   account=ACC0000005   amount=2200.00
+  branch=300   account=ACC0000006   amount=100.00
+  control break: branch 100 -&gt; 2 row(s), subtotal=1750.75
+  control break: branch 200 -&gt; 2 row(s), subtotal=4999.99
+  control break: branch 300 -&gt; 2 row(s), subtotal=2300.00
+</code></pre><p><strong>Exercise:</strong>
+Re-run <code>parse_report_line</code> and <code>control_break_groups</code> over the extended three-page data
+line set from Concept 1's exercise, which adds a fourth branch group, <code>400</code>.</p>
+<p><strong>Starting point:</strong> The <code>parse_report_line</code> and <code>control_break_groups</code> functions from this
+concept's Example, applied to the 9-line <code>data_lines</code> set from Concept 1's exercise.</p>
+<p>Expected output (actually run):</p>
+<pre><code>  control break: branch 100 -&gt; 2 row(s), subtotal=1750.75
+  control break: branch 200 -&gt; 2 row(s), subtotal=4999.99
+  control break: branch 300 -&gt; 2 row(s), subtotal=2300.00
+  control break: branch 400 -&gt; 3 row(s), subtotal=150.00
+</code></pre><hr />
+<h3>Concept 3 — Trailer Totals Reused as a Parse Checksum</h3>
+<p>Every page's footer total is not just something to strip and discard — it is a free
+correctness check the report-writer program already computed, from data this parser cannot
+independently trust yet. Summing the parsed <code>amount</code> column for a page and comparing it
+against that page's own trailer total catches exactly the class of bug a truncated LRECL
+validation (Day 2) does not: a report where every individual line parses without error, but
+one line was silently dropped or double-counted somewhere in the pipeline before this
+check ever ran.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def page_trailer_total(page_lines):
+    trailer = page_lines[-1]
+    return Decimal(trailer.replace(&quot;PAGE TOTAL:&quot;, &quot;&quot;).strip())
+
+def verify_pages_against_trailers(lines, lines_per_page, header_lines=2, footer_lines=1):
+    results = []
+    for page in split_pages(lines, lines_per_page):
+        data = page[header_lines: lines_per_page - footer_lines]
+        parsed = [parse_report_line(l) for l in data]
+        computed_total = sum(amount for _b, _a, amount in parsed)
+        trailer_total = page_trailer_total(page)
+        results.append((computed_total, trailer_total, computed_total == trailer_total))
+    return results
+
+for i, (computed, trailer, ok) in enumerate(
+        verify_pages_against_trailers(report_lines, LINES_PER_PAGE), start=1):
+    print(f&quot;  page {i}: computed={computed} trailer={trailer} match={ok}&quot;)
+
+grand_total_computed = sum(amount for _b, _a, amount in parsed_rows)
+print(f&quot;grand total across both pages (computed from data lines): {grand_total_computed}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>  page 1: computed=5750.75 trailer=5750.75 match=True
+  page 2: computed=3299.99 trailer=3299.99 match=True
+grand total across both pages (computed from data lines): 9050.74
+</code></pre><p><strong>Exercise:</strong>
+Run <code>verify_pages_against_trailers</code> over the extended three-page <code>report_lines</code> from
+Concept 1's exercise, and compute the grand total across all three pages.</p>
+<p><strong>Starting point:</strong> The <code>verify_pages_against_trailers</code> function from this concept's
+Example, applied to the 18-line, three-page <code>report_lines</code> from Concept 1's exercise.</p>
+<p>Expected output (actually run):</p>
+<pre><code>  page 1: computed=5750.75 trailer=5750.75 match=True
+  page 2: computed=3299.99 trailer=3299.99 match=True
+  page 3: computed=150.00 trailer=150.00 match=True
+  grand total across all three pages: 9200.74
+</code></pre><p>Every page's computed subtotal matches its own trailer exactly — this is what a passing
+checksum looks like, and it is the same reconciliation-by-comparison idea Week 07 used for
+CDC's source-vs-index key reconciliation, applied here to a report's own self-declared
+totals instead.</p>
+<hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> The report program's line-per-page count, header format, and footer
+format are baked into COBOL source code that may not have been touched in a decade — there
+is no configuration file describing &quot;6 lines per page, 2 header lines&quot; anywhere; that
+number has to be worked out by inspecting real report output, and it silently changes if
+the report program itself is ever recompiled with a different page-length JCL parameter.</p>
+<p><strong>Compliance angle:</strong> A mainframe report is frequently the <em>only</em> surviving record of a
+batch run's outcome for older systems with no separate audit log — the trailer totals this
+concept parses as a checksum are, in practice, sometimes the regulatory evidence that a
+given day's batch actually balanced.</p>
+<p><strong>What breaks in production:</strong> A quarter-end report run adds one extra summary page at the
+very end that does not follow the same 6-line-per-page pattern as every other page (a
+report-wide grand-total page, differently formatted). A parser hard-coded to the ordinary
+page shape either crashes on it or, worse, silently misparses it as if it were an ordinary
+data page and folds a summary line into a control-break group where it does not belong.</p>
+<hr />
+<h2 id="day-5">Day 5 — Legacy Records Into Vectors</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="13-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=zRQ4sbIhKJ0" target="_blank" rel="noopener"><b>Modernizing mainframes without a full migration</b><small>Technix · 5:37</small></a></li><li><a href="https://www.youtube.com/watch?v=UXgcz94d_1s" target="_blank" rel="noopener"><b>Migrating Mainframe &amp; Modernizing Legacy Applications/Systems onto the Cloud</b><small>Angelbeat Events · 24:58</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=legacy%20mainframe%20data%20ingestion%20modernization%20pipeline" target="_blank" rel="noopener">Search YouTube: legacy mainframe data ingestion modernization pipeline</a></p></div>
+<hr />
+<h3>Concept 1 — Rendering Copybook Records Into Narrative Before Embedding</h3>
+<p>An embedding model was never trained on raw copybook field names and packed-decimal
+values — <code>ACCOUNT-ID=ACC0000001, ACCOUNT-STATUS=A</code> carries far less retrievable meaning to
+a semantic search than the same facts written as a sentence. The DataPrep step this whole
+week has been building toward is rendering a fully-decoded record (Days 1-3's byte-level
+work has already produced real Python values by this point) into a short natural-language
+narrative before it ever reaches the embed step Week 08 built.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def render_account_narrative(account_id, customer_name, balance, status, tran_count):
+    status_word = {&quot;A&quot;: &quot;active&quot;, &quot;C&quot;: &quot;closed&quot;, &quot;D&quot;: &quot;delinquent&quot;}.get(status, status)
+    return (f&quot;Account {account_id} held by {customer_name.strip()} is {status_word} &quot;
+            f&quot;with a current balance of ${balance} across {tran_count} recorded &quot;
+            f&quot;transactions.&quot;)
+
+account_narrative = render_account_narrative(
+    &quot;ACC0000001&quot;, &quot;JANE DOE&quot;, Decimal(&quot;1234.56&quot;), &quot;A&quot;, 12)
+print(account_narrative)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>Account ACC0000001 held by JANE DOE is active with a current balance of $1234.56 across 12 recorded transactions.
+</code></pre><p><strong>Exercise:</strong>
+Render a second account's narrative: <code>ACC0000002</code>, held by <code>&quot;CARLOS RUIZ&quot;</code>, status <code>&quot;D&quot;</code>
+(delinquent), balance <code>87.40</code>, transaction count <code>3</code>.</p>
+<p><strong>Starting point:</strong> The <code>render_account_narrative</code> function from this concept's Example,
+called with the values above.</p>
+<p>Expected output (actually run):</p>
+<pre><code>Account ACC0000002 held by CARLOS RUIZ is delinquent with a current balance of $87.40 across 3 recorded transactions.
+</code></pre><hr />
+<h3>Concept 2 — Short Structured Records vs. Long Report Pages Need Different Chunking</h3>
+<p>A single copybook record's narrative (Concept 1) is already a short, self-contained
+unit — chunking it further would only fragment one account's facts across multiple
+vectors for no benefit. A multi-page mainframe report (Day 4) is the opposite case: one
+embedding call over the whole thing would blur one branch's transactions into another's
+inside a single vector, exactly the retrieval-quality problem Week 09's chunking-strategy
+week exists to avoid. The natural chunk boundary for a report is its own page boundary,
+since that is already how the report itself organizes its control-break groups.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def chunk_lines(lines, size):
+    return [lines[i:i + size] for i in range(0, len(lines), size)]
+
+# A single ACCOUNT-RECORD narrative is already one short, self-contained
+# unit -- it is its own chunk, never split further.
+account_chunks = [account_narrative]
+
+# The 12-line report from Day 4 is long enough that one embedding call over
+# the whole thing would blur page 1&#x27;s branch-100 rows into page 2&#x27;s
+# branch-300 rows in a single vector; chunk it by page instead.
+report_chunks = chunk_lines(report_lines, LINES_PER_PAGE)
+print(f&quot;account narrative -&gt; {len(account_chunks)} chunk(s) (short structured record, no split)&quot;)
+print(f&quot;12-line mainframe report -&gt; {len(report_chunks)} chunk(s) of {LINES_PER_PAGE} lines each &quot;
+      f&quot;(chunked by page, matching the report&#x27;s own page boundary)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>account narrative -&gt; 1 chunk(s) (short structured record, no split)
+12-line mainframe report -&gt; 2 chunk(s) of 6 lines each (chunked by page, matching the report&#x27;s own page boundary)
+</code></pre><p><strong>Exercise:</strong>
+Chunk the extended three-page, 18-line <code>report_lines</code> from Day 4's exercises by page, and
+confirm the single-narrative case from Concept 1's exercise still produces exactly one
+chunk.</p>
+<p><strong>Starting point:</strong> The <code>chunk_lines</code> function from this concept's Example, the 18-line
+<code>report_lines</code> from Day 4 Concept 1's exercise, and the <code>claim_narrative</code> string from this
+concept's own Concept 1 exercise.</p>
+<p>Expected output (actually run):</p>
+<pre><code>18-line, 3-page report -&gt; 3 chunk(s) of 6 lines each
+single claim narrative -&gt; 1 chunk(s), no split
+</code></pre><hr />
+<h3>Concept 3 — Provenance and Idempotent Upsert Keyed by Record ID Plus Extract Date</h3>
+<p>Week 12's idempotent-pipeline pattern (a deterministic key so re-running a batch is a
+no-op) needs one adjustment for mainframe-sourced records: the key must include the
+<strong>extract date</strong>, not just the record's own ID. A mainframe record has no reliable
+&quot;modified at&quot; timestamp of its own the way a modern database row does — the whole record
+is simply re-extracted in full on every batch run, whether or not anything in it actually
+changed — so re-running the <em>same day's</em> extract must collapse to the same key (a
+genuine no-op), while a <strong>later day's</strong> extract for the same record is a legitimately new
+key, because the underlying mainframe record may have changed in the interim. Every
+provenance record also carries <code>source_system</code> and <code>copybook_version</code> alongside the
+record's own ID — exactly the fields Week 07's unified-record provenance design used for
+CDC-sourced records, reused here for a batch-sourced one instead.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+
+@dataclasses.dataclass
+class LegacyVectorRecord:
+    record_id: str
+    source_system: str
+    copybook_version: str
+    extract_date: str
+    narrative: str
+    upsert_key: str = dataclasses.field(init=False)
+
+    def __post_init__(self):
+        # Deterministic key: same record_id re-extracted on the same date
+        # collapses to the same key -- re-running a day&#x27;s load is a no-op,
+        # not a duplicate. A later extract_date is a genuinely new key,
+        # because the mainframe record may have changed since.
+        basis = f&quot;{self.record_id}|{self.extract_date}&quot;
+        self.upsert_key = hashlib.sha256(basis.encode()).hexdigest()[:16]
+
+def upsert_batch(index, records):
+    for r in records:
+        index[r.upsert_key] = r
+    return index
+
+index = {}
+batch_1 = [
+    LegacyVectorRecord(&quot;ACC0000001&quot;, &quot;mainframe_policy_core&quot;, &quot;COPYBOOK-V3&quot;,
+                        &quot;2026-03-01&quot;, account_narrative),
+]
+upsert_batch(index, batch_1)
+print(f&quot;after first load: {len(index)} record(s) in the index&quot;)
+
+# Re-run the exact same extract (same record_id, same extract_date) -- this
+# must be a no-op, not a duplicate.
+upsert_batch(index, batch_1)
+print(f&quot;after re-running the same extract: {len(index)} record(s) in the index &quot;
+      f&quot;(unchanged -- idempotent on record_id + extract_date)&quot;)
+
+# A genuinely new day&#x27;s extract for the same account IS a new key.
+batch_2 = [
+    LegacyVectorRecord(&quot;ACC0000001&quot;, &quot;mainframe_policy_core&quot;, &quot;COPYBOOK-V3&quot;,
+                        &quot;2026-03-02&quot;, account_narrative),
+]
+upsert_batch(index, batch_2)
+print(f&quot;after the next day&#x27;s extract for the same account: {len(index)} record(s) &quot;
+      f&quot;(a new extract_date is a genuinely new key, not an overwrite)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>REAL MODE — not executed here; requires a live embedding-API network call:</strong></p>
+<pre><code>Turning each LegacyVectorRecord&#x27;s `narrative` field into an actual vector needs a real call
+to an embedding API (OpenAI, a hosted open-weight model, etc.) -- a network call this
+sandbox has no credential or connectivity to make. Everything upstream of that call (byte
+decoding, narrative rendering, chunking, and the provenance/idempotency key logic this
+concept demonstrates) is genuinely executed above; only the embedding call itself, and the
+subsequent vector-store upsert, are the REAL MODE step, unchanged in shape from Week 08&#x27;s
+already-executed embed/upsert pattern.
+</code></pre><p>Expected output (actually run):</p>
+<pre><code>after first load: 1 record(s) in the index
+after re-running the same extract: 1 record(s) in the index (unchanged -- idempotent on record_id + extract_date)
+after the next day&#x27;s extract for the same account: 2 record(s) (a new extract_date is a genuinely new key, not an overwrite)
+</code></pre><p><strong>Exercise:</strong>
+Using <code>ACC0000002</code>'s narrative from Concept 1's exercise, load it once for extract date
+<code>2026-03-01</code>, re-run the identical load, then load a same-day reprocessing pass that only
+bumps <code>copybook_version</code> to <code>COPYBOOK-V4</code> (same <code>record_id</code> and <code>extract_date</code>), and finally
+load a genuinely later extract dated <code>2026-03-03</code>. Report the index size after each step.</p>
+<p><strong>Starting point:</strong> The <code>LegacyVectorRecord</code> dataclass and <code>upsert_batch</code> function from
+this concept's Example, and the <code>ACC0000002</code> narrative from this day's Concept 1 exercise.</p>
+<p>Expected output (actually run):</p>
+<pre><code>after first load: 1 record(s)
+after re-running same extract: 1 record(s) (unchanged)
+after a same-day copybook-version-only reprocessing pass: 1 record(s) (same record_id + extract_date -&gt; same key, so this OVERWRITES, it does not add a row)
+after a genuinely later extract_date: 2 record(s) (new key)
+</code></pre><p>The copybook-version bump alone does not create a second row, because the upsert key is
+built only from <code>record_id</code> and <code>extract_date</code> — a schema-version change on the <em>same</em>
+extract day is treated as a correction to the same record, not a new one, exactly as
+intended.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> There is frequently no per-record change indicator on the mainframe side
+at all — the daily extract is a full re-dump of every record in scope, whether or not it
+changed, which is exactly why the upsert key must be built from the extract date rather
+than assuming an incremental, changed-rows-only feed the way Week 11's incremental
+embedding update week could.</p>
+<p><strong>Compliance angle:</strong> The rendered narrative is a new representation of the same regulated
+customer data the copybook record always held — a deletion request honored against the
+mainframe source but never propagated to this narrative's vector-store entry has not
+actually deleted the customer's data, it has only deleted one of its two copies.</p>
+<p><strong>What breaks in production:</strong> A batch is accidentally re-run twice for the same extract
+date after a scheduling retry, and the upsert key correctly absorbs the duplicate — but a
+different, more subtle bug ships alongside it unnoticed: the extract date is read from the
+job's <em>run</em> timestamp instead of the mainframe's own <em>as-of</em> date for the data, so a job
+that runs late (after midnight) silently starts keying every record under the next
+calendar day, splitting one logical daily extract's records across two different
+provenance dates.</p>
+<hr />
+<h2>Architecture Decision — Week 13</h2>
+<p><strong>Choosing between:</strong> treating a COBOL/mainframe source as a special case handled outside
+the DataPrep pipeline Weeks 08-12 built, vs. treating it as one more parser stage feeding
+the same parse→chunk→embed→upsert shape everything else in Phase 2 already uses.</p>
+<p><strong>Rule of thumb:</strong> A mainframe copybook record is not a fundamentally different kind of
+DataPrep input, it is a <strong>differently-encoded</strong> one — the parse stage is genuinely
+different (Days 1-4's byte-offset arithmetic, EBCDIC decode, packed/zoned-decimal
+unpacking, report control-break logic all exist because nothing about a mainframe extract
+resembles a modern document format), but everything from &quot;a fully-decoded record exists as
+Python values&quot; onward is identical to Week 08's document pipeline: render to narrative,
+chunk at the boundary that matches the record's own natural shape (never split a short
+structured record, always chunk a long report by its own page boundary), embed, and upsert
+with a deterministic key. Build one COBOL-aware parser stage that emits the same shape
+Week 08's parser already emits, rather than building a second, parallel pipeline for
+mainframe sources — the tax of a parallel pipeline is every downstream fix (a chunking
+tweak, an upsert-key change) having to be made twice and kept in sync forever, exactly the
+kind of drift this track's own copy-in-not-cross-reference convention exists to avoid
+internally.</p>
+<p>The one genuine divergence from Week 08-12's contract is the upsert key: a mainframe batch
+source has no reliable per-record change timestamp the way a modern database row does, so
+the key must fold in the <strong>extract date</strong> (Day 5) rather than relying on a content hash or
+a change-log offset the way Weeks 06, 07, and 11's sources could. Get this key wrong — key
+on <code>record_id</code> alone, say — and a same-record, same-day reprocessing pass looks
+indistinguishable from a genuinely new day's data; key on <code>record_id</code> plus a naive
+wall-clock run timestamp instead of the batch's own as-of date, and a late-running job
+silently splits one logical day's extract across two provenance dates, exactly the failure
+this week's Day 5 Reality Check names.</p>
+<p>Taken together, Phase 2 (Weeks 08-13) closes with the same lesson Phase 1 closed with in
+Week 07, from the opposite direction: Week 07 showed that a beautifully engineered
+streaming pipeline is worthless fed by a source whose real floor is a nightly batch window;
+this week shows that a beautifully engineered parse→chunk→embed→upsert pipeline is
+worthless if it cannot actually read the bytes its most important source hands it in the
+first place. A DataPrep pipeline for a BFSI organization is not done when it handles PDFs
+and scanned forms — it is done when it can also read the copybook-defined, EBCDIC-encoded,
+packed-decimal record that is often the single most authoritative source of truth the
+organization has.</p>
+<div class="pager"><a class="btn ghost" href="week-12.html">&larr; Week 12</a><a class="btn ghost" href="week-14.html">Week 14 &rarr;</a></div>
+</main></body></html>

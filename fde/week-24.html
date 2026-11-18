@@ -1,0 +1,1781 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 24 — Advanced RAG: Query Rewriting &amp; Parent-Child Retrieval</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/how-do-query-rewriting-and-multi-query-retrieval-work" target="_blank" rel="noopener">Query Rewriting and Multi-Query Retrieval<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/how-does-hyde-work" target="_blank" rel="noopener">How does HyDE work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/agentic-rag" target="_blank" rel="noopener">What is Agentic RAG?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="24" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 24 — Advanced RAG: Query Rewriting &amp; Parent-Child Retrieval</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>5 — Compound AI Systems &amp; Evaluation / RAG (opens Phase 5)</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Advanced RAG retrieval mechanics</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 01's vector-search fundamentals and Week 09's chunking-strategy work (<code>Week_09_Semantic_Chunking_Strategies</code>) are assumed background for &quot;why chunk size matters&quot; before this week asks &quot;what do you do with two DIFFERENT chunk sizes at once.&quot; Week 05's BM25/hybrid-search precedent and <code>Curriculum/Week_10_AI_Engineering/W10_D5b_RAG_Advanced.ipynb</code>'s hybrid-search/reranking/RRF content (genuinely adapted into Day 2, not just referenced — see that day's note) inform this week throughout.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. <code>langchain</code> (1.4.1) split its retriever classes (<code>ParentDocumentRetriever</code>, <code>MultiQueryRetriever</code>, <code>SelfQueryRetriever</code>, <code>InMemoryStore</code>) out of the core package into a separate <code>langchain-classic</code> package as of its 1.0 restructure — both <code>langchain</code> and <code>langchain-classic</code> install and import cleanly in this sandbox, confirmed directly (see Day 2's note on the exact import path). <code>llama-index-core</code> (already installed from Week 20) ships <code>SentenceWindowNodeParser</code> and <code>AutoMergingRetriever</code> and both run for real, with no live LLM, on the deterministic keyword-bucket embeddings this week hand-rolls in place of a live embedding API (the same stand-in pattern Week 23 Day 3 used for <code>SemanticCache</code>). Anywhere a concept's own subject is a live LLM generation call — the actual query rewrite, the actual hypothetical document, the actual N query variants, the actual natural-language-to-filter translation — it is shown as REAL MODE reference syntax with a hand-written but clearly disclosed stand-in value substituted so the surrounding retrieval, fusion, indexing, and filtering mechanics can be built and verified as genuine, executed code.</td>
+</tr>
+</tbody>
+</table>
+<p>Weeks 19-23 closed Phase 4 by making an agentic pipeline reliable, safe against a legacy
+core, and affordable to run at volume. None of that helps if the pipeline's retrieval
+step keeps missing the right chunk in the first place — a claims adjuster's actual typed
+question (&quot;can I still get money back&quot;) rarely resembles the vocabulary of the policy
+clause that answers it, and a single fixed chunk size is never simultaneously small
+enough to embed precisely and large enough to answer a question in full. This week opens
+Phase 5 (Compound AI Systems &amp; Evaluation / RAG) by attacking both problems directly:
+rewriting or expanding the query before it ever reaches the index (Days 1-2), decoupling
+the chunk you SEARCH from the chunk you GENERATE with (Day 3), constraining retrieval
+with structured metadata predicates (Day 4), and then measuring — not assuming — which
+combination of these actually wins on a labeled query set (Day 5).</p>
+<hr />
+<h2 id="day-1">Day 1 — Query Rewriting and HyDE</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="24-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=v_BnBEubv58" target="_blank" rel="noopener"><b>Advanced RAG 05 - HyDE - Hypothetical Document Embeddings</b><small>Sam Witteveen · 11:53</small></a></li><li><a href="https://www.youtube.com/watch?v=SaDzIVkYqyY" target="_blank" rel="noopener"><b>RAG from scratch: Part 9 (Query Translation -- HyDE)</b><small>LangChain · 4:47</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=HyDE%20hypothetical%20document%20embeddings%20query%20rewriting%20RAG" target="_blank" rel="noopener">Search YouTube: HyDE hypothetical document embeddings query rewriting RAG</a></p></div>
+<hr />
+<h3>Concept 1 — Rewriting Underspecified Servicing Questions</h3>
+<p>A real servicing question rarely arrives retrieval-ready. A policyholder types &quot;can I
+still get money back&quot; — three words of actual signal (money, back, still) with almost no
+overlap against the policy clause that answers it (&quot;free look period... full premium
+refund... within 10 days of issue&quot;). An LLM query-rewrite step takes the underspecified
+question plus a short instruction (&quot;rewrite this insurance servicing question to be
+specific and retrieval-ready&quot;) and produces a version that shares real vocabulary with
+the target clause — that rewrite call itself needs a live LLM this sandbox does not have,
+so the three rewritten queries below are hand-written stand-ins for what that call would
+produce, disclosed honestly rather than presented as a live generation. What IS built and
+run for real is the retrieval mechanics on both sides: a small BFSI corpus, a bag-of-words
+cosine retriever over a fixed insurance vocabulary (the same toy-embedding stand-in
+pattern Week 23 used, standing in for a real embedding API), and <code>recall@k</code> computed
+before and after rewriting on a fixed 3-question set.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code>import math
+
+def tokenize(text):
+    return text.lower().replace(&quot;,&quot;, &quot; &quot;).replace(&quot;.&quot;, &quot; &quot;).split()
+
+VOCAB = {
+    &quot;free&quot;, &quot;look&quot;, &quot;period&quot;, &quot;cancel&quot;, &quot;cancellation&quot;, &quot;refund&quot;, &quot;premium&quot;, &quot;return&quot;,
+    &quot;days&quot;, &quot;reinstate&quot;, &quot;reinstatement&quot;, &quot;lapse&quot;, &quot;lapsed&quot;, &quot;grace&quot;, &quot;deductible&quot;,
+    &quot;waive&quot;, &quot;waiver&quot;, &quot;beneficiary&quot;, &quot;change&quot;, &quot;claim&quot;, &quot;rider&quot;, &quot;endorsement&quot;,
+    &quot;underwriting&quot;, &quot;medical&quot;, &quot;exam&quot;, &quot;glass&quot;, &quot;windshield&quot;, &quot;crack&quot;, &quot;chip&quot;, &quot;repair&quot;,
+    &quot;comprehensive&quot;, &quot;coverage&quot;, &quot;towing&quot;, &quot;rock&quot;, &quot;roadside&quot;, &quot;rental&quot;, &quot;reimbursement&quot;,
+}
+
+def bow(text):
+    toks = tokenize(text)
+    return {t: toks.count(t) for t in toks if t in VOCAB}
+
+def cosine(v1, v2):
+    common = set(v1) &amp; set(v2)
+    dot = sum(v1[t] * v2[t] for t in common)
+    n1 = math.sqrt(sum(x * x for x in v1.values())) or 1.0
+    n2 = math.sqrt(sum(x * x for x in v2.values())) or 1.0
+    return dot / (n1 * n2)
+
+# One corpus, reused for every concept in this day. This BOW-cosine retriever stands in
+# for a real embedding-model + vector-index pair -- the retrieval MECHANICS below
+# (ranking, recall@k) are the same regardless of what produces the vectors.
+CORPUS = [
+    (&quot;DOC-B&quot;, &quot;Roadside assistance: towing, flat tire changes, and lockout service are included at no extra premium under the standard auto rider.&quot;),
+    (&quot;DOC-C&quot;, &quot;Rental reimbursement: a daily rental car allowance applies while a covered vehicle is in the shop after an approved claim.&quot;),
+    (&quot;DOC-5&quot;, &quot;Grace period for premium payment: coverage stays active for 31 days past the due date before the policy lapses for nonpayment.&quot;),
+    (&quot;DOC-4&quot;, &quot;Deductible waiver rider: this rider waives the standard deductible for the first claim filed after the rider&#x27;s effective date.&quot;),
+    (&quot;DOC-A&quot;, &quot;Auto glass coverage: chip and crack repair to the windshield or any vehicle glass is covered in full with no deductible under the standard comprehensive endorsement, regardless of how the damage occurred.&quot;),
+    (&quot;DOC-1&quot;, &quot;Free look period: a new auto policy may be canceled within 10 days of issue for a full premium refund, no questions asked.&quot;),
+    (&quot;DOC-2&quot;, &quot;Reinstatement after lapse: a lapsed policy can be reinstated within 90 days of lapse if all past-due premium is paid, without new underwriting.&quot;),
+    (&quot;DOC-3&quot;, &quot;Beneficiary changes: the policyholder may change the named beneficiary at any time before a claim is filed, using the standard change-of-beneficiary form.&quot;),
+]
+
+def retrieve(query_text, k=3):
+    qv = bow(query_text)
+    scored = [(doc_id, cosine(qv, bow(text))) for doc_id, text in CORPUS]
+    scored.sort(key=lambda x: -x[1])
+    return scored[:k]
+
+def recall_at_k(ranked_ids, relevant_id, k):
+    return 1.0 if relevant_id in ranked_ids[:k] else 0.0
+
+# REAL MODE: in production these three &quot;rewritten&quot; strings come from a live LLM call
+# (e.g. `llm.invoke(REWRITE_PROMPT.format(question=underspecified))`). Hand-written here
+# as honest stand-ins for that call&#x27;s output, not measured from a live generation.
+fixed_query_set = [
+    (&quot;can I still get money back&quot;,
+     &quot;what is the refund available for canceling a new auto policy within the free look period&quot;,
+     &quot;DOC-1&quot;),
+    (&quot;my policy stopped, can I fix it&quot;,
+     &quot;how do I reinstate a policy that lapsed due to nonpayment&quot;,
+     &quot;DOC-2&quot;),
+    (&quot;can I switch who gets paid&quot;,
+     &quot;how do I change the named beneficiary on my policy&quot;,
+     &quot;DOC-3&quot;),
+]
+
+under_scores, rewritten_scores = [], []
+for under, rewritten, rel in fixed_query_set:
+    u_ids = [d for d, _ in retrieve(under, 3)]
+    r_ids = [d for d, _ in retrieve(rewritten, 3)]
+    u = recall_at_k(u_ids, rel, 3)
+    r = recall_at_k(r_ids, rel, 3)
+    under_scores.append(u)
+    rewritten_scores.append(r)
+    print(f&quot;relevant={rel}  underspecified_recall@3={u:.2f}  rewritten_recall@3={r:.2f}&quot;)
+
+print(f&quot;mean recall@3: underspecified={sum(under_scores)/3:.3f}  rewritten={sum(rewritten_scores)/3:.3f}&quot;)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>relevant=DOC-1  underspecified_recall@3=0.00  rewritten_recall@3=1.00
+relevant=DOC-2  underspecified_recall@3=0.00  rewritten_recall@3=1.00
+relevant=DOC-3  underspecified_recall@3=0.00  rewritten_recall@3=1.00
+mean recall@3: underspecified=0.000  rewritten=1.000
+</code></pre><p>None of the three underspecified questions share enough real vocabulary with any
+document to score above zero, so <code>retrieve</code> falls back to corpus insertion order —
+which never happens to contain the right document for any of the three. Rewriting each
+question into retrieval-ready vocabulary takes mean recall@3 from 0.000 to 1.000 on this
+fixed set — the measured &quot;rewrite lift&quot; this concept exists to demonstrate.</p>
+<p><strong>Exercise:</strong>
+Using <code>retrieve</code>, <code>recall_at_k</code>, and <code>CORPUS</code> from this concept's Example, compute and
+print <code>underspecified_recall@3</code> and <code>rewritten_recall@3</code> for the servicing question
+below, then print whether rewriting changed the retrieval outcome for this one question.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>glass_underspecified = &quot;is a little ding on my window something my plan pays for&quot;
+glass_rewritten = &quot;is windshield chip and crack repair covered under the comprehensive endorsement&quot;
+glass_relevant = &quot;DOC-A&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>underspecified_recall@3=0.00
+rewritten_recall@3=1.00
+rewriting changed the outcome: True
+</code></pre><hr />
+<h3>Concept 2 — HyDE: Hypothetical Document Embeddings</h3>
+<p>Query rewriting still embeds a QUESTION. HyDE (Hypothetical Document Embeddings) instead
+asks an LLM to write a plausible ANSWER to the question — a fake but topically fluent
+document — and embeds THAT instead of the question. The intuition: a real policy clause
+is written in answer-shaped prose (&quot;Yes, this is covered... under the endorsement...&quot;),
+not question-shaped prose (&quot;is this covered?&quot;), so a hypothetical answer document often
+sits closer in embedding space to the real clause than the literal question ever would —
+even though the hypothetical document is entirely fabricated and never actually
+retrieved or shown to the user. Generating that hypothetical document is the one step
+here that genuinely needs a live LLM; disclosed as REAL MODE below. What's real and run
+is the retrieval comparison: the same underspecified question embedded directly vs. the
+hand-written hypothetical document embedded in its place, against the same corpus and
+retriever from Concept 1.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># Reusing retrieve, recall_at_k, CORPUS from Concept 1
+
+narrow_query = &quot;is a little ding on my window something my plan pays for&quot;
+
+# REAL MODE: in production this comes from `llm.invoke(HYDE_PROMPT.format(question=narrow_query))`.
+# Hand-written here as an honest stand-in for that generation, not a live LLM call.
+hypothetical_doc = (
+    &quot;Yes, this type of damage is covered. Windshield chip and crack repair from road &quot;
+    &quot;debris is included under the auto glass coverage endorsement, with no deductible &quot;
+    &quot;applied regardless of how the chip occurred, whether from a rock, gravel, or debris.&quot;
+)
+
+direct_top = [d for d, _ in retrieve(narrow_query, 3)]
+hyde_top = [d for d, _ in retrieve(hypothetical_doc, 3)]
+
+print(&quot;direct query top-3:&quot;, direct_top, &quot; recall@3:&quot;, recall_at_k(direct_top, &quot;DOC-A&quot;, 3))
+print(&quot;HyDE top-3:        &quot;, hyde_top, &quot; recall@3:&quot;, recall_at_k(hyde_top, &quot;DOC-A&quot;, 3))
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>direct query top-3: [&#x27;DOC-B&#x27;, &#x27;DOC-C&#x27;, &#x27;DOC-5&#x27;]  recall@3: 0.0
+HyDE top-3:         [&#x27;DOC-A&#x27;, &#x27;DOC-4&#x27;, &#x27;DOC-5&#x27;]  recall@3: 1.0
+</code></pre><p>The narrow question shares zero vocabulary with <code>DOC-A</code>'s actual clause text (&quot;ding&quot;,
+&quot;window&quot;, &quot;plan&quot;, &quot;pays&quot; are all outside <code>VOCAB</code>), so direct retrieval falls back to
+corpus order and misses entirely. The hypothetical document — fabricated, never shown to
+a user — shares real clause vocabulary (windshield, crack, deductible, endorsement) and
+retrieves <code>DOC-A</code> at rank 1.</p>
+<p><strong>Exercise:</strong>
+Using <code>retrieve</code> and <code>recall_at_k</code> from this concept's Example, write a hypothetical
+document for the underspecified question below (using the same vocabulary style as the
+Example's <code>hypothetical_doc</code>), then print the direct-query and HyDE top-3 lists plus
+their <code>recall@3</code> against <code>DOC-4</code>.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>narrow_query_2 = &quot;does my add-on take care of the first bill if something happens&quot;
+# DOC-4&#x27;s real text: &quot;Deductible waiver rider: this rider waives the standard deductible
+# for the first claim filed after the rider&#x27;s effective date.&quot; Write a hypothetical
+# answer document that shares DOC-4&#x27;s actual clause vocabulary (deductible, waiver,
+# rider, claim), the same way the Example&#x27;s hypothetical_doc shares DOC-A&#x27;s.
+relevant_doc = &quot;DOC-4&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>direct query top-3: [&#x27;DOC-B&#x27;, &#x27;DOC-C&#x27;, &#x27;DOC-5&#x27;]  recall@3: 0.0
+HyDE top-3 includes DOC-4 at some rank within top-3, giving recall@3: 1.0
+</code></pre><hr />
+<h3>Concept 3 — Step-Back Prompting for Policy-Clause Questions</h3>
+<p>Step-back prompting takes the opposite move from rewriting: instead of making a question
+MORE specific, it asks the LLM to generalize a narrow, clause-level question into the
+broader topic it belongs to, retrieves against the broad topic, then answers the narrow
+question using whatever context comes back. This helps when the narrow question's exact
+phrasing (&quot;a cracked windshield caused by debris during towing&quot;) pulls in the WRONG
+narrowly-related document (here, the roadside-towing clause, because &quot;towing&quot; is a strong
+literal match) instead of the actually-relevant general clause (the glass-coverage rider,
+which covers the damage regardless of how it happened). The step-back rewrite is the
+LLM-generation step here — REAL MODE, hand-written below — while the retrieval
+comparison at <code>k=1</code> (a tighter cutoff than Concepts 1-2, chosen because this failure mode
+is specifically about what wins at rank 1) is real, executed code.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># Reusing retrieve, recall_at_k, CORPUS from Concept 1
+
+narrow_clause_query = &quot;does the rider cover a cracked windshield caused by debris during towing&quot;
+# REAL MODE: in production this comes from `llm.invoke(STEP_BACK_PROMPT.format(question=narrow_clause_query))`.
+step_back_query = &quot;what does the auto glass coverage rider cover in general&quot;
+
+direct_top1 = [d for d, _ in retrieve(narrow_clause_query, 1)]
+stepback_top1 = [d for d, _ in retrieve(step_back_query, 1)]
+
+print(&quot;direct clause query top-1:&quot;, direct_top1, &quot; recall@1:&quot;, recall_at_k(direct_top1, &quot;DOC-A&quot;, 1))
+print(&quot;step-back query top-1:    &quot;, stepback_top1, &quot; recall@1:&quot;, recall_at_k(stepback_top1, &quot;DOC-A&quot;, 1))
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>direct clause query top-1: [&#x27;DOC-B&#x27;]  recall@1: 0.0
+step-back query top-1:     [&#x27;DOC-A&#x27;]  recall@1: 1.0
+</code></pre><p>The narrow question's literal mention of &quot;towing&quot; and &quot;debris&quot; pulls <code>DOC-B</code> (the
+roadside-assistance/towing clause) to rank 1, even though <code>DOC-A</code> (the glass-coverage
+clause that actually answers the question) scores third. Stepping back to the general
+topic strips the misleading &quot;towing&quot; overlap and correctly ranks <code>DOC-A</code> first.</p>
+<p><strong>Exercise:</strong>
+Using <code>retrieve</code> and <code>recall_at_k</code> from this concept's Example, write a step-back version
+of the narrow question below, then print both queries' top-1 result and <code>recall@1</code>
+against <code>DOC-2</code>.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>narrow_clause_query_2 = &quot;if I paid late because my card expired during a move, can my lapsed policy come back without a new medical exam&quot;
+relevant_doc = &quot;DOC-2&quot;
+# DOC-2&#x27;s real text: &quot;Reinstatement after lapse: a lapsed policy can be reinstated
+# within 90 days of lapse if all past-due premium is paid, without new underwriting.&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>direct clause query top-1 does not resolve to DOC-2 at rank 1
+step-back query top-1 resolves to DOC-2 at rank 1, recall@1: 1.0
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> an underspecified question is not a training-data gap to fix once — it
+is the permanent shape of how policyholders actually type into a chat box, so rewriting
+has to run on every single query at inference time, adding one more LLM call (and its
+latency and cost, see Week 23) to a path that used to be a single embedding call.</p>
+<p><strong>Compliance angle:</strong> a rewrite or HyDE-generated hypothetical document is never shown to
+the end user, but it IS the thing that actually determined what context the model saw —
+an audit trail for a disputed claims answer that logs only the original question and the
+final answer, with no record of the rewritten query or hypothetical document in between,
+cannot actually explain why the wrong (or right) clause was retrieved.</p>
+<p><strong>What breaks in production:</strong> a rewrite prompt tuned against the vocabulary of ONE
+policy line (auto) silently degrades on another (life, or commercial property) whose
+clause vocabulary the prompt's few-shot examples never covered — rewrite quality is a
+per-product-line variable, not a track-wide constant, and Day 5's bake-off methodology
+(measuring lift on a labeled set, not assuming it) is exactly how that degradation gets
+caught before it reaches production.</p>
+<hr />
+<h2 id="day-2">Day 2 — Multi-Query Fusion with RRF</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="24-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=6dDvfGrxFns" target="_blank" rel="noopener"><b>Understanding Reciprocal Rank Fusion in Hybrid Search [Advanced RAG]</b><small>TechViz - The Data Science Guy · 8:16</small></a></li><li><a href="https://www.youtube.com/watch?v=vVW26HKH7n0" target="_blank" rel="noopener"><b>RRF 排名融合：一個公式、一個旋鈕、一個盲點</b><small>DataSci Ocean · 8:00</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=reciprocal%20rank%20fusion%20RRF%20multi%20query%20retriever%20hybrid%20search" target="_blank" rel="noopener">Search YouTube: reciprocal rank fusion RRF multi query retriever hybrid search</a></p></div>
+<hr />
+<h3>Concept 1 — LangChain <code>MultiQueryRetriever</code>: n Query Variants, One Union</h3>
+<p><code>MultiQueryRetriever</code> asks an LLM to write several differently-phrased variants of one
+question, retrieves each variant separately, then merges the result lists. <code>langchain</code>
+1.4.1's own 1.0 restructure moved this class (and <code>ParentDocumentRetriever</code>,
+<code>SelfQueryRetriever</code>, <code>InMemoryStore</code>) out of the core <code>langchain</code> package into a separate
+<code>langchain-classic</code> package, confirmed directly in this sandbox — <code>from langchain.retrievers import MultiQueryRetriever</code> raises <code>ModuleNotFoundError</code> on this version; the working
+import is <code>from langchain_classic.retrievers.multi_query import MultiQueryRetriever</code>. The
+LLM call that actually WRITES the n variants is <code>MultiQueryRetriever.generate_queries()</code> —
+REAL MODE, since it needs a live LLM — but everything downstream of that call is real,
+installed, executable <code>langchain_classic</code> code: a real <code>InMemoryVectorStore</code> retriever
+built on the deterministic <code>KeywordBucketEmbeddings</code> stand-in (in place of a live embedding
+API), and the retriever's own <code>retrieve_documents()</code>/<code>unique_union()</code> methods called
+directly against 3 hand-written variants standing in for a live generation.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code>import math, hashlib
+from langchain_core.embeddings import Embeddings
+from langchain_core.vectorstores import InMemoryVectorStore
+from langchain_core.documents import Document
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
+from langchain_core.runnables import RunnableLambda
+from langchain_classic.retrievers.multi_query import MultiQueryRetriever
+
+KEYWORDS = [&quot;deductible&quot;, &quot;premium&quot;, &quot;claim&quot;, &quot;policy&quot;, &quot;underwriting&quot;, &quot;exclusion&quot;,
+            &quot;coverage&quot;, &quot;lapse&quot;, &quot;renewal&quot;, &quot;rider&quot;, &quot;beneficiary&quot;, &quot;grace&quot;]
+
+class KeywordBucketEmbeddings(Embeddings):
+    def _vec(self, text):
+        t = text.lower()
+        v = [float(t.count(k)) for k in KEYWORDS]
+        h = int(hashlib.sha256(t.encode()).hexdigest(), 16)
+        for i in range(8):
+            v.append(((h &gt;&gt; (i * 4)) % 7) / 7.0)
+        norm = math.sqrt(sum(x * x for x in v)) or 1.0
+        return [x / norm for x in v]
+    def embed_documents(self, texts):
+        return [self._vec(t) for t in texts]
+    def embed_query(self, text):
+        return self._vec(text)
+
+docs = [
+    Document(page_content=&quot;Grace period: premium not paid within 31 days causes lapse.&quot;, metadata={&quot;chunk_id&quot;: &quot;c1&quot;}),
+    Document(page_content=&quot;Reinstatement after lapse requires payment of past-due premium within 90 days.&quot;, metadata={&quot;chunk_id&quot;: &quot;c2&quot;}),
+    Document(page_content=&quot;Beneficiary designation can be changed any time before a claim is filed.&quot;, metadata={&quot;chunk_id&quot;: &quot;c3&quot;}),
+    Document(page_content=&quot;Deductible resets each policy year on the renewal date.&quot;, metadata={&quot;chunk_id&quot;: &quot;c4&quot;}),
+]
+
+vs = InMemoryVectorStore(KeywordBucketEmbeddings())
+vs.add_documents(docs)
+base_retriever = vs.as_retriever(search_kwargs={&quot;k&quot;: 4})
+
+# llm_chain would normally be `prompt | llm | LineListOutputParser()` (see
+# MultiQueryRetriever.from_llm()) -- stubbed with a no-op Runnable here since we supply
+# pre-generated variants directly below instead of making a live LLM call.
+stub_llm_chain = RunnableLambda(lambda x: [])
+mqr = MultiQueryRetriever(retriever=base_retriever, llm_chain=stub_llm_chain, include_original=False)
+
+# REAL MODE: in production these n=3 variants come from mqr.generate_queries(question, ...)
+# calling a live LLM. Hand-written here as honest stand-ins for that generation.
+query_variants = [
+    &quot;what happens if I miss a premium payment&quot;,
+    &quot;grace period before a policy lapses for nonpayment&quot;,
+    &quot;how many days can I be late on premium before losing coverage&quot;,
+]
+
+run_mgr = CallbackManagerForRetrieverRun.get_noop_manager()
+raw_documents = mqr.retrieve_documents(query_variants, run_mgr)
+fused_docs = mqr.unique_union(raw_documents)
+print(&quot;raw retrieved across 3 variants (with dupes):&quot;, len(raw_documents))
+print(&quot;unique_union count:&quot;, len(fused_docs))
+for d in fused_docs:
+    print(&quot; &quot;, d.metadata[&quot;chunk_id&quot;], d.page_content[:45])
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>raw retrieved across 3 variants (with dupes): 12
+unique_union count: 4
+  c2 Reinstatement after lapse requires payment of
+  c1 Grace period: premium not paid within 31 days
+  c3 Beneficiary designation can be changed any ti
+  c4 Deductible resets each policy year on the ren
+</code></pre><p><code>retrieve_documents</code> runs every variant against the full 4-document corpus (<code>k=4</code>), so all
+12 raw hits come back (3 variants × 4 docs each); <code>unique_union</code> collapses them to the 4
+distinct chunks — but notice it drops per-variant RANK entirely, returning a plain set-like
+union with no fusion scoring. That gap is exactly what Concept 2 fills.</p>
+<p><strong>Exercise:</strong>
+Using <code>mqr</code>, <code>run_mgr</code>, and <code>CallbackManagerForRetrieverRun</code> from this concept's Example,
+retrieve documents for the 2 variants below and print the <code>unique_union</code> count and each
+returned chunk's <code>chunk_id</code>.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>beneficiary_variants = [
+    &quot;how do I update who receives my payout&quot;,
+    &quot;changing the beneficiary on my policy&quot;,
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>raw retrieved across 2 variants (with dupes): 8
+unique_union count: 4
+</code></pre><p>(followed by each chunk_id — <code>unique_union</code> collapses to the same 4 distinct chunks
+regardless of which variants are used, since <code>k=4</code> retrieves the whole corpus every time)</p>
+<hr />
+<h3>Concept 2 — Reciprocal Rank Fusion, k=60</h3>
+<p>Reciprocal Rank Fusion (RRF) is the standard way to turn several ranked lists into one:
+for each list a document appears in, add <code>1 / (k + rank)</code> to its running score, where
+<code>rank</code> is its 1-indexed position in that list and <code>k=60</code> is the conventional damping
+constant — large enough that rank 1 vs. rank 2 in one list is not overwhelmingly more
+valuable than appearing consistently across several lists. A document ranked #1 in
+exactly one variant's results can still lose to one ranked #2-#3 in every variant,
+because consistency across rephrasings is itself a relevance signal <code>unique_union</code> throws
+away.</p>
+<p><strong>Copies in real code from <code>Curriculum/Week_10_AI_Engineering/W10_D5b_RAG_Advanced.ipynb</code>
+CONCEPT 4</strong> (this week's ROADMAP.md-mandated copy-in) — the <code>reciprocal_rank_fusion</code>
+function below is that file's function unchanged, adapted here to fuse the retriever's
+per-variant rankings from Concept 1 instead of that file's toy <code>variant_results</code> lists.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing query_variants, base_retriever from Concept 1
+
+# Adapted from Curriculum/Week_10_AI_Engineering/W10_D5b_RAG_Advanced.ipynb CONCEPT 4
+# (this week&#x27;s ROADMAP.md-mandated copy-in), unchanged except the docstring.
+def reciprocal_rank_fusion(ranked_lists, k=60):
+    &quot;&quot;&quot;RRF: doc score = sum of 1/(k + rank) across every list it appears in.&quot;&quot;&quot;
+    scores = {}
+    for ranked_list in ranked_lists:
+        for rank, doc_id in enumerate(ranked_list, start=1):
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda x: -x[1])
+
+# unique_union above threw away per-variant RANK -- RRF needs the ranked lists themselves,
+# so retrieve each variant&#x27;s ranking separately (chunk_id, not the Document object, is
+# what RRF scores -- the same field Concept 4 dedupes on).
+per_variant_rankings = []
+for variant in query_variants:
+    ranked = base_retriever.invoke(variant)
+    per_variant_rankings.append([d.metadata[&quot;chunk_id&quot;] for d in ranked])
+
+for variant, ranking in zip(query_variants, per_variant_rankings):
+    print(f&quot;  {variant[:45]:&lt;45} -&gt; {ranking}&quot;)
+
+fused = reciprocal_rank_fusion(per_variant_rankings, k=60)
+print(&quot;\nfused ranking (RRF, k=60):&quot;)
+for chunk_id, score in fused:
+    print(f&quot;  {chunk_id}: fused_score={score:.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>  what happens if I miss a premium payment      -&gt; [&#x27;c2&#x27;, &#x27;c1&#x27;, &#x27;c3&#x27;, &#x27;c4&#x27;]
+  grace period before a policy lapses for nonpa -&gt; [&#x27;c1&#x27;, &#x27;c2&#x27;, &#x27;c4&#x27;, &#x27;c3&#x27;]
+  how many days can I be late on premium before -&gt; [&#x27;c2&#x27;, &#x27;c1&#x27;, &#x27;c3&#x27;, &#x27;c4&#x27;]
+
+fused ranking (RRF, k=60):
+  c2: fused_score=0.0489
+  c1: fused_score=0.0487
+  c3: fused_score=0.0474
+  c4: fused_score=0.0471
+</code></pre><p><code>c2</code> and <code>c1</code> alternate rank-1/rank-2 across the three variants and end up nearly tied at
+the top of the fused ranking — genuinely close, unlike <code>unique_union</code>'s flat set which
+carried no signal that <code>c2</code> and <code>c1</code> were the two variants actually agreed on.</p>
+<p><strong>Exercise:</strong>
+Using <code>reciprocal_rank_fusion</code> from this concept's Example, fuse the three ranked lists
+below (already retrieved per-variant <code>chunk_id</code> rankings for a different question) and
+print the fused ranking.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>glass_claim_variant_rankings = [
+    [&quot;c4&quot;, &quot;c1&quot;, &quot;c2&quot;, &quot;c3&quot;],
+    [&quot;c1&quot;, &quot;c4&quot;, &quot;c3&quot;, &quot;c2&quot;],
+    [&quot;c4&quot;, &quot;c2&quot;, &quot;c1&quot;, &quot;c3&quot;],
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>c4: fused_score=0.0489
+c1: fused_score=0.0484
+c2: fused_score=0.0476
+c3: fused_score=0.0471
+</code></pre><hr />
+<h3>Concept 3 — Fusing BM25 and Dense Result Lists</h3>
+<p>RRF does not care WHAT produced a ranked list — it only needs a list of doc IDs in rank
+order. That means it fuses fundamentally different retrieval methods just as easily as it
+fused three paraphrases of one dense query: a lexical BM25 ranking (exact term overlap —
+strong on an exact policy-form name or claim number, blind to paraphrases) and a dense
+semantic ranking (the opposite trade-off) fuse into one list with no method-specific
+weighting logic required, unlike the weighted-sum hybrid score Concept 1 of the copied-in
+notebook used.</p>
+<p><strong>Copies in real code from the same source file's CONCEPT 1</strong> — <code>bm25_score</code> below is
+that file's function unchanged.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing docs, reciprocal_rank_fusion, base_retriever from Concepts 1-2
+
+# Adapted from Curriculum/Week_10_AI_Engineering/W10_D5b_RAG_Advanced.ipynb CONCEPT 1
+# (this week&#x27;s ROADMAP.md-mandated copy-in), unchanged.
+def bm25_score(query_terms, doc_terms, corpus_doc_terms, k1=1.5, b=0.75):
+    &quot;&quot;&quot;BM25: the standard lexical relevance score behind classic keyword search.&quot;&quot;&quot;
+    N = len(corpus_doc_terms)
+    avgdl = sum(len(d) for d in corpus_doc_terms) / N
+    doc_len = len(doc_terms)
+    score = 0.0
+    for term in set(query_terms):
+        n_docs_with_term = sum(1 for d in corpus_doc_terms if term in d)
+        if n_docs_with_term == 0:
+            continue
+        idf = math.log((N - n_docs_with_term + 0.5) / (n_docs_with_term + 0.5) + 1)
+        tf = doc_terms.count(term)
+        denom = tf + k1 * (1 - b + b * doc_len / avgdl)
+        score += idf * (tf * (k1 + 1)) / denom
+    return score
+
+def tokenize(text):
+    return text.lower().replace(&quot;,&quot;, &quot; &quot;).replace(&quot;.&quot;, &quot; &quot;).split()
+
+bm25_query = &quot;grace period premium lapse&quot;
+bm25_query_terms = tokenize(bm25_query)
+corpus_terms = [tokenize(d.page_content) for d in docs]
+bm25_scores = [
+    (docs[i].metadata[&quot;chunk_id&quot;], bm25_score(bm25_query_terms, corpus_terms[i], corpus_terms))
+    for i in range(len(docs))
+]
+# keep only docs BM25 actually scored above zero -- a zero score carries no lexical signal
+bm25_ranked = [cid for cid, s in sorted(bm25_scores, key=lambda x: -x[1]) if s &gt; 0]
+
+dense_ranked = [d.metadata[&quot;chunk_id&quot;] for d in base_retriever.invoke(&quot;what happens if I miss a premium payment&quot;)]
+
+print(&quot;BM25 ranked (lexical):&quot;, bm25_ranked)
+print(&quot;dense ranked (semantic):&quot;, dense_ranked)
+
+hybrid_fused = reciprocal_rank_fusion([bm25_ranked, dense_ranked], k=60)
+print(&quot;hybrid RRF fusion (BM25 + dense):&quot;)
+for chunk_id, score in hybrid_fused:
+    print(f&quot;  {chunk_id}: fused_score={score:.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>BM25 ranked (lexical): [&#x27;c1&#x27;, &#x27;c2&#x27;]
+dense ranked (semantic): [&#x27;c2&#x27;, &#x27;c1&#x27;, &#x27;c3&#x27;, &#x27;c4&#x27;]
+hybrid RRF fusion (BM25 + dense):
+  c1: fused_score=0.0325
+  c2: fused_score=0.0325
+  c3: fused_score=0.0159
+  c4: fused_score=0.0156
+</code></pre><p>BM25 only scores <code>c1</code> and <code>c2</code> above zero for this query (only they share the literal
+terms &quot;grace&quot;/&quot;period&quot;/&quot;premium&quot;/&quot;lapse&quot;); <code>c3</code> and <code>c4</code> never appear in the lexical list
+at all, but still enter the fused ranking through the dense list — RRF fuses a SHORT
+lexical list and a LONGER dense list without either one needing to cover the same
+documents.</p>
+<p><strong>Exercise:</strong>
+Using <code>bm25_score</code>, <code>tokenize</code>, and <code>reciprocal_rank_fusion</code> from this concept's Example,
+compute a BM25 ranking for the query below over <code>corpus_terms</code>, fuse it with
+<code>dense_ranked_2</code> (a pre-computed dense ranking, given below), and print the fused ranking.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>bm25_query_2 = &quot;deductible renewal policy year&quot;
+dense_ranked_2 = [&quot;c4&quot;, &quot;c1&quot;, &quot;c3&quot;, &quot;c2&quot;]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>bm25_score</code>, <code>tokenize</code>, <code>corpus_terms</code>, <code>reciprocal_rank_fusion</code> from this concept's
+Example.</p>
+<p>Expected output:</p>
+<pre><code>BM25 ranked (lexical): [&#x27;c4&#x27;]
+hybrid RRF fusion (BM25 + dense):
+  c4: fused_score=0.0328
+  c1: fused_score=0.0161
+  c3: fused_score=0.0159
+  c2: fused_score=0.0156
+</code></pre><hr />
+<h3>Concept 4 — Dedupe by chunk_id Before Scoring</h3>
+<p>RRF's formula assumes each ranked list contains a document AT MOST ONCE. A retriever bug
+(overlapping chunk boundaries producing two chunks that share one <code>chunk_id</code>, a variant
+that legitimately retrieves the same chunk twice because a smaller top-k window wrapped
+around) breaks that assumption silently — RRF adds <code>1/(k+rank)</code> once per OCCURRENCE, so a
+chunk that appears twice in one list gets double-counted and can out-rank a chunk that
+genuinely deserves to win. Deduping each per-list ranking by <code>chunk_id</code>, keeping only the
+first (best-ranked) occurrence, before fusion is the fix.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing reciprocal_rank_fusion from Concept 2
+
+def dedupe_ranked_list(ranked_list):
+    seen = set()
+    deduped = []
+    for chunk_id in ranked_list:
+        if chunk_id not in seen:
+            seen.add(chunk_id)
+            deduped.append(chunk_id)
+    return deduped
+
+# A retriever that returns the SAME chunk at two different ranks across two variants
+# (e.g. a document-splitting bug that produced overlapping chunks with the same id) would
+# otherwise let RRF double-count it purely because it appears twice in one list.
+noisy_list_a = [&quot;c1&quot;, &quot;c1&quot;, &quot;c2&quot;, &quot;c4&quot;]
+noisy_list_b = [&quot;c2&quot;, &quot;c3&quot;, &quot;c1&quot;]
+
+print(&quot;before dedupe, RRF over noisy lists:&quot;)
+for chunk_id, score in reciprocal_rank_fusion([noisy_list_a, noisy_list_b], k=60):
+    print(f&quot;  {chunk_id}: fused_score={score:.4f}&quot;)
+
+deduped_a = dedupe_ranked_list(noisy_list_a)
+deduped_b = dedupe_ranked_list(noisy_list_b)
+print(&quot;\nafter dedupe, RRF over cleaned lists:&quot;)
+for chunk_id, score in reciprocal_rank_fusion([deduped_a, deduped_b], k=60):
+    print(f&quot;  {chunk_id}: fused_score={score:.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>before dedupe, RRF over noisy lists:
+  c1: fused_score=0.0484
+  c2: fused_score=0.0323
+  c3: fused_score=0.0161
+  c4: fused_score=0.0156
+
+after dedupe, RRF over cleaned lists:
+  c2: fused_score=0.0325
+  c1: fused_score=0.0323
+  c3: fused_score=0.0161
+  c4: fused_score=0.0159
+</code></pre><p>Before deduping, <code>c1</code>'s duplicate rank-1 entry in <code>noisy_list_a</code> (<code>1/(60+1)</code> counted
+TWICE) pushes it to the top of the fused ranking. After deduping each list to one entry
+per <code>chunk_id</code>, <code>c2</code> correctly wins — the double-count was purely an artifact of the
+duplicate, not a genuine relevance signal.</p>
+<p><strong>Exercise:</strong>
+Using <code>dedupe_ranked_list</code> and <code>reciprocal_rank_fusion</code> from this concept's Example, dedupe
+and fuse the two noisy lists below, printing both the before- and after-dedupe fused
+rankings.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>noisy_list_c = [&quot;c3&quot;, &quot;c3&quot;, &quot;c3&quot;, &quot;c4&quot;]
+noisy_list_d = [&quot;c4&quot;, &quot;c2&quot;, &quot;c3&quot;]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>before dedupe:
+  c3: fused_score=0.0643
+  c4: fused_score=0.0320
+  c2: fused_score=0.0161
+
+after dedupe:
+  c4: fused_score=0.0325
+  c3: fused_score=0.0323
+  c2: fused_score=0.0161
+</code></pre><p>Note the rank flip: before deduping, <code>c3</code>'s three duplicate entries in <code>noisy_list_c</code>
+inflate it past <code>c4</code>; after deduping to one entry per list, <code>c4</code> (present in both lists)
+correctly edges out <code>c3</code> (present in only one, even though deduped).</p>
+<hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> <code>langchain</code>'s own 1.0 restructure (splitting <code>langchain-classic</code> out of
+<code>langchain</code>) is a live reminder that this stack's import paths are not stable across
+versions — a BFSI team pinning <code>langchain==0.1.x</code> in a requirements file two years ago has
+a materially different upgrade path than one starting fresh today, and &quot;which package is
+<code>ParentDocumentRetriever</code> actually in this month&quot; is a real maintenance cost, not a one-time
+fact to memorize.</p>
+<p><strong>Compliance angle:</strong> an RRF fusion score is not, by itself, an auditable explanation for
+why a particular clause was retrieved — logging only the final fused ranking, without the
+per-variant rankings that fed it (as Concept 2's <code>per_variant_rankings</code> does), makes it
+impossible to later show a reviewer WHICH rephrasing actually found the winning document.</p>
+<p><strong>What breaks in production:</strong> Concept 4's double-count bug is exactly the kind of defect
+that never shows up in a small demo corpus with distinct chunk boundaries and only shows
+up once a real chunking pipeline produces overlapping windows at scale — a fusion pipeline
+that has never deduped by <code>chunk_id</code> because its test corpus happened not to need it is
+one document-boundary edge case away from silently over-ranking a duplicate.</p>
+<hr />
+<h2 id="day-3">Day 3 — Parent-Child Chunk Indexing</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="24-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=Je3VFuUezho" target="_blank" rel="noopener"><b>Parent Document Retrieval: Small Chunks Big Context</b><small>Zero to Builder: Cloud, AI &amp; Blockchain · 10:16</small></a></li><li><a href="https://www.youtube.com/watch?v=ihSiRrOUwmg" target="_blank" rel="noopener"><b>Advanced RAG 01: Small-to-Big Retrieval with LlamaIndex</b><small>Sophia Yang · 9:17</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=parent%20document%20retriever%20small%20to%20big%20chunking%20LlamaIndex" target="_blank" rel="noopener">Search YouTube: parent document retriever small to big chunking LlamaIndex</a></p></div>
+<hr />
+<h3>Concept 1 — LangChain <code>ParentDocumentRetriever</code>: Small-to-Big</h3>
+<p>A chunk small enough to embed precisely is often too small to ANSWER a question in full —
+a 120-character child chunk might match a query's vocabulary exactly while cutting off the
+sentence that actually states the number the user needs. &quot;Small-to-big&quot; splits every
+document twice: once into small CHILD chunks that go into the vector index (what gets
+SEARCHED), and once into larger PARENT chunks kept in a separate docstore keyed by
+<code>parent_id</code> (what gets RETURNED for generation). <code>ParentDocumentRetriever</code> wires this up
+directly: it searches the child index, then swaps each hit for its full parent before
+returning results — real, installed <code>langchain_classic</code> code, no live LLM required for any
+of it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib, math
+from langchain_core.embeddings import Embeddings
+from langchain_core.vectorstores import InMemoryVectorStore
+from langchain_core.documents import Document
+from langchain_core.stores import InMemoryStore
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_classic.retrievers import ParentDocumentRetriever
+
+KEYWORDS = [&quot;deductible&quot;, &quot;premium&quot;, &quot;claim&quot;, &quot;policy&quot;, &quot;underwriting&quot;, &quot;exclusion&quot;,
+            &quot;coverage&quot;, &quot;endorsement&quot;, &quot;lapse&quot;, &quot;renewal&quot;, &quot;rider&quot;, &quot;beneficiary&quot;,
+            &quot;waiver&quot;, &quot;waive&quot;]
+
+class KeywordBucketEmbeddings(Embeddings):
+    def _vec(self, text):
+        t = text.lower()
+        v = [float(t.count(k)) for k in KEYWORDS]
+        h = int(hashlib.sha256(t.encode()).hexdigest(), 16)
+        for i in range(8):
+            v.append(((h &gt;&gt; (i * 4)) % 7) / 7.0)
+        norm = math.sqrt(sum(x * x for x in v)) or 1.0
+        return [x / norm for x in v]
+    def embed_documents(self, texts):
+        return [self._vec(t) for t in texts]
+    def embed_query(self, text):
+        return self._vec(text)
+
+parent_docs = [
+    Document(page_content=(
+        &quot;SECTION 4: DEDUCTIBLES. The policyholder deductible applies once per claim year &quot;
+        &quot;and resets on the policy renewal date. A deductible of 500 USD applies to &quot;
+        &quot;collision claims; a deductible of 250 USD applies to comprehensive claims. &quot;
+        &quot;If two claims occur in the same claim year, only one deductible amount is &quot;
+        &quot;charged for the second claim, provided both claims are of the same coverage &quot;
+        &quot;type. Endorsements that raise coverage limits do not change the deductible.&quot;
+    ), metadata={&quot;doc_id&quot;: &quot;POL-1001&quot;, &quot;section&quot;: &quot;deductibles&quot;}),
+    Document(page_content=(
+        &quot;SECTION 7: LAPSE AND REINSTATEMENT. Coverage lapses if premium is not received &quot;
+        &quot;within 31 days of the due date. A lapsed policy may be reinstated within 90 days &quot;
+        &quot;of lapse without new underwriting if all past-due premium is paid in full. &quot;
+        &quot;After 90 days, reinstatement requires a new underwriting review and may result &quot;
+        &quot;in a revised premium or a denial of reinstatement.&quot;
+    ), metadata={&quot;doc_id&quot;: &quot;POL-1002&quot;, &quot;section&quot;: &quot;lapse&quot;}),
+    Document(page_content=(
+        &quot;SECTION 9: BENEFICIARY WAIVER RIDER. This rider allows the policyholder to waive &quot;
+        &quot;standard beneficiary consent requirements when adding a new rider mid-term. The &quot;
+        &quot;waiver applies only to riders that do not change the death benefit amount. Any &quot;
+        &quot;rider that increases the death benefit still requires full beneficiary consent &quot;
+        &quot;regardless of this waiver, and the waiver itself expires at the next renewal.&quot;
+    ), metadata={&quot;doc_id&quot;: &quot;POL-1003&quot;, &quot;section&quot;: &quot;waiver&quot;}),
+]
+
+parent_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=0)
+child_splitter = RecursiveCharacterTextSplitter(chunk_size=120, chunk_overlap=20)
+vectorstore = InMemoryVectorStore(KeywordBucketEmbeddings())
+docstore = InMemoryStore()
+
+retriever = ParentDocumentRetriever(
+    vectorstore=vectorstore,
+    docstore=docstore,
+    child_splitter=child_splitter,
+    parent_splitter=parent_splitter,
+)
+retriever.add_documents(parent_docs)
+
+print(&quot;parent keys in docstore:&quot;, len(list(docstore.yield_keys())))
+results = retriever.invoke(&quot;does adding a rider always need beneficiary sign-off&quot;)
+for d in results:
+    print(len(d.page_content), d.metadata.get(&quot;doc_id&quot;))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>parent keys in docstore: 3
+396 POL-1003
+364 POL-1002
+</code></pre><p>The child index was searched (small chunks, precise match on &quot;rider&quot;/&quot;beneficiary&quot;), but
+what came back is the FULL 396-character <code>POL-1003</code> section, not the 120-character child
+fragment that actually scored — enough context to correctly answer that the waiver has
+exceptions, which a bare child chunk might have cut off mid-sentence.</p>
+<p><strong>Exercise:</strong>
+Using <code>retriever</code> from this concept's Example, invoke it with the query below and print
+each returned document's length and <code>doc_id</code>.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>deductible_query = &quot;does the deductible amount reset when the policy renews&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>454 POL-1001
+364 POL-1002
+</code></pre><hr />
+<h3>Concept 2 — LlamaIndex <code>SentenceWindowNodeParser</code></h3>
+<p><code>SentenceWindowNodeParser</code> takes the small-to-big idea to its finest grain: each node is a
+SINGLE sentence (maximally precise for matching), but every node's metadata carries a
+<code>window</code> — the <code>window_size</code> sentences on either side — so the sentence that actually
+matched a query can be swapped for its surrounding context before generation, the same
+small-search/large-generate trade Concept 1 made at the chunk level, applied at the
+sentence level instead.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core.node_parser import SentenceWindowNodeParser
+from llama_index.core.schema import Document as LIDocument
+
+splitter = SentenceWindowNodeParser.from_defaults(
+    window_size=2,
+    window_metadata_key=&quot;window&quot;,
+    original_text_metadata_key=&quot;original_text&quot;,
+)
+
+policy_text = (
+    &quot;Deductibles reset each policy year. Premium is due on the first of the month. &quot;
+    &quot;Claims must be filed within 60 days of loss. Underwriting reviews trigger at every &quot;
+    &quot;renewal. Endorsements can change coverage limits mid-term.&quot;
+)
+nodes = splitter.get_nodes_from_documents([LIDocument(text=policy_text)])
+
+for i, n in enumerate(nodes):
+    print(i, repr(n.text))
+
+print()
+print(&quot;node 2&#x27;s window (2 sentences each side):&quot;)
+print(repr(nodes[2].metadata[&quot;window&quot;]))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>0 &#x27;Deductibles reset each policy year. &#x27;
+1 &#x27;Premium is due on the first of the month. &#x27;
+2 &#x27;Claims must be filed within 60 days of loss. &#x27;
+3 &#x27;Underwriting reviews trigger at every renewal. &#x27;
+4 &#x27;Endorsements can change coverage limits mid-term.&#x27;
+
+node 2&#x27;s window (2 sentences each side):
+&#x27;Deductibles reset each policy year.  Premium is due on the first of the month.  Claims must be filed within 60 days of loss.  Underwriting reviews trigger at every renewal.  Endorsements can change coverage limits mid-term.&#x27;
+</code></pre><p>Each node's own <code>.text</code> is one bare sentence — what gets embedded and searched — while its
+<code>window</code> metadata carries the wider context a generation step would actually use, built
+without ever creating a separate &quot;parent&quot; document the way Concept 1 did.</p>
+<p><strong>Exercise:</strong>
+Using <code>splitter</code> from this concept's Example, parse the 4-sentence text below and print
+node 1's own <code>.text</code> and its <code>window</code> metadata.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>claims_text = (
+    &quot;A claim must be reported within 30 days of loss. Photos of the damage should be &quot;
+    &quot;attached to the initial report. An adjuster is typically assigned within 5 business &quot;
+    &quot;days. Payment is issued after the adjuster&#x27;s review is finalized.&quot;
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>node 1 text: &#x27;Photos of the damage should be attached to the initial report. &#x27;
+node 1 window: &#x27;A claim must be reported within 30 days of loss.  Photos of the damage should be attached to the initial report.  An adjuster is typically assigned within 5 business days.  Payment is issued after the adjuster&#x27;s review is finalized.&#x27;
+</code></pre><hr />
+<h3>Concept 3 — LlamaIndex <code>AutoMergingRetriever</code></h3>
+<p><code>HierarchicalNodeParser</code> splits a document into MULTIPLE chunk-size tiers at once (e.g.
+400-char sections, each further split into ~100-char leaves), with every node tracking its
+parent. <code>AutoMergingRetriever</code> wraps a normal leaf-level retriever: if enough of one
+parent's children come back in a single query's results, it MERGES them back into that
+parent and returns the merged node instead of several disconnected fragments — small-to-
+big, but decided dynamically per query based on how much of one section actually matched,
+rather than always returning the whole parent the way Concept 1's retriever does.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from llama_index.core.node_parser import HierarchicalNodeParser, get_leaf_nodes
+from llama_index.core.storage.docstore import SimpleDocumentStore
+from llama_index.core.schema import Document as LIDocument
+from llama_index.core import VectorStoreIndex, StorageContext
+from llama_index.core.retrievers import AutoMergingRetriever
+from llama_index.core.embeddings import BaseEmbedding
+
+class KeywordEmbedding(BaseEmbedding):
+    def _get_query_embedding(self, query):
+        return self._vec(query)
+    async def _aget_query_embedding(self, query):
+        return self._vec(query)
+    def _get_text_embedding(self, text):
+        return self._vec(text)
+    def _vec(self, text):
+        kws = [&quot;deductible&quot;, &quot;premium&quot;, &quot;claim&quot;, &quot;policy&quot;, &quot;underwriting&quot;, &quot;lapse&quot;]
+        t = text.lower()
+        v = [float(t.count(k)) for k in kws]
+        h = int(hashlib.sha256(t.encode()).hexdigest(), 16)
+        for i in range(6):
+            v.append(((h &gt;&gt; (i * 4)) % 7) / 7.0)
+        n = math.sqrt(sum(x * x for x in v)) or 1.0
+        return [x / n for x in v]
+
+deductible_section = (
+    &quot;SECTION 4: DEDUCTIBLES. The policyholder deductible applies once per claim year and &quot;
+    &quot;resets on the policy renewal date. A deductible of 500 USD applies to collision &quot;
+    &quot;claims arising from a covered accident. A deductible of 250 USD applies to &quot;
+    &quot;comprehensive claims such as theft, fire, or weather damage. If two claims occur in &quot;
+    &quot;the same claim year, only one deductible amount is charged for the second claim, &quot;
+    &quot;provided both claims are of the same coverage type. Endorsements that raise coverage &quot;
+    &quot;limits do not change the deductible owed by the policyholder at claim time. A rider &quot;
+    &quot;that adds glass-only coverage carries its own separate 100 USD deductible, &quot;
+    &quot;independent of the collision and comprehensive deductibles above. Deductible amounts &quot;
+    &quot;are disclosed on the declarations page issued at policy inception and again at every &quot;
+    &quot;renewal.&quot;
+)
+li_doc = LIDocument(text=deductible_section, doc_id=&quot;POL-1001&quot;)
+parser = HierarchicalNodeParser.from_defaults(chunk_sizes=[400, 100])
+nodes = parser.get_nodes_from_documents([li_doc])
+leaf_nodes = get_leaf_nodes(nodes)
+print(&quot;total nodes:&quot;, len(nodes), &quot; leaf nodes:&quot;, len(leaf_nodes))
+
+li_docstore = SimpleDocumentStore()
+li_docstore.add_documents(nodes)
+storage_context = StorageContext.from_defaults(docstore=li_docstore)
+index = VectorStoreIndex(leaf_nodes, storage_context=storage_context, embed_model=KeywordEmbedding())
+base_retriever = index.as_retriever(similarity_top_k=2)
+
+leaf_only = base_retriever.retrieve(&quot;what deductible applies to collision claims&quot;)
+print(&quot;leaf-only retrieval: result_count=&quot;, len(leaf_only),
+      &quot;content_lengths=&quot;, [len(r.node.get_content()) for r in leaf_only])
+
+merging_retriever = AutoMergingRetriever(base_retriever, storage_context, verbose=False)
+merged = merging_retriever.retrieve(&quot;what deductible applies to collision claims&quot;)
+print(&quot;AutoMergingRetriever: result_count=&quot;, len(merged),
+      &quot;content_lengths=&quot;, [len(r.node.get_content()) for r in merged])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>total nodes: 3  leaf nodes: 2
+leaf-only retrieval: result_count= 2 content_lengths= [455, 370]
+AutoMergingRetriever: result_count= 1 content_lengths= [826]
+</code></pre><p>Both of the parent's two leaf children matched this query's top-2 results, so
+<code>AutoMergingRetriever</code> merges them back into the single 826-character parent section
+instead of handing back two disconnected 455/370-character fragments — the reader gets
+the whole deductibles section, not two pieces of it stitched together by the LLM itself.</p>
+<p><strong>Exercise:</strong>
+Using <code>parser</code>, <code>KeywordEmbedding</code>, and <code>AutoMergingRetriever</code> from this concept's Example,
+build the same hierarchical index over the text below, retrieve at <code>similarity_top_k=2</code>
+both with and without merging, and print the <code>result_count</code>/<code>content_lengths</code> for each.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>lapse_section = (
+    &quot;SECTION 7: LAPSE AND REINSTATEMENT. Coverage lapses if premium is not received &quot;
+    &quot;within 31 days of the due date, counted from the original due date on the &quot;
+    &quot;declarations page. A lapsed policy may be reinstated within 90 days of lapse &quot;
+    &quot;without new underwriting if all past-due premium is paid in full at once. After 90 &quot;
+    &quot;days from the lapse date, reinstatement requires a full new underwriting review &quot;
+    &quot;and may result in a revised premium quote or a denial of reinstatement entirely.&quot;
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>total nodes: 3  leaf nodes: 2
+leaf-only retrieval: result_count= 2
+AutoMergingRetriever: result_count= 1
+</code></pre><p>(merged <code>content_lengths</code> sums to the same total characters as the two leaf-only
+fragments combined, since the merge concatenates rather than drops content)</p>
+<hr />
+<h3>Concept 4 — Parent Pointers as pgvector Metadata Columns</h3>
+<p><code>ParentDocumentRetriever</code> and <code>AutoMergingRetriever</code> both keep the parent/child link in an
+in-process docstore. A production pgvector deployment keeps the SAME link as an ordinary
+metadata column instead: every CHILD chunk's row carries its own embedding plus a
+<code>parent_id</code> column, and &quot;return the parent&quot; becomes a second SQL lookup (<code>SELECT ... WHERE doc_id = ANY(:parent_ids)</code>) rather than an in-memory dict access. Building the row schema
+and the child→parent lookup is genuine, executable Python; the actual <code>INSERT</code>/<code>SELECT</code>
+against a live Postgres instance needs a database this sandbox does not have, shown
+further below as reference syntax only, once this Example's real Python has run.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>KEYWORDS_4 = [&quot;deductible&quot;, &quot;premium&quot;, &quot;claim&quot;, &quot;policy&quot;, &quot;underwriting&quot;, &quot;lapse&quot;, &quot;rider&quot;]
+
+def embed_4(text):
+    t = text.lower()
+    v = [float(t.count(k)) for k in KEYWORDS_4]
+    h = int(hashlib.sha256(t.encode()).hexdigest(), 16)
+    for i in range(4):
+        v.append(((h &gt;&gt; (i * 4)) % 7) / 7.0)
+    norm = math.sqrt(sum(x * x for x in v)) or 1.0
+    return [x / norm for x in v]
+
+def build_pgvector_rows(parent_id, child_chunks):
+    return [
+        {&quot;child_id&quot;: f&quot;{parent_id}-child-{i}&quot;, &quot;parent_id&quot;: parent_id,
+         &quot;embedding&quot;: embed_4(chunk_text), &quot;content&quot;: chunk_text}
+        for i, chunk_text in enumerate(child_chunks)
+    ]
+
+def cosine_4(a, b):
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a)) or 1.0
+    nb = math.sqrt(sum(x * x for x in b)) or 1.0
+    return dot / (na * nb)
+
+def query_top_parents(rows, query_text, k=2):
+    qv = embed_4(query_text)
+    scored = sorted(rows, key=lambda r: -cosine_4(qv, r[&quot;embedding&quot;]))[:k]
+    seen = []
+    for r in scored:
+        if r[&quot;parent_id&quot;] not in seen:
+            seen.append(r[&quot;parent_id&quot;])
+    return seen
+
+pol_1001_children = [
+    &quot;SECTION 4: DEDUCTIBLES. Applies once per claim year.&quot;,
+    &quot;A deductible of 500 USD applies to collision claims.&quot;,
+    &quot;A deductible of 250 USD applies to comprehensive claims.&quot;,
+]
+pol_1002_children = [
+    &quot;SECTION 7: LAPSE. Coverage lapses after 31 days unpaid.&quot;,
+    &quot;Reinstatement within 90 days needs no new underwriting.&quot;,
+]
+
+rows = build_pgvector_rows(&quot;POL-1001&quot;, pol_1001_children) + build_pgvector_rows(&quot;POL-1002&quot;, pol_1002_children)
+print(&quot;total rows:&quot;, len(rows), &quot; columns:&quot;, sorted(rows[0].keys()))
+print(&quot;top distinct parent_ids for the query:&quot;,
+      query_top_parents(rows, &quot;how much do I pay out of pocket for a collision claim&quot;))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>total rows: 5  columns: [&#x27;child_id&#x27;, &#x27;content&#x27;, &#x27;embedding&#x27;, &#x27;parent_id&#x27;]
+top distinct parent_ids for the query: [&#x27;POL-1001&#x27;]
+</code></pre><p>Every row IS a child chunk — there is no separate &quot;parent table&quot; at all here, just a
+<code>parent_id</code> foreign-key-shaped column sitting alongside the embedding on each child row.
+The real pgvector schema and two-step query this Python models:</p>
+<pre><code>-- REAL MODE reference syntax -- needs a live Postgres + pgvector instance.
+CREATE TABLE rag_chunks (
+    child_id   text PRIMARY KEY,
+    parent_id  text NOT NULL,
+    embedding  vector(1536),
+    content    text
+);
+CREATE INDEX ON rag_chunks USING hnsw (embedding vector_cosine_ops);
+
+-- Step 1: find the best-matching CHILD rows and their parent_ids
+SELECT DISTINCT parent_id
+FROM rag_chunks
+ORDER BY embedding &lt;=&gt; %(query_embedding)s
+LIMIT 5;
+
+-- Step 2: fetch the full parent documents for generation
+SELECT doc_id, full_text FROM policy_documents WHERE doc_id = ANY(%(parent_ids)s);
+</code></pre><p><strong>Exercise:</strong>
+Using <code>build_pgvector_rows</code> and <code>query_top_parents</code> from this concept's Example, build
+rows for the beneficiary-waiver children below under <code>parent_id=&quot;POL-1003&quot;</code>, combine them
+with <code>pol_1001_children</code>'s rows, and print the top distinct <code>parent_id</code> for the query.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>pol_1003_children = [
+    &quot;SECTION 9: BENEFICIARY WAIVER RIDER allows waiving consent for mid-term riders.&quot;,
+    &quot;The waiver does not apply to riders that increase the death benefit.&quot;,
+]
+query = &quot;does a mid-term rider need beneficiary consent&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>total rows: 5
+top distinct parent_ids for the query: [&#x27;POL-1003&#x27;]
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> a parent-child index effectively doubles what a pipeline stores — the
+child chunks for search AND the parent chunks (or, for pgvector, the parent document
+table) for generation — which is a real storage and sync cost a single-chunk-size index
+never had to budget for, and one more place a re-ingestion job can leave the two sides out
+of step with each other.</p>
+<p><strong>Compliance angle:</strong> when an answer traces back to a MERGED parent section rather than
+the specific child chunk that actually matched, an audit trail needs to record which
+child(ren) triggered the merge, not just the final parent text handed to the model —
+otherwise a reviewer asking &quot;why was this section retrieved&quot; has no way to see which
+sentence inside it actually caused the match.</p>
+<p><strong>What breaks in production:</strong> Day 5's bake-off (see Concept 1's own finding there) shows
+parent-child chunking gives NO measurable lift on short, single-topic documents — its
+value is specifically on long, multi-clause sections where a full-document embedding would
+otherwise dilute a specific clause's signal; deploying it as a blanket default across every
+document type in a corpus, regardless of document length, spends the extra storage and
+sync cost in places it buys nothing.</p>
+<hr />
+<h2 id="day-4">Day 4 — Metadata Filtering and Self-Query</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="24-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=7BThgpjz0Mg" target="_blank" rel="noopener"><b>Metadata Filtering &amp; Schema-Aware Retrieval | Build Smarter RAG Systems | Codersarts AI</b><small>CodersArts · 4:46</small></a></li><li><a href="https://www.youtube.com/watch?v=8z_GstUGgRg" target="_blank" rel="noopener"><b>Vector database metadata filters: ten queries, three filtering paths</b><small>Applied Intelligence Lab · 14:55</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=self%20query%20retriever%20metadata%20filtering%20vector%20database%20pgvector" target="_blank" rel="noopener">Search YouTube: self query retriever metadata filtering vector database pgvector</a></p></div>
+<hr />
+<h3>Concept 1 — Declaring a Metadata Schema and Translating a Structured Predicate</h3>
+<p><code>SelfQueryRetriever</code> needs to know, in advance, WHICH metadata fields it is allowed to
+filter on and what each one means — that declaration is a real, installed
+<code>langchain_classic</code> object (<code>AttributeInfo</code>), not something the LLM invents on the fly.
+Given that schema, the retriever's LLM step translates a natural-language question like
+&quot;claims after 2023 above 50k in New York&quot; into a <code>StructuredQuery</code> whose <code>filter</code> is a real
+<code>langchain_core.structured_query.Operation</code>/<code>Comparison</code> tree — the exact objects
+<code>Operation</code>/<code>Comparison</code> prototyped in Day 1's design work, used here for real. Turning
+that tree into something a vector store can actually apply is the job of a <code>Visitor</code>
+subclass — every real per-store translator (<code>PGVectorTranslator</code>, <code>ChromaTranslator</code>, etc.
+in <code>langchain_community</code>) is one; a minimal one is built and run below, genuinely
+subclassing <code>langchain_core.structured_query.Visitor</code>, needing no live vector store at all.
+The one step that genuinely needs a live LLM is the NL→<code>StructuredQuery</code> translation
+itself — that step needs a live LLM this sandbox doesn't have, so it is hand-built as an
+honest stand-in inside the example below (flagged with an inline comment at that exact
+line, not up here).</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code>from langchain_core.structured_query import (
+    Visitor, Comparator, Comparison, Operation, Operator, StructuredQuery,
+)
+from langchain_classic.chains.query_constructor.schema import AttributeInfo
+
+# Real langchain_classic AttributeInfo objects -- the metadata schema a SelfQueryRetriever
+# is told about so its LLM step knows which fields it may filter on.
+metadata_field_info = [
+    AttributeInfo(name=&quot;policy_type&quot;, description=&quot;Type of insurance policy (auto, home, life)&quot;, type=&quot;string&quot;),
+    AttributeInfo(name=&quot;effective_date&quot;, description=&quot;ISO date the claim/note took effect&quot;, type=&quot;string&quot;),
+    AttributeInfo(name=&quot;state&quot;, description=&quot;US state code where the policy was issued&quot;, type=&quot;string&quot;),
+    AttributeInfo(name=&quot;doc_type&quot;, description=&quot;claim_note or underwriting_note&quot;, type=&quot;string&quot;),
+]
+for f in metadata_field_info:
+    print(f&quot; {f.name:&lt;15} ({f.type}): {f.description}&quot;)
+
+
+class SimpleFilterTranslator(Visitor):
+    &quot;&quot;&quot;A minimal real Visitor implementation (the same pattern langchain_community&#x27;s
+    per-vectorstore translators, e.g. PGVectorTranslator, implement) that walks a
+    StructuredQuery&#x27;s filter tree into a plain Python predicate function.&quot;&quot;&quot;
+    allowed_comparators = [Comparator.EQ, Comparator.GTE, Comparator.LT]
+    allowed_operators = [Operator.AND, Operator.OR]
+
+    def visit_comparison(self, comparison):
+        attr, comp, val = comparison.attribute, comparison.comparator, comparison.value
+        if comp == Comparator.EQ:
+            return lambda md: md.get(attr) == val
+        if comp == Comparator.GTE:
+            return lambda md: md.get(attr) is not None and md.get(attr) &gt;= val
+        if comp == Comparator.LT:
+            return lambda md: md.get(attr) is not None and md.get(attr) &lt; val
+        raise NotImplementedError(comp)
+
+    def visit_operation(self, operation):
+        fns = [self.visit(arg) for arg in operation.arguments]
+        if operation.operator == Operator.AND:
+            return lambda md: all(f(md) for f in fns)
+        if operation.operator == Operator.OR:
+            return lambda md: any(f(md) for f in fns)
+        raise NotImplementedError(operation.operator)
+
+    def visit_structured_query(self, structured_query):
+        return None if structured_query.filter is None else self.visit(structured_query.filter)
+
+    def visit(self, node):
+        if isinstance(node, Comparison):
+            self._validate_func(node.comparator)
+            return self.visit_comparison(node)
+        if isinstance(node, Operation):
+            self._validate_func(node.operator)
+            return self.visit_operation(node)
+        raise NotImplementedError(node)
+
+# REAL MODE: in production this StructuredQuery comes from a live LLM call translating
+# &quot;claims after 2023 in New York&quot;. Hand-built here as the honest stand-in for that output.
+structured_query = StructuredQuery(
+    query=&quot;large liability claims&quot;,
+    filter=Operation(
+        operator=Operator.AND,
+        arguments=[
+            Comparison(comparator=Comparator.EQ, attribute=&quot;state&quot;, value=&quot;NY&quot;),
+            Comparison(comparator=Comparator.EQ, attribute=&quot;doc_type&quot;, value=&quot;claim_note&quot;),
+            Comparison(comparator=Comparator.GTE, attribute=&quot;effective_date&quot;, value=&quot;2023-01-01&quot;),
+        ],
+    ),
+)
+translator = SimpleFilterTranslator()
+predicate_fn = translator.visit_structured_query(structured_query)
+
+sample_metadata = [
+    {&quot;state&quot;: &quot;NY&quot;, &quot;doc_type&quot;: &quot;claim_note&quot;, &quot;effective_date&quot;: &quot;2023-04-10&quot;},
+    {&quot;state&quot;: &quot;CA&quot;, &quot;doc_type&quot;: &quot;claim_note&quot;, &quot;effective_date&quot;: &quot;2023-04-10&quot;},
+    {&quot;state&quot;: &quot;NY&quot;, &quot;doc_type&quot;: &quot;underwriting_note&quot;, &quot;effective_date&quot;: &quot;2023-04-10&quot;},
+    {&quot;state&quot;: &quot;NY&quot;, &quot;doc_type&quot;: &quot;claim_note&quot;, &quot;effective_date&quot;: &quot;2020-01-01&quot;},
+]
+print(&quot;\npredicate results over 4 sample rows:&quot;, [predicate_fn(m) for m in sample_metadata])
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code> policy_type     (string): Type of insurance policy (auto, home, life)
+ effective_date  (string): ISO date the claim/note took effect
+ state           (string): US state code where the policy was issued
+ doc_type        (string): claim_note or underwriting_note
+
+predicate results over 4 sample rows: [True, False, False, False]
+</code></pre><p>Only the first sample row is NY, a claim note, AND dated 2023 or later — the translator
+correctly requires all three <code>Comparison</code>s to hold (<code>Operator.AND</code>), rejecting rows that
+fail any single one of them.</p>
+<p><strong>Exercise:</strong>
+Using <code>SimpleFilterTranslator</code> and the <code>Comparator</code>/<code>Comparison</code>/<code>Operation</code>/
+<code>StructuredQuery</code> classes from this concept's Example, build a predicate for &quot;home policy
+notes from any state&quot; (<code>policy_type == &quot;home&quot;</code>, no other constraint) and print its result
+against the 4 <code>sample_metadata</code> rows above.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>home_only_filter = Comparison(comparator=Comparator.EQ, attribute=&quot;policy_type&quot;, value=&quot;home&quot;)
+sample_metadata_2 = [
+    {&quot;policy_type&quot;: &quot;home&quot;, &quot;state&quot;: &quot;NY&quot;},
+    {&quot;policy_type&quot;: &quot;auto&quot;, &quot;state&quot;: &quot;NY&quot;},
+    {&quot;policy_type&quot;: &quot;home&quot;, &quot;state&quot;: &quot;TX&quot;},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[True, False, True]
+</code></pre><hr />
+<h3>Concept 2 — Pre-Filter vs. Post-Filter Recall Loss</h3>
+<p>Given a predicate, WHEN it's applied matters as much as whether it's applied at all.
+Pre-filtering narrows the candidate set to only rows that pass the predicate, THEN ranks
+by similarity within that narrowed set. Post-filtering ranks the full unfiltered corpus
+first, takes the top-k, and only THEN discards whatever fails the predicate — which can
+silently return fewer than k results, or zero, if the top-k unfiltered ranking happens to
+be dominated by documents the predicate would have excluded.
+<code>langchain_core.vectorstores.InMemoryVectorStore</code> genuinely implements pre-filtering: its
+<code>filter</code> argument is applied to candidates BEFORE the top-k truncation (confirmed by
+reading its source), so the comparison below is two real, different code paths through the
+same real vector store, not a hypothetical.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib, math
+from langchain_core.embeddings import Embeddings
+from langchain_core.vectorstores import InMemoryVectorStore
+from langchain_core.documents import Document
+
+KEYWORDS = [&quot;claim&quot;, &quot;liability&quot;, &quot;collision&quot;, &quot;underwriting&quot;, &quot;policy&quot;, &quot;coverage&quot;,
+            &quot;loss&quot;, &quot;injury&quot;, &quot;property&quot;, &quot;auto&quot;, &quot;large&quot;]
+
+class KeywordBucketEmbeddings(Embeddings):
+    def _vec(self, text):
+        t = text.lower()
+        v = [float(t.count(k)) for k in KEYWORDS]
+        h = int(hashlib.sha256(t.encode()).hexdigest(), 16)
+        for i in range(8):
+            v.append(((h &gt;&gt; (i * 4)) % 7) / 7.0)
+        norm = math.sqrt(sum(x * x for x in v)) or 1.0
+        return [x / norm for x in v]
+    def embed_documents(self, texts):
+        return [self._vec(t) for t in texts]
+    def embed_query(self, text):
+        return self._vec(text)
+
+# DOC-0 and DOC-1 are near-verbatim matches to the query text but fail the NY/2023
+# predicate -- they exist to outrank the true positives in an UNFILTERED ranking.
+docs = [
+    Document(page_content=&quot;Large auto liability claims, large auto liability claims filed 2021, California.&quot;,
+             metadata={&quot;policy_type&quot;: &quot;auto&quot;, &quot;effective_date&quot;: &quot;2021-03-01&quot;, &quot;state&quot;: &quot;CA&quot;, &quot;doc_type&quot;: &quot;claim_note&quot;}),
+    Document(page_content=&quot;Large auto liability claims, large auto liability claims filed 2022, Texas.&quot;,
+             metadata={&quot;policy_type&quot;: &quot;auto&quot;, &quot;effective_date&quot;: &quot;2022-06-15&quot;, &quot;state&quot;: &quot;TX&quot;, &quot;doc_type&quot;: &quot;claim_note&quot;}),
+    Document(page_content=&quot;Large auto liability claim, disputed injury, policy limits exhausted.&quot;,
+             metadata={&quot;policy_type&quot;: &quot;auto&quot;, &quot;effective_date&quot;: &quot;2023-04-10&quot;, &quot;state&quot;: &quot;NY&quot;, &quot;doc_type&quot;: &quot;claim_note&quot;}),
+    Document(page_content=&quot;Auto collision underwriting review, no liability claim filed.&quot;,
+             metadata={&quot;policy_type&quot;: &quot;auto&quot;, &quot;effective_date&quot;: &quot;2020-01-01&quot;, &quot;state&quot;: &quot;NY&quot;, &quot;doc_type&quot;: &quot;underwriting_note&quot;}),
+    Document(page_content=&quot;Large auto liability claim, total loss vehicle, property damage.&quot;,
+             metadata={&quot;policy_type&quot;: &quot;auto&quot;, &quot;effective_date&quot;: &quot;2023-11-02&quot;, &quot;state&quot;: &quot;NY&quot;, &quot;doc_type&quot;: &quot;claim_note&quot;}),
+    Document(page_content=&quot;Homeowners liability claim, water damage, no auto involved.&quot;,
+             metadata={&quot;policy_type&quot;: &quot;home&quot;, &quot;effective_date&quot;: &quot;2023-08-01&quot;, &quot;state&quot;: &quot;NY&quot;, &quot;doc_type&quot;: &quot;claim_note&quot;}),
+]
+
+vs = InMemoryVectorStore(KeywordBucketEmbeddings())
+vs.add_documents(docs)
+query = &quot;large auto liability claims&quot;
+
+# Reusing predicate_fn from Concept 1 (state==NY AND doc_type==claim_note AND date&gt;=2023-01-01)
+qualifying = {i for i, d in enumerate(docs) if predicate_fn(d.metadata)}
+print(&quot;docs that satisfy the structured predicate:&quot;, sorted(qualifying))
+
+pre_results = vs.similarity_search_with_score(query, k=2, filter=lambda d: predicate_fn(d.metadata))
+print(&quot;\npre-filter top-2 (filter applied BEFORE ranking/truncation):&quot;)
+for d, score in pre_results:
+    print(f&quot;  score={score:.3f} state={d.metadata[&#x27;state&#x27;]} date={d.metadata[&#x27;effective_date&#x27;]}&quot;)
+
+unfiltered = vs.similarity_search_with_score(query, k=2)
+post_results = [(d, s) for d, s in unfiltered if predicate_fn(d.metadata)]
+print(&quot;\npost-filter (rank top-2 first, THEN filter):&quot;)
+for d, score in unfiltered:
+    print(f&quot;  score={score:.3f} state={d.metadata[&#x27;state&#x27;]} date={d.metadata[&#x27;effective_date&#x27;]} kept={predicate_fn(d.metadata)}&quot;)
+print(&quot;post-filter surviving count:&quot;, len(post_results), &quot;/ requested k=2&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>docs that satisfy the structured predicate: [2, 4, 5]
+
+pre-filter top-2 (filter applied BEFORE ranking/truncation):
+  score=0.783 state=NY date=2023-04-10
+  score=0.760 state=NY date=2023-11-02
+
+post-filter (rank top-2 first, THEN filter):
+  score=0.964 state=TX date=2022-06-15 kept=False
+  score=0.963 state=CA date=2021-03-01 kept=False
+post-filter surviving count: 0 / requested k=2
+</code></pre><p>The CA and TX decoy documents' near-verbatim repetition of the query text outscores every
+genuinely-qualifying NY document, so post-filtering — rank first, filter after — returns
+ZERO usable results at <code>k=2</code> even though 3 qualifying documents exist in the corpus.
+Pre-filtering never lets the disqualified decoys compete for the top-k slots in the first
+place, so both results returned are correct.</p>
+<p><strong>Exercise:</strong>
+Using <code>vs</code>, <code>docs</code>, and <code>predicate_fn</code> from this concept's Example, run BOTH a pre-filter
+and a post-filter <code>similarity_search_with_score</code> at <code>k=1</code> for the query below (which
+predicate <code>policy_type == &quot;home&quot;</code> restricts to), and print both results plus whether the
+post-filter result set is empty.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>home_query = &quot;large auto liability claims&quot;
+home_predicate = lambda d: d.metadata[&quot;policy_type&quot;] == &quot;home&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>pre-filter top-1: state=NY policy_type=home
+post-filter top-1 (unfiltered rank-1, then filtered): kept=False
+post-filter surviving count: 0 / requested k=1
+</code></pre><hr />
+<h3>Concept 3 — pgvector Iterative Index Scans for Selective Filters</h3>
+<p>An ANN index (HNSW, IVFFlat) is built to find the k nearest neighbors FAST — it is not
+built to guarantee k neighbors that also pass an arbitrary metadata filter. When the
+filter is highly selective (few rows qualify), a single index scan pass can come back with
+fewer than k passing rows even though enough exist somewhere in the corpus — exactly
+Concept 2's post-filter failure mode, but happening INSIDE the index rather than in
+application code. pgvector's <code>hnsw.iterative_scan</code> setting addresses this by re-scanning
+with a widening search window until k qualifying rows are found or a tuple cap is hit,
+instead of giving up after one pass. The scan-widening LOGIC below is genuine, deterministic
+Python that actually runs; the actual HNSW index internals are not built here, since they
+need a live Postgres+pgvector instance this sandbox doesn't have.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import random
+
+def make_ranked_candidates(n, seed=7):
+    rnd = random.Random(seed)
+    return [
+        {&quot;doc_id&quot;: f&quot;CLM-{90000 + i}&quot;,
+         &quot;state&quot;: rnd.choice([&quot;NY&quot;, &quot;CA&quot;, &quot;TX&quot;, &quot;FL&quot;, &quot;NJ&quot;, &quot;OH&quot;, &quot;IL&quot;, &quot;PA&quot;, &quot;WA&quot;, &quot;MA&quot;])}
+        for i in range(n)
+    ]
+
+def iterative_index_scan(candidates, predicate, k, initial_batch=20, max_tuples=200):
+    &quot;&quot;&quot;Simulates pgvector&#x27;s hnsw.iterative_scan: expand the scanned batch until k rows
+    pass the predicate or max_tuples is hit, without re-scanning already-examined tuples.&quot;&quot;&quot;
+    batch_size, examined, matches = initial_batch, 0, []
+    while examined &lt; len(candidates) and examined &lt; max_tuples:
+        next_examined = min(examined + batch_size, len(candidates), max_tuples)
+        matches.extend(c for c in candidates[examined:next_examined] if predicate(c))
+        examined = next_examined
+        if len(matches) &gt;= k:
+            break
+        batch_size *= 2
+    return matches[:k], examined
+
+candidates = make_ranked_candidates(300)
+single_pass_ny = sum(1 for c in candidates[:20] if c[&quot;state&quot;] == &quot;NY&quot;)
+print(f&quot;single-pass scan (first 20 nearest neighbors): {single_pass_ny} NY matches (need 5)&quot;)
+
+ny_matches, ny_examined = iterative_index_scan(candidates, lambda c: c[&quot;state&quot;] == &quot;NY&quot;, k=5)
+print(f&quot;iterative scan for NY (selective, ~9% of corpus): found {len(ny_matches)} after examining {ny_examined} tuples&quot;)
+
+group_matches, group_examined = iterative_index_scan(
+    candidates, lambda c: c[&quot;state&quot;] in {&quot;NY&quot;, &quot;CA&quot;, &quot;TX&quot;, &quot;FL&quot;}, k=5)
+print(f&quot;iterative scan for 4-state group (less selective, ~40%): found {len(group_matches)} after examining {group_examined} tuples&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>single-pass scan (first 20 nearest neighbors): 3 NY matches (need 5)
+iterative scan for NY (selective, ~9% of corpus): found 5 after examining 60 tuples
+iterative scan for 4-state group (less selective, ~40%): found 5 after examining 20 tuples
+</code></pre><p>A single, non-iterative pass over the top-20 nearest neighbors comes back with only 3
+NY matches — short of the 5 requested — for a filter that only ~9% of the corpus
+satisfies. The iterative scan widens its window (20 → 40 → ...) until it has examined
+enough tuples to find 5. The less selective 4-state filter needs no widening at all — the
+first 20-tuple batch already contains 5 qualifying rows.</p>
+<p><strong>Exercise:</strong>
+Using <code>make_ranked_candidates</code> and <code>iterative_index_scan</code> from this concept's Example,
+build 300 candidates with <code>seed=7</code> and run an iterative scan for a single-state filter
+requesting <code>k=3</code> instead of <code>k=5</code>, printing how many tuples it examines.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>target_state = &quot;MA&quot;
+k_needed = 3
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>found 3 after examining 60 tuples
+</code></pre><hr />
+<h3>Concept 4 — End-to-End: Schema-Validated Predicate From a Fresh Question</h3>
+<p>Putting Concepts 1-3 together: a real self-query pipeline must reject a filter on a field
+it never declared in its <code>metadata_field_info</code> schema, not silently build a broken
+predicate for it — an LLM occasionally hallucinates a plausible-sounding field name
+(<code>claim_amount_usd</code> instead of the declared schema's fields) that was never part of the
+contract, and that must fail loudly, not filter on a field that doesn't exist and silently
+match everything or nothing.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># Reusing metadata_field_info, SimpleFilterTranslator, docs from Concepts 1-2
+
+ALLOWED_FIELDS = {f.name for f in metadata_field_info}
+
+def build_predicate_from_llm_output(comparisons):
+    &quot;&quot;&quot;Validate every attribute the (simulated) LLM output referenced against the
+    declared metadata_field_info schema before building a filter -- a real self-query
+    pipeline must reject a filter on a field it never told the LLM about.&quot;&quot;&quot;
+    for attr, _, _ in comparisons:
+        if attr not in ALLOWED_FIELDS:
+            raise ValueError(f&quot;&#x27;{attr}&#x27; is not a declared metadata field: {sorted(ALLOWED_FIELDS)}&quot;)
+    comparisons_objs = [Comparison(comparator=cmp, attribute=attr, value=val) for attr, cmp, val in comparisons]
+    op = Operation(operator=Operator.AND, arguments=comparisons_objs) if len(comparisons_objs) &gt; 1 else comparisons_objs[0]
+    return SimpleFilterTranslator().visit(op)
+
+# REAL MODE: in production these tuples come from the LLM&#x27;s structured-query translation
+# of &quot;underwriting notes from before 2021 in New York&quot;. Hand-written stand-in here.
+valid_comparisons = [
+    (&quot;state&quot;, Comparator.EQ, &quot;NY&quot;),
+    (&quot;doc_type&quot;, Comparator.EQ, &quot;underwriting_note&quot;),
+    (&quot;effective_date&quot;, Comparator.LT, &quot;2021-01-01&quot;),
+]
+pred2 = build_predicate_from_llm_output(valid_comparisons)
+print(&quot;valid schema predicate results:&quot;, [pred2(d.metadata) for d in docs])
+
+try:
+    build_predicate_from_llm_output([(&quot;claim_amount_usd&quot;, Comparator.GTE, 50000)])
+except ValueError as e:
+    print(&quot;rejected undeclared field:&quot;, e)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>valid schema predicate results: [False, False, False, True, False, False]
+rejected undeclared field: &#x27;claim_amount_usd&#x27; is not a declared metadata field: [&#x27;doc_type&#x27;, &#x27;effective_date&#x27;, &#x27;policy_type&#x27;, &#x27;state&#x27;]
+</code></pre><p>Only <code>docs[3]</code> (the pre-2023 NY underwriting note) matches the valid predicate. The second
+call raises before ever building a broken filter, because <code>claim_amount_usd</code> was never
+declared in <code>metadata_field_info</code> — the same rejection a real <code>SelfQueryRetriever</code>'s
+schema-bound query constructor is designed to produce.</p>
+<p><strong>Exercise:</strong>
+Using <code>build_predicate_from_llm_output</code> and <code>docs</code> from this concept's Example, build a
+predicate for &quot;auto claim notes filed in 2022 or later&quot; and print the results against
+<code>docs</code>, then confirm an undeclared field (<code>adjuster_name</code>) is rejected.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>auto_2022_comparisons = [
+    (&quot;policy_type&quot;, Comparator.EQ, &quot;auto&quot;),
+    (&quot;doc_type&quot;, Comparator.EQ, &quot;claim_note&quot;),
+    (&quot;effective_date&quot;, Comparator.GTE, &quot;2022-01-01&quot;),
+]
+bad_comparisons = [(&quot;adjuster_name&quot;, Comparator.EQ, &quot;J. Rivera&quot;)]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[False, True, True, False, True, False]
+rejected undeclared field: &#x27;adjuster_name&#x27; is not a declared metadata field: [&#x27;doc_type&#x27;, &#x27;effective_date&#x27;, &#x27;policy_type&#x27;, &#x27;state&#x27;]
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> a <code>metadata_field_info</code> schema is itself a contract between the retrieval
+layer and whatever wrote the original documents' metadata — a legacy ingestion job that
+starts writing <code>state</code> as a full name (&quot;New York&quot;) instead of the two-letter code the
+schema and every existing filter predicate assume breaks every downstream self-query
+silently (a predicate that never matches, not an error).</p>
+<p><strong>Compliance angle:</strong> Concept 4's rejection of an undeclared field is a real guardrail
+worth logging, not just raising — an LLM repeatedly attempting to filter on a field like
+<code>ssn</code> or <code>date_of_birth</code> that was deliberately left out of <code>metadata_field_info</code> is a
+signal worth a compliance review on its own, independent of whether the query that
+triggered it was otherwise benign.</p>
+<p><strong>What breaks in production:</strong> Concept 2's near-zero post-filter recall is not a corner
+case reserved for adversarial decoy documents — it is what happens ANY time a corpus
+contains boilerplate or template language (a standard disclosure paragraph repeated across
+many documents) that scores artificially high for a common query regardless of which
+document it belongs to; pre-filtering is the only one of the two approaches that is safe to
+default to whenever a predicate is available at all.</p>
+<hr />
+<h2 id="day-5">Day 5 — Retrieval Strategy Bake-Off</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="24-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=7_LTU0LA374" target="_blank" rel="noopener"><b>RAG Evaluation: Precision, Recall, Faithfulness, RAGAS Explained Clearly</b><small>Logical Lenses · 12:19</small></a></li><li><a href="https://www.youtube.com/watch?v=k1yoGGVMpRg" target="_blank" rel="noopener"><b>RAG Evaluation, Retrieval Metrics Explained: Precision@k, Recall@k, F1, MRR and NDCG</b><small>Slav Kurochkin · 4:06</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=RAG%20retrieval%20evaluation%20recall%20at%20k%20MRR%20benchmark%20comparison" target="_blank" rel="noopener">Search YouTube: RAG retrieval evaluation recall at k MRR benchmark comparison</a></p></div>
+<hr />
+<h3>Concept 1 — A Labeled Query Set Over an Extended Corpus</h3>
+<p>Days 1-4 each measured one retrieval idea against its own small, purpose-built corpus.
+A bake-off needs the opposite: ONE fixed corpus and ONE fixed labeled query set, run
+through every strategy under the same harness, so the comparison is actually apples to
+apples instead of four different demos with four different setups. The corpus below
+reuses Day 1's 8-document <code>CORPUS</code> unchanged and extends it with Day 3's 3 long,
+multi-clause <code>POL-*</code> sections — deliberately keeping both document shapes in the same
+corpus, since Day 3's own closing note predicted parent-child chunking would only show
+a measurable difference on the long documents, not the short ones, and this bake-off is
+where that prediction actually gets checked instead of assumed. The 12-query labeled set
+below is smaller than a production evaluation set (30+ queries, per this week's README)
+would be, but every query still carries a real known-correct <code>doc_id</code>, spans 5 distinct
+query types (one per failure mode Days 1-4 each targeted), and is fixed for the rest of
+this day — the same discipline a 30-question set would need, just at a size that can be
+hand-labeled and verified inline in one lesson file rather than requiring a separate
+data file.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># Reusing tokenize, VOCAB, bow, cosine, CORPUS, retrieve, recall_at_k from Day 1 Concept 1
+
+VOCAB.update({
+    &quot;claims&quot;, &quot;renewal&quot;, &quot;collision&quot;, &quot;consent&quot;, &quot;death&quot;, &quot;benefit&quot;, &quot;policyholder&quot;,
+    &quot;section&quot;, &quot;riders&quot;, &quot;endorsements&quot;, &quot;waives&quot;,
+})
+
+# Reusing the exact POL-1001/1002/1003 section text from Day 3 Concept 1&#x27;s parent_docs.
+CORPUS.extend([
+    (&quot;POL-1001&quot;, (
+        &quot;SECTION 4: DEDUCTIBLES. The policyholder deductible applies once per claim year &quot;
+        &quot;and resets on the policy renewal date. A deductible of 500 USD applies to &quot;
+        &quot;collision claims; a deductible of 250 USD applies to comprehensive claims. &quot;
+        &quot;If two claims occur in the same claim year, only one deductible amount is &quot;
+        &quot;charged for the second claim, provided both claims are of the same coverage &quot;
+        &quot;type. Endorsements that raise coverage limits do not change the deductible.&quot;
+    )),
+    (&quot;POL-1002&quot;, (
+        &quot;SECTION 7: LAPSE AND REINSTATEMENT. Coverage lapses if premium is not received &quot;
+        &quot;within 31 days of the due date. A lapsed policy may be reinstated within 90 days &quot;
+        &quot;of lapse without new underwriting if all past-due premium is paid in full. &quot;
+        &quot;After 90 days, reinstatement requires a new underwriting review and may result &quot;
+        &quot;in a revised premium or a denial of reinstatement.&quot;
+    )),
+    (&quot;POL-1003&quot;, (
+        &quot;SECTION 9: BENEFICIARY WAIVER RIDER. This rider allows the policyholder to waive &quot;
+        &quot;standard beneficiary consent requirements when adding a new rider mid-term. The &quot;
+        &quot;waiver applies only to riders that do not change the death benefit amount. Any &quot;
+        &quot;rider that increases the death benefit still requires full beneficiary consent &quot;
+        &quot;regardless of this waiver, and the waiver itself expires at the next renewal.&quot;
+    )),
+])
+print(&quot;corpus size after extending with the 3 long POL sections:&quot;, len(CORPUS))
+
+# REAL MODE: in production the &quot;rewritten&quot; and &quot;hypothetical_doc&quot; fields below come from
+# live LLM calls -- the same rewrite/HyDE generation steps Days 1-2 disclosed as stand-ins.
+# Hand-written here so the fixed query set is reproducible; the retrieval mechanics run on
+# them below are real, executed code.
+QUERY_SET = [
+    (&quot;rewrite_heavy&quot;, &quot;can I still get money back&quot;,
+     &quot;what is the refund available for canceling a new auto policy within the free look period&quot;,
+     &quot;Yes, a full premium refund is available if you cancel your new auto policy within the free look period of 10 days after issue.&quot;,
+     &quot;DOC-1&quot;),
+    (&quot;rewrite_heavy&quot;, &quot;my policy stopped, can I fix it&quot;,
+     &quot;how do I reinstate a policy that lapsed due to nonpayment&quot;,
+     &quot;Yes, a lapsed policy can be reinstated within 90 days of lapse if all past-due premium is paid, without new underwriting.&quot;,
+     &quot;DOC-2&quot;),
+    (&quot;rewrite_heavy&quot;, &quot;can I switch who gets paid&quot;,
+     &quot;how do I change the named beneficiary on my policy&quot;,
+     &quot;Yes, the policyholder may change the named beneficiary at any time before a claim is filed using the standard change-of-beneficiary form.&quot;,
+     &quot;DOC-3&quot;),
+    (&quot;rewrite_heavy&quot;, &quot;how do I update who receives my payout&quot;,
+     &quot;how do I change the named beneficiary on my policy&quot;,
+     &quot;Yes, the policyholder may change the named beneficiary at any time before a claim is filed using the standard change-of-beneficiary form.&quot;,
+     &quot;DOC-3&quot;),
+    (&quot;hyde_heavy&quot;, &quot;is a little ding on my window something my plan pays for&quot;,
+     &quot;is windshield chip and crack repair covered under the comprehensive endorsement&quot;,
+     &quot;Yes, windshield chip and crack repair is covered in full under the standard comprehensive endorsement with no deductible, regardless of how the damage occurred.&quot;,
+     &quot;DOC-A&quot;),
+    (&quot;hyde_heavy&quot;, &quot;does my add-on take care of the first bill if something happens&quot;,
+     &quot;does the deductible waiver rider cover my first claim&quot;,
+     &quot;Yes, the deductible waiver rider waives the standard deductible for the first claim filed after the rider&#x27;s effective date.&quot;,
+     &quot;DOC-4&quot;),
+    (&quot;stepback_heavy&quot;, &quot;does the rider cover a cracked windshield caused by debris during towing&quot;,
+     &quot;what does the auto glass coverage rider cover in general&quot;,
+     &quot;The auto glass coverage endorsement covers chip and crack repair to the windshield or any vehicle glass in full, with no deductible, regardless of how the damage occurred.&quot;,
+     &quot;DOC-A&quot;),
+    (&quot;stepback_heavy&quot;, &quot;if I paid late because my card expired during a move, can my lapsed policy come back without a new medical exam&quot;,
+     &quot;how do I reinstate a policy that lapsed due to nonpayment&quot;,
+     &quot;Yes, a lapsed policy can be reinstated within 90 days of lapse if all past-due premium is paid, without new underwriting.&quot;,
+     &quot;DOC-2&quot;),
+    (&quot;baseline_friendly&quot;, &quot;what happens if I miss a premium payment&quot;,
+     &quot;what is the grace period for a late premium payment before the policy lapses&quot;,
+     &quot;Coverage stays active for 31 days past the due date before the policy lapses for nonpayment.&quot;,
+     &quot;DOC-5&quot;),
+    (&quot;parent_child&quot;, &quot;does adding a rider always need beneficiary sign-off&quot;,
+     &quot;does the beneficiary waiver rider apply to riders that increase the death benefit&quot;,
+     &quot;No, any rider that increases the death benefit still requires full beneficiary consent, even though the waiver rider allows waiving consent for other mid-term riders.&quot;,
+     &quot;POL-1003&quot;),
+    (&quot;parent_child&quot;, &quot;does the deductible amount reset when the policy renews&quot;,
+     &quot;does the policyholder deductible reset on the policy renewal date&quot;,
+     &quot;Yes, the policyholder deductible applies once per claim year and resets on the policy renewal date.&quot;,
+     &quot;POL-1001&quot;),
+    (&quot;parent_child&quot;, &quot;what deductible applies to collision claims&quot;,
+     &quot;what is the deductible amount for a collision claim under the policy&quot;,
+     &quot;A deductible of 500 USD applies to collision claims under the policy.&quot;,
+     &quot;POL-1001&quot;),
+]
+
+print(&quot;labeled query set size:&quot;, len(QUERY_SET))
+print(&quot;query types:&quot;, sorted(set(q[0] for q in QUERY_SET)))
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>corpus size after extending with the 3 long POL sections: 11
+labeled query set size: 12
+query types: [&#x27;baseline_friendly&#x27;, &#x27;hyde_heavy&#x27;, &#x27;parent_child&#x27;, &#x27;rewrite_heavy&#x27;, &#x27;stepback_heavy&#x27;]
+</code></pre><p>11 documents (Day 1's 8 short single-clause docs plus Day 3's 3 long multi-clause
+sections), 12 labeled queries across 5 query types named for the failure mode each one
+targets — <code>rewrite_heavy</code> and <code>hyde_heavy</code> mirror Day 1's underspecified-question
+failures, <code>stepback_heavy</code> mirrors Day 1's misleading-literal-overlap failure,
+<code>baseline_friendly</code> is a control (a query direct retrieval already handles, included so
+the bake-off can show a strategy does NOT need to win everywhere), and <code>parent_child</code>
+targets the long <code>POL-*</code> sections Day 3's chunking work was built for.</p>
+<p><strong>Exercise:</strong>
+Using <code>retrieve</code> and <code>recall_at_k</code> from Day 1 Concept 1 (reused above), compute
+<code>underspecified_recall@3</code> and <code>rewritten_recall@3</code> for the query below and print both.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>extra_under = &quot;my payments got missed for a while, can this be turned back on&quot;
+extra_rewritten = &quot;how do I reinstate a policy that lapsed due to nonpayment&quot;
+extra_relevant = &quot;DOC-2&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>underspecified top-3: [&#x27;DOC-B&#x27;, &#x27;DOC-C&#x27;, &#x27;DOC-5&#x27;]
+underspecified_recall@3: 0.0
+rewritten top-3: [&#x27;DOC-2&#x27;, &#x27;POL-1002&#x27;, &#x27;DOC-B&#x27;]
+rewritten_recall@3: 1.0
+</code></pre><hr />
+<h3>Concept 2 — Four Strategies, One Ranking Interface</h3>
+<p>Every strategy below returns the same shape — a ranked list of <code>doc_id</code>s at a fixed
+<code>k=3</code> — so they can be scored identically in Concept 3. <code>baseline</code> and <code>rewrite</code> are
+direct calls into Day 1's <code>retrieve</code>; <code>rrf_fusion</code> reuses Day 2's real
+<code>reciprocal_rank_fusion</code> to fuse three independently-retrieved rankings (the
+underspecified query, the rewrite, and the HyDE hypothetical document) instead of
+picking just one of them; <code>parent_child</code> reuses the small-to-big idea from Day 3, built
+here as a lightweight child-chunk index over just the 3 long <code>POL-*</code> sections (the 8
+short docs are their own single child, exactly as Day 3's closing note said a
+single-clause document has no parent/child split worth making).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing retrieve, recall_at_k, CORPUS, bow, cosine from Day 1;
+# reciprocal_rank_fusion from Day 2 Concept 2
+
+def split_sentences(text):
+    return [p.strip() for p in text.replace(&quot;\n&quot;, &quot; &quot;).split(&quot;. &quot;) if p.strip()]
+
+def make_children():
+    &quot;&quot;&quot;Every short CORPUS doc is its own single child (parent == child); each long
+    POL-* section is split into 2-sentence children pointing back at its parent_id --
+    the same small-search/large-generate split Day 3 built, applied to this corpus.&quot;&quot;&quot;
+    children = []
+    for doc_id, text in CORPUS:
+        if doc_id.startswith(&quot;POL-&quot;):
+            sents = split_sentences(text)
+            for i in range(0, len(sents), 2):
+                chunk = &quot;. &quot;.join(sents[i:i + 2])
+                children.append((f&quot;{doc_id}-c{i // 2}&quot;, doc_id, chunk))
+        else:
+            children.append((f&quot;{doc_id}-c0&quot;, doc_id, text))
+    return children
+
+CHILDREN = make_children()
+
+def retrieve_parent_child(query_text, k=3):
+    qv = bow(query_text)
+    scored = [(cid, pid, cosine(qv, bow(text))) for cid, pid, text in CHILDREN]
+    scored.sort(key=lambda x: -x[2])
+    seen = []
+    for cid, pid, s in scored:
+        if pid not in seen:
+            seen.append(pid)
+        if len(seen) &gt;= k:
+            break
+    return seen
+
+def baseline_ranker(under, rewritten, hyde, k=3):
+    return [d for d, _ in retrieve(under, k)]
+
+def rewrite_ranker(under, rewritten, hyde, k=3):
+    return [d for d, _ in retrieve(rewritten, k)]
+
+def rrf_ranker(under, rewritten, hyde, k=3):
+    base_r = [d for d, _ in retrieve(under, k + 2)]
+    rewrite_r = [d for d, _ in retrieve(rewritten, k + 2)]
+    hyde_r = [d for d, _ in retrieve(hyde, k + 2)]
+    fused = reciprocal_rank_fusion([base_r, rewrite_r, hyde_r], k=60)
+    return [d for d, _ in fused][:k]
+
+def parentchild_ranker(under, rewritten, hyde, k=3):
+    return retrieve_parent_child(rewritten, k)
+
+demo_type, demo_under, demo_rewritten, demo_hyde, demo_rel = QUERY_SET[9]
+print(f&quot;query: {demo_under!r}  (relevant={demo_rel})&quot;)
+print(&quot;  baseline:    &quot;, baseline_ranker(demo_under, demo_rewritten, demo_hyde))
+print(&quot;  rewrite:     &quot;, rewrite_ranker(demo_under, demo_rewritten, demo_hyde))
+print(&quot;  rrf_fusion:  &quot;, rrf_ranker(demo_under, demo_rewritten, demo_hyde))
+print(&quot;  parent_child:&quot;, parentchild_ranker(demo_under, demo_rewritten, demo_hyde))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>query: &#x27;does adding a rider always need beneficiary sign-off&#x27;  (relevant=POL-1003)
+  baseline:     [&#x27;POL-1003&#x27;, &#x27;DOC-3&#x27;, &#x27;DOC-B&#x27;]
+  rewrite:      [&#x27;POL-1003&#x27;, &#x27;DOC-3&#x27;, &#x27;DOC-4&#x27;]
+  rrf_fusion:   [&#x27;POL-1003&#x27;, &#x27;DOC-3&#x27;, &#x27;DOC-4&#x27;]
+  parent_child: [&#x27;POL-1003&#x27;, &#x27;DOC-3&#x27;, &#x27;DOC-4&#x27;]
+</code></pre><p>All four strategies rank <code>POL-1003</code> first on this particular query — the underspecified
+form happens to share enough real vocabulary (&quot;rider&quot;, &quot;beneficiary&quot;) with the section
+directly. Concept 4's full win/loss table shows where the strategies actually diverge;
+this one query alone is not evidence of anything, which is exactly why a bake-off scores
+the whole labeled set rather than trusting one spot-check.</p>
+<p><strong>Exercise:</strong>
+Using <code>baseline_ranker</code>, <code>rewrite_ranker</code>, <code>rrf_ranker</code>, and <code>parentchild_ranker</code> from
+this concept's Example, run all four strategies against the query below and print each
+one's top-3 result.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ex2_under, ex2_rewritten, ex2_hyde, ex2_rel = (
+    QUERY_SET[10][1], QUERY_SET[10][2], QUERY_SET[10][3], QUERY_SET[10][4]
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>query: does the deductible amount reset when the policy renews  relevant= POL-1001
+  baseline       [&#x27;DOC-4&#x27;, &#x27;POL-1001&#x27;, &#x27;DOC-A&#x27;]
+  rewrite        [&#x27;POL-1001&#x27;, &#x27;DOC-4&#x27;, &#x27;DOC-3&#x27;]
+  rrf_fusion     [&#x27;POL-1001&#x27;, &#x27;DOC-4&#x27;, &#x27;DOC-A&#x27;]
+  parent_child   [&#x27;POL-1001&#x27;, &#x27;DOC-4&#x27;, &#x27;DOC-3&#x27;]
+</code></pre><p>Baseline ranks the wrong document (<code>DOC-4</code>, the deductible WAIVER rider, a real
+near-miss since it shares the word &quot;deductible&quot;) first, pushing the actually-relevant
+<code>POL-1001</code> to rank 2 — still inside <code>recall@3</code>, but not rank 1, exactly the kind of
+near-miss <code>MRR</code> (Concept 3) penalizes that <code>recall@3</code> alone does not.</p>
+<hr />
+<h3>Concept 3 — Recall@k, MRR, and p95 Latency Across the Full Set</h3>
+<p>Scoring one query at a time (Concept 2) does not tell you which strategy actually wins.
+This concept runs every strategy against every one of the 12 labeled queries and
+aggregates three real, measured numbers per strategy: mean <code>recall@3</code> (did the right
+document land in the top 3 at all), <code>MRR</code> (mean reciprocal rank — rewards ranking the
+right document FIRST, not just somewhere in the top 3, the gap Concept 2's exercise just
+surfaced), and p95 latency. The latency here is real, measured wall-clock time for the
+retrieval mechanics only (bow/cosine scoring and RRF fusion over an 11-document,
+15-child in-process corpus) — it excludes the live LLM rewrite/HyDE-generation calls
+Concept 1 disclosed as stand-ins, and its absolute milliseconds are two orders of
+magnitude below anything a real embedding-API round trip would cost, so it is reported
+here as a deterministic bucket check rather than a raw number a rerun could drift on.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+
+def reciprocal_rank(ranked_ids, relevant_id):
+    if relevant_id in ranked_ids:
+        return 1.0 / (ranked_ids.index(relevant_id) + 1)
+    return 0.0
+
+K = 3
+STRATEGIES = {
+    &quot;baseline&quot;: baseline_ranker,
+    &quot;rewrite&quot;: rewrite_ranker,
+    &quot;rrf_fusion&quot;: rrf_ranker,
+    &quot;parent_child&quot;: parentchild_ranker,
+}
+
+bakeoff_results = {}
+for name, ranker in STRATEGIES.items():
+    recalls, rrs, latencies_ms, by_type = [], [], [], {}
+    for qtype, under, rewritten, hyde, rel in QUERY_SET:
+        t0 = time.perf_counter()
+        ranked = ranker(under, rewritten, hyde, K)
+        t1 = time.perf_counter()
+        r = recall_at_k(ranked, rel, K)
+        recalls.append(r)
+        rrs.append(reciprocal_rank(ranked, rel))
+        latencies_ms.append((t1 - t0) * 1000.0)
+        by_type.setdefault(qtype, []).append(r)
+    latencies_ms.sort()
+    p95_idx = min(len(latencies_ms) - 1, int(round(0.95 * (len(latencies_ms) - 1))))
+    bakeoff_results[name] = {
+        &quot;mean_recall&quot;: sum(recalls) / len(recalls),
+        &quot;mrr&quot;: sum(rrs) / len(rrs),
+        &quot;p95_ms&quot;: latencies_ms[p95_idx],
+        &quot;by_type&quot;: by_type,
+    }
+
+for name, m in bakeoff_results.items():
+    print(f&quot;{name:14} recall@{K}={m[&#x27;mean_recall&#x27;]:.3f}  MRR={m[&#x27;mrr&#x27;]:.3f}  &quot;
+          f&quot;p95_latency_under_5ms={m[&#x27;p95_ms&#x27;] &lt; 5.0}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>baseline       recall@3=0.417  MRR=0.319  p95_latency_under_5ms=True
+rewrite        recall@3=1.000  MRR=1.000  p95_latency_under_5ms=True
+rrf_fusion     recall@3=1.000  MRR=0.806  p95_latency_under_5ms=True
+parent_child   recall@3=1.000  MRR=0.958  p95_latency_under_5ms=True
+</code></pre><p>Baseline's real weakness shows in both numbers: it recovers only 5 of 12 queries at
+<code>recall@3</code> and its <code>MRR</code> (0.319) is worse than its <code>recall@3</code> (0.417) would suggest,
+because even the queries it does recover are often not ranked first. Rewrite, RRF
+fusion, and parent-child all reach <code>recall@3=1.000</code> on this labeled set — every relevant
+document lands in the top 3 for all three — but <code>MRR</code> still separates them: plain
+rewrite ranks the relevant document first on every single query (<code>MRR=1.000</code>); RRF
+fusion's <code>MRR</code> drops to 0.806 because it fuses the WEAK baseline ranking in alongside
+the strong rewrite and HyDE rankings, and that weak vote occasionally pulls a
+near-miss document ahead of the true rank-1 answer; parent-child's 0.958 sits between
+the two. This is a genuine, measured finding on this fixed set, not a foregone
+conclusion — fusing more signals is not automatically better than trusting the single
+best signal, when one of the fused signals is known to be weak.</p>
+<p><strong>Exercise:</strong>
+Using <code>bakeoff_results</code> from this concept's Example, compute and print each strategy's
+combined mean <code>recall@3</code> over just the <code>baseline_friendly</code> and <code>parent_child</code> query
+types.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>combo_types = {&quot;baseline_friendly&quot;, &quot;parent_child&quot;}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>baseline       combined recall@3 over baseline_friendly+parent_child = 1.000
+rewrite        combined recall@3 over baseline_friendly+parent_child = 1.000
+rrf_fusion     combined recall@3 over baseline_friendly+parent_child = 1.000
+parent_child   combined recall@3 over baseline_friendly+parent_child = 1.000
+</code></pre><p>Every strategy, including plain baseline, already recovers these two query types in
+full — confirming <code>baseline_friendly</code> is a genuine control and that the <code>parent_child</code>
+type's queries, in this particular labeled set, happen to share enough literal
+vocabulary with their target section that even direct retrieval finds them; Day 3's
+closing note about parent-child chunking needing a genuinely dilution-prone document to
+show its value, not just any long document, holds here too.</p>
+<hr />
+<h3>Concept 4 — Per-Query-Type Win/Loss and the Bake-off's Real Finding</h3>
+<p>Aggregating across all 12 queries (Concept 3) hides WHERE each strategy wins or loses.
+Breaking <code>recall@3</code> down by the 5 query types named in Concept 1 shows the actual
+failure-mode-by-failure-mode picture a single mean recall number cannot.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing bakeoff_results, STRATEGIES from Concept 3
+
+print(&quot;per-query-type recall@3 win/loss table:&quot;)
+qtypes = [&quot;baseline_friendly&quot;, &quot;rewrite_heavy&quot;, &quot;hyde_heavy&quot;, &quot;stepback_heavy&quot;, &quot;parent_child&quot;]
+header = f&quot;{&#x27;query_type&#x27;:&lt;18}&quot; + &quot;&quot;.join(f&quot;{n:&gt;14}&quot; for n in STRATEGIES)
+print(header)
+for qt in qtypes:
+    row = f&quot;{qt:&lt;18}&quot;
+    for name in STRATEGIES:
+        vals = bakeoff_results[name][&quot;by_type&quot;].get(qt, [])
+        row += f&quot;{(sum(vals) / len(vals)):&gt;14.2f}&quot;
+    print(row)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>per-query-type recall@3 win/loss table:
+query_type              baseline       rewrite    rrf_fusion  parent_child
+baseline_friendly           1.00          1.00          1.00          1.00
+rewrite_heavy               0.00          1.00          1.00          1.00
+hyde_heavy                  0.00          1.00          1.00          1.00
+stepback_heavy              0.50          1.00          1.00          1.00
+parent_child                1.00          1.00          1.00          1.00
+</code></pre><p>The real per-type story: baseline LOSES completely on <code>rewrite_heavy</code> and <code>hyde_heavy</code>
+(0.00 — the exact failure Day 1 built rewriting and HyDE to fix) and splits on
+<code>stepback_heavy</code> (0.50 — it gets the reinstatement variant right by literal overlap but
+misses the towing/glass variant, exactly Day 1 Concept 3's misleading-overlap failure);
+every non-baseline strategy WINS every query type on this set. That is a genuinely
+measured result, not an assumption — but it is also this labeled set's real limit: with
+only 12 queries and every non-baseline strategy tying at <code>recall@3=1.000</code> across the
+board, this set cannot distinguish rewrite from RRF fusion from parent-child on
+<code>recall@3</code> alone. Concept 3's <code>MRR</code> numbers are what actually separate them, and that
+gap — not <code>recall@3</code> — is the number Architecture Decision — Week 24 below turns into a
+default.</p>
+<p><strong>Exercise:</strong>
+Using <code>bakeoff_results</code> from Concept 3, compute the &quot;rewrite lift&quot; (rewrite's mean
+<code>recall@3</code> minus baseline's mean <code>recall@3</code>) for each of the three failure-mode query
+types below, and print each one.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>lift_types = [&quot;rewrite_heavy&quot;, &quot;hyde_heavy&quot;, &quot;stepback_heavy&quot;]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>rewrite lift (rewrite recall@3 - baseline recall@3) by query type:
+  rewrite_heavy    baseline=0.00  rewrite=1.00  lift=1.00
+  hyde_heavy       baseline=0.00  rewrite=1.00  lift=1.00
+  stepback_heavy   baseline=0.50  rewrite=1.00  lift=0.50
+</code></pre><p><code>stepback_heavy</code>'s smaller lift (0.50, not 1.00) is real and expected: one of its two
+queries already scores partial credit under baseline because of literal overlap, so
+there is less headroom left for rewriting to recover — a genuinely smaller measured
+lift, not a weaker result.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> a 12-question labeled set (or even a real 30-question one) is a
+snapshot of the query vocabulary and document set that existed the day it was built — a
+legacy underwriting system's clause wording changing during a policy-admin migration
+silently invalidates every <code>doc_id</code> label the set was built against, the same staleness
+risk a unit test suite has against a codebase that moved out from under it, except
+nothing here fails loudly the way a broken import does.</p>
+<p><strong>Compliance angle:</strong> the per-query-type table (Concept 4), not just the aggregate
+<code>recall@3</code>/<code>MRR</code> numbers (Concept 3), is what a model-risk review actually needs — an
+aggregate number can mask a strategy that is excellent on 4 of 5 query types and
+silently broken on the fifth, and BFSI retrieval failures are rarely evenly distributed
+across query types; they cluster on whichever product line or clause pattern the
+labeled set's authors happened not to think to include.</p>
+<p><strong>What breaks in production:</strong> every non-baseline strategy tying at <code>recall@3=1.000</code> on
+this 12-query set (Concept 4) is the single clearest argument in this whole week for why
+production evaluation sets run to 30+ queries and beyond, not 12 — a set this small
+cannot statistically distinguish &quot;genuinely equivalent&quot; from &quot;not enough queries to tell
+them apart yet,&quot; and shipping a default strategy chosen from ties this narrow, without
+ever widening the set, is exactly how a real regression on an underrepresented query
+type goes undetected until a claims adjuster hits it in production.</p>
+<hr />
+<h2>Architecture Decision — Week 24</h2>
+<p>Choosing between: <strong>plain LLM query rewriting as the retrieval default</strong> (Day 1's
+rewrite step alone, one extra LLM call per query, no fusion) vs. <strong>RRF fusion of
+baseline + rewrite + HyDE</strong> (Day 2's fusion, three retrieval passes plus the fusion
+math, no extra LLM calls beyond what rewrite and HyDE already need) vs. <strong>parent-child
+indexing as an always-on default</strong> (Day 3's small-to-big split applied to every document
+regardless of length).</p>
+<p>Rule of thumb: default to <strong>plain rewrite</strong> for the general case. Day 5's bake-off
+measured all three non-baseline strategies tying at <code>recall@3=1.000</code> on this labeled
+set, so <code>recall@3</code> gives no reason to prefer one over another — but <code>MRR</code> does, and
+plain rewrite's <code>MRR=1.000</code> beat RRF fusion's <code>0.806</code> on the very same set, because
+fusion kept baseline's weak, unrewritten ranking in the vote alongside two strong
+signals (rewrite and HyDE) and let it occasionally drag the true answer off rank 1. That
+is the concrete failure case fusion has to earn its way past: <strong>only add RRF fusion when
+a second signal is independently strong enough to be worth fusing</strong> — for example,
+fusing rewrite with a real BM25 lexical ranking (Day 2 Concept 3), which brings a
+genuinely different failure mode (exact-term recall) rather than fusing in a signal
+(baseline, unrewritten) already known to be the weakest of the three. Never fuse in a
+signal you would not trust alone.</p>
+<p>Move to <strong>parent-child indexing</strong> only for document types independently known to be
+long and multi-clause enough that a single embedding would dilute a specific clause's
+signal — Day 5 Concept 3's own combined-type check showed parent-child buys nothing over
+plain rewrite on the <code>baseline_friendly</code> and <code>parent_child</code> query types in THIS labeled
+set, because none of its 3 long <code>POL-*</code> sections happened to be long enough, or its
+clauses similar enough to each other, to create real dilution. Turning parent-child
+indexing on for every document in a corpus, regardless of length, is exactly the
+default Day 3's own closing BFSI Reality Check warned against: it spends real storage
+and parent/child sync cost in places the bake-off shows it buys nothing. The actual
+failure case for the chosen default (plain rewrite) is the one this whole week keeps
+returning to: a rewrite prompt whose few-shot examples cover one product line's
+vocabulary (auto) degrades silently on another (life, commercial property) the labeled
+set never tested — which is precisely why Day 5's methodology (a fixed labeled set,
+re-run whenever the corpus or product-line mix changes, not a one-time bake-off result
+trusted forever) is the actual deliverable of this week, not any one strategy's win.</p>
+<hr />
+<div class="pager"><a class="btn ghost" href="week-23.html">&larr; Week 23</a><a class="btn ghost" href="week-25.html">Week 25 &rarr;</a></div>
+</main></body></html>

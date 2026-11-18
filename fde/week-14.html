@@ -1,0 +1,1787 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 14 — PII Masking with Presidio</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="14" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 14 — PII Masking with Presidio</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>3 — FinServ Compliance, Guardrails &amp; Governance for AI</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Advanced</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 09 semantic chunking and Week 11 incremental embedding updates (this week inserts a gate between those two stages). Week 12 pipeline orchestration for where the gate runs. No prior Presidio or spaCy experience assumed.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. <code>presidio-analyzer</code> and <code>presidio-anonymizer</code> install and run genuinely in this sandbox, and every code block below is EXECUTED with real captured output unless explicitly marked REAL MODE. One substitution is worth knowing about up front: Presidio's documented default spaCy model is <code>en_core_web_lg</code> (~400 MB); this sandbox has <code>en_core_web_sm</code> (~12 MB), so every <code>NlpEngineProvider</code> block below names <code>en_core_web_sm</code> explicitly. That changes NER recall on hard names — the smaller model misses more <code>PERSON</code> spans in noisy text — but not a single API shape or lesson in this week. Where a number would move with the larger model, the text says so.</td>
+</tr>
+</tbody>
+</table>
+<p>Phase 2 built a DataPrep pipeline that parses documents, chunks them, embeds the chunks
+and upserts them into a vector store. Every one of those stages moved raw claim text
+around without once asking what was in it. That is the gap this week closes, and it is not
+a theoretical one: once a chunk containing a customer's name and Teudat Zehut has been
+embedded and written to a vector store, the PII is in a system that has no <code>DELETE FROM ... WHERE customer_id = ?</code>, no straightforward right-to-erasure story, and — because
+embeddings are lossy but not anonymous — no honest claim that the original text is gone.</p>
+<p>The order of operations is the whole lesson. Masking has to happen <em>before</em> the embedding
+call, not after retrieval, because after retrieval is too late in every direction that
+matters: the vector store already holds it, the embedding API vendor already saw it, and
+the audit question &quot;was this customer's ID ever sent to a third party&quot; already has the
+wrong answer.</p>
+<hr />
+<h2 id="day-1">Day 1 — PII Detection Baseline with AnalyzerEngine</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=4GuK9sPUvus" target="_blank" rel="noopener"><b>Data Anonymization With Microsoft Presidio - Full Step By Step Tutorial</b><small>M&amp;M Tech · 7:08</small></a></li><li><a href="https://www.youtube.com/watch?v=j9Kcnnft2YA" target="_blank" rel="noopener"><b>PII Anonymization Service Demonstration (Microsoft Presidio based)</b><small>akingscote · 6:49</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Microsoft%20Presidio%20tutorial%20PII%20detection%20python" target="_blank" rel="noopener">Search YouTube: Microsoft Presidio tutorial PII detection python</a></p></div>
+<hr />
+<h3>Concept 1 — <code>AnalyzerEngine.analyze()</code> and the <code>RecognizerResult</code> span</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li><code>AnalyzerEngine</code> is the detection half of Presidio. It runs a set of <em>recognizers</em> over
+text and returns a list of <code>RecognizerResult</code> objects — it does not modify the text.
+Changing the text is <code>AnonymizerEngine</code>'s job (Day 3).</li>
+<li>Each <code>RecognizerResult</code> carries four things that matter: <code>entity_type</code>, <code>start</code>, <code>end</code>,
+and <code>score</code>. The span is a character offset pair into the original string, which is what
+makes downstream masking possible without re-finding anything.</li>
+<li>Recognizers are independent and overlapping by design. The same character range can come
+back under several entity types at several scores, and <em>nothing in Presidio resolves that
+for you by default</em> — the caller decides.</li>
+<li>The engine needs an NLP backend for the model-driven recognizers (<code>PERSON</code>, <code>LOCATION</code>,
+<code>ORGANIZATION</code>, <code>DATE_TIME</code>). Pattern-driven ones (<code>CREDIT_CARD</code>, <code>IBAN_CODE</code>) are regex
+plus validation and do not depend on it.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+# Presidio&#x27;s documented default is en_core_web_lg; this sandbox has en_core_web_sm,
+# so the model is named explicitly rather than left to the default.
+provider = NlpEngineProvider(nlp_configuration={
+    &quot;nlp_engine_name&quot;: &quot;spacy&quot;,
+    &quot;models&quot;: [{&quot;lang_code&quot;: &quot;en&quot;, &quot;model_name&quot;: &quot;en_core_web_sm&quot;}],
+})
+analyzer = AnalyzerEngine(nlp_engine=provider.create_engine())
+
+claim_note = (
+    &quot;Adjuster note: spoke with Dana Cohen about claim CLM-2291. &quot;
+    &quot;Teudat Zehut 123456782 on file. Refund issued to card 4111111111111111, &quot;
+    &quot;settlement wired to IBAN IL620108000000099999999.&quot;
+)
+
+results = analyzer.analyze(text=claim_note, language=&quot;en&quot;)
+print(&quot;total RecognizerResult objects:&quot;, len(results))
+print()
+# entity_type breaks score ties so this listing is reproducible run to run
+for r in sorted(results, key=lambda r: (r.start, -r.score, r.entity_type)):
+    print(f&quot;{r.entity_type:&lt;18}{r.start:&gt;4}-{r.end:&lt;4}score={r.score:.2f}  &quot;
+          f&quot;{claim_note[r.start:r.end]!r}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output:</p>
+<pre><code>total RecognizerResult objects: 13
+
+PERSON              26-36  score=0.85  &#x27;Dana Cohen&#x27;
+ORGANIZATION        59-71  score=0.85  &#x27;Teudat Zehut&#x27;
+DATE_TIME           72-81  score=0.85  &#x27;123456782&#x27;
+US_BANK_NUMBER      72-81  score=0.05  &#x27;123456782&#x27;
+US_PASSPORT         72-81  score=0.05  &#x27;123456782&#x27;
+US_SSN              72-81  score=0.05  &#x27;123456782&#x27;
+US_DRIVER_LICENSE   72-81  score=0.01  &#x27;123456782&#x27;
+CREDIT_CARD        113-129 score=1.00  &#x27;4111111111111111&#x27;
+DATE_TIME          113-129 score=0.85  &#x27;4111111111111111&#x27;
+US_BANK_NUMBER     113-129 score=0.05  &#x27;4111111111111111&#x27;
+US_DRIVER_LICENSE  113-129 score=0.01  &#x27;4111111111111111&#x27;
+ORGANIZATION       151-179 score=0.85  &#x27;IBAN IL620108000000099999999&#x27;
+IBAN_CODE          156-179 score=1.00  &#x27;IL620108000000099999999&#x27;
+</code></pre><p>Thirteen results for one three-sentence note, and four distinct character ranges. Read the
+noise rather than skipping past it, because the noise is the actual subject of Concept 2.
+The credit card is found twice — once correctly at <code>score=1.00</code> by the Luhn-validating
+<code>CREDIT_CARD</code> recognizer, and once as a <code>DATE_TIME</code> at <code>0.85</code> because a sixteen-digit run
+is a plausible date to a statistical model. <code>Teudat Zehut</code> itself is tagged
+<code>ORGANIZATION</code>, which is wrong but harmless. And the IBAN is covered by two overlapping
+spans at different offsets: <code>IBAN_CODE</code> at 156-179 (the code itself, <code>score=1.00</code>) and
+<code>ORGANIZATION</code> at 151-179 (the code <em>plus</em> the word &quot;IBAN&quot;, <code>score=0.85</code>).</p>
+<p>That last one is the detail worth carrying into Day 3. If you mask by iterating results
+naively, you will mask 151-179 and 156-179 as two separate operations on shifting offsets
+and corrupt the string. Overlap resolution is a real step, not an edge case.</p>
+<p><strong>Exercise:</strong></p>
+<p>Add a second adjuster note containing a customer name written in a form the small model is
+likely to miss — an all-caps surname, or a name that is also a common noun — and compare
+what <code>PERSON</code> spans come back against the <code>Dana Cohen</code> baseline. Then state, in one
+sentence, whether a <code>PERSON</code> miss is a detection problem you can fix by lowering
+<code>score_threshold</code>.</p>
+<p><strong>Starting point:</strong> The <code>analyzer</code> object and <code>claim_note</code> from this concept's Example, plus one
+note of your own writing. Do not change the NLP model — the point is to characterise the
+model you actually have.</p>
+<p>Expected output: the second note's <code>PERSON</code> spans, likely fewer than you expected. A miss
+is a <em>recall</em> failure inside the NER model — the span was never proposed at any score — so
+lowering <code>score_threshold</code> cannot recover it. Only a better model, or a custom recognizer
+that does not depend on NER, can. This distinction is why Day 2 exists.</p>
+<hr />
+<h3>Concept 2 — <code>score_threshold</code> and an explicit <code>entities</code> list</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li><code>analyze()</code> takes an <code>entities</code> list. Passing it restricts detection to those types and
+is the single most effective way to cut false positives, because most noise comes from
+recognizers you never wanted.</li>
+<li><code>score_threshold</code> drops results below a confidence floor. It is coarser than it looks:
+Presidio scores are mostly recognizer-defined constants, not a smooth distribution, so
+the threshold behaves like a step function.</li>
+<li>Restricting entities is a compliance decision, not a tuning one. The list is the written
+answer to &quot;which categories of personal data does this pipeline claim to handle&quot;, and it
+belongs in the same document as your DPIA.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED -- continues from Concept 1&#x27;s analyzer and claim_note
+WANTED = [&quot;PERSON&quot;, &quot;CREDIT_CARD&quot;, &quot;IBAN_CODE&quot;, &quot;US_BANK_NUMBER&quot;]
+
+filtered = analyzer.analyze(
+    text=claim_note,
+    language=&quot;en&quot;,
+    entities=WANTED,
+    score_threshold=0.5,
+)
+print(f&quot;unfiltered            : {len(results)} results&quot;)
+print(f&quot;entities= + threshold : {len(filtered)} results&quot;)
+print()
+for r in sorted(filtered, key=lambda r: r.start):
+    print(f&quot;{r.entity_type:&lt;14}score={r.score:.2f}  {claim_note[r.start:r.end]!r}&quot;)
+
+print()
+for th in (0.0, 0.3, 0.5, 0.85, 1.0):
+    n = len(analyzer.analyze(text=claim_note, language=&quot;en&quot;, score_threshold=th))
+    print(f&quot;score_threshold={th:&lt;5} -&gt; {n:&gt;2} results&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output:</p>
+<pre><code>unfiltered            : 13 results
+entities= + threshold : 3 results
+
+PERSON        score=0.85  &#x27;Dana Cohen&#x27;
+CREDIT_CARD   score=1.00  &#x27;4111111111111111&#x27;
+IBAN_CODE     score=1.00  &#x27;IL620108000000099999999&#x27;
+
+score_threshold=0.0   -&gt; 13 results
+score_threshold=0.3   -&gt;  7 results
+score_threshold=0.5   -&gt;  7 results
+score_threshold=0.85  -&gt;  7 results
+score_threshold=1.0   -&gt;  2 results
+</code></pre><p>Thirteen down to three, and the three are exactly right.</p>
+<p>The threshold sweep is the more instructive half, because it does not behave like a dial.
+Every value from 0.3 through 0.85 gives the same seven results. That is not a bug — it is
+what happens when scores cluster on a handful of recognizer-defined constants (0.01, 0.05,
+0.85, 1.00 are the only values in the table above). Turning the threshold from 0.3 to 0.8
+feels like tightening and changes nothing; turning it from 0.85 to 1.0 feels like a small
+step and silently discards the <code>PERSON</code> match, because NER results land at 0.85 and only
+checksum-validated pattern matches reach 1.00.</p>
+<p>So a threshold of 1.0 on a claims pipeline means &quot;mask card numbers and IBANs, and let
+every customer name through.&quot; Anyone tuning this by feel, without printing the score
+distribution first, will ship that.</p>
+<p><strong>Exercise:</strong></p>
+<p>Print the set of distinct <code>score</code> values the analyzer produces across five or six claim
+notes of your own, then choose a <code>score_threshold</code> justified by that distribution rather
+than by intuition, and say in one line what you are choosing to lose.</p>
+<p><strong>Starting point:</strong> The <code>analyzer</code> from Concept 1 and the sweep loop above, extended over
+several notes instead of one. Collect scores with a <code>set</code> comprehension over the results.</p>
+<p>Expected output: a small set of discrete values, not a continuum — on <code>en_core_web_sm</code>
+with these recognizers the values seen are 0.01, 0.05, 0.85 and 1.00. Any threshold in
+(0.05, 0.85] keeps NER and pattern hits while dropping the weak US-specific guesses, and
+that whole open interval is one decision, not a range to tune within.</p>
+<hr />
+<h3>Concept 3 — Why regex alone is not a masking strategy, and where the Israeli gap is</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li>A regex catches things with <em>shape</em>: card numbers, IBANs, fixed-length IDs. It cannot
+catch a person's name, because names have no shape — they are identified by context and
+statistics, which is exactly what the NER model is for.</li>
+<li>Presidio ships no Israeli entity. There is no <code>IL_ID</code>, no <code>IL_TEUDAT_ZEHUT</code>, nothing in
+the <code>IL_*</code> namespace. A nine-digit Teudat Zehut therefore falls through to whichever
+US-centric or model-driven recognizer happens to fire on nine digits.</li>
+<li>Worse, Presidio's response to a Teudat Zehut is <em>identical</em> whether or not its check
+digit is valid, because none of the recognizers firing on it know the checksum rule. A
+valid ID and a random nine-digit string are indistinguishable to the default engine.</li>
+<li>That is the argument for Day 2's custom recognizer, and it is a validation argument
+rather than a pattern one: <code>\d{9}</code> is trivial, the checksum is what separates an ID from
+an account number.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED -- continues from Concept 1&#x27;s analyzer, claim_note and results
+import re
+
+CARD_RE = re.compile(r&quot;\b\d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{4}\b&quot;)
+IBAN_RE = re.compile(r&quot;\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b&quot;)
+ID9_RE = re.compile(r&quot;\b\d{9}\b&quot;)
+
+
+def regex_only_spans(text):
+    spans = []
+    for label, rx in ((&quot;CARD&quot;, CARD_RE), (&quot;IBAN&quot;, IBAN_RE), (&quot;ID9&quot;, ID9_RE)):
+        for m in rx.finditer(text):
+            spans.append((label, m.start(), m.end()))
+    return sorted(spans, key=lambda s: s[1])
+
+
+regex_spans = regex_only_spans(claim_note)
+print(&quot;regex-only found:&quot;)
+for label, s, e in regex_spans:
+    print(f&quot;  {label:&lt;6}{claim_note[s:e]!r}&quot;)
+
+analyzer_person = [r for r in results if r.entity_type == &quot;PERSON&quot;]
+print()
+print(&quot;what regex structurally cannot find:&quot;)
+for r in analyzer_person:
+    covered = any(s &lt;= r.start and r.end &lt;= e for _, s, e in regex_spans)
+    print(f&quot;  PERSON {claim_note[r.start:r.end]!r} covered by any regex span: {covered}&quot;)
+
+
+def teudat_zehut_valid(digits):
+    &quot;&quot;&quot;Israeli ID check digit: alternate weights 1,2 across 9 digits, sum the
+    digits of each product, total must be divisible by 10.&quot;&quot;&quot;
+    if len(digits) != 9 or not digits.isdigit():
+        return False
+    total = 0
+    for i, ch in enumerate(digits):
+        p = int(ch) * (1 if i % 2 == 0 else 2)
+        total += p if p &lt; 10 else p - 9
+    return total % 10 == 0
+
+
+print()
+for candidate in (&quot;123456782&quot;, &quot;123456789&quot;, &quot;000000018&quot;):
+    labels = sorted({r.entity_type for r in
+                     analyzer.analyze(text=f&quot;ID {candidate} on file.&quot;, language=&quot;en&quot;)})
+    print(f&quot;  {candidate}  checksum_valid={teudat_zehut_valid(candidate)!s:&lt;5} &quot;
+          f&quot;presidio_says={labels}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output:</p>
+<pre><code>regex-only found:
+  ID9   &#x27;123456782&#x27;
+  CARD  &#x27;4111111111111111&#x27;
+  IBAN  &#x27;IL620108000000099999999&#x27;
+
+what regex structurally cannot find:
+  PERSON &#x27;Dana Cohen&#x27; covered by any regex span: False
+
+  123456782  checksum_valid=True  presidio_says=[&#x27;DATE_TIME&#x27;, &#x27;US_BANK_NUMBER&#x27;, &#x27;US_DRIVER_LICENSE&#x27;, &#x27;US_PASSPORT&#x27;, &#x27;US_SSN&#x27;]
+  123456789  checksum_valid=False presidio_says=[&#x27;DATE_TIME&#x27;, &#x27;US_BANK_NUMBER&#x27;, &#x27;US_DRIVER_LICENSE&#x27;, &#x27;US_PASSPORT&#x27;]
+  000000018  checksum_valid=True  presidio_says=[&#x27;DATE_TIME&#x27;, &#x27;US_BANK_NUMBER&#x27;, &#x27;US_DRIVER_LICENSE&#x27;, &#x27;US_PASSPORT&#x27;]
+</code></pre><p>Three things in that output, in ascending order of importance.</p>
+<p>The regex does fine on shaped data — it finds all three structured identifiers, and for
+card numbers and IBANs a regex plus a checksum is genuinely most of what Presidio's own
+pattern recognizers are.</p>
+<p>It finds nothing where <code>Dana Cohen</code> is. Not &quot;finds it with low confidence&quot; — the span is
+never a candidate. This is the structural argument for a model-based recognizer, and it is
+why a masking layer built by a team that reached for <code>re</code> first will pass its own tests
+(the tests will use shaped data) and leak names in production free text.</p>
+<p>And the Teudat Zehut lines are the one to sit with. All three nine-digit strings come back
+with essentially the same US-centric label set. The valid ID <code>123456782</code> and the invalid
+<code>123456789</code> are treated the same, because nothing in that label set validates an Israeli
+check digit — <code>US_SSN</code> fires on one and not the other purely as an artifact of its own
+unrelated pattern rules, not because it knows anything about Teudat Zehut. If your
+compliance register says &quot;Israeli national ID numbers are detected and masked&quot;, the
+default engine does not support that claim.</p>
+<p><strong>Exercise:</strong></p>
+<p>Write the smallest test that would fail today and pass once Day 2's recognizer exists: an
+assertion that a <em>valid</em> Teudat Zehut is detected under an Israeli entity type and an
+<em>invalid</em> nine-digit string is not. Run it now and confirm it fails for the right reason.</p>
+<p><strong>Starting point:</strong> <code>teudat_zehut_valid()</code> and the <code>analyzer</code> from above, plus the valid /
+invalid pair <code>123456782</code> / <code>123456789</code>. Assert on the presence of an entity type such as
+<code>&quot;IL_TEUDAT_ZEHUT&quot;</code> in the analyzer's output — a name nothing currently produces.</p>
+<p>Expected output: a failing assertion, and the failure reason matters. It must fail because
+no Israeli entity type is present at all, not because the wrong span was returned. A test
+that fails for the wrong reason will pass for the wrong reason later.</p>
+<hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle.</strong> The claim notes this week masks do not arrive as tidy UTF-8 paragraphs.
+In an insurer running the stack Phase 2 dealt with, adjuster free text lives in a
+<code>VARCHAR(4000)</code> column on an on-prem MSSQL box, often mixed-encoding, frequently
+containing the customer's ID because a 2009 data-entry screen had one free-text field and
+no validation. Presidio operates on strings, so everything upstream — the EBCDIC
+conversion from Week 13, the encoding normalisation — has to be right before detection
+even starts. A mojibake'd name is a name the NER model will not recognise, and a detection
+layer cannot mask what the decoder already mangled.</p>
+<p><strong>Compliance angle.</strong> Under Israeli PPPA, and under GDPR where an insurer has EU
+exposure, the relevant question at audit is not &quot;do you mask PII&quot; but &quot;what is your
+evidence for the categories you claim to handle.&quot; The <code>entities</code> list from Concept 2 is
+that evidence, which is why it belongs in version control next to the DPIA rather than
+inline in a script. The Teudat Zehut gap in Concept 3 is a live finding in exactly that
+frame: a register claiming Israeli national IDs are masked, backed by an engine with no
+Israeli recognizer, is a documented control that does not exist.</p>
+<p><strong>What breaks in production.</strong> The failure is quiet, and it is almost always recall rather
+than precision. Over-masking is loud — someone complains the retrieval results are useless
+— and gets fixed within a day. Under-masking produces a pipeline that runs clean, passes
+its tests, and writes unmasked names into a vector store for months, discovered only when
+somebody greps an index for a customer who exercised a deletion request. Assume every
+<code>PERSON</code> miss in Concept 1's exercise is a row in a vector store that you cannot
+selectively delete, and the priority ordering for the rest of this week follows.</p>
+<hr />
+<h2 id="day-2">Day 2 — Custom Recognizers for Financial Identifiers</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=4GuK9sPUvus" target="_blank" rel="noopener"><b>Data Anonymization With Microsoft Presidio - Full Step By Step Tutorial</b><small>M&amp;M Tech · 7:08</small></a></li><li><a href="https://www.youtube.com/watch?v=FsVuqmhLq3g" target="_blank" rel="noopener"><b>Your AI Is Leaking Personal Data | Stop It with Microsoft Presidio #AI #LLM #MicrosoftPresidio</b><small>AI Learning Hub · 6:31</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Presidio%20custom%20recognizer%20pattern%20context%20words%20python" target="_blank" rel="noopener">Search YouTube: Presidio custom recognizer pattern context words python</a></p></div>
+<hr />
+<h3>Concept 1 — <code>PatternRecognizer</code> from <code>Pattern</code>, and <code>deny_list</code> vs <code>allow_list</code></h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li>A <code>PatternRecognizer</code> is built from one or more <code>Pattern(name, regex, score)</code> objects
+plus <code>supported_entity</code>, the entity type it reports. Register it with
+<code>analyzer.registry.add_recognizer(...)</code> and it runs on every later <code>analyze()</code> call
+exactly like a built-in recognizer — Presidio does not distinguish custom from built-in
+once registered.</li>
+<li><code>deny_list</code> is not an exclusion list, despite the name reading that way. It is a list of
+<em>exact terms to flag</em>, compiled internally into a regex and matched at <code>deny_list_score</code>
+(default <code>1.0</code>). Use it for identifiers with no shape a regex can express — an internal
+project codename, a product nickname — where <code>Pattern</code> has nothing to match against.</li>
+<li>The actual exclusion mechanism is <code>allow_list</code>, and it lives on <code>AnalyzerEngine.analyze()</code>
+itself, not on the recognizer. It exempts specific exact values from every recognizer's
+output at once, for the one case a shaped pattern legitimately over-matches: a code that
+is public knowledge, not a secret, even though it fits the regex.</li>
+<li>Patterns can be appended to an already-registered <code>PatternRecognizer</code> instance after the
+fact (<code>recognizer.patterns.append(...)</code>) — the registry holds a reference to the object,
+not a snapshot, so later <code>analyze()</code> calls pick up the change without re-registering.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+provider = NlpEngineProvider(nlp_configuration={
+    &quot;nlp_engine_name&quot;: &quot;spacy&quot;,
+    &quot;models&quot;: [{&quot;lang_code&quot;: &quot;en&quot;, &quot;model_name&quot;: &quot;en_core_web_sm&quot;}],
+})
+analyzer = AnalyzerEngine(nlp_engine=provider.create_engine())
+
+product_pattern = Pattern(name=&quot;claim_product_code&quot;, regex=r&quot;\bCLM-\d{4}\b&quot;, score=0.9)
+branch_pattern = Pattern(name=&quot;branch_code&quot;, regex=r&quot;\bBR-\d{3}\b&quot;, score=0.9)
+
+# &quot;Project Nightingale&quot; has no shape a regex can express -- deny_list flags it
+# by exact term instead. deny_list is a list of terms TO FLAG, not to exclude.
+internal_code_recognizer = PatternRecognizer(
+    supported_entity=&quot;FINSERV_INTERNAL_CODE&quot;,
+    name=&quot;internal_code_recognizer&quot;,
+    patterns=[product_pattern, branch_pattern],
+    deny_list=[&quot;Project Nightingale&quot;, &quot;Project Falcon&quot;],
+)
+analyzer.registry.add_recognizer(internal_code_recognizer)
+
+note = (
+    &quot;Adjuster note: spoke with Dana Cohen about claim CLM-2291 at branch BR-014, &quot;
+    &quot;part of Project Nightingale&#x27;s fast-track pilot. Head office branch BR-000 &quot;
+    &quot;handled the escalation. Refund issued to card 4111111111111111.&quot;
+)
+
+print(&quot;without allow_list:&quot;)
+results = analyzer.analyze(text=note, language=&quot;en&quot;,
+                            entities=[&quot;FINSERV_INTERNAL_CODE&quot;, &quot;PERSON&quot;, &quot;CREDIT_CARD&quot;])
+for r in sorted(results, key=lambda r: r.start):
+    print(f&quot;  {r.entity_type:&lt;24}score={r.score:.2f}  {note[r.start:r.end]!r}&quot;)
+
+print()
+print(&quot;with allow_list=[&#x27;BR-000&#x27;] (head office code is public, not a secret):&quot;)
+results2 = analyzer.analyze(text=note, language=&quot;en&quot;,
+                             entities=[&quot;FINSERV_INTERNAL_CODE&quot;, &quot;PERSON&quot;, &quot;CREDIT_CARD&quot;],
+                             allow_list=[&quot;BR-000&quot;])
+for r in sorted(results2, key=lambda r: r.start):
+    print(f&quot;  {r.entity_type:&lt;24}score={r.score:.2f}  {note[r.start:r.end]!r}&quot;)
+
+print()
+print(f&quot;result count: no_allow_list={len(results)}  with_allow_list={len(results2)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output:</p>
+<pre><code>without allow_list:
+  PERSON                  score=0.85  &#x27;Dana Cohen&#x27;
+  FINSERV_INTERNAL_CODE   score=0.90  &#x27;CLM-2291&#x27;
+  FINSERV_INTERNAL_CODE   score=0.90  &#x27;BR-014&#x27;
+  FINSERV_INTERNAL_CODE   score=1.00  &#x27;Project Nightingale&#x27;
+  FINSERV_INTERNAL_CODE   score=0.90  &#x27;BR-000&#x27;
+  CREDIT_CARD             score=1.00  &#x27;4111111111111111&#x27;
+
+with allow_list=[&#x27;BR-000&#x27;] (head office code is public, not a secret):
+  PERSON                  score=0.85  &#x27;Dana Cohen&#x27;
+  FINSERV_INTERNAL_CODE   score=0.90  &#x27;CLM-2291&#x27;
+  FINSERV_INTERNAL_CODE   score=0.90  &#x27;BR-014&#x27;
+  FINSERV_INTERNAL_CODE   score=1.00  &#x27;Project Nightingale&#x27;
+  CREDIT_CARD             score=1.00  &#x27;4111111111111111&#x27;
+
+result count: no_allow_list=6  with_allow_list=5
+</code></pre><p><code>Project Nightingale</code> comes back at <code>score=1.00</code>, the <code>deny_list_score</code> default, because
+<code>deny_list</code> compiled it into an exact-match pattern the same way <code>CLM-\d{4}</code> is a shaped
+one — Presidio does not remember which recognizer contributed a result differently by
+mechanism, only by entity type. <code>BR-000</code> disappears only from the second run, and only
+because it was named in <code>allow_list</code>, not because anything about the recognizer changed.
+That asymmetry — <code>deny_list</code> flags, <code>allow_list</code> excludes, and they are not each other's
+opposite despite the naming — is the actual gotcha here, not the regex syntax.</p>
+<p><strong>Exercise:</strong></p>
+<p>Extend <code>internal_code_recognizer</code> with a third pattern for policy numbers
+(<code>POL-\d{6}</code>) by appending to its existing <code>.patterns</code> list rather than constructing a new
+<code>PatternRecognizer</code> or calling <code>add_recognizer</code> again, then analyze a new note containing a
+policy number to confirm the running <code>analyzer</code> picks up the change.</p>
+<p><strong>Starting point:</strong> The <code>analyzer</code> and <code>internal_code_recognizer</code> objects from this
+concept's Example, already registered.</p>
+<p>Expected output: a <code>FINSERV_INTERNAL_CODE</code> match on the policy number at <code>score=0.90</code>,
+returned by the same <code>analyzer.analyze()</code> call used for the earlier patterns, with no
+re-registration step. If this requires calling <code>add_recognizer</code> again to work, the
+mutation didn't take — the registry was designed to hold live references specifically so
+this works.</p>
+<hr />
+<h3>Concept 2 — <code>context</code> words and the <code>LemmaContextAwareEnhancer</code> score uplift</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li>A <code>PatternRecognizer</code> can take a <code>context</code> list: words that, when found near a match,
+raise its score. This is how Presidio turns a deliberately weak, over-matching pattern
+into something usable — start the pattern's own <code>score</code> low and let context do the
+discrimination.</li>
+<li><code>AnalyzerEngine</code> wires a <code>LemmaContextAwareEnhancer</code> by default. Its
+<code>context_similarity_factor</code> (default <code>0.35</code>) is added to the base score when a context
+word is found nearby, so the arithmetic is not mysterious: a <code>score=0.3</code> pattern near its
+context word becomes <code>0.3 + 0.35 = 0.65</code>.</li>
+<li>&quot;Nearby&quot; is asymmetric and configurable, not just &quot;somewhere in the sentence&quot;:
+<code>context_prefix_count</code> defaults to <code>5</code> words <em>before</em> the match, <code>context_suffix_count</code>
+defaults to <code>0</code> words after it. A context word placed after the match does nothing by
+default.</li>
+<li>Matching is lemma-based, not exact-string. <code>context=[&quot;account&quot;]</code> also boosts on
+&quot;accounts&quot; and other inflections, because the enhancer compares lemmas of the surrounding
+tokens to the lemmas of the context words, not the raw text.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+provider = NlpEngineProvider(nlp_configuration={
+    &quot;nlp_engine_name&quot;: &quot;spacy&quot;,
+    &quot;models&quot;: [{&quot;lang_code&quot;: &quot;en&quot;, &quot;model_name&quot;: &quot;en_core_web_sm&quot;}],
+})
+
+# Deliberately weak: an 8-10 digit run is common enough (amounts, phone
+# fragments, references) that it should not mask everywhere -- only near a
+# word that says &quot;this is an account&quot;.
+weak_account_pattern = Pattern(name=&quot;weak_account_number&quot;, regex=r&quot;\b\d{8,10}\b&quot;, score=0.3)
+
+no_context_recognizer = PatternRecognizer(
+    supported_entity=&quot;FINSERV_ACCOUNT_NUMBER&quot;,
+    name=&quot;account_number_recognizer_no_context&quot;,
+    patterns=[weak_account_pattern],
+)
+with_context_recognizer = PatternRecognizer(
+    supported_entity=&quot;FINSERV_ACCOUNT_NUMBER&quot;,
+    name=&quot;account_number_recognizer_with_context&quot;,
+    patterns=[weak_account_pattern],
+    context=[&quot;account&quot;, &quot;acct&quot;, &quot;account number&quot;],
+)
+
+analyzer_bare = AnalyzerEngine(nlp_engine=provider.create_engine())
+analyzer_bare.registry.add_recognizer(no_context_recognizer)
+
+analyzer_with_ctx = AnalyzerEngine(nlp_engine=provider.create_engine())
+analyzer_with_ctx.registry.add_recognizer(with_context_recognizer)
+
+near_context = &quot;Please debit account number 88213410 for this month&#x27;s premium.&quot;
+far_context = &quot;Policy renewal reference 88213410 was generated overnight.&quot;
+after_context = &quot;Reference 88213410 was applied to the account balance.&quot;
+
+for label, text in (
+    (&quot;context word before match&quot;, near_context),
+    (&quot;no context word nearby&quot;, far_context),
+    (&quot;context word after match (suffix_count=0)&quot;, after_context),
+):
+    bare = analyzer_bare.analyze(text=text, language=&quot;en&quot;, entities=[&quot;FINSERV_ACCOUNT_NUMBER&quot;])
+    ctx = analyzer_with_ctx.analyze(text=text, language=&quot;en&quot;, entities=[&quot;FINSERV_ACCOUNT_NUMBER&quot;])
+    b = round(bare[0].score, 2) if bare else None
+    c = round(ctx[0].score, 2) if ctx else None
+    print(f&quot;{label:&lt;42} no_context_recognizer={b}  with_context_recognizer={c}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output:</p>
+<pre><code>context word before match                  no_context_recognizer=0.3  with_context_recognizer=0.65
+no context word nearby                     no_context_recognizer=0.3  with_context_recognizer=0.3
+context word after match (suffix_count=0)  no_context_recognizer=0.3  with_context_recognizer=0.3
+</code></pre><p><code>no_context_recognizer</code> never moves, in all three rows, because it has no <code>context</code> list —
+that column is the control. <code>with_context_recognizer</code> moves from <code>0.3</code> to <code>0.65</code> only in
+the first row, exactly <code>0.3 + 0.35</code>, confirming the enhancer is doing simple addition on a
+hit, not some smoother similarity score. The third row is the one worth remembering: the
+word &quot;account&quot; is right there in the sentence, two words after the match, and it still
+does nothing — <code>context_suffix_count=0</code> means only words <em>before</em> a match count by
+default. A context list is not &quot;does this word appear nearby,&quot; it is &quot;does this word
+appear in the specific window this recognizer was configured to look at.&quot;</p>
+<p><strong>Exercise:</strong></p>
+<p>Using <code>with_context_recognizer</code>, test whether <code>context=[&quot;account&quot;, &quot;acct&quot;, &quot;account number&quot;]</code> boosts a match near the plural &quot;accounts&quot; and near the abbreviation &quot;Acct&quot;,
+without adding either exact form to the <code>context</code> list.</p>
+<p><strong>Starting point:</strong> <code>analyzer_with_ctx</code> from this concept's Example, plus two sentences of
+your own: one using &quot;accounts&quot; (plural) near the number, one using &quot;Acct&quot; (capitalised
+abbreviation) near the number.</p>
+<p>Expected output: both boost to <code>0.65</code>, the same as the exact-match case. &quot;accounts&quot; works
+because its lemma is &quot;account&quot;, which is already in the context list. &quot;Acct&quot; works because
+<code>context</code> values are matched case-insensitively against surrounding lemmas, and spaCy's
+<code>en_core_web_sm</code> lemmatizes &quot;Acct&quot; to &quot;acct&quot; — which is in the list verbatim. Neither
+result depends on the list containing every inflection or capitalisation by hand.</p>
+<hr />
+<h3>Concept 3 — Checksum validation inside a custom <code>EntityRecognizer</code></h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li><code>PatternRecognizer</code> is a convenience subclass of the more general <code>EntityRecognizer</code>.
+Writing an <code>EntityRecognizer</code> directly means implementing <code>load()</code> and
+<code>analyze(text, entities, nlp_artifacts)</code> yourself and returning a list of
+<code>RecognizerResult</code> — full control, in exchange for doing the finding yourself instead of
+handing a regex to the base class.</li>
+<li>That control is exactly what a checksum needs. <code>\b\d{9}\b</code> finds every nine-digit run;
+it cannot express &quot;and the check digit must be valid,&quot; because that is arithmetic over
+the matched digits, not a shape. A custom <code>EntityRecognizer.analyze()</code> can run the regex
+<em>and then filter</em> by the checksum before ever constructing a <code>RecognizerResult</code> — so
+only valid IDs are reported at all, not valid ones at a higher score than invalid ones.</li>
+<li>This directly resolves Day 1 Concept 3's failing test: a real <code>IL_TEUDAT_ZEHUT</code> entity
+type now exists, and only fires on candidates whose check digit passes.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED -- reuses ID9_RE and teudat_zehut_valid() from Day 1 Concept 3
+import re
+from presidio_analyzer import AnalyzerEngine, EntityRecognizer, RecognizerResult
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+ID9_RE = re.compile(r&quot;\b\d{9}\b&quot;)
+
+
+def teudat_zehut_valid(digits):
+    if len(digits) != 9 or not digits.isdigit():
+        return False
+    total = 0
+    for i, ch in enumerate(digits):
+        p = int(ch) * (1 if i % 2 == 0 else 2)
+        total += p if p &lt; 10 else p - 9
+    return total % 10 == 0
+
+
+class TeudatZehutRecognizer(EntityRecognizer):
+    &quot;&quot;&quot;Checksum-validated Israeli national ID recognizer.
+
+    Day 1&#x27;s regex_only_spans fired on every nine-digit run, valid or not.
+    This one only reports a span when the check digit actually passes.
+    &quot;&quot;&quot;
+
+    ENTITY = &quot;IL_TEUDAT_ZEHUT&quot;
+
+    def __init__(self):
+        super().__init__(supported_entities=[self.ENTITY], name=&quot;teudat_zehut_recognizer&quot;)
+
+    def load(self):
+        pass
+
+    def analyze(self, text, entities, nlp_artifacts):
+        if self.ENTITY not in entities:
+            return []
+        results = []
+        for m in ID9_RE.finditer(text):
+            if teudat_zehut_valid(m.group()):
+                results.append(RecognizerResult(
+                    entity_type=self.ENTITY, start=m.start(), end=m.end(), score=0.9,
+                ))
+        return results
+
+
+provider = NlpEngineProvider(nlp_configuration={
+    &quot;nlp_engine_name&quot;: &quot;spacy&quot;,
+    &quot;models&quot;: [{&quot;lang_code&quot;: &quot;en&quot;, &quot;model_name&quot;: &quot;en_core_web_sm&quot;}],
+})
+analyzer = AnalyzerEngine(nlp_engine=provider.create_engine())
+analyzer.registry.add_recognizer(TeudatZehutRecognizer())
+
+claim_note = (
+    &quot;Adjuster note: spoke with Dana Cohen about claim CLM-2291. &quot;
+    &quot;Teudat Zehut 123456782 on file. Refund issued to card 4111111111111111, &quot;
+    &quot;settlement wired to IBAN IL620108000000099999999.&quot;
+)
+
+results = analyzer.analyze(text=claim_note, language=&quot;en&quot;, entities=[&quot;IL_TEUDAT_ZEHUT&quot;])
+print(&quot;IL_TEUDAT_ZEHUT spans found:&quot;)
+for r in results:
+    print(f&quot;  {claim_note[r.start:r.end]!r} score={r.score}&quot;)
+
+print()
+# Day 1&#x27;s failing assertion, re-run against the real recognizer
+for candidate in (&quot;123456782&quot;, &quot;123456789&quot;, &quot;000000018&quot;):
+    labels = sorted({r.entity_type for r in
+                     analyzer.analyze(text=f&quot;ID {candidate} on file.&quot;, language=&quot;en&quot;,
+                                       entities=[&quot;IL_TEUDAT_ZEHUT&quot;])})
+    print(f&quot;  {candidate}  checksum_valid={teudat_zehut_valid(candidate)!s:&lt;5} presidio_says={labels}&quot;)
+
+assert any(r.entity_type == &quot;IL_TEUDAT_ZEHUT&quot; for r in
+           analyzer.analyze(text=&quot;ID 123456782 on file.&quot;, language=&quot;en&quot;, entities=[&quot;IL_TEUDAT_ZEHUT&quot;]))
+assert not any(r.entity_type == &quot;IL_TEUDAT_ZEHUT&quot; for r in
+               analyzer.analyze(text=&quot;ID 123456789 on file.&quot;, language=&quot;en&quot;, entities=[&quot;IL_TEUDAT_ZEHUT&quot;]))
+print()
+print(&quot;Day 1&#x27;s assertion now passes.&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output:</p>
+<pre><code>IL_TEUDAT_ZEHUT spans found:
+  &#x27;123456782&#x27; score=0.9
+
+  123456782  checksum_valid=True  presidio_says=[&#x27;IL_TEUDAT_ZEHUT&#x27;]
+  123456789  checksum_valid=False presidio_says=[]
+  000000018  checksum_valid=True  presidio_says=[&#x27;IL_TEUDAT_ZEHUT&#x27;]
+
+Day 1&#x27;s assertion now passes.
+</code></pre><p><code>000000018</code> is worth a second look — eighteen zeros and an eight is not a string anyone
+would guess is a valid ID, and yet <code>teudat_zehut_valid</code> accepts it, because the checksum
+only constrains the relationship between digits, not their distribution. A checksum proves
+internal consistency, never realism; a custom recognizer built only on <code>teudat_zehut_valid</code>
+will happily mask <code>000000018</code> and would just as happily let a plausible-looking but
+checksum-failing string like <code>123456789</code> straight through. That is a feature, not a gap —
+it means the recognizer's false-positive rate is governed entirely by how the ten-digit
+space maps onto valid checksums, a fixed and computable property, not by guesswork about
+what real IDs look like.</p>
+<p><strong>Exercise:</strong></p>
+<p>Build a small labelled test set of short claim-note snippets, each with the set of
+nine-digit strings (if any) that are <em>actually</em> valid Teudat Zehut numbers among the noise
+in the sentence — mix in a phone number fragment and a settlement amount, not just IDs —
+then run <code>TeudatZehutRecognizer</code> against each and confirm its checksum-filtered output
+matches your labels exactly, with no false positives from the noise.</p>
+<p><strong>Starting point:</strong> <code>TeudatZehutRecognizer</code>, <code>teudat_zehut_valid()</code>, and <code>ID9_RE</code> from this
+concept's Example. Build the labelled list as <code>(text, expected_valid_ids_set)</code> tuples
+yourself.</p>
+<p>Expected output: every snippet's checksum-filtered candidates equal to its label exactly.
+A settlement amount that happens to be nine digits long (<code>987654321</code>) should produce zero
+matches — not because it doesn't look like an ID, but because it fails the checksum, which
+is the only thing this recognizer actually checks.</p>
+<hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle.</strong> Mainframe COBOL fields store a Teudat Zehut as a fixed-width <code>PIC 9(9)</code>
+zero-padded numeric, e.g. <code>005328155</code> — but once that value crosses into a spreadsheet or
+a free-text export (a very Israeli-insurance-specific failure mode: an adjuster pastes a
+claimant list from Excel into a note), Excel silently drops the leading zeros and the field
+becomes <code>5328155</code>, seven digits. <code>ID9_RE</code> will not even find it — <code>\b\d{9}\b</code> requires
+nine digits, and the checksum math in <code>teudat_zehut_valid</code> assumes nine positions with
+specific alternating weights, so a naive re-pad is not safe either: <code>005328155</code> and
+<code>5328155</code> zero-padded the <em>wrong</em> way are different candidate strings. Handling this
+correctly means re-padding on the left specifically, which is exactly the kind of
+legacy-format assumption that has to be verified against the source system rather than
+guessed from the free-text side alone.</p>
+<p><strong>Compliance angle.</strong> <code>TeudatZehutRecognizer</code> is a control an auditor can ask to see
+evidence for, same as Day 1's <code>entities</code> list — but a hand-written checksum recognizer is
+also a piece of code with a bug surface a built-in recognizer doesn't have. The exercise's
+labelled test set is not busywork: it is the artifact that lets you answer &quot;how do you
+know this recognizer works&quot; with a number instead of a claim. The same applies to
+<code>deny_list</code> from Concept 1 — a list of internal codenames is only as good as its last
+update, and a compliance register that says &quot;internal project names are masked&quot; needs
+that list treated as a maintained, version-controlled artifact, not a one-time hardcode.</p>
+<p><strong>What breaks in production.</strong> A Teudat Zehut printed on a scanned form or typed by a
+customer often carries a separator before the check digit — <code>12345678-2</code> — because that is
+how the number is visually grouped on the physical ID card. <code>ID9_RE</code> finds nothing in that
+string at all: the hyphen splits it into an eight-digit run and a one-digit run, neither
+of which is nine contiguous digits, so this is a silent recall failure, not a rejected
+match. Stripping non-digit characters before matching (<code>re.sub(r&quot;[^0-9]&quot;, &quot;&quot;, s)</code>) recovers
+<code>123456782</code> correctly here, but doing that on the whole free-text note before detection
+would also silently collapse <code>CLM-2291</code> and the IBAN into different, wrong strings. The
+fix belongs inside the recognizer, applied only to what already looks like a candidate
+span, not upstream on the raw text — another reason <code>EntityRecognizer</code> control matters
+more than it looks like it should for what seems like a two-line regex problem.</p>
+<hr />
+<h2 id="day-3">Day 3 — Reversible Anonymization and Operator Design</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=4GuK9sPUvus" target="_blank" rel="noopener"><b>Data Anonymization With Microsoft Presidio - Full Step By Step Tutorial</b><small>M&amp;M Tech · 7:08</small></a></li><li><a href="https://www.youtube.com/watch?v=oUAYZPY-tw8" target="_blank" rel="noopener"><b>How to Anonymize Your Data Before Putting in ChatGPT  ( LangChain + Presidio)</b><small>MG · 18:38</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Presidio%20anonymizer%20operators%20encrypt%20deanonymize%20example" target="_blank" rel="noopener">Search YouTube: Presidio anonymizer operators encrypt deanonymize example</a></p></div>
+<hr />
+<h3>Concept 1 — <code>OperatorConfig</code> per entity type, and why <code>hash</code> is not a free pseudonym</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li><code>AnonymizerEngine.anonymize()</code> takes the original text plus the <code>RecognizerResult</code> list
+from <code>analyze()</code>. With no <code>operators</code> argument it wraps every match in
+<code>&lt;ENTITY_TYPE&gt;</code>, which is a reasonable default and also the reason Day 1/2's examples
+never had to think about anonymization at all — detection and replacement are
+genuinely separate engines.</li>
+<li>The real control surface is an <code>operators</code> dict keyed by entity type, each value an
+<code>OperatorConfig(operator_name, params)</code>. <code>replace</code> takes <code>new_value</code>; <code>mask</code> takes
+<code>masking_char</code>, <code>chars_to_mask</code>, <code>from_end</code>; <code>hash</code> takes <code>hash_type</code> (<code>sha256</code> or
+<code>sha512</code>). Each <code>EngineResult.items</code> entry records which operator actually ran, which
+matters once several entity types are masked differently in one call.</li>
+<li><code>hash</code> is not a stable fingerprint by default. It salts every value with 32 random
+bytes from <code>os.urandom()</code> before hashing, generated fresh per match — so the <em>same</em>
+string, masked twice in the <em>same</em> call, gets two different digests, and masking the
+same document again a minute later gets a third. This is a deliberate anti-dictionary-
+attack design, not a bug, but it means <code>hash</code> cannot be used as a join key or a
+coreference-preserving pseudonym unless you override it.</li>
+<li>Passing an explicit <code>salt</code> (bytes or a string of at least 16 bytes) makes <code>hash</code>
+fully deterministic: the same plaintext and salt always produce the same digest,
+in the same call and across separate runs. That determinism is exactly what a
+deterministic-tokenization requirement (Week 18's masked join keys) needs — and
+exactly what it gives up on unlinkability, since anyone who guesses the salt and a
+candidate plaintext can confirm a match by re-hashing.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+from presidio_analyzer import AnalyzerEngine
+from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+provider = NlpEngineProvider(nlp_configuration={
+    &quot;nlp_engine_name&quot;: &quot;spacy&quot;,
+    &quot;models&quot;: [{&quot;lang_code&quot;: &quot;en&quot;, &quot;model_name&quot;: &quot;en_core_web_sm&quot;}],
+})
+analyzer = AnalyzerEngine(nlp_engine=provider.create_engine())
+anonymizer = AnonymizerEngine()
+
+claim_note = (
+    &quot;Adjuster note: spoke with Dana Cohen about claim CLM-2291. &quot;
+    &quot;Dana Cohen confirmed the refund amount. Refund issued to card &quot;
+    &quot;4111111111111111, settlement wired to IBAN IL620108000000099999999.&quot;
+)
+
+results = analyzer.analyze(text=claim_note, language=&quot;en&quot;,
+                            entities=[&quot;PERSON&quot;, &quot;CREDIT_CARD&quot;, &quot;IBAN_CODE&quot;])
+
+default_out = anonymizer.anonymize(text=claim_note, analyzer_results=results)
+print(&quot;default operator (no operators dict passed):&quot;)
+print(&quot; &quot;, default_out.text)
+print()
+
+operators = {
+    &quot;PERSON&quot;: OperatorConfig(&quot;replace&quot;, {&quot;new_value&quot;: &quot;&lt;CUSTOMER&gt;&quot;}),
+    &quot;CREDIT_CARD&quot;: OperatorConfig(&quot;mask&quot;, {&quot;masking_char&quot;: &quot;*&quot;, &quot;chars_to_mask&quot;: 12, &quot;from_end&quot;: False}),
+    &quot;IBAN_CODE&quot;: OperatorConfig(&quot;hash&quot;, {&quot;hash_type&quot;: &quot;sha256&quot;}),
+}
+out = anonymizer.anonymize(text=claim_note, analyzer_results=results, operators=operators)
+print(&quot;one OperatorConfig per entity type:&quot;)
+print(&quot; &quot;, out.text)
+print()
+print(&quot;EngineResult.items (each records which operator actually ran):&quot;)
+for item in sorted(out.items, key=lambda i: i.start):
+    print(f&quot;  {item.entity_type:&lt;12} operator={item.operator:&lt;8} {item.text!r}&quot;)
+
+print()
+person_results = [r for r in results if r.entity_type == &quot;PERSON&quot;]
+no_salt_1 = anonymizer.anonymize(text=claim_note, analyzer_results=person_results,
+                                  operators={&quot;PERSON&quot;: OperatorConfig(&quot;hash&quot;, {&quot;hash_type&quot;: &quot;sha256&quot;})})
+no_salt_2 = anonymizer.anonymize(text=claim_note, analyzer_results=person_results,
+                                  operators={&quot;PERSON&quot;: OperatorConfig(&quot;hash&quot;, {&quot;hash_type&quot;: &quot;sha256&quot;})})
+print(&quot;hash with no explicit salt -- same document, two separate anonymize() calls:&quot;)
+print(&quot;  call 1:&quot;, no_salt_1.text)
+print(&quot;  call 2:&quot;, no_salt_2.text)
+print(&quot;  identical output both calls:&quot;, no_salt_1.text == no_salt_2.text)
+
+FIXED_SALT = &quot;insurer-batch-2026Q1-salt&quot;  # 25 bytes, over the 16-byte minimum
+fixed_salt_1 = anonymizer.anonymize(text=claim_note, analyzer_results=person_results,
+                                     operators={&quot;PERSON&quot;: OperatorConfig(&quot;hash&quot;, {&quot;hash_type&quot;: &quot;sha256&quot;, &quot;salt&quot;: FIXED_SALT})})
+fixed_salt_2 = anonymizer.anonymize(text=claim_note, analyzer_results=person_results,
+                                     operators={&quot;PERSON&quot;: OperatorConfig(&quot;hash&quot;, {&quot;hash_type&quot;: &quot;sha256&quot;, &quot;salt&quot;: FIXED_SALT})})
+print()
+print(&quot;hash with an explicit fixed salt -- same two calls:&quot;)
+print(&quot;  call 1:&quot;, fixed_salt_1.text)
+print(&quot;  call 2:&quot;, fixed_salt_2.text)
+print(&quot;  identical output both calls:&quot;, fixed_salt_1.text == fixed_salt_2.text)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output (the two <code>hash</code>-with-no-salt digests and the per-entity-operator IBAN
+digest are random every run — that unpredictability is the point being demonstrated;
+the fixed-salt digest below is the one guaranteed to reproduce exactly):</p>
+<pre><code>default operator (no operators dict passed):
+  Adjuster note: spoke with &lt;PERSON&gt; about claim CLM-2291. &lt;PERSON&gt; confirmed the refund amount. Refund issued to card &lt;CREDIT_CARD&gt;, settlement wired to IBAN &lt;IBAN_CODE&gt;.
+
+one OperatorConfig per entity type:
+  Adjuster note: spoke with &lt;CUSTOMER&gt; about claim CLM-2291. &lt;CUSTOMER&gt; confirmed the refund amount. Refund issued to card ************1111, settlement wired to IBAN 54d3dfbf43de60ca9f03452b33dd87f60ee66d4883e2c5740773d47230ab9b87.
+
+EngineResult.items (each records which operator actually ran):
+  PERSON       operator=replace  &#x27;&lt;CUSTOMER&gt;&#x27;
+  PERSON       operator=replace  &#x27;&lt;CUSTOMER&gt;&#x27;
+  CREDIT_CARD  operator=mask     &#x27;************1111&#x27;
+  IBAN_CODE    operator=hash     &#x27;54d3dfbf43de60ca9f03452b33dd87f60ee66d4883e2c5740773d47230ab9b87&#x27;
+
+hash with no explicit salt -- same document, two separate anonymize() calls:
+  call 1: Adjuster note: spoke with 1846290d629a55290398e5b9dc2f68c1810c235c3f72a121dc95357cd6868a6e about claim CLM-2291. 28f009d468fc68b6081bf3726297c28ca95504f132aaf5e530a6249b4590358f confirmed the refund amount. Refund issued to card 4111111111111111, settlement wired to IBAN IL620108000000099999999.
+  call 2: Adjuster note: spoke with a0c4d4a7ca581be4c40b7eb49be636df3e40cd3cc1cfc5d71340fd74f23ce73c about claim CLM-2291. 99d94f1e57add641405a8048e47c67cce5ef49b155872653f0d7728d54e07ac5 confirmed the refund amount. Refund issued to card 4111111111111111, settlement wired to IBAN IL620108000000099999999.
+  identical output both calls: False
+
+hash with an explicit fixed salt -- same two calls:
+  call 1: Adjuster note: spoke with b69d536e837f1449e6d7e177712a628d94fa1e9755b489ff27e104908aa9f149 about claim CLM-2291. b69d536e837f1449e6d7e177712a628d94fa1e9755b489ff27e104908aa9f149 confirmed the refund amount. Refund issued to card 4111111111111111, settlement wired to IBAN IL620108000000099999999.
+  call 2: Adjuster note: spoke with b69d536e837f1449e6d7e177712a628d94fa1e9755b489ff27e104908aa9f149 about claim CLM-2291. b69d536e837f1449e6d7e177712a628d94fa1e9755b489ff27e104908aa9f149 confirmed the refund amount. Refund issued to card 4111111111111111, settlement wired to IBAN IL620108000000099999999.
+  identical output both calls: True
+</code></pre><p>The masked card shows twelve stars followed by <code>1111</code> — <code>chars_to_mask=12, from_end=False</code> masks the <em>first</em> twelve of the sixteen digits, which is the standard
+last-four-visible convention, not the trailing digits. And the two <code>PERSON</code> matches for
+the same <code>Dana Cohen</code> both became <code>&lt;CUSTOMER&gt;</code> under <code>replace</code> — a literal, not a
+template, so every occurrence collapses to the identical string. That is fine for
+<code>replace</code> and fatal for a use case that needs to tell two different customers apart,
+which is exactly the gap Concept 3 exists to close.</p>
+<p>The no-salt-versus-fixed-salt comparison is the concept's real payload. Both <code>call 1</code>
+and <code>call 2</code> use the identical plaintext and the identical <code>OperatorConfig</code>; the only
+difference is whether <code>salt</code> is present. Without it, every single call — and every
+single match within a call — draws a fresh random salt, so <code>Dana Cohen</code>'s two
+occurrences inside <code>no_salt_1</code> do not even match each other, let alone <code>no_salt_2</code>. With
+<code>salt</code> fixed, all four occurrences across both calls collapse to the same digest. A
+deterministic downstream join (matching masked records across two exports) needs the
+fixed-salt form; anyone reaching for bare <code>hash</code> because &quot;SHA-256 is deterministic&quot; is
+about to discover that Presidio's operator, not the underlying algorithm, decides that.</p>
+<p><strong>Exercise:</strong></p>
+<p>Reuse <code>person_results</code> and <code>FIXED_SALT</code> above. Anonymize the same <code>claim_note</code> with the
+<code>sha512</code> hash type instead of <code>sha256</code>, keeping the same salt, and print the resulting
+digest length in hex characters for each. Then explain in one line why the length
+difference is a real operational choice (storage/index size) and not a security one at
+the salt lengths used here.</p>
+<p><strong>Starting point:</strong> <code>anonymizer</code>, <code>person_results</code>, <code>claim_note</code>, and <code>FIXED_SALT</code> from
+this concept's Example.</p>
+<p>Expected output: a 64-hex-character digest for <code>sha256</code> and a 128-hex-character digest
+for <code>sha512</code>, both fully reproducible with the fixed salt. SHA-256 versus SHA-512 does
+not meaningfully change resistance to a dictionary attack on a small guessable input
+space like personal names — the salt already defeats a precomputed rainbow table
+either way — so the honest reason to pick one is the extra 32 bytes per masked value
+this multiplies into an index at scale, not a security argument.</p>
+<hr />
+<h3>Concept 2 — <code>DeanonymizeEngine</code>, <code>encrypt</code>/<code>decrypt</code>, and key custody</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li><code>encrypt</code> is the only anonymization operator built for two-way use. It runs AES under
+the hood and takes a <code>key</code> of exactly 128, 192, or 256 bits — as a <code>str</code> (UTF-8
+encoded) or <code>bytes</code> — raising <code>InvalidParamError</code> immediately if the length doesn't
+match one of those three sizes, before any encryption happens.</li>
+<li><code>DeanonymizeEngine.deanonymize()</code> reverses it: it takes the anonymized text, the
+<code>EngineResult.items</code> list <code>anonymize()</code> returned, and an <code>operators</code> dict mapping
+entity type (or the literal string <code>&quot;DEFAULT&quot;</code>, which applies whenever no
+entity-specific key is given) to a <code>decrypt</code> <code>OperatorConfig</code> carrying the <em>same</em> key.
+There is no separate &quot;encrypted blob&quot; object to pass around — the ciphertext already
+lives inline in the anonymized string, and <code>items</code> is only the coordinate list telling
+<code>deanonymize()</code> where to find it.</li>
+<li><code>item.start</code>/<code>item.end</code> on an <code>EngineResult</code> item are offsets into the <em>anonymized</em>
+text, not the original. That has to be true for <code>deanonymize()</code> to work at all, since
+ciphertext is a different length than the plaintext it replaced, and it means you
+cannot reuse <code>analyze()</code>'s original <code>RecognizerResult</code> spans to locate anything after
+anonymization — only the <code>items</code> <code>anonymize()</code> itself returns are valid for that.</li>
+<li>The wrong key does not silently return garbage text — AES's padding check fails first
+and <code>deanonymize()</code> raises <code>ValueError</code>. That fail-loud behavior is worth relying on:
+a key-rotation bug shows up as a crash on the next decrypt, not as a customer service
+rep reading corrupted mojibake off a screen.</li>
+<li>Key custody is the entire security model here, and it is deliberately outside
+Presidio's scope: nothing in either engine persists, rotates, or protects the key. It
+is exactly as sensitive as the plaintext it can unlock and belongs in a secrets
+manager, never in the same table, log line, or git repository as the ciphertext it
+decrypts.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED -- continues from Concept 1&#x27;s analyzer, anonymizer, claim_note and person_results
+from presidio_anonymizer import DeanonymizeEngine
+
+deanonymizer = DeanonymizeEngine()
+CRYPTO_KEY = &quot;WmZq4t7w!z%C&amp;F)J&quot;  # 16 chars = 128 bits, one of the three valid key sizes
+
+encrypt_out = anonymizer.anonymize(
+    text=claim_note,
+    analyzer_results=person_results,
+    operators={&quot;PERSON&quot;: OperatorConfig(&quot;encrypt&quot;, {&quot;key&quot;: CRYPTO_KEY})},
+)
+print(&quot;encrypted text:&quot;)
+print(&quot; &quot;, encrypt_out.text)
+print(&quot;EngineResult.items -- start/end are offsets into the ANONYMIZED text, not the original:&quot;)
+for item in encrypt_out.items:
+    print(f&quot;  {item.entity_type} start={item.start} end={item.end} ciphertext={item.text!r}&quot;)
+
+correct_deanon = deanonymizer.deanonymize(
+    text=encrypt_out.text,
+    entities=encrypt_out.items,
+    operators={&quot;DEFAULT&quot;: OperatorConfig(&quot;decrypt&quot;, {&quot;key&quot;: CRYPTO_KEY})},
+)
+print()
+print(&quot;deanonymized with the correct key:&quot;)
+print(&quot; &quot;, correct_deanon.text)
+print(&quot;round trip matches original claim_note:&quot;, correct_deanon.text == claim_note)
+
+try:
+    deanonymizer.deanonymize(
+        text=encrypt_out.text,
+        entities=encrypt_out.items,
+        operators={&quot;DEFAULT&quot;: OperatorConfig(&quot;decrypt&quot;, {&quot;key&quot;: &quot;0000000000000000&quot;})},
+    )
+    print(&quot;wrong key: no exception raised (unexpected)&quot;)
+except ValueError as e:
+    print(f&quot;wrong key raised ValueError: {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output (the ciphertext is a fresh random AES output every run; the round-trip
+result, the offset relationship, and the wrong-key failure are not):</p>
+<pre><code>encrypted text:
+  Adjuster note: spoke with WQHu-uvt0oUdByXETbQqJZOHOJ-ACvimRMFtMecaN5w= about claim CLM-2291. WHE8ru0KkvpWyy0ddzMfKDQO788Hqw0PJnGJDUUnvAo= confirmed the refund amount. Refund issued to card 4111111111111111, settlement wired to IBAN IL620108000000099999999.
+EngineResult.items -- start/end are offsets into the ANONYMIZED text, not the original:
+  PERSON start=93 end=137 ciphertext=&#x27;WHE8ru0KkvpWyy0ddzMfKDQO788Hqw0PJnGJDUUnvAo=&#x27;
+  PERSON start=26 end=70 ciphertext=&#x27;WQHu-uvt0oUdByXETbQqJZOHOJ-ACvimRMFtMecaN5w=&#x27;
+
+deanonymized with the correct key:
+  Adjuster note: spoke with Dana Cohen about claim CLM-2291. Dana Cohen confirmed the refund amount. Refund issued to card 4111111111111111, settlement wired to IBAN IL620108000000099999999.
+round trip matches original claim_note: True
+wrong key raised ValueError: Invalid padding bytes.
+</code></pre><p>The two <code>items</code> print in reverse document order (<code>start=93</code> before <code>start=26</code>) because
+<code>anonymize()</code> processes matches from the end of the string backward — replacing the
+later span first means the earlier span's offset is never invalidated by a length
+change. It is an implementation detail that only surfaces if you assume <code>items</code> arrives
+in reading order, which this output shows it does not.</p>
+<p>Notice, too, what <code>operators={&quot;DEFAULT&quot;: ...}</code> bought here: both <code>PERSON</code> occurrences
+decrypted correctly from one entry keyed <code>&quot;DEFAULT&quot;</code>, not two entries keyed <code>&quot;PERSON&quot;</code>.
+<code>DeanonymizeEngine</code> falls back to <code>DEFAULT</code> exactly the way <code>AnonymizerEngine</code>'s own
+<code>operators</code> dict does — an entity-specific key only needs to exist for an entity type
+that needs a <em>different</em> key than everything else.</p>
+<p><strong>Exercise:</strong></p>
+<p>Encrypt <code>claim_note</code>'s <code>IBAN_CODE</code> entity with a <em>different</em> 128-bit key than the one
+used for <code>PERSON</code>, using two entity-specific operator entries (no <code>&quot;DEFAULT&quot;</code>), then
+deanonymize both in one <code>deanonymize()</code> call with both keys supplied. Confirm the full
+original <code>claim_note</code> is recovered exactly.</p>
+<p><strong>Starting point:</strong> <code>analyzer</code>, <code>anonymizer</code>, <code>deanonymizer</code>, <code>claim_note</code>, and
+<code>CRYPTO_KEY</code> from this concept's Example, plus a second 16-byte key string of your own
+and the <code>IBAN_CODE</code> results from Concept 1's <code>results</code> list.</p>
+<p>Expected output: the deanonymized text equals <code>claim_note</code> exactly, the same way
+<code>correct_deanon.text</code> did above, this time with two independently-keyed entity types
+resolved in a single call. If you supply only one of the two keys, expect a <code>ValueError</code>
+on the entity type left without one — there is no partial-success mode.</p>
+<hr />
+<h3>Concept 3 — Consistent pseudonyms with a <code>custom</code> operator, and choosing reversible vs irreversible</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li><code>OperatorConfig(&quot;custom&quot;, {&quot;lambda&quot;: fn})</code> runs <code>fn(matched_text)</code> per match and
+substitutes whatever string it returns. Nothing else in the built-in operator set can
+see the matched text and decide the replacement itself — <code>replace</code> is a fixed literal,
+<code>hash</code>/<code>encrypt</code> are one-way transforms of the text, but <code>custom</code> is a genuine hook.</li>
+<li>A closure over a plain <code>dict</code> is enough to build a consistent per-entity pseudonym:
+look the matched text up, assign a new label only the first time it's seen, and return
+the same label on every later match. Because <code>analyze()</code>'s spans and <code>anonymize()</code>'s
+substitution both work off exact string equality within one call, this preserves
+coreference — every mention of the same customer collapses to the same pseudonym —
+without needing a database or a second pass over the document.</li>
+<li>A per-match counter with no memory (<code>itertools.count()</code>, or <code>len(seen) + 1</code> recomputed
+fresh each call) looks similar but is not the same thing: it assigns a new value to
+every match regardless of whether the underlying text repeats, destroying the exact
+coreference signal a pseudonym is supposed to carry.</li>
+<li>This is the reversible half of the reversible-vs-irreversible decision from Concept 2,
+generalized: <code>replace</code>/<code>mask</code>/<code>redact</code> throw the original value away and are the right
+default for anything headed to a vector store or a third-party analytics sink that
+never legitimately needs it back. <code>encrypt</code> and a custody-tracked custom pseudonym map
+are for the minority of downstream consumers — a fraud investigation, a regulator
+audit response, a customer's own subject-access request — who have a specific,
+documented reason to re-identify a record later. The map (or the key) is exactly as
+sensitive as the data it protects and needs the same access control, which is the
+argument for choosing irreversible redaction by default and only reaching for the
+reversible path when a named consumer actually requires it.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED -- reuses analyzer and anonymizer from Concept 1
+document = (
+    &quot;Adjuster note: Dana Cohen called about claim CLM-2291. &quot;
+    &quot;Dana Cohen confirmed the mailing address on file. &quot;
+    &quot;A second claimant, Avi Levy, was added as a co-driver. &quot;
+    &quot;Dana Cohen and Avi Levy are both listed on the policy.&quot;
+)
+doc_results = analyzer.analyze(text=document, language=&quot;en&quot;, entities=[&quot;PERSON&quot;])
+print(&quot;PERSON spans found, in document order:&quot;)
+for r in sorted(doc_results, key=lambda r: r.start):
+    print(f&quot;  {document[r.start:r.end]!r} @ {r.start}-{r.end}&quot;)
+
+counter = {&quot;n&quot;: 0}
+def naive_pseudonym(original_text):
+    counter[&quot;n&quot;] += 1
+    return f&quot;CUSTOMER_{counter[&#x27;n&#x27;]}&quot;
+
+naive_out = anonymizer.anonymize(
+    text=document, analyzer_results=doc_results,
+    operators={&quot;PERSON&quot;: OperatorConfig(&quot;custom&quot;, {&quot;lambda&quot;: naive_pseudonym})},
+)
+print()
+print(&quot;naive: a fresh counter value per match (no memory of prior matches):&quot;)
+print(&quot; &quot;, naive_out.text)
+
+pseudonym_map = {}
+def consistent_pseudonym(original_text):
+    if original_text not in pseudonym_map:
+        pseudonym_map[original_text] = f&quot;CUSTOMER_{len(pseudonym_map) + 1}&quot;
+    return pseudonym_map[original_text]
+
+consistent_out = anonymizer.anonymize(
+    text=document, analyzer_results=doc_results,
+    operators={&quot;PERSON&quot;: OperatorConfig(&quot;custom&quot;, {&quot;lambda&quot;: consistent_pseudonym})},
+)
+print()
+print(&quot;consistent: a dict keyed by the original span text, shared across the whole call:&quot;)
+print(&quot; &quot;, consistent_out.text)
+print(&quot;pseudonym_map built along the way:&quot;, pseudonym_map)
+
+assert naive_out.text.count(&quot;CUSTOMER_1&quot;) == 1 and naive_out.text.count(&quot;CUSTOMER_5&quot;) == 1
+assert consistent_out.text.count(&quot;CUSTOMER_1&quot;) == 2   # Avi Levy, 2 occurrences
+assert consistent_out.text.count(&quot;CUSTOMER_2&quot;) == 3   # Dana Cohen, 3 occurrences
+print()
+print(&quot;assertions passed: consistent pseudonyms preserve coreference, naive counters do not.&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output:</p>
+<pre><code>PERSON spans found, in document order:
+  &#x27;Dana Cohen&#x27; @ 15-25
+  &#x27;Dana Cohen&#x27; @ 55-65
+  &#x27;Avi Levy&#x27; @ 124-132
+  &#x27;Dana Cohen&#x27; @ 160-170
+  &#x27;Avi Levy&#x27; @ 175-183
+
+naive: a fresh counter value per match (no memory of prior matches):
+  Adjuster note: CUSTOMER_5 called about claim CLM-2291. CUSTOMER_4 confirmed the mailing address on file. A second claimant, CUSTOMER_3, was added as a co-driver. CUSTOMER_2 and CUSTOMER_1 are both listed on the policy.
+
+consistent: a dict keyed by the original span text, shared across the whole call:
+  Adjuster note: CUSTOMER_2 called about claim CLM-2291. CUSTOMER_2 confirmed the mailing address on file. A second claimant, CUSTOMER_1, was added as a co-driver. CUSTOMER_2 and CUSTOMER_1 are both listed on the policy.
+pseudonym_map built along the way: {&#x27;Avi Levy&#x27;: &#x27;CUSTOMER_1&#x27;, &#x27;Dana Cohen&#x27;: &#x27;CUSTOMER_2&#x27;}
+
+assertions passed: consistent pseudonyms preserve coreference, naive counters do not.
+</code></pre><p>The naive counter counts down from <code>CUSTOMER_5</code> to <code>CUSTOMER_1</code> in reading order — a
+direct, visible consequence of Concept 2's reverse-processing fact. Because the last
+match in the document (<code>Avi Levy</code> at 175) is processed first, it claims <code>CUSTOMER_1</code>,
+and the very first match in the document (<code>Dana Cohen</code> at 15) is processed last and
+ends up labeled <code>CUSTOMER_5</code>. Nobody reading the anonymized output would guess that
+numbering came from anything but chance, which is itself the argument against a
+stateless counter: it looks like it might be preserving some structure and is not.</p>
+<p>The consistent version fixes that by keying on the matched text rather than on match
+order. <code>Dana Cohen</code> — three separate <code>RecognizerResult</code> spans, three separate calls into
+<code>consistent_pseudonym</code> — collapses to <code>CUSTOMER_2</code> every time, and <code>Avi Levy</code> to
+<code>CUSTOMER_1</code>, regardless of which one the reverse-order processing happened to reach
+first. The pseudonym a reader sees for a name is stable for the entire document, which
+is the property coreference resolution downstream (or a human auditor) actually needs.</p>
+<p><strong>Exercise:</strong></p>
+<p>Extend <code>pseudonym_map</code> so it also accepts an optional starting dict — pass in
+<code>{&quot;Dana Cohen&quot;: &quot;CUSTOMER_9&quot;}</code> before anonymizing — and confirm every occurrence of
+&quot;Dana Cohen&quot; in the output uses <code>CUSTOMER_9</code> while <code>Avi Levy</code> still gets assigned fresh
+starting from <code>CUSTOMER_1</code>. State in one sentence why this pre-seeding capability
+matters for a claims system that must use the <em>same</em> pseudonym for one customer across
+multiple separately-processed documents, not just within one <code>anonymize()</code> call.</p>
+<p><strong>Starting point:</strong> <code>analyzer</code>, <code>anonymizer</code>, <code>document</code>, and <code>doc_results</code> from this
+concept's Example. Modify <code>consistent_pseudonym</code>'s closure (or rewrap it as a small
+class) so the map can be pre-populated before the first call.</p>
+<p>Expected output: every <code>Dana Cohen</code> mention replaced with <code>CUSTOMER_9</code>, <code>Avi Levy</code>
+replaced with <code>CUSTOMER_1</code> (the first fresh slot, since <code>9</code> is already taken by the
+seed). The one-sentence answer: without pre-seeding, each document processed
+independently starts its counter over, so the same customer gets a different pseudonym
+in every claim file — exactly the cross-document coreference a real pseudonymization
+system, backed by a persistent lookup table rather than a fresh in-memory dict, exists
+to prevent.</p>
+<hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle.</strong> A masking gate that runs once per document, as every example above
+does, is the easy case. A real claims system re-processes the same claim note every time
+it is amended, and a mainframe-sourced export (Week 13) frequently re-sends the <em>entire</em>
+customer history on every nightly batch rather than just the delta. If the pseudonym map
+from Concept 3 lives only in the process's memory, the same &quot;Dana Cohen&quot; gets a new
+<code>CUSTOMER_N</code> on every batch run, and any downstream system joining on that pseudonym
+silently loses the link. The map has to be a persisted, keyed store — typically the
+claims system's own customer ID, not the free-text name, as the real join key, with the
+name-to-pseudonym mapping as a derived, rebuildable cache rather than the source of
+truth.</p>
+<p><strong>Compliance angle.</strong> Reversible pseudonymization and encryption are not &quot;more
+compliant&quot; than irreversible redaction by default — they are a <em>different</em> control with
+a different obligation attached. Choosing <code>encrypt</code> over <code>replace</code> for a field means the
+organization now has to document who holds the key, under what access control, with
+what rotation and audit-logging policy, because that key is a single point of
+re-identification for every record it touches. Under GDPR Recital 26 and equivalent
+Israeli PPPA guidance, pseudonymized data is still personal data precisely because it is
+reversible — only irreversibly anonymized data exits the regulation's scope entirely.
+A DPIA that lists &quot;customer names are anonymized&quot; without saying which mechanism was
+used, and who can turn it back, has not actually answered the auditor's question.</p>
+<p><strong>What breaks in production.</strong> The failure mode unique to this day is losing the key,
+not leaking it. An encryption key stored only in a deploy-time environment variable, on
+a service that gets redeployed without its previous env preserved, makes every
+previously-encrypted record permanently unrecoverable — not a breach, but a silent,
+irreversible data-loss event against the organization's own retained records, discovered
+only when a regulator's subject-access request or a fraud investigation asks for a
+record the team can no longer open. The fix is the same one every other credential in
+this stack needs — a secrets manager with versioned keys, never a bare env var — but
+the failure here is easy to miss in testing, because encryption and decryption both work
+fine right up until the key that made them work is the one thing nobody backed up.</p>
+<hr />
+<h2 id="day-4">Day 4 — Masking Tabular and Batch Sources</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=4GuK9sPUvus" target="_blank" rel="noopener"><b>Data Anonymization With Microsoft Presidio - Full Step By Step Tutorial</b><small>M&amp;M Tech · 7:08</small></a></li><li><a href="https://www.youtube.com/watch?v=_dAzcCk-3U4" target="_blank" rel="noopener"><b>Presidio in Action: Detect &amp; Anonymize Sensitive Data in Text, Images &amp; Tables</b><small>MLWorks · 9:43</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Presidio%20batch%20anonymize%20pandas%20dataframe%20columns" target="_blank" rel="noopener">Search YouTube: Presidio batch anonymize pandas dataframe columns</a></p></div>
+<hr />
+<h3>Concept 1 — <code>BatchAnalyzerEngine</code>/<code>BatchAnonymizerEngine</code> over dict and iterator inputs</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li>Days 1-3 called <code>analyzer.analyze()</code>/<code>anonymizer.anonymize()</code> once per string. A claims
+extract is thousands of rows across several free-text columns, not one string —
+<code>BatchAnalyzerEngine.analyze_dict()</code> and <code>BatchAnonymizerEngine.anonymize_dict()</code> are the
+same two engines wrapped to walk a <code>dict</code> of <code>column_name -&gt; list_of_values</code> (or a nested
+dict of dicts) without a manual loop.</li>
+<li><code>analyze_dict()</code> returns an iterator of <code>DictAnalyzerResult</code> — one per input key, each
+carrying <code>.key</code>, <code>.value</code> (the original list) and <code>.recognizer_results</code> (a list of
+<code>RecognizerResult</code> lists, same order as the input rows). Passing that iterator straight
+into <code>anonymize_dict()</code> is enough; it does not need re-flattening by hand.</li>
+<li><code>keys_to_skip</code> excludes named columns from analysis entirely — the right tool for a
+column that is a coded reference number, not free text, and would otherwise cost a model
+call for nothing.</li>
+<li>Skipping a column is not the same as the model correctly ignoring it. A coded reference
+number's shape (letters, digits, a dash) still resembles something spaCy's NER model was
+trained to recognize, and left unskipped it produces confident-looking, wrong labels.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+from presidio_analyzer import AnalyzerEngine, BatchAnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+from presidio_anonymizer import AnonymizerEngine, BatchAnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
+
+nlp_config = {
+    &quot;nlp_engine_name&quot;: &quot;spacy&quot;,
+    &quot;models&quot;: [{&quot;lang_code&quot;: &quot;en&quot;, &quot;model_name&quot;: &quot;en_core_web_sm&quot;}],
+}
+analyzer = AnalyzerEngine(nlp_engine=NlpEngineProvider(nlp_configuration=nlp_config).create_engine())
+batch_analyzer = BatchAnalyzerEngine(analyzer_engine=analyzer)
+batch_anonymizer = BatchAnonymizerEngine(anonymizer_engine=AnonymizerEngine())
+
+claims_batch = {
+    &quot;adjuster_note&quot;: [
+        &quot;Spoke with Dana Cohen about claim CLM-2291, card 4111111111111111.&quot;,
+        &quot;Avi Levy called re: claim CLM-3007, refund to IBAN IL620108000000099999999.&quot;,
+        &quot;No PII in this one, routine status update only.&quot;,
+    ],
+    &quot;claim_id&quot;: [&quot;CLM-2291&quot;, &quot;CLM-3007&quot;, &quot;CLM-4410&quot;],
+}
+
+# First, without keys_to_skip -- show what the coded claim_id column does to the model
+unskipped = list(batch_analyzer.analyze_dict(claims_batch, language=&quot;en&quot;))
+claim_id_hits = next(r for r in unskipped if r.key == &quot;claim_id&quot;).recognizer_results
+print(&quot;claim_id WITHOUT keys_to_skip:&quot;)
+for row_text, row_hits in zip(claims_batch[&quot;claim_id&quot;], claim_id_hits):
+    print(f&quot;  {row_text!r:12s} -&gt; {[h.entity_type for h in row_hits]}&quot;)
+
+# Now the real pass, skipping claim_id
+dict_results = list(batch_analyzer.analyze_dict(claims_batch, language=&quot;en&quot;, keys_to_skip=[&quot;claim_id&quot;]))
+anonymized = batch_anonymizer.anonymize_dict(
+    dict_results,
+    operators={
+        &quot;PERSON&quot;: OperatorConfig(&quot;replace&quot;, {&quot;new_value&quot;: &quot;&lt;CUSTOMER&gt;&quot;}),
+        &quot;CREDIT_CARD&quot;: OperatorConfig(&quot;mask&quot;, {&quot;masking_char&quot;: &quot;*&quot;, &quot;chars_to_mask&quot;: 12, &quot;from_end&quot;: False}),
+    },
+)
+print()
+print(&quot;adjuster_note, anonymized (claim_id skipped):&quot;)
+for note in anonymized[&quot;adjuster_note&quot;]:
+    print(&quot; &quot;, note)
+print()
+print(&quot;claim_id, untouched by keys_to_skip:&quot;, claims_batch[&quot;claim_id&quot;])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output:</p>
+<pre><code>claim_id WITHOUT keys_to_skip:
+  &#x27;CLM-2291&#x27;   -&gt; []
+  &#x27;CLM-3007&#x27;   -&gt; []
+  &#x27;CLM-4410&#x27;   -&gt; [&#x27;NRP&#x27;]
+
+adjuster_note, anonymized (claim_id skipped):
+  Spoke with &lt;CUSTOMER&gt; about claim CLM-2291, card ************1111.
+  &lt;CUSTOMER&gt; called re: claim CLM-3007, refund to &lt;ORGANIZATION&gt;.
+  No &lt;ORGANIZATION&gt; in this one, routine status update only.
+
+claim_id, untouched by keys_to_skip: [&#x27;CLM-2291&#x27;, &#x27;CLM-3007&#x27;, &#x27;CLM-4410&#x27;]
+</code></pre><p>Two real false positives are visible here, not invented for the lesson. <code>'CLM-4410'</code>
+gets tagged <code>NRP</code> (nationality/religious/political group) without <code>keys_to_skip</code> — the
+model's guess at an unfamiliar coded token, exactly the risk the Claims list above warns
+about. And even with <code>claim_id</code> correctly skipped, the second note's <code>IBAN_CODE</code> got
+absorbed into a broader <code>ORGANIZATION</code> span this run instead of being masked as
+<code>IBAN_CODE</code> on its own — Concept 1 of Day 1 already established that overlapping
+recognizers aren't resolved for you; batch mode does not change that, it just makes the
+same ambiguity happen thousands of times instead of once. Most strikingly, the third
+note's own word &quot;PII&quot; got replaced by <code>&lt;ORGANIZATION&gt;</code> — the literal string &quot;PII&quot; inside
+&quot;No PII in this one&quot; triggered a false-positive <code>ORGANIZATION</code> match. None of this is a
+bug in the code above; it is the real, occasionally embarrassing behavior of a
+general-purpose NER model run at batch scale, and it is exactly why Concept 3's
+Reality Check below insists on measuring precision, not assuming it.</p>
+<p><strong>Exercise:</strong></p>
+<p>Add a fourth column, <code>internal_flag</code>, with values <code>[&quot;review&quot;, &quot;closed&quot;, &quot;review&quot;]</code>, to
+<code>claims_batch</code>. Run <code>batch_analyzer.analyze_dict()</code> on the four-column dict without
+adding <code>internal_flag</code> to <code>keys_to_skip</code>, and print which entity type (if any) each value
+gets tagged with. Then add <code>internal_flag</code> to <code>keys_to_skip</code> alongside <code>claim_id</code> and
+confirm the anonymized <code>adjuster_note</code> output is unchanged from this concept's Example.</p>
+<p><strong>Starting point:</strong> <code>batch_analyzer</code>, <code>batch_anonymizer</code>, and <code>claims_batch</code> from this
+concept's Example.</p>
+<p>Expected output: <code>&quot;review&quot;</code>/<code>&quot;closed&quot;</code> are short, common English words, not names or
+codes — expect Presidio's model-driven recognizers to find nothing in them (an empty
+list for each), unlike <code>claim_id</code>'s coded-token false positive above. Adding a column to
+<code>keys_to_skip</code> never changes any other column's result, so <code>adjuster_note</code>'s anonymized
+text is byte-for-byte identical to the Example's.</p>
+<hr />
+<h3>Concept 2 — Column-level <code>presidio-structured</code> analysis, and tokenization that survives a join</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li><code>PandasAnalysisBuilder(analyzer).generate_analysis(df)</code> infers one entity type per
+<em>column</em> — a <code>StructuredAnalysis</code> with an <code>entity_mapping</code> dict — by sampling values and
+taking the most common <code>AnalyzerEngine</code> result across the column, rather than analyzing
+every cell independently the way <code>BatchAnalyzerEngine</code> does. This is the right level for
+a DataFrame with a name column and a national-ID column: the schema, not the cell text,
+usually already tells you what a column <em>is</em>.</li>
+<li>Column-level inference inherits row-level false positives: a column of coded IDs
+(<code>customer_id</code>, <code>claim_id</code>) or short numeric strings (<code>national_id</code>) gets misclassified
+by the same model quirks Concept 1 showed, just voted over the whole column instead of
+reported per cell. <code>generate_analysis()</code>'s output is a starting point to review and
+correct, never a mapping to trust blindly and hand straight to <code>anonymize()</code>.</li>
+<li><code>StructuredEngine().anonymize(df, structured_analysis, operators)</code> applies one operator
+per mapped column to every value in that column — it is <code>AnonymizerEngine</code>, retargeted
+from &quot;spans inside one string&quot; to &quot;cells inside one column.&quot;</li>
+<li><code>OperatorConfig(&quot;hash&quot;, {&quot;salt&quot;: &lt;fixed string&gt;})</code>, applied to the <em>same</em> column name
+(here <code>customer_id</code>) in two DataFrames that share that column, produces the same
+ciphertext for the same plaintext in both outputs — because a fixed salt makes <code>hash</code>
+deterministic (Day 3, Concept 1). That determinism, not anything specific to
+<code>presidio-structured</code>, is what lets two independently-extracted, independently-masked
+tables still be joined on the masked key afterward.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+import pandas as pd
+from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+from presidio_anonymizer.entities import OperatorConfig
+from presidio_structured import PandasAnalysisBuilder, StructuredEngine, StructuredAnalysis
+
+nlp_config = {
+    &quot;nlp_engine_name&quot;: &quot;spacy&quot;,
+    &quot;models&quot;: [{&quot;lang_code&quot;: &quot;en&quot;, &quot;model_name&quot;: &quot;en_core_web_sm&quot;}],
+}
+analyzer = AnalyzerEngine(nlp_engine=NlpEngineProvider(nlp_configuration=nlp_config).create_engine())
+
+customers = pd.DataFrame({
+    &quot;customer_id&quot;: [&quot;C-1001&quot;, &quot;C-1002&quot;, &quot;C-1003&quot;],
+    &quot;full_name&quot;: [&quot;Dana Cohen&quot;, &quot;Avi Levy&quot;, &quot;Noa Peretz&quot;],
+    &quot;national_id&quot;: [&quot;123456782&quot;, &quot;000000018&quot;, &quot;234567891&quot;],
+})
+claims = pd.DataFrame({
+    &quot;claim_id&quot;: [&quot;CLM-2291&quot;, &quot;CLM-3007&quot;, &quot;CLM-4410&quot;],
+    &quot;customer_id&quot;: [&quot;C-1002&quot;, &quot;C-1001&quot;, &quot;C-1003&quot;],  # deliberately not in customers&#x27; row order
+    &quot;policyholder_name&quot;: [&quot;Avi Levy&quot;, &quot;Dana Cohen&quot;, &quot;Noa Peretz&quot;],
+})
+
+builder = PandasAnalysisBuilder(analyzer)
+print(&quot;auto-inferred customers mapping:&quot;, builder.generate_analysis(customers, language=&quot;en&quot;).entity_mapping)
+print(&quot;auto-inferred claims mapping:   &quot;, builder.generate_analysis(claims, language=&quot;en&quot;).entity_mapping)
+
+# The auto-inferred mapping mislabels the coded/numeric columns (shown above) --
+# override it by hand before anonymizing, the same review Concept 1 argued for.
+engine = StructuredEngine()
+FIXED_SALT = &quot;week14-demo-salt-do-not-reuse-in-real-system&quot;
+ops = {&quot;PERSON&quot;: OperatorConfig(&quot;hash&quot;, {&quot;hash_type&quot;: &quot;sha256&quot;, &quot;salt&quot;: FIXED_SALT})}
+
+customers_map = StructuredAnalysis(entity_mapping={&quot;customer_id&quot;: &quot;PERSON&quot;, &quot;full_name&quot;: &quot;PERSON&quot;, &quot;national_id&quot;: &quot;PERSON&quot;})
+claims_map = StructuredAnalysis(entity_mapping={&quot;customer_id&quot;: &quot;PERSON&quot;, &quot;policyholder_name&quot;: &quot;PERSON&quot;})
+
+anon_customers = engine.anonymize(customers, customers_map, operators=ops)
+anon_claims = engine.anonymize(claims, claims_map, operators=ops)
+
+print()
+print(&quot;anonymized customers.customer_id:&quot;, list(anon_customers[&quot;customer_id&quot;]))
+print(&quot;anonymized claims.customer_id:   &quot;, list(anon_claims[&quot;customer_id&quot;]))
+
+merged = anon_claims.merge(anon_customers, on=&quot;customer_id&quot;, how=&quot;left&quot;, suffixes=(&quot;_claim&quot;, &quot;_cust&quot;))
+print()
+print(&quot;join on tokenized customer_id still resolves the right rows:&quot;)
+for _, row in merged.iterrows():
+    print(f&quot;  {row[&#x27;claim_id&#x27;]} -&gt; matched customer row: {&#x27;yes&#x27; if pd.notna(row[&#x27;full_name&#x27;]) else &#x27;NO MATCH&#x27;}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output:</p>
+<pre><code>auto-inferred customers mapping: {&#x27;customer_id&#x27;: &#x27;ORGANIZATION&#x27;, &#x27;full_name&#x27;: &#x27;PERSON&#x27;, &#x27;national_id&#x27;: &#x27;DATE_TIME&#x27;}
+auto-inferred claims mapping:    {&#x27;claim_id&#x27;: &#x27;NRP&#x27;, &#x27;customer_id&#x27;: &#x27;ORGANIZATION&#x27;, &#x27;policyholder_name&#x27;: &#x27;PERSON&#x27;}
+
+anonymized customers.customer_id: [&#x27;43ad7ba8173fa9c8f8c0508c3de6a5d47e19bd366ece6acc0828d0f758bd419e&#x27;, &#x27;071bdd6a759088df51b4f667f75bc29f596996f5769007fc1349e0adc98cfdca&#x27;, &#x27;693dd90daa3a7aba918973824e40796ff4f51c735bc58d9c8b626f5cd33fe72a&#x27;]
+anonymized claims.customer_id:    [&#x27;071bdd6a759088df51b4f667f75bc29f596996f5769007fc1349e0adc98cfdca&#x27;, &#x27;43ad7ba8173fa9c8f8c0508c3de6a5d47e19bd366ece6acc0828d0f758bd419e&#x27;, &#x27;693dd90daa3a7aba918973824e40796ff4f51c735bc58d9c8b626f5cd33fe72a&#x27;]
+
+join on tokenized customer_id still resolves the right rows:
+  CLM-2291 -&gt; matched customer row: yes
+  CLM-3007 -&gt; matched customer row: yes
+  CLM-4410 -&gt; matched customer row: yes
+</code></pre><p>The auto-inferred mapping confirms Concept 1's warning at column scale: <code>customer_id</code>
+comes back <code>ORGANIZATION</code>, <code>national_id</code> comes back <code>DATE_TIME</code> (a 9-digit string reads
+as a date to the model, the same confusion Day 1 Concept 3 built a checksum recognizer to
+resolve for free text), and <code>claim_id</code> comes back <code>NRP</code> — three columns, three wrong
+guesses, zero of them corrected without a human reviewing the output first. Overriding
+all three to <code>PERSON</code> before calling <code>anonymize()</code> isn't semantically accurate (a
+customer ID is not a person's name), but it is a deliberate, reviewed choice to route
+every sensitive column through the same deterministic-hash operator so the join survives
+— the entity-type label only controls which <code>OperatorConfig</code> applies, not any validation
+of whether the label is &quot;true.&quot; The row-order mismatch between <code>claims</code> and <code>customers</code>
+in the input data was deliberate: the join still resolves all three rows correctly
+because <code>merge()</code> matches on the hashed value itself, not on row position.</p>
+<p><strong>Exercise:</strong></p>
+<p>Change <code>FIXED_SALT</code> to a <em>different</em> string and re-run only the <code>customers</code> anonymization
+(leave <code>claims</code> anonymized with the original salt). Merge the two results as the Example
+does and report how many rows match. State in one sentence why a salt is operationally
+equivalent to a shared secret between every system that needs to join on the same masked
+column, not an implementation detail either side can pick independently.</p>
+<p><strong>Starting point:</strong> <code>engine</code>, <code>customers</code>, <code>claims</code>, <code>customers_map</code>, <code>claims_map</code> from
+this concept's Example.</p>
+<p>Expected output: zero rows match (<code>full_name</code> is <code>NaN</code>/missing for every claim row) —
+different salts make <code>hash</code> produce completely different digests for the same plaintext,
+so no <code>customer_id</code> value in the re-hashed <code>customers</code> table equals any value in the
+still-original-salt <code>claims</code> table. The one-sentence answer: every table that must join
+on a masked column has to be masked with the exact same salt, which makes salt
+distribution and rotation a coordinated, access-controlled operation across systems, not
+a per-job configuration choice.</p>
+<hr />
+<h3>Concept 3 — Throughput and false-positive cost, measured, not assumed</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li>The Metadata table at the top of this file already names the <code>en_core_web_sm</code> vs
+<code>en_core_web_lg</code> substitution this sandbox requires. The claim worth checking, not just
+restating, is what that substitution actually costs: raw analysis throughput, and the
+false-positive rate a downstream masking gate inherits from whichever model runs it.</li>
+<li><code>BatchAnalyzerEngine.analyze_iterator()</code> timed over an identical batch, once per model,
+isolates the throughput question from everything else (same text, same entity set, same
+machine, back to back).</li>
+<li>Model file size (<code>en_core_web_sm</code> ≈ 12 MB, <code>en_core_web_lg</code> ≈ 400 MB, per spaCy's own
+published package listing) is a real, separate cost from per-record throughput: it is
+what determines cold-start time and memory footprint for every worker process in a
+horizontally-scaled batch job, independent of how fast either model scores one record
+once loaded.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+import time
+from collections import Counter
+from presidio_analyzer import AnalyzerEngine, BatchAnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+SAMPLE_NOTES = [
+    &quot;Spoke with Dana Cohen about claim CLM-2291, card 4111111111111111.&quot;,
+    &quot;Avi Levy called re: claim CLM-3007, refund to IBAN IL620108000000099999999.&quot;,
+    &quot;Routine status update, policyholder Noa Peretz confirmed address on file.&quot;,
+    &quot;No new information this cycle.&quot;,
+] * 125  # 500 notes -- extrapolated to a per-10,000-record figure below
+
+def build_analyzer(model_name):
+    nlp_config = {&quot;nlp_engine_name&quot;: &quot;spacy&quot;, &quot;models&quot;: [{&quot;lang_code&quot;: &quot;en&quot;, &quot;model_name&quot;: model_name}]}
+    return AnalyzerEngine(nlp_engine=NlpEngineProvider(nlp_configuration=nlp_config).create_engine())
+
+for model_name in (&quot;en_core_web_sm&quot;, &quot;en_core_web_lg&quot;):
+    analyzer = build_analyzer(model_name)
+    batch = BatchAnalyzerEngine(analyzer_engine=analyzer)
+    start = time.perf_counter()
+    results = list(batch.analyze_iterator(SAMPLE_NOTES, language=&quot;en&quot;))
+    elapsed = time.perf_counter() - start
+    per_10k = elapsed / len(SAMPLE_NOTES) * 10_000
+    counts = Counter(span.entity_type for r in results for span in r)
+    print(f&quot;{model_name:16s} {per_10k:6.1f}s per 10,000 records (measured on {len(SAMPLE_NOTES)}, extrapolated)&quot;)
+    print(f&quot;{&#x27;&#x27;:16s} entity counts: {dict(counts)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output:</p>
+<pre><code>en_core_web_sm     52.4s per 10,000 records (measured on 500, extrapolated)
+                 entity counts: {&#x27;CREDIT_CARD&#x27;: 125, &#x27;PERSON&#x27;: 375, &#x27;US_BANK_NUMBER&#x27;: 125, &#x27;US_DRIVER_LICENSE&#x27;: 125, &#x27;IBAN_CODE&#x27;: 125, &#x27;ORGANIZATION&#x27;: 250}
+en_core_web_lg     57.9s per 10,000 records (measured on 500, extrapolated)
+                 entity counts: {&#x27;CREDIT_CARD&#x27;: 125, &#x27;PERSON&#x27;: 375, &#x27;US_BANK_NUMBER&#x27;: 125, &#x27;US_DRIVER_LICENSE&#x27;: 125, &#x27;IBAN_CODE&#x27;: 125, &#x27;ORGANIZATION&#x27;: 125}
+</code></pre><p>(Exact timings vary run to run and by machine; re-running locally will not reproduce
+these to the decimal, only the shape of the comparison.)</p>
+<p>The intuitive assumption — a 400 MB model must be much slower per record than a 12 MB
+one — does not hold up on this measurement: both land in the same tens-of-seconds range
+per 10,000 records on this sample (the exact gap moves run to run, as the note above
+says), nowhere near the order-of-magnitude difference the 33x file-size gap might
+suggest, because spaCy's CPU inference cost here is dominated by sentence length and
+pipeline components enabled, not raw model file size. <code>PERSON</code>
+recall is identical (375 = 3 names × 125 repeats, found by both). The real, measured
+difference is <code>ORGANIZATION</code>: <code>en_core_web_sm</code> produces exactly double the
+<code>ORGANIZATION</code> false positives of <code>en_core_web_lg</code> on this sample (250 vs 125) — the
+larger model is more precise on that entity type here, not faster. That reframes the
+Metadata table's substitution note: the practical cost of running <code>en_core_web_sm</code> in
+this sandbox is a higher false-positive rate a human reviewer or a downstream consumer
+has to absorb, not a throughput penalty a bigger batch window would fix.</p>
+<p><strong>Exercise:</strong></p>
+<p>Re-run the Example's loop with <code>SAMPLE_NOTES</code> deduplicated to just the four distinct
+strings (<code>SAMPLE_NOTES[:4]</code>, not <code>* 125</code>) and compare the two models' <code>ORGANIZATION</code>
+counts on that four-row sample to the 500-row Example. State in one sentence whether the
+2x <code>ORGANIZATION</code> gap between models is a property of the model pair in general or of
+this specific repeated sample, and what a real measurement (not this lesson's synthetic
+one) would need to establish which.</p>
+<p><strong>Starting point:</strong> <code>build_analyzer</code> from this concept's Example.</p>
+<p>Expected output: on the 4-row sample, <code>en_core_web_sm</code> finds 2 <code>ORGANIZATION</code> matches and
+<code>en_core_web_lg</code> finds 1 — the same 2x ratio the 500-row run showed, because
+<code>SAMPLE_NOTES * 125</code> is the same 4 sentences repeated, so every ratio in the 500-row
+result is already fully determined by the 4-row result times 125. The one-sentence
+answer: this measurement only establishes the ratio <em>on these four sentences</em>; a real
+measurement needs a large, non-repeating, representative sample of actual claim notes —
+repeating four sentences 125 times proves nothing about false-positive rate on genuinely
+varied text, only that the code runs correctly at scale.</p>
+<hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle.</strong> Week 13's mainframe/COBOL exports and Week 12's pipeline orchestration
+both produce exactly the tabular shape this day assumes — a DataFrame with a customer
+column, an identifier column, and one or more free-text columns extracted from a
+fixed-width or EBCDIC-decoded record. <code>presidio-structured</code>'s column-level analysis is
+the natural masking point for that pipeline stage, but Concept 2's auto-inferred mapping
+failure on coded/numeric columns means a legacy-sourced schema — heavy on exactly those
+column types (account numbers, branch codes, product codes) — is the shape most likely to
+sail through <code>generate_analysis()</code> unreviewed and get masked wrong, or not masked at all.</p>
+<p><strong>Compliance angle.</strong> A masking gate applied per-column at batch scale changes what an
+audit has to check. Day 1-3 asked &quot;was this string ever un-redacted&quot; about one document;
+a batch/tabular job raises &quot;was every row of this column redacted, or did the column-level
+inference miss one value that didn't match its neighbors&quot; — a single mismatched cell (a
+national ID formatted with dashes when the rest of the column has none) can silently skip
+the column's chosen operator for just that row. <code>verify_fde_track.py</code>-style row-count and
+null-rate assertions after every batch masking run, not just after the code review that
+approved the <code>entity_mapping</code>, are what actually catches that.</p>
+<p><strong>What breaks in production.</strong> Concept 3's measured finding — <code>en_core_web_sm</code> produces
+roughly double the false-positive <code>ORGANIZATION</code> rate of <code>en_core_web_lg</code> on repeated
+text — is a real production risk if this sandbox's model substitution is ever mistaken
+for a deployment decision rather than a documented environment constraint. A team that
+prototypes a masking gate against <code>en_core_web_sm</code> because that is what installed easily,
+measures acceptable-looking precision on a small hand-picked sample, and ships the same
+model to production because &quot;it worked in dev,&quot; inherits a higher false-positive rate at
+real volume without ever having measured it against the model the rest of the org
+assumed was in use. The fix is not &quot;always use the larger model&quot; — it is recording, in
+the same place <code>requirements.txt</code> records the dependency itself, which model a
+measurement was taken against, so a later model swap is a decision someone makes on
+purpose rather than a silent substitution nobody notices until precision drops.</p>
+<hr />
+<h2 id="day-5">Day 5 — A Masking Gate Before Embedding</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="14-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=PdWIrDYtN_I" target="_blank" rel="noopener"><b>Redact PII Before Embedding: Protect Data in Your Vector Store</b><small>SkillRecall · 4:37</small></a></li><li><a href="https://www.youtube.com/watch?v=TViOMTF2vVg" target="_blank" rel="noopener"><b>PII Redaction for RAG in Python: Presidio Before Chunking and Indexing</b><small>Professor Py: AI Engineering · 8:47</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=PII%20redaction%20before%20embedding%20vector%20database%20RAG" target="_blank" rel="noopener">Search YouTube: PII redaction before embedding vector database RAG</a></p></div>
+<hr />
+<h3>Concept 1 — A fail-closed gate between chunking and embedding</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li>Every concept in Days 1-4 called <code>AnalyzerEngine</code>/<code>AnonymizerEngine</code> directly inside a
+concept's own example. A real pipeline needs exactly one place where every chunk headed
+to Week 11's embedding step passes through masking first — not a convention every
+caller has to remember, but a single function on the only path from &quot;chunked text&quot; to
+&quot;embedding API call,&quot; matching Week 12's own parse→chunk→embed→upsert stage boundaries.</li>
+<li>&quot;Fail-closed&quot; means: if the masking gate itself cannot complete — the analyzer raises,
+times out, or returns something the caller can't trust — the chunk is quarantined, not
+embedded anyway with a warning. The alternative, &quot;fail-open&quot; (embed the raw, unmasked
+chunk and log a warning), is worse than doing nothing: it sends exactly the PII this
+whole week exists to keep out of the vector store, silently, on the one path (an
+unexpected input, a transient error) that was never exercised by a normal-case test.</li>
+<li>A quarantined chunk is not a deleted one. The gate's job is to stop that specific
+chunk from reaching the embedder — what happens to it next (retry, dead-letter queue,
+a human review step) is a pipeline-operations decision, not this gate's job to make.</li>
+<li>Logging <em>why</em> a chunk was quarantined (the actual exception, not just &quot;masking
+failed&quot;) is what turns &quot;the pipeline embedded fewer chunks than expected today&quot; from a
+silent drop into a diagnosable, residual-risk-tracked event — the same audit-trail
+argument Day 3's Reality Check made about encryption key custody applies here to
+masking-gate failures.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+import logging
+from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
+
+nlp_config = {&quot;nlp_engine_name&quot;: &quot;spacy&quot;, &quot;models&quot;: [{&quot;lang_code&quot;: &quot;en&quot;, &quot;model_name&quot;: &quot;en_core_web_sm&quot;}]}
+analyzer = AnalyzerEngine(nlp_engine=NlpEngineProvider(nlp_configuration=nlp_config).create_engine())
+anonymizer = AnonymizerEngine()
+
+residual_risk_log = []
+
+def mask_before_embed(chunk_text, chunk_id):
+    &quot;&quot;&quot;Gate between Week 09&#x27;s chunker and Week 11&#x27;s embedder. Returns the
+    masked text to embed, or None if masking could not be trusted -- a None
+    return means the caller MUST NOT embed chunk_text, fail-closed rather
+    than fail-open.&quot;&quot;&quot;
+    try:
+        results = analyzer.analyze(text=chunk_text, language=&quot;en&quot;)
+        return anonymizer.anonymize(
+            text=chunk_text, analyzer_results=results,
+            operators={&quot;DEFAULT&quot;: OperatorConfig(&quot;replace&quot;)},
+        ).text
+    except Exception as exc:
+        residual_risk_log.append({&quot;chunk_id&quot;: chunk_id, &quot;error&quot;: repr(exc)})
+        logging.error(&quot;masking gate failed for chunk %s: %r -- quarantined, NOT embedded&quot;, chunk_id, exc)
+        return None
+
+def embed_pipeline(chunks):
+    &quot;&quot;&quot;Stands in for Week 11&#x27;s embed step -- it only ever receives what the gate approved.&quot;&quot;&quot;
+    embedded, quarantined = [], []
+    for i, chunk in enumerate(chunks):
+        masked = mask_before_embed(chunk, chunk_id=i)
+        if masked is None:
+            quarantined.append(i)
+            continue
+        embedded.append((i, masked))
+    return embedded, quarantined
+
+# One normal chunk, one chunk that is not a string at all -- a realistic real-world
+# shape (a None value slipping through an upstream parsing bug), not a contrived
+# crash: analyzer.analyze(text=None, ...) genuinely raises inside Presidio&#x27;s own
+# type check, no mocking needed to produce this failure.
+chunks = [
+    &quot;Adjuster spoke with Dana Cohen about claim CLM-2291.&quot;,
+    None,
+    &quot;Routine status update, no PII.&quot;,
+]
+
+embedded, quarantined = embed_pipeline(chunks)
+print(&quot;embedded chunk ids:   &quot;, [i for i, _ in embedded])
+print(&quot;quarantined chunk ids:&quot;, quarantined)
+print(&quot;residual_risk_log:    &quot;, residual_risk_log)
+print()
+for i, text in embedded:
+    print(f&quot;  chunk {i} sent to embedder: {text!r}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output:</p>
+<pre><code>embedded chunk ids:    [0, 2]
+quarantined chunk ids: [1]
+residual_risk_log:     [{&#x27;chunk_id&#x27;: 1, &#x27;error&#x27;: &#x27;ValueError(&quot;[E1041] Expected a string, Doc, or bytes as input, but got: &lt;class \&#x27;NoneType\&#x27;&gt;&quot;)&#x27;}]
+
+  chunk 0 sent to embedder: &#x27;Adjuster spoke with &lt;PERSON&gt; about claim CLM-2291.&#x27;
+  chunk 2 sent to embedder: &#x27;&lt;ORGANIZATION&gt; status update, no &lt;ORGANIZATION&gt;.&#x27;
+</code></pre><p>Chunk 1 (<code>None</code>) never reaches the embedder — it is quarantined with the real
+<code>ValueError</code> spaCy raised, not a synthetic stand-in. Chunk 2's own output is a small,
+honest reminder that this week's recurring false positive (a broad, unscoped <code>analyze()</code>
+call tagging ordinary words <code>ORGANIZATION</code>) is still live even inside a &quot;working&quot;
+pipeline stage — the gate stopped a crash from leaking raw PII, but it did not stop a
+false positive from over-masking a chunk that had no PII in it at all. That gap is
+exactly what Concept 3 measures.</p>
+<p><strong>Exercise:</strong></p>
+<p>Add a third failure case to <code>chunks</code>: an empty string <code>&quot;&quot;</code>. Run it through
+<code>embed_pipeline</code> and report whether it is embedded or quarantined, and what
+<code>residual_risk_log</code> looks like afterward. State in one sentence whether an empty chunk
+reaching this gate at all indicates a bug somewhere upstream (in the chunker, not here).</p>
+<p><strong>Starting point:</strong> <code>mask_before_embed</code>, <code>embed_pipeline</code>, and <code>residual_risk_log</code> from
+this concept's Example (reset <code>residual_risk_log</code> to <code>[]</code> first if re-running from a
+fresh cell rather than continuing the same session).</p>
+<p>Expected output: an empty string is valid input to <code>analyzer.analyze()</code> — it returns no
+results and <code>anonymize()</code> returns the empty string unchanged, so chunk index 2 (the new
+one) is embedded, not quarantined, and <code>residual_risk_log</code> is unchanged from the
+Example's single entry. The one-sentence answer: yes — an empty chunk reaching the
+embedding gate means Week 09's chunker produced a zero-length chunk, which is a chunker
+bug (or an upstream empty-document bug) to fix at the source, not something this gate
+should be responsible for filtering; masking an empty string is harmless but embedding
+it wastes an API call and adds a meaningless vector to the store.</p>
+<hr />
+<h3>Concept 2 — Measuring detection recall and precision against a labelled set</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li>Every score/threshold claim in Days 1-4 was about individual examples. A masking gate
+actually deployed needs an aggregate number: across a labelled set of realistic inputs,
+what fraction of real PII does the gate catch (recall), and what fraction of what it
+flags is actually PII (precision) — neither number is knowable from reading example
+output one string at a time.</li>
+<li>A labelled synthetic set is a list of <code>(text, ground_truth_spans)</code> pairs, built by hand
+for exactly this purpose — not scraped from real customer data, which would itself be
+the PII exposure this week exists to prevent.</li>
+<li>Overlap-based matching (a predicted span counts as correct if it overlaps a ground-truth
+span of the same entity type at all, not only on an exact character-for-character match)
+is the standard relaxation for this kind of evaluation — Presidio's own span boundaries
+routinely differ by a character or two from a hand-labelled boundary (a leading/trailing
+space, a possessive <code>'s</code>) without that being a real detection failure.</li>
+<li><code>score_threshold</code> is a precision/recall dial, not a fixed correctness setting: raising it
+trades recall for precision (fewer, more-confident matches; more real PII slips through
+unflagged) and lowering it does the reverse. Day 1's Concept 2 already showed the raw
+match-count effect of moving this threshold; this concept measures what that trade
+actually costs against ground truth.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+nlp_config = {&quot;nlp_engine_name&quot;: &quot;spacy&quot;, &quot;models&quot;: [{&quot;lang_code&quot;: &quot;en&quot;, &quot;model_name&quot;: &quot;en_core_web_sm&quot;}]}
+analyzer = AnalyzerEngine(nlp_engine=NlpEngineProvider(nlp_configuration=nlp_config).create_engine())
+
+# Small labelled synthetic set: (text, ground-truth [(entity_type, start, end), ...])
+LABELLED_SET = [
+    (&quot;Dana Cohen filed claim CLM-2291 for water damage.&quot;,
+     [(&quot;PERSON&quot;, 0, 10)]),
+    (&quot;Card 4111111111111111 was charged for the deductible.&quot;,
+     [(&quot;CREDIT_CARD&quot;, 5, 21)]),
+    (&quot;Refund wired to IBAN IL620108000000099999999 yesterday.&quot;,
+     [(&quot;IBAN_CODE&quot;, 21, 45)]),
+    (&quot;No customer information appears in this maintenance log entry.&quot;,
+     []),
+    (&quot;Avi Levy and Dana Cohen are both listed as co-policyholders.&quot;,
+     [(&quot;PERSON&quot;, 0, 8), (&quot;PERSON&quot;, 13, 23)]),
+]
+
+def spans_overlap(a_start, a_end, b_start, b_end):
+    return a_start &lt; b_end and b_start &lt; a_end
+
+def score(labelled_set, entities, score_threshold):
+    tp = fp = fn = 0
+    for text, truth in labelled_set:
+        preds = analyzer.analyze(text=text, language=&quot;en&quot;, entities=entities, score_threshold=score_threshold)
+        matched_truth, matched_pred = set(), set()
+        for pi, p in enumerate(preds):
+            for ti, (etype, ts, te) in enumerate(truth):
+                if p.entity_type == etype and spans_overlap(p.start, p.end, ts, te):
+                    matched_truth.add(ti)
+                    matched_pred.add(pi)
+        tp += len(matched_truth)
+        fn += len(truth) - len(matched_truth)
+        fp += len(preds) - len(matched_pred)
+    precision = tp / (tp + fp) if (tp + fp) else float(&quot;nan&quot;)
+    recall = tp / (tp + fn) if (tp + fn) else float(&quot;nan&quot;)
+    return tp, fp, fn, precision, recall
+
+ENTITIES = [&quot;PERSON&quot;, &quot;CREDIT_CARD&quot;, &quot;IBAN_CODE&quot;]
+for threshold in (0.5, 0.9):
+    tp, fp, fn, precision, recall = score(LABELLED_SET, ENTITIES, threshold)
+    print(f&quot;score_threshold={threshold}  TP={tp} FP={fp} FN={fn}  precision={precision:.2f} recall={recall:.2f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output:</p>
+<pre><code>score_threshold=0.5  TP=5 FP=0 FN=0  precision=1.00 recall=1.00
+score_threshold=0.9  TP=2 FP=0 FN=3  precision=1.00 recall=0.40
+</code></pre><p>At <code>0.5</code>, every ground-truth span in this 5-example set is caught with zero false
+positives — a clean result, but on a deliberately small, clean set; Concept 3's broader
+masking already showed real false positives exist once the entity list widens beyond
+these three types. At <code>0.9</code>, recall collapses to 0.40 with precision unchanged at 1.00 —
+this is Day 1 Concept 1's <code>PERSON</code> score of <code>0.85</code> made concrete: every <code>PERSON</code> match in
+this set scores below <code>0.9</code> and is silently dropped, while <code>CREDIT_CARD</code>/<code>IBAN_CODE</code>
+(pattern-matched, score <code>1.00</code>) survive either threshold untouched. A masking gate tuned
+to <code>0.9</code> &quot;for higher confidence&quot; is, on this evidence, a gate that stops reliably
+detecting names at all while looking identically precise in a dashboard that only ever
+reports precision.</p>
+<p><strong>Exercise:</strong></p>
+<p>Add one more labelled example to <code>LABELLED_SET</code>: <code>(&quot;Contact the branch about claim CLM-9981.&quot;, [])</code> — a sentence with no PII of the three tracked types (matching Concept
+1's &quot;PII-free chunk still gets over-masked&quot; observation). Re-run <code>score()</code> at
+<code>score_threshold=0.5</code> and report whether TP/FP/FN change. State in one sentence why a
+labelled set needs PII-free examples in it, not just examples that contain PII.</p>
+<p><strong>Starting point:</strong> <code>analyzer</code>, <code>spans_overlap</code>, <code>score</code>, and <code>LABELLED_SET</code> from this
+concept's Example.</p>
+<p>Expected output: TP, FP, and FN are all unchanged from the <code>threshold=0.5</code> row above —
+<code>ENTITIES</code> here is scoped to <code>[&quot;PERSON&quot;, &quot;CREDIT_CARD&quot;, &quot;IBAN_CODE&quot;]</code>, and the new
+sentence's only plausible false-positive risk (<code>branch</code>, an <code>ORGANIZATION</code>-shaped word)
+is outside that scope, so it contributes zero predictions and zero ground truth either
+way. The one-sentence answer: without PII-free examples in the set, precision is
+<em>structurally</em> impossible to measure at all — every predicted span in an all-PII set is
+either a true positive or overlaps some ground truth, so a labelled set built only from
+sentences that contain PII can never surface a false positive, no matter how badly the
+gate over-detects.</p>
+<hr />
+<h3>Concept 3 — Over-masking is a retrieval-quality regression, not just noise</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li>Days 1-4's false positives (<code>ORGANIZATION</code> on the word &quot;PII&quot; itself, <code>NRP</code> on a coded
+claim ID, <code>DATE_TIME</code> on a day-of-week word) were framed as detection accuracy
+problems. At the embedding stage they are something more specific: every word an
+over-broad <code>analyze()</code> call masks is a word no downstream retrieval query can ever
+match against again, because the vector store only ever saw the masked placeholder.</li>
+<li>Scoping <code>entities=[...]</code> to only the types a chunk actually needs masked (PERSON and
+the financial identifiers this week has focused on) versus leaving it unset (every
+registered recognizer, including the noisier <code>DATE_TIME</code>/<code>ORGANIZATION</code>/<code>NRP</code> ones)
+is the same &quot;scoped vs broad&quot; choice Day 1 Concept 2 already introduced — this concept
+measures its downstream cost, not just its match count.</li>
+<li>A simple word-overlap retrieval score (shared non-stopword tokens between a query and a
+chunk) is not a real vector-similarity search, but it is enough to demonstrate the
+mechanism: a query term that only exists in the masked-away portion of a chunk cannot
+contribute to that chunk's score under ANY retrieval method, vector or lexical, because
+the term is no longer in the text the retrieval system indexed.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED -- reuses analyzer, anonymizer from Concept 1
+import re
+
+chunks = [
+    &quot;Adjuster met the customer, Dana Cohen, on Tuesday at the downtown branch &quot;
+    &quot;regarding water damage to the kitchen ceiling, claim CLM-5521.&quot;,
+    &quot;Routine policy renewal reminder sent, no claim activity this cycle.&quot;,
+    &quot;Customer Avi Levy reported a windshield crack on Monday, claim CLM-6002, &quot;
+    &quot;repair scheduled at the north branch.&quot;,
+]
+
+def mask(text, entities):
+    results = analyzer.analyze(text=text, language=&quot;en&quot;, entities=entities)
+    return anonymizer.anonymize(
+        text=text, analyzer_results=results,
+        operators={&quot;DEFAULT&quot;: OperatorConfig(&quot;replace&quot;)},
+    ).text
+
+SCOPED_ENTITIES = [&quot;PERSON&quot;, &quot;CREDIT_CARD&quot;, &quot;IBAN_CODE&quot;, &quot;US_BANK_NUMBER&quot;]
+scoped = [mask(c, SCOPED_ENTITIES) for c in chunks]
+broad = [mask(c, None) for c in chunks]  # None = every registered recognizer
+
+print(&quot;properly-scoped masking:&quot;)
+for c in scoped:
+    print(&quot; &quot;, c)
+print()
+print(&quot;broad/unscoped masking:&quot;)
+for c in broad:
+    print(&quot; &quot;, c)
+
+def tokenize(text):
+    return set(re.findall(r&quot;[a-z0-9]+&quot;, text.lower())) - {&quot;the&quot;, &quot;on&quot;, &quot;a&quot;, &quot;at&quot;, &quot;to&quot;, &quot;of&quot;, &quot;no&quot;}
+
+def retrieval_scores(query, corpus):
+    q = tokenize(query)
+    return [len(q &amp; tokenize(c)) for c in corpus]
+
+query = &quot;What happened on Monday?&quot;
+scoped_scores = retrieval_scores(query, scoped)
+broad_scores = retrieval_scores(query, broad)
+print()
+print(f&quot;query: {query!r}&quot;)
+print(&quot;scoped-masked scores:&quot;, scoped_scores, &quot;-&gt; top chunk&quot;, scoped_scores.index(max(scoped_scores)))
+print(&quot;broad-masked scores: &quot;, broad_scores, &quot;-&gt; top chunk&quot;, broad_scores.index(max(broad_scores)))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Genuine output:</p>
+<pre><code>properly-scoped masking:
+  Adjuster met the customer, &lt;PERSON&gt;, on Tuesday at the downtown branch regarding water damage to the kitchen ceiling, claim CLM-5521.
+  Routine policy renewal reminder sent, no claim activity this cycle.
+  &lt;PERSON&gt; reported a windshield crack on Monday, claim CLM-6002, repair scheduled at the north branch.
+
+broad/unscoped masking:
+  Adjuster met the customer, &lt;PERSON&gt;, on &lt;DATE_TIME&gt; at the downtown branch regarding water damage to the kitchen ceiling, claim CLM-5521.
+  &lt;NRP&gt; policy renewal reminder sent, no claim activity this cycle.
+  &lt;PERSON&gt; reported a windshield crack on &lt;DATE_TIME&gt;, claim &lt;ORGANIZATION&gt;, repair scheduled at the north branch.
+
+query: &#x27;What happened on Monday?&#x27;
+scoped-masked scores: [0, 0, 1] -&gt; top chunk 2
+broad-masked scores:  [0, 0, 0] -&gt; top chunk 0
+</code></pre><p>The regression is exact and measured, not asserted. Chunk 2 (the windshield-crack claim,
+the only chunk that actually mentions Monday) is the unambiguous top match under
+scoped masking — a score of <code>1</code> against two chunks scoring <code>0</code>. Under broad masking, the
+word &quot;Monday&quot; itself was replaced with <code>&lt;DATE_TIME&gt;</code> before the chunk ever reached the
+vector store, so every chunk scores <code>0</code> and <code>.index(max(...))</code>'s tie-break silently
+returns chunk <code>0</code> — the wrong chunk, indistinguishable in the scoring from the two chunks
+that have nothing to do with the query. No retrieval algorithm, however sophisticated,
+can recover a word from a vector that was never computed from that word in the first
+place; broad masking did not just add noise, it deleted the one signal this query needed.</p>
+<p><strong>Exercise:</strong></p>
+<p>Add a fourth chunk to <code>chunks</code>: <code>&quot;Weekly claims summary: three new claims opened this week, no customer names or account numbers included.&quot;</code> Mask it with both <code>SCOPED_ENTITIES</code>
+and broad masking, and report whether either version differs from the original text.
+State in one sentence why a chunk with genuinely no PII is the one case where scoped vs
+broad masking should never matter, and whether that held here.</p>
+<p><strong>Starting point:</strong> <code>mask</code>, <code>SCOPED_ENTITIES</code>, and <code>chunks</code> from this concept's Example.</p>
+<p>Expected output: the scoped-masked version is character-identical to the original (no
+<code>PERSON</code> or financial-identifier entity is present). The broad-masked version is very
+likely NOT identical — &quot;Weekly&quot; or &quot;claims&quot; have a real chance of tripping a
+model-driven recognizer the same way &quot;Routine&quot; and &quot;PII&quot; did earlier in this file (the
+exact word is not guaranteed reproducible across spaCy versions, only the <em>shape</em> of the
+false positive is). The one-sentence answer: a genuinely PII-free chunk is exactly where
+scoped and broad masking should produce identical output, since neither has real PII to
+find — and when they don't match, as is likely here, that gap is pure false-positive
+noise from the broader recognizer set, not a safety benefit purchased by broad masking.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle.</strong> Week 12's orchestration pipeline and Week 13's mainframe-sourced
+records both feed into the same parse→chunk→embed→upsert path this week's gate now sits
+inside. A legacy-sourced chunk is disproportionately likely to contain exactly the coded,
+non-standard tokens (branch codes, product codes, fixed-width account numbers) that this
+week has repeatedly shown trip false positives under broad masking — meaning the
+retrieval-quality regression Concept 3 measured is not evenly distributed across the
+corpus, it concentrates precisely in the legacy-sourced documents the business most needs
+a working audit trail for.</p>
+<p><strong>Compliance angle.</strong> Concept 2's precision/recall measurement is not just an engineering
+metric — it is the artifact a DPIA (data protection impact assessment) actually needs.
+&quot;We use Presidio to mask PII before embedding&quot; is an unverifiable claim without a number
+attached; &quot;measured recall of 1.00 at score_threshold=0.5 against an N-example labelled
+set, re-measured whenever the model or threshold changes&quot; is a claim a regulator, an
+auditor, or an internal risk committee can actually evaluate and re-check. Recording only
+the threshold that was chosen, without the recall/precision trade it was chosen against,
+leaves the actual residual risk undocumented.</p>
+<p><strong>What breaks in production.</strong> The three concepts compose into the real failure mode this
+week has been building toward: an analyzer failure that fails open (not this file's
+<code>mask_before_embed</code>, but a version of it someone wrote without Concept 1's try/except)
+embeds raw PII silently; a threshold raised &quot;for higher confidence&quot; without Concept 2's
+measurement silently drops recall on exactly the entity type (<code>PERSON</code>, at <code>0.85</code>) this
+whole week centers on; and broad, unscoped masking adopted &quot;to be safe&quot; silently deletes
+the retrieval signal a real user's query depends on, discovered only when someone asks
+the RAG system a perfectly reasonable question and it confidently retrieves the wrong
+document. None of these three fail loudly. All three are exactly what this day's
+<code>residual_risk_log</code>, labelled-set measurement, and scoped-entities discipline exist to
+make visible instead of silent.</p>
+<hr />
+<h2>Architecture Decision — Week 14</h2>
+<p><strong>Choosing between:</strong> masking every chunk with the broadest possible <code>entities=None</code> call
+(&quot;catch everything, err on the side of caution&quot;) vs a deliberately scoped <code>entities=[...]</code>
+list matched to what a chunk's source actually contains, backed by Concept 2's measured
+precision/recall rather than an unmeasured assumption either way.</p>
+<p><strong>Rule of thumb:</strong> Scope the entity list to what the data source genuinely needs masked —
+Days 1-2 built exactly this kind of source-specific knowledge (financial identifiers,
+Teudat Zehut) precisely so a chunk's origin can drive its masking policy instead of a
+one-size-fits-all default. Move to a broader entity list only for a data source whose
+content is genuinely unpredictable (free-text customer complaints, unstructured call
+transcripts) where a scoped list would risk missing a real category of PII — and even
+then, pair the broader list with Concept 2's labelled-set measurement before trusting it,
+because Concept 3 showed broad masking has a real, measured cost (retrieval-quality
+regression) that &quot;catch everything&quot; does not make free. The gate itself (Concept 1) is
+never optional regardless of which entity-list policy a source uses: fail-closed
+quarantine-on-error is the one piece of this week that has no scoped/broad trade-off,
+because the alternative to quarantining an unmaskable chunk is embedding it unmasked.</p>
+<hr />
+<div class="pager"><a class="btn ghost" href="week-13.html">&larr; Week 13</a><a class="btn ghost" href="week-15.html">Week 15 &rarr;</a></div>
+</main></body></html>
