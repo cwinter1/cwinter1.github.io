@@ -1,0 +1,989 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 04 — HNSW/IVF-PQ Tuning Deep Dive</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/how-does-approximate-nearest-neighbor-ann-search-work" target="_blank" rel="noopener">How does ANN Search work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/how-does-a-vector-database-work" target="_blank" rel="noopener">How does a Vector Database work?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="04" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 04 — HNSW/IVF-PQ Tuning Deep Dive</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>1 — Real-Time Vector Infrastructure &amp; Streaming</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Expert</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Weeks 01–03: brute-force k-NN and recall@k harness (Week 01), pgvector storage and operators (Week 02), Milvus/Qdrant parameter surfaces (Week 03). Working Python and NumPy.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>9–11 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>None yet. This week is markdown-only — every runnable example below was executed to produce its <code>Expected output:</code>, but no <code>.ipynb</code> has been built for it.</td>
+</tr>
+</tbody>
+</table>
+<p>Weeks 01–03 <em>named</em> the parameters a vector index exposes — <code>M</code>, <code>ef_construction</code>,
+<code>ef_search</code>, <code>nlist</code>, <code>nprobe</code> — without turning any of them, because building a real HNSW
+graph or IVF index was deliberately deferred here. This week turns them, on a from-scratch
+implementation small enough to run on a laptop and honest enough to show where it diverges
+from a production library. Two families are covered, and they are never the same family
+wearing different settings: HNSW is a layered proximity graph (Malkov &amp; Yashunin,
+arXiv:1603.09320); IVF is a k-means coarse quantizer with an inverted-list probe. Day 4 adds
+Product Quantization, the memory-compression technique usually paired with IVF. Day 5 turns
+everything measured into one benchmark record.</p>
+<hr />
+<h2 id="day-1">Day 1 — Tuning M and ef_construction</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="04-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=_JmGWwUZskE" target="_blank" rel="noopener"><b>HNSW Is a Skip List for Vectors: One Random Draw Builds the Hierarchy | formalRAG Topic 21</b><small>Jonathan Aaron  · 36:10</small></a></li><li><a href="https://www.youtube.com/watch?v=S_Gj_QvegCo" target="_blank" rel="noopener"><b>M4L2 HNSW: The Multi-Layer Highway Through Your Data | Vector Databases Masterclass</b><small>Enterprise AI Recovery | Kris Kassem · 9:11</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=HNSW%20M%20ef_construction%20parameters%20tuning%20explained" target="_blank" rel="noopener">Search YouTube: HNSW M ef_construction parameters tuning explained</a></p></div>
+<hr />
+<h3>Concept 1 — M Is Graph Degree, and Levels Are Assigned by a Coin Flip</h3>
+<p><code>M</code> is the maximum number of neighbours each node keeps at the graph's base layer (layer 0);
+<code>mmax0</code>, the base-layer cap, is conventionally <code>2*M</code>. Every inserted node is also assigned a
+top layer by an exponential draw: <code>mL = 1 / ln(M)</code>, and <code>level = floor(-ln(U) * mL)</code> for a
+uniform random <code>U</code>. The probability of landing at layer 1 or higher works out to
+<code>1/M</code> — a smaller <code>M</code> means more nodes get long-range layers, a larger <code>M</code> means the
+hierarchy stays flatter.</p>
+<p>This is a <em>build-time</em> choice. There is no &quot;reconfigure <code>M</code>&quot; operation in a real HNSW
+index — changing it means re-inserting every vector into a new graph, because the base
+layer's connectivity is baked in one insertion at a time. Naming <code>M</code> correctly as a rebuild
+parameter, not a tunable setting, matters more than the exact number chosen.</p>
+<p>One clarification worth holding before the first line of code below: a plain &quot;connect each
+vector to its <code>M</code> nearest neighbours&quot; graph is <em>not</em> HNSW, and it can fail outright. Linking
+5,000 vectors drawn from 10 well-separated clusters to their 8 nearest neighbours each, then
+walking that graph with a beam search from a fixed entry point, reached only 448 of the
+5,000 nodes and scored <strong>recall@10 = 0.000</strong> even with the candidate list widened to 5,000 —
+the entry point's cluster and the query's cluster were simply never connected. Rebuilding
+the same graph <em>incrementally</em>, one node at a time, with the neighbour-selection heuristic
+Concept 3 measures below, reached all 5,000 nodes and scored recall@10 = 1.000 on the same
+query. That heuristic — favouring diverse, long-range links over a clique of nearest
+neighbours — is the concrete reason &quot;just link each vector to its <code>M</code> nearest&quot; is not HNSW.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+rng = np.random.default_rng(10)
+n = 100_000
+for M in (8, 16, 32, 48):
+    mL = 1 / np.log(M)
+    levels = np.floor(-np.log(rng.random(n)) * mL).astype(int)
+    frac_ge1 = (levels &gt;= 1).mean()
+    print(f&quot;M={M:&gt;3}  mL={mL:.4f}  frac(level&gt;=1)={frac_ge1:.4f}  theory(1/M)={1/M:.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Re-run the level-assignment sweep at <code>M = 64</code> and <code>M = 96</code>, and confirm the measured
+<code>frac(level&gt;=1)</code> tracks <code>1/M</code> at both. Then compute, for <code>M = 16</code>, the fraction of nodes
+that reach layer 2 or higher (<code>levels &gt;= 2</code>) and compare it against the theoretical
+<code>1/M**2</code>.</p>
+<p><strong>Starting point:</strong> The level-assignment block from this concept's Example (<code>rng</code>, <code>n = 100_000</code>, and the <code>mL = 1/ln(M)</code> / <code>levels</code> computation), with <code>M</code> swept over <code>(64, 96)</code>
+plus a separate pass at <code>M = 16</code> checking <code>levels &gt;= 2</code>.</p>
+<p>Expected output: measured fractions close to <code>1/M</code> for both new <code>M</code> values (as seen for
+<code>M = 8/16/32/48</code> above: 0.1230/0.0631/0.0304/0.0201 against theory 0.1250/0.0625/0.0312/
+0.0208), and a <code>levels &gt;= 2</code> fraction for <code>M = 16</code> in the neighbourhood of <code>1/16**2 = 0.0039</code> — layer 2 is rare, which is exactly why the top layers act as a sparse long-range
+skip structure rather than ordinary graph density.</p>
+<hr />
+<h3>Concept 2 — What M Costs in RAM, and Why It's a Rebuild Not a Reconfigure</h3>
+<p>hnswlib documents its own per-vector memory formula: <code>d*4 + M*2*4</code> bytes — the <code>d*4</code> is the
+float32 vector itself, <code>M*2*4</code> is <code>M</code> neighbour ids stored as 4-byte integers on each of the
+two directions the base-layer cap (<code>mmax0 = 2*M</code>) allows. This is additive to the raw vector
+storage, not a replacement for it: HNSW does not compress vectors, it adds a graph on top of
+them.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>d = 1024
+for M in (8, 16, 32, 48, 64):
+    per_vector = d * 4 + M * 2 * 4
+    total_1m_gib = per_vector * 1_000_000 / 1024**3
+    print(f&quot;M={M:&gt;3}  bytes/vector={per_vector}  total@1M={total_1m_gib:.2f} GiB&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the same formula, find the smallest <code>M</code> (checking every integer from 8 upward) at
+which the <em>edge overhead alone</em> (<code>M*2*4</code> bytes/vector, excluding the raw vector) exceeds 5%
+of the raw vector size at <code>d = 1024</code>. Then repeat at <code>d = 128</code> and explain in one sentence
+why the same <code>M</code> matters more at low dimension.</p>
+<p><strong>Starting point:</strong> The <code>per_vector = d * 4 + M * 2 * 4</code> formula from this concept's
+Example, with <code>M</code> swept as an integer loop instead of a fixed tuple, at <code>d = 1024</code> and
+<code>d = 128</code>.</p>
+<p>Expected output: at <code>d = 1024</code> the measured bytes/vector are 4160/4224/4352/4480/4608 for
+<code>M = 8/16/32/48/64</code> (totals 3.87/3.93/4.05/4.17/4.29 GiB per million vectors) — edge
+overhead alone crosses 5% of the 4096-byte raw vector somewhere around <code>M = 27</code> (<code>27*2*4 = 216</code> bytes, 5.3% of 4096). At <code>d = 128</code> the raw vector is only 512 bytes, so the same
+edge-overhead formula crosses 5% at a much smaller <code>M</code> (around <code>M = 4</code>) — <code>M</code>'s memory cost
+is relative to dimension, so a rule of thumb tuned on 1024-dim embeddings does not transfer
+to a 128-dim model without re-deriving it.</p>
+<p><strong>REAL MODE — not executed, requires pgvector or hnswlib:</strong> in Postgres with pgvector, the
+same two build-time parameters appear verbatim: <code>CREATE INDEX ON claims USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 100);</code>. In hnswlib, they are
+constructor arguments to <code>init_index(max_elements=..., ef_construction=100, M=16)</code>. Neither
+API exposes a way to change <code>m</code> after the index exists — the only path is <code>DROP INDEX</code> /
+<code>init_index</code> again and re-insert every vector. Expected output (shape only, no invented
+number): a successful index build that then reports its size via <code>pg_relation_size</code> or
+<code>hnswlib.Index.element_count</code>, consistent with the byte formula measured above, not a
+specific figure — the real figure depends on the live corpus.</p>
+<hr />
+<h3>Concept 3 — ef_construction Buys Graph Quality With Build Time</h3>
+<p><code>ef_construction</code> is the candidate-list size used <em>while building</em> the graph: for each new
+node, the builder does a beam search of width <code>ef_construction</code> over the graph built so far,
+then keeps the best <code>M</code> of those candidates (via the neighbour-selection heuristic from
+Concept 1) as the new node's links. Bigger <code>ef_construction</code> means a better-informed
+neighbour choice — and a slower build, since every insertion does more work.</p>
+<p>The honest shape of that tradeoff: quality rises with <code>ef_construction</code> and then plateaus.
+It does not plateau at 1.0, because the neighbour-selection heuristic deliberately trades
+away some true-nearest-neighbour links in exchange for the long-range diversity that fixes
+the disconnection problem from Concept 1 — a graph of pure true-nearest-neighbour links is
+exactly the kind of graph that got stuck at 448/5000 reachable nodes.</p>
+<p>This week's <code>build_graph</code>/<code>search_layer</code> pair, defined once below and reused for the rest
+of the week, is the compact single-layer NSW-style implementation the note under this
+concept's Expected output describes: a greedy beam search over whatever graph has been
+built so far, plus the Malkov &amp; Yashunin neighbour-selection heuristic (Algorithm 4,
+simplified) that Concept 1's disconnection story depends on.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+import numpy as np
+
+_dist_calls = [0]
+
+def dist(points, i, q):
+    _dist_calls[0] += 1
+    return np.linalg.norm(points[i] - q)
+
+def _greedy_search(points, graph, entry, q, ef, limit):
+    &quot;&quot;&quot;Beam search over nodes already inserted (index &lt; limit).&quot;&quot;&quot;
+    visited = {entry}
+    result = [(dist(points, entry, q), entry)]
+    frontier = list(result)
+    while frontier:
+        frontier.sort()
+        c_dist, c = frontier.pop(0)
+        result.sort()
+        if len(result) &gt;= ef and c_dist &gt; result[-1][0]:
+            break
+        for nb in graph.get(c, []):
+            if nb not in visited and nb &lt; limit:
+                visited.add(nb)
+                nd = dist(points, nb, q)
+                frontier.append((nd, nb))
+                result.append((nd, nb))
+        result.sort()
+        if len(result) &gt; ef:
+            result = result[:ef]
+    result.sort()
+    return result[:ef]
+
+def _select_neighbors_heuristic(points, candidates, M):
+    &quot;&quot;&quot;Algorithm 4, simplified: keep a candidate only if it is closer to the
+    query than to every neighbour already selected -- this is what buys the
+    long-range diversity Concept 1&#x27;s disconnection story depends on.&quot;&quot;&quot;
+    candidates = sorted(candidates)
+    selected = []
+    for cd, cidx in candidates:
+        if len(selected) &gt;= M:
+            break
+        if all(np.linalg.norm(points[cidx] - points[sidx]) &gt;= cd for _, sidx in selected):
+            selected.append((cd, cidx))
+    return [idx for _, idx in selected]
+
+def build_graph(points, M, ef_construction):
+    n = len(points)
+    graph = {0: []}
+    entry = 0
+    for i in range(1, n):
+        candidates = _greedy_search(points, graph, entry, points[i], ef_construction, limit=i)
+        selected = _select_neighbors_heuristic(points, candidates, M)
+        graph[i] = list(selected)
+        for j in selected:
+            graph[j].append(i)
+            if len(graph[j]) &gt; 2 * M:
+                cands_j = [(np.linalg.norm(points[nb] - points[j]), nb) for nb in graph[j]]
+                graph[j] = _select_neighbors_heuristic(points, cands_j, 2 * M)
+    return graph, entry
+
+def search_layer(points, graph, entry, query, ef):
+    return _greedy_search(points, graph, entry, query, ef, limit=len(points))
+
+rng = np.random.default_rng(11)
+n, d, M = 2000, 32, 16
+points = rng.normal(size=(n, d)).astype(np.float32)
+
+dmat = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
+np.fill_diagonal(dmat, np.inf)
+true_16nn = np.argsort(dmat, axis=1)[:, :16]
+
+for efc in (10, 20, 40, 80, 160, 320):
+    t0 = time.perf_counter()
+    graph, entry = build_graph(points, M=M, ef_construction=efc)
+    build_s = time.perf_counter() - t0
+    captured = sum(len(set(true_16nn[i]) &amp; set(graph[i])) for i in range(n))
+    total = n * 16
+    print(f&quot;ef_c={efc:&gt;4}  true-16NN captured={captured/total:.3f}  build={build_s:.1f}s&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Re-run the sweep with <code>M = 32</code> instead of <code>M = 16</code> (same 2,000-point corpus and seed) and
+compare where the true-16NN-captured curve plateaus. State whether a larger <code>M</code> needs a
+larger or smaller <code>ef_construction</code> to reach the same plateau quality.</p>
+<p><strong>Starting point:</strong> The <code>build_graph</code> sweep from this concept's Example, with <code>M</code> changed
+to 32 and the same <code>ef_construction</code> values <code>(10, 20, 40, 80, 160, 320)</code>.</p>
+<p>Expected output: on the <code>M = 16</code> run measured here, true-16NN capture rose from 0.267 at
+<code>ef_c = 10</code> to 0.391 (20), 0.471 (40), 0.494 (80), 0.499 (160), and 0.499 again at 320 —
+build time rose steadily across the sweep, roughly 25x from <code>ef_c = 10</code> to <code>ef_c = 320</code>
+on the machine this was measured on (wall-clock build time is hardware-dependent and will
+scale differently on other machines; the <em>shape</em> of the curve, and where it plateaus
+relative to the recall curve, is the number worth trusting, not the absolute seconds). The
+plateau from <code>ef_c = 160</code> to <code>ef_c = 320</code> at an unchanged score is the signal that more
+build-time search stopped buying anything on this corpus; spending further <code>ef_construction</code>
+past that point is wasted build time, not free quality.</p>
+<p><em>Implementation note, stated once and held for the rest of this week:</em> every runnable
+example in this file uses a compact incremental single-layer NSW-style graph with the
+Malkov &amp; Yashunin neighbour-selection heuristic (Algorithm 4, simplified — no
+<code>extendCandidates</code> or <code>keepPrunedConnections</code>), not a full multi-layer HNSW implementation.
+A full multi-layer build is too long to fit in a markdown lesson block. What is measured
+here is the base-layer mechanics — degree, heuristic neighbour selection, <code>ef_construction</code>
+and <code>ef_search</code> — the same mechanics a real multi-layer graph runs at every layer. The layer
+hierarchy on top is what gives production HNSW its logarithmic scaling at large corpus size;
+it is not reproduced here, and no recall or latency number in this file should be read as a
+production HNSW benchmark.</p>
+<hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> An insurer's on-prem index-build window is usually the overnight batch
+slot, shared with settlement runs and regulatory extract jobs. A rebuild triggered by a
+tuning change to <code>M</code> competes for the same machine and the same window as those existing
+jobs — the constraint is rarely &quot;can this build finish&quot;, it is &quot;does this build finish
+before the settlement job needs the CPU back.&quot;</p>
+<p><strong>Compliance angle:</strong> Because <code>M</code> and <code>ef_construction</code> are baked into the graph at build
+time, every live index has an implicit &quot;as-built&quot; configuration that a model card or index
+change log should record — not just at launch, but at every rebuild. A regulator asking why
+a claims-similarity search under-performed cannot be answered with &quot;current config&quot; if the
+config that actually built the graph in production was a different one that has since been
+changed in a ticket but never redeployed.</p>
+<p><strong>What breaks in production:</strong> A well-meaning engineer bumps <code>M</code> in a config file expecting
+an immediate quality improvement, and nothing happens — because the running index was never
+rebuilt against the new value. The failure is silent: the service keeps serving the old
+graph under a config that claims to be the new one.</p>
+<hr />
+<h2 id="day-2">Day 2 — Query-Time Recall with ef_search</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="04-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=6pRQ6_aHR8E" target="_blank" rel="noopener"><b>pgvector HNSW vs IVFFlat Indexing: Cut Latency and Cost in Python</b><small>Professor Py: Information Retrieval with Python · 7:57</small></a></li><li><a href="https://www.youtube.com/watch?v=1-oV5g0RFzE" target="_blank" rel="noopener"><b>Why Your RAG Retrieval Is Failing (Vector Search Recall Tuning)</b><small>Actian for Developers · 8:29</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=ef_search%20recall%20latency%20tradeoff%20vector%20index%20tuning" target="_blank" rel="noopener">Search YouTube: ef_search recall latency tradeoff vector index tuning</a></p></div>
+<hr />
+<h3>Concept 1 — ef_search Is a Candidate-List Size, Not a Result Count</h3>
+<p><code>ef_search</code> controls how many candidates the query-time beam search keeps in flight at the
+base layer before returning the best <code>k</code>. It is a floor, not a target: if <code>ef_search &lt; k</code>,
+the search physically cannot return <code>k</code> results, because the candidate list it is drawing
+from is smaller than <code>k</code>. Every production HNSW implementation enforces (or silently clamps
+to) <code>ef_search &gt;= k</code>; this example removes that guard to make the failure visible.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing build_graph/search_layer defined in Day 1 Concept 3.
+import numpy as np
+
+rng = np.random.default_rng(12)
+n, d, M = 2000, 32, 16
+points = rng.normal(size=(n, d)).astype(np.float32)
+graph, entry = build_graph(points, M=M, ef_construction=100)
+
+query = rng.normal(size=d).astype(np.float32)
+k = 10
+# ef passed straight through, no max(ef, k) floor -- this is deliberately unsafe.
+for ef in (2, 5, 10, 20):
+    results = search_layer(points, graph, entry, query, ef=ef)[:k]
+    print(f&quot;ef_search={ef:&gt;3}  k={k}  results returned={len(results)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add the <code>max(ef_search, k)</code> floor a production library applies internally, re-run the same
+four <code>ef_search</code> values, and confirm every call now returns exactly <code>k = 10</code> results
+regardless of how low <code>ef_search</code> is set.</p>
+<p><strong>Starting point:</strong> The unsafe sweep from this concept's Example (<code>points</code>, <code>graph</code>,
+<code>entry</code>, <code>query</code>, <code>k = 10</code>), with the search call changed to
+<code>search_layer(points, graph, entry, query, ef=max(ef, k))</code>.</p>
+<p>Expected output: without the floor, this run returned 2, 5, 10 and 10 results for
+<code>ef_search = 2, 5, 10, 20</code> respectively — truncated below <code>k</code> for the first two. With
+<code>max(ef_search, k)</code> applied, all four calls return exactly 10.</p>
+<hr />
+<h3>Concept 2 — The Recall@10 Sweep, With Distance Computations as the Cost Axis</h3>
+<p>Wall-clock timing is one way to measure query cost, but it is noisy in a pure-Python
+implementation. The number of distance computations a search performs is a cleaner, more
+stable proxy for the work <code>ef_search</code> actually buys — and it is the quantity a real vector
+database's own internal counters expose.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing build_graph/search_layer/dist/_dist_calls defined in Day 1 Concept 3.
+import numpy as np
+
+rng = np.random.default_rng(13)
+n, d, M, efc = 3000, 32, 16, 100
+points = rng.normal(size=(n, d)).astype(np.float32)
+graph, entry = build_graph(points, M=M, ef_construction=efc)
+
+n_queries = 50
+queries = rng.normal(size=(n_queries, d)).astype(np.float32)
+dmat = np.linalg.norm(points[None, :, :] - queries[:, None, :], axis=2)
+true_top10 = np.argsort(dmat, axis=1)[:, :10]
+
+# dist() already counts every call into _dist_calls[0] -- reset it right
+# before each measured search and read it right after, ignoring whatever
+# the build above already accumulated.
+for ef in (10, 32, 64, 128):
+    recalls, total_calls = [], 0
+    for qi in range(n_queries):
+        _dist_calls[0] = 0
+        results = search_layer(points, graph, entry, queries[qi], ef=ef)[:10]
+        got = set(i for _, i in results)
+        recalls.append(len(got &amp; set(true_top10[qi].tolist())) / 10)
+        total_calls += _dist_calls[0]
+    print(f&quot;ef_search={ef:&gt;4}  recall@10={np.mean(recalls):.3f}  &quot;
+          f&quot;avg distance computations={total_calls / n_queries:.0f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Rebuild the same corpus with <code>ef_construction = 20</code> instead of 100 (a deliberately
+under-built graph) and re-run the <code>ef_search</code> sweep. Report whether a weaker graph can be
+compensated for by raising <code>ef_search</code> alone, or whether recall stays capped below the
+well-built graph's numbers no matter how high <code>ef_search</code> goes.</p>
+<p><strong>Starting point:</strong> The recall@10 sweep from this concept's Example, with <code>build_graph</code>
+called at <code>ef_construction=20</code> instead of <code>100</code>, same corpus and query set.</p>
+<p>Expected output: on the well-built graph (<code>ef_construction=100</code>) measured here, recall@10
+rose from 0.740 (<code>ef_search=10</code>, ~291 distance computations) to 0.950 (32, ~603), 0.992 (64,
+~967) and 0.998 (128, ~1474) — cost roughly tracks <code>ef_search</code> linearly, recall does not.
+The under-built graph should show a visibly lower ceiling at high <code>ef_search</code>, because a
+weak build-time search already missed links that no amount of query-time search can restore
+— <code>ef_search</code> cannot substitute for <code>ef_construction</code>.</p>
+<hr />
+<h3>Concept 3 — Latency Percentiles Under Rising ef_search</h3>
+<p>The expected story is that <code>ef_search</code> disproportionately taxes the tail: a minority of
+hard queries pay more of the added cost than the median query does. Measuring this
+carefully on the toy graph here gives a more precise, slightly different answer worth
+reporting honestly rather than asserting the expected one unchecked.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing build_graph/search_layer/dist/_dist_calls defined in Day 1 Concept 3.
+import numpy as np
+
+rng = np.random.default_rng(14)
+n, d, M, efc = 3000, 32, 16, 100
+points = rng.normal(size=(n, d)).astype(np.float32)
+graph, entry = build_graph(points, M=M, ef_construction=efc)
+
+n_queries = 300
+queries = rng.normal(size=(n_queries, d)).astype(np.float32)
+
+for ef in (32, 128):
+    costs = []
+    for qi in range(n_queries):
+        _dist_calls[0] = 0
+        search_layer(points, graph, entry, queries[qi], ef=ef)
+        costs.append(_dist_calls[0])
+    costs = np.array(costs)
+    p50, p95, p99 = (np.percentile(costs, q) for q in (50, 95, 99))
+    print(f&quot;ef_search={ef:&gt;4}  p50={p50:.0f}  p95={p95:.0f}  p99={p99:.0f}  &quot;
+          f&quot;max={costs.max():.0f}  p99/p50={p99/p50:.2f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the same 300-query cost arrays, compute the coefficient of variation
+(<code>std / mean</code>) of per-query cost at <code>ef_search=32</code> and at <code>ef_search=128</code>. State whether
+absolute tail spread (<code>max - p50</code>) grows, shrinks, or stays flat as <code>ef_search</code> rises, using
+these two runs as the evidence.</p>
+<p><strong>Starting point:</strong> The two per-<code>ef_search</code> <code>costs</code> arrays produced by this concept's
+Example (<code>ef_search=32</code> and <code>ef_search=128</code>).</p>
+<p>Expected output: on this measured run, <code>ef_search=32</code> gave p50=616, p95=664, p99=686,
+max=692 (<code>p99/p50 = 1.11</code>); <code>ef_search=128</code> gave p50=1483, p95=1552, p99=1577, max=1587
+(<code>p99/p50 = 1.06</code>). The absolute tail gap (<code>max - p50</code>) widened from 76 to 104 as
+<code>ef_search</code> rose, but the <em>relative</em> tail ratio narrowed slightly rather than widening. Do
+not over-read this as &quot;raising <code>ef_search</code> shrinks tail risk&quot; — on this single-layer toy,
+every query pays a similar, roughly <code>ef_search</code>-proportional cost because there is no layer
+hierarchy or regional density variation for a hard query to get stuck in. A real
+multi-layer HNSW graph over heterogeneous, clustered production embeddings is exactly where
+the layer hierarchy and uneven local density reintroduce the query-dependent tail behaviour
+this toy cannot show — measure the ratio on your own corpus and topology rather than
+assuming either direction.</p>
+<hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> A per-query <code>ef_search</code> override is the cheapest lever an on-call engineer
+has at 2 a.m. — it needs no rebuild, no deploy, just a changed request parameter. Knowing
+that <code>ef_search</code> is the query-time knob (unlike <code>M</code>, which needs a rebuild) is the difference
+between a five-minute mitigation and an escalation.</p>
+<p><strong>Compliance angle:</strong> A high-stakes lookup — a sanctions-adjacent claim similarity check, for
+instance — is a legitimate reason to raise <code>ef_search</code> for that one call path even if the
+rest of the service runs a lower default, since the latency cost of a single elevated-recall
+query is bounded and the completeness gain is real. Document that override as a deliberate
+per-path decision, not a stray parameter someone will &quot;clean up&quot; later.</p>
+<p><strong>What breaks in production:</strong> <code>ef_search</code> left at whatever the client library's default
+happens to be, which was tuned against a benchmark corpus, not this one. Nothing errors.
+Recall is quietly lower than the number in last quarter's evaluation report, and nobody
+notices until a specific claim search is manually checked and found wanting.</p>
+<hr />
+<h2 id="day-3">Day 3 — IVF nlist and nprobe Tuning</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="04-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=twoL_saoY_w" target="_blank" rel="noopener"><b>Vector Databases : 7 - IVF Explained: Clusters, nprobe and a Failure Case</b><small>Oddly Yogi · 7:19</small></a></li><li><a href="https://www.youtube.com/watch?v=KtNAsFOH7aI" target="_blank" rel="noopener"><b>Vector Search in Python: How Fast Search Works (FAISS: brute force, IVF, HNSW, PQ)</b><small>Token by Token · 14:06</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=FAISS%20IVF%20nlist%20nprobe%20tuning%20explained" target="_blank" rel="noopener">Search YouTube: FAISS IVF nlist nprobe tuning explained</a></p></div>
+<hr />
+<h3>Concept 1 — IVF Is a Different Family, Not a Different Setting</h3>
+<p>IVF (Inverted File index) has nothing structurally in common with HNSW. It trains a k-means
+coarse quantizer over the corpus, producing <code>nlist</code> centroids; every stored vector is
+assigned to its nearest centroid's inverted list. A query first finds the <code>nprobe</code> closest
+centroids, then does an exact (or PQ-approximated) scan of only the vectors in those lists.
+There is no graph, no layers, no <code>M</code>, no <code>ef_construction</code>.</p>
+<p>The two families do not share a parameter, and describing IVF's <code>nlist</code>/<code>nprobe</code> as
+&quot;HNSW's version of <code>M</code>/<code>ef_search</code>&quot; is a category error that will send a reader looking for
+a knob that does not exist in whichever system they are actually configuring.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>hnsw_config = {&quot;family&quot;: &quot;HNSW&quot;, &quot;M&quot;: 16, &quot;ef_construction&quot;: 100, &quot;ef_search&quot;: 64}
+ivf_config = {&quot;family&quot;: &quot;IVF&quot;, &quot;nlist&quot;: 224, &quot;nprobe&quot;: 16, &quot;quantizer&quot;: &quot;kmeans&quot;}
+
+shared_keys = set(hnsw_config) &amp; set(ivf_config)
+print(&quot;HNSW config:&quot;, hnsw_config)
+print(&quot;IVF config :&quot;, ivf_config)
+print(&quot;keys shared between the two configs (excluding &#x27;family&#x27;):&quot;, shared_keys - {&quot;family&quot;})
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write a one-paragraph explanation, for a teammate who has only used pgvector's HNSW index,
+of why switching a collection to IVF is not a matter of renaming <code>ef_search</code> to <code>nprobe</code> in
+the same config object — name at least one operational consequence (for example: what has
+to happen before the index can serve any query at all).</p>
+<p><strong>Starting point:</strong> No code. The <code>hnsw_config</code> / <code>ivf_config</code> dictionaries from this
+concept's Example as the two things being contrasted.</p>
+<p>Expected output: a short paragraph naming that IVF requires a <em>training</em> step (fitting
+k-means centroids on representative data) before any vector can be inserted — HNSW has no
+equivalent training phase, vectors can be inserted from the very first one. That asymmetry
+alone rules out a drop-in config rename.</p>
+<hr />
+<h3>Concept 2 — nlist, the sqrt(N) Heuristic, and the Training-Sample Floor</h3>
+<p><code>nlist</code>, the number of coarse-quantizer centroids, is a <em>build-time</em> parameter — it needs a
+training pass before the index exists at all, exactly like <code>M</code> needs a graph rebuild. FAISS's
+own documentation gives <code>nlist ~ sqrt(N)</code> as a starting point, plus a hard minimum: at least
+<code>39 * nlist</code> training points, with <code>256 * nlist</code> as its stated comfort level. Below the
+minimum, k-means has too few points per intended cluster to converge meaningfully.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+for n in (20_000, 50_000, 500_000, 5_000_000):
+    nlist_heuristic = int(round(np.sqrt(n)))
+    min_train = 39 * nlist_heuristic
+    comfort_train = 256 * nlist_heuristic
+    print(f&quot;n={n:&gt;10,}  sqrt(n) nlist~={nlist_heuristic:&gt;5}  &quot;
+          f&quot;min_train_pts={min_train:&gt;9,}  comfort_train_pts={comfort_train:&gt;10,}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+For a corpus of 50,000 claim-note vectors, compute <code>nlist ~ sqrt(N)</code> and its <code>39*nlist</code>
+minimum training requirement. Then state, in one sentence, what happens if the team decides
+to train the quantizer on only 5,000 sampled vectors instead.</p>
+<p><strong>Starting point:</strong> The heuristic-and-floor block from this concept's Example, evaluated at
+<code>n = 50_000</code> only.</p>
+<p>Expected output: <code>nlist ~= 224</code>, minimum training points <code>= 8,736</code>, comfort level <code>= 57,344</code>. Training on 5,000 points is below the 8,736-point minimum FAISS itself warns
+about — the centroids will be under-determined for a 224-way split, and cluster quality
+(hence recall at any given <code>nprobe</code>) will suffer in a way that looks like a search-time bug
+but is actually a training-data shortfall.</p>
+<hr />
+<h3>Concept 3 — nprobe Tracks the nprobe/nlist Ratio, Not nprobe Alone</h3>
+<p>The clean version of &quot;sqrt(N) is a rule of thumb&quot; ends here: measuring <code>nprobe</code> in
+isolation is misleading, because the same <code>nprobe</code> value means something completely
+different depending on <code>nlist</code>. <code>nprobe = 32</code> is nearly exhaustive at <code>nlist = 64</code> (half the
+lists get probed) and a thin slice at <code>nlist = 1000</code> (3.2% of lists). Recall tracks the
+<em>ratio</em>, not the raw count — and cluster imbalance (a corpus with a few dominant claim types
+and many rare ones) makes that ratio even less predictable, since some lists hold far more
+vectors than others.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+import numpy as np
+
+def build_ivf(points, nlist, seed=1, iters=10):
+    &quot;&quot;&quot;Lloyd&#x27;s-algorithm k-means coarse quantizer, Forgy (random-sample) init.&quot;&quot;&quot;
+    rng = np.random.default_rng(seed)
+    n = len(points)
+    idx = rng.choice(n, size=nlist, replace=False)
+    centroids = points[idx].copy()
+    for _ in range(iters):
+        d2 = ((points[:, None, :] - centroids[None, :, :]) ** 2).sum(axis=2)
+        assign = np.argmin(d2, axis=1)
+        new_centroids = centroids.copy()
+        for c in range(nlist):
+            members = points[assign == c]
+            if len(members) &gt; 0:
+                new_centroids[c] = members.mean(axis=0)
+        centroids = new_centroids
+    d2 = ((points[:, None, :] - centroids[None, :, :]) ** 2).sum(axis=2)
+    assign = np.argmin(d2, axis=1)
+    lists = {c: [] for c in range(nlist)}
+    for i, c in enumerate(assign):
+        lists[int(c)].append(i)
+    return centroids, lists
+
+def ivf_search(points, centroids, lists, query, nprobe, k):
+    d2c = ((centroids - query) ** 2).sum(axis=1)
+    probe_order = np.argsort(d2c)[:nprobe]
+    cand_ids = []
+    for c in probe_order:
+        cand_ids.extend(lists[int(c)])
+    if not cand_ids:
+        return []
+    cand_ids = np.array(cand_ids)
+    dists = np.linalg.norm(points[cand_ids] - query, axis=1)
+    order = np.argsort(dists)[:k]
+    return cand_ids[order].tolist()
+
+# Skewed claim-type corpus: a few dominant claim types, several rare ones.
+rng = np.random.default_rng(20)
+d = 16
+cluster_sizes = [8000, 6000, 3000, 1200, 700, 500, 300, 300]  # sums to 20,000
+centres = rng.normal(scale=6.0, size=(len(cluster_sizes), d))
+chunks = [rng.normal(loc=centres[i], scale=1.0, size=(sz, d)) for i, sz in enumerate(cluster_sizes)]
+points = np.concatenate(chunks, axis=0).astype(np.float32)
+n = len(points)
+
+n_queries = 30
+queries = rng.normal(size=(n_queries, d)).astype(np.float32)
+dmat = np.linalg.norm(points[None, :, :] - queries[:, None, :], axis=2)
+true_top10 = np.argsort(dmat, axis=1)[:, :10]
+
+for nlist in (64, 224, 1000):
+    t0 = time.perf_counter()
+    centroids, lists = build_ivf(points, nlist, seed=1)
+    build_s = time.perf_counter() - t0
+    sizes = np.array([len(v) for v in lists.values()])
+    ratio = sizes.max() / max(sizes.min(), 1)
+    for nprobe in (1, 8, 16, 32):
+        recalls = []
+        for qi in range(n_queries):
+            got = set(ivf_search(points, centroids, lists, queries[qi], nprobe, 10))
+            recalls.append(len(got &amp; set(true_top10[qi].tolist())) / 10)
+        print(f&quot;nlist={nlist:&gt;5}  nprobe={nprobe:&gt;3}  recall@10={np.mean(recalls):.3f}  &quot;
+              f&quot;list max/min={ratio:.1f}  build={build_s:.1f}s&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+From the printed results, compute the <code>nprobe/nlist</code> ratio for every row and confirm that
+rows with a similar ratio (for example <code>nlist=64, nprobe=8</code> at ratio 0.125, versus
+<code>nlist=1000</code> at some <code>nprobe</code> near 125) score closer to each other on recall than rows with
+the same raw <code>nprobe</code> do. State the <code>nprobe</code> you would need at <code>nlist=1000</code> to match
+<code>nlist=64, nprobe=8</code>'s ratio, and whether that is a realistic number to probe in production.</p>
+<p><strong>Starting point:</strong> The printed <code>(nlist, nprobe, recall@10)</code> table from this concept's
+Example.</p>
+<p>Expected output: on this skewed 20,000-vector corpus, <code>nlist=64</code> reached recall@10 = 0.310,
+0.823, 0.963, 1.000 at <code>nprobe = 1, 8, 16, 32</code> (list size max/min ratio 7.0); <code>nlist=224</code>
+reached 0.360, 0.790, 0.893, 0.970 over the same <code>nprobe</code> values (ratio 3.0); <code>nlist=1000</code>
+reached only 0.147, 0.490, 0.663, 0.787 (ratio 40.0) — the same <code>nprobe=32</code> gives near-perfect
+recall at <code>nlist=64</code> and under 0.8 at <code>nlist=1000</code>, because 32 lists out of 1000 is a much
+thinner slice than 32 out of 64. Matching the ratio (<code>nprobe=8</code> at <code>nlist=64</code> is a ratio of
+0.125; <code>nlist=1000</code> would need <code>nprobe~=125</code> to match it) is rarely realistic in production —
+probing an eighth of all lists defeats most of the point of partitioning in the first place,
+which is the real, practical corollary of &quot;match the ratio, not the count.&quot;</p>
+<hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> IVF's training step needs a representative sample of the corpus <em>before</em>
+the index can serve anything — for a claims system that means waiting for a batch extract of
+historical claims to land before the index can be built at all, not an instant &quot;spin it up
+and start inserting&quot; workflow like HNSW's incremental build.</p>
+<p><strong>Compliance angle:</strong> Cluster imbalance is not an abstract statistics problem here — a
+dominant claim type (auto collision) sitting in a handful of oversized lists means queries
+for a rare claim type (marine cargo, cyber) systematically probe a thinner, less
+representative slice of the corpus at the same <code>nprobe</code>. If recall is measured only on
+average across all claim types, that average can hide materially worse coverage on exactly
+the rare, high-value claim categories a fraud or compliance review cares most about.</p>
+<p><strong>What breaks in production:</strong> <code>nlist</code> chosen once at launch off the corpus size at the time,
+then never revisited as the corpus grows 10x. The <code>nprobe/nlist</code> ratio silently drifts
+toward the thin end, and recall degrades corpus-growth by corpus-growth with no code change
+to blame it on.</p>
+<hr />
+<h2 id="day-4">Day 4 — Product Quantization Memory Budgets</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="04-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=4FZvqtnQ5Hw" target="_blank" rel="noopener"><b>Day 28: Product Quantization (PQ) Explained: HNSW vs IVF vs PQ vs LSH – Which Should You Use?</b><small>Cloud and Coffee with Navnit · 6:56</small></a></li><li><a href="https://www.youtube.com/watch?v=eKwEg9Y6WCg" target="_blank" rel="noopener"><b>Product Quantization with FAISS in Python: Measure Memory vs Recall</b><small>Professor Py: AI Foundations · 8:21</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=product%20quantization%20IVF-PQ%20explained%20FAISS%20memory%20compression" target="_blank" rel="noopener">Search YouTube: product quantization IVF-PQ explained FAISS memory compression</a></p></div>
+<hr />
+<h3>Concept 1 — The Compression Arithmetic</h3>
+<p>Product Quantization splits each <code>d</code>-dimensional vector into <code>m</code> contiguous subvectors and
+encodes each subvector as the index of its nearest of <code>2**bits</code> per-subspace centroids. A
+1024-dimension float32 vector (4096 bytes) encoded with <code>m = 64</code> subvectors at 8 bits each
+becomes a 64-byte code — a 64x compression, at the cost of a codebook (<code>m * 2**bits * (d/m) * 4</code> bytes) that must be kept in RAM to decode or score against. Scalar quantization
+(SQ8, one byte per dimension, no subspace training) is the simpler alternative worth sizing
+alongside PQ, since it needs no training step at all.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>d = 1024
+for m, bits in ((64, 8), (32, 8), (16, 8)):
+    code_bytes = m * bits / 8
+    compression = (d * 4) / code_bytes
+    codebook_bytes = m * (2 ** bits) * (d // m) * 4
+    print(f&quot;m={m:&gt;3} bits={bits}  code={code_bytes:.0f} B  &quot;
+          f&quot;compression={compression:.0f}x  codebook={codebook_bytes/1024:.1f} KiB&quot;)
+
+sq8_bytes = d * 1
+print(f&quot;\nSQ8 for comparison: {sq8_bytes} B/vector, compression={(d*4)/sq8_bytes:.0f}x&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Compute the same table at <code>bits = 4</code> (16 centroids per subspace) for <code>m = (64, 32, 16)</code>.
+Report how much the codebook shrinks relative to <code>bits = 8</code>, and how much the per-vector
+code shrinks in the same comparison.</p>
+<p><strong>Starting point:</strong> The compression-arithmetic block from this concept's Example, with
+<code>bits</code> changed to <code>4</code> for the same <code>m</code> values.</p>
+<p>Expected output: at <code>d = 1024</code>, <code>bits = 8</code> measured here: <code>m=64</code> gives a 64-byte code at 64x
+compression with a 1024.0 KiB codebook; <code>m=32</code> gives 32 bytes at 128x with the same 1024.0
+KiB codebook (codebook size depends on <code>d</code>, not on <code>m</code>, once <code>m</code> divides <code>d</code> evenly — more
+subspaces means more, smaller codebooks that sum to the same total); <code>m=16</code> gives 16 bytes
+at 256x. SQ8 gives 1024 bytes/vector at 4x. At <code>bits=4</code>, halving centroid count per subspace
+halves both codebook size and (since 4 bits packs two codes per byte) the per-vector code
+size relative to <code>bits=8</code> — more compression, at a coarser codebook that the training-and-
+measurement in Concept 2 is what actually reveals the cost of.</p>
+<hr />
+<h3>Concept 2 — Training a Codebook and Measuring the Loss</h3>
+<p>The arithmetic in Concept 1 says nothing about accuracy — that has to be measured by
+training real per-subspace k-means codebooks and running Asymmetric Distance Computation
+(ADC): for a query, build a per-subspace lookup table of distances to that subspace's
+centroids, then score every stored code by summing table lookups, without ever
+decompressing a stored vector.</p>
+<p>This example runs at <code>d = 64</code>, not <code>d = 1024</code>, so codebook training finishes in a
+reasonable time on a laptop — the compression ratios and the recall trend transfer, the
+absolute byte counts do not (see Concept 1 for the <code>d = 1024</code> arithmetic).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+def train_pq(train_points, m, bits, seed=1, iters=10):
+    &quot;&quot;&quot;Per-subspace k-means: one independent codebook per of the m subvectors.&quot;&quot;&quot;
+    rng = np.random.default_rng(seed)
+    n, d = train_points.shape
+    sub_dim = d // m
+    k = 2 ** bits
+    codebooks = []
+    for s in range(m):
+        sub = train_points[:, s * sub_dim:(s + 1) * sub_dim]
+        k_eff = min(k, len(sub))
+        idx = rng.choice(len(sub), size=k_eff, replace=False)
+        centroids = sub[idx].copy()
+        for _ in range(iters):
+            d2 = ((sub[:, None, :] - centroids[None, :, :]) ** 2).sum(axis=2)
+            assign = np.argmin(d2, axis=1)
+            new_centroids = centroids.copy()
+            for c in range(k_eff):
+                members = sub[assign == c]
+                if len(members) &gt; 0:
+                    new_centroids[c] = members.mean(axis=0)
+            centroids = new_centroids
+        codebooks.append(centroids)
+    return codebooks, sub_dim
+
+def adc_search(codebooks, full_codes, query, m, k_return):
+    &quot;&quot;&quot;Asymmetric Distance Computation: per-subspace lookup table, summed.&quot;&quot;&quot;
+    n = full_codes.shape[0]
+    sub_dim = len(query) // m
+    total = np.zeros(n)
+    for s in range(m):
+        qs = query[s * sub_dim:(s + 1) * sub_dim]
+        d2 = ((codebooks[s] - qs) ** 2).sum(axis=1)
+        total += d2[full_codes[:, s]]
+    return np.argsort(total)[:k_return].tolist()
+
+rng = np.random.default_rng(30)
+n, d = 8000, 64
+points = rng.normal(size=(n, d)).astype(np.float32)
+train_points = points[:4000]  # train on a subsample, per FAISS practice
+
+n_queries = 30
+queries = rng.normal(size=(n_queries, d)).astype(np.float32)
+dmat = np.linalg.norm(points[None, :, :] - queries[:, None, :], axis=2)
+true_top10 = np.argsort(dmat, axis=1)[:, :10]
+
+bits = 8
+for m in (4, 8, 16):
+    codebooks, _ = train_pq(train_points, m=m, bits=bits, seed=1)
+    sub_dim = d // m
+    full_codes = np.zeros((n, m), dtype=np.int32)
+    for s in range(m):
+        sub = points[:, s * sub_dim:(s + 1) * sub_dim]
+        d2 = ((sub[:, None, :] - codebooks[s][None, :, :]) ** 2).sum(axis=2)
+        full_codes[:, s] = np.argmin(d2, axis=1)
+
+    adc_recalls = []
+    for qi in range(n_queries):
+        top10 = adc_search(codebooks, full_codes, queries[qi], m, k_return=10)
+        adc_recalls.append(len(set(top10) &amp; set(true_top10[qi].tolist())) / 10)
+    code_bytes = m * bits / 8
+    print(f&quot;m={m:&gt;3}  code={code_bytes:.0f}B  compression={(d*4)/code_bytes:.0f}x  &quot;
+          f&quot;ADC recall@10={np.mean(adc_recalls):.3f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Re-run the same sweep training on the <em>full</em> 8,000-point corpus instead of the 4,000-point
+subsample, and compare ADC recall@10 at each <code>m</code>. State whether doubling the training sample
+size materially changed recall at this corpus size, or whether the subsample was already
+enough.</p>
+<p><strong>Starting point:</strong> The <code>train_pq(train_points, ...)</code> call from this concept's Example, with
+<code>train_points</code> changed from <code>points[:4000]</code> to the full <code>points</code> array.</p>
+<p>Expected output: on the 4,000-point training sample measured here, ADC recall@10 was 0.127
+at <code>m=4</code>, 0.223 at <code>m=8</code>, and 0.547 at <code>m=16</code> — more subspaces means finer per-subspace
+codebooks and materially better recall, at the cost of a bigger code (less compression, per
+Concept 1). Training on the full 8,000-point corpus instead measured 0.113 at <code>m=4</code>, 0.253
+at <code>m=8</code>, and an unchanged 0.547 at <code>m=16</code> — a small, mixed shift at low <code>m</code> (worse at <code>m=4</code>,
+better at <code>m=8</code>) and no change at all at <code>m=16</code>, confirming that at this corpus size 4,000
+training points already gives each of a 256-centroid subspace's clusters about 15-16 points
+on average, comfortably past the point of a k-means centroid collapsing to zero members. The
+bigger lever on raw ADC recall is <code>m</code>, not training-sample size — the real fix for a recall
+number this low is Concept 3's refine/rerank pass, not more training data.</p>
+<hr />
+<h3>Concept 3 — Buying Recall Back With Refine/Rerank</h3>
+<p>Raw ADC recall from Concept 2 is often too low to ship alone. The standard fix is refine
+(also called rerank): retrieve a larger candidate set with the cheap PQ/ADC scan (say
+top-100 instead of top-10), then compute <em>exact</em> distances against the full, uncompressed
+vectors for just those 100 candidates, and return the true top-10 among them.</p>
+<p>The catch, worth stating rather than glossing over: reranking requires the full,
+uncompressed vectors to still exist somewhere accessible — on disk, in a separate store, or
+paged in on demand. That storage requirement is exactly what PQ's compression was trying to
+avoid, so a refine step is a partial, not a free, undoing of the memory saving. It usually
+still nets out ahead, because the <em>resident, hot</em> index is the small PQ codes, and only the
+cold full vectors need to exist somewhere for the (small) refine step.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing train_pq/adc_search defined in Day 4 Concept 2.
+import numpy as np
+
+rng = np.random.default_rng(30)
+n, d = 8000, 64
+points = rng.normal(size=(n, d)).astype(np.float32)
+train_points = points[:4000]
+queries = rng.normal(size=(30, d)).astype(np.float32)
+dmat = np.linalg.norm(points[None, :, :] - queries[:, None, :], axis=2)
+true_top10 = np.argsort(dmat, axis=1)[:, :10]
+
+m, bits = 8, 8
+codebooks, _ = train_pq(train_points, m=m, bits=bits, seed=1)
+sub_dim = d // m
+full_codes = np.zeros((n, m), dtype=np.int32)
+for s in range(m):
+    sub = points[:, s * sub_dim:(s + 1) * sub_dim]
+    d2 = ((sub[:, None, :] - codebooks[s][None, :, :]) ** 2).sum(axis=2)
+    full_codes[:, s] = np.argmin(d2, axis=1)
+
+rerank_recalls = []
+for qi in range(30):
+    cand = np.array(adc_search(codebooks, full_codes, queries[qi], m, k_return=100))
+    true_d = np.linalg.norm(points[cand] - queries[qi], axis=1)
+    reranked = cand[np.argsort(true_d)][:10]
+    rerank_recalls.append(len(set(reranked.tolist()) &amp; set(true_top10[qi].tolist())) / 10)
+print(f&quot;m={m}  rerank@100 recall@10 = {np.mean(rerank_recalls):.3f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Repeat the refine measurement for <code>m = 4</code> and <code>m = 16</code> (same corpus, queries, and ground
+truth), and build a table of ADC-only recall versus rerank@100 recall at all three <code>m</code>
+values. State which <code>m</code> gives the best recall <em>per byte of code stored</em> after reranking, not
+just the best raw recall.</p>
+<p><strong>Starting point:</strong> The refine block from this concept's Example, with <code>m</code> swept over
+<code>(4, 8, 16)</code> and the ADC-only recall numbers from Concept 2 available for the same <code>m</code>
+values.</p>
+<p>Expected output: on this corpus, refine recovered recall substantially at every <code>m</code> measured
+— <code>m=4</code>: ADC 0.127 rising to 0.380 after rerank@100; <code>m=8</code>: 0.223 rising to 0.683; <code>m=16</code>:
+0.543 rising to 0.993. <code>m=16</code> gives both the best raw and best reranked recall here, but at
+double the code bytes of <code>m=8</code> — whether that is &quot;best per byte&quot; depends on whether the
+extra 8 bytes/vector fits the RAM budget, which is exactly the kind of tradeoff Day 5's
+benchmark record is built to make comparable across configurations rather than argued about
+from a single number.</p>
+<p><strong>REAL MODE — not executed, requires FAISS:</strong> in FAISS, this whole day's construction is one
+factory string: <code>faiss.index_factory(1024, &quot;IVF1024,PQ64&quot;)</code> builds an IVF coarse quantizer
+with 1024 lists over a 64-subspace PQ code, and <code>faiss.IndexRefineFlat(base_index)</code> wraps it
+with the exact-rerank behaviour measured above. Expected output (shape only): a trained,
+searchable index object whose <code>.search(queries, k)</code> call returns <code>(distances, ids)</code> arrays,
+with <code>IndexRefineFlat</code>'s <code>k_factor</code> parameter controlling how large the raw candidate set is
+before rerank — functionally the same knob as this day's <code>k_return=100</code>.</p>
+<hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> The uncompressed vectors a refine step needs still have to live somewhere
+on-prem storage the compliance team already knows about — pointing refine at &quot;wherever the
+embedding model happened to cache its output&quot; is how a shadow copy of sensitive claim
+embeddings ends up on a laptop or a scratch disk nobody inventoried.</p>
+<p><strong>Compliance angle:</strong> PQ's compression is lossy by construction — a decoded/reconstructed
+vector from a PQ code is an approximation, not the original. Any downstream process that
+treats a PQ-reconstructed vector as if it were the audited original embedding (for example,
+re-deriving a similarity explanation from it) is working from a different, undocumented
+number than what produced the original decision.</p>
+<p><strong>What breaks in production:</strong> A refine step quietly disabled (or its candidate set shrunk)
+to save latency during a load spike, with no corresponding recall re-measurement. The system
+keeps answering; it just answers less accurately, and the gap between &quot;still up&quot; and &quot;still
+correct&quot; is precisely what a launch-day recall number cannot tell you six months later.</p>
+<hr />
+<h2 id="day-5">Day 5 — Benchmarking the Recall-Latency Frontier</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="04-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=qWfzIYCvBqo" target="_blank" rel="noopener"><b>Never Forget Again! // Precision vs Recall with a Clear Example of Precision and Recall</b><small>Kimberly Fessel · 5:24</small></a></li><li><a href="https://www.youtube.com/watch?v=2osIZ-dSPGE" target="_blank" rel="noopener"><b>Precision, Recall, F1 score, True Positive|Deep Learning Tutorial 19 (Tensorflow2.0, Keras &amp; Python)</b><small>codebasics · 11:46</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=ANN%20benchmarks%20recall%20vs%20queries%20per%20second%20pareto%20curve" target="_blank" rel="noopener">Search YouTube: ANN benchmarks recall vs queries per second pareto curve</a></p></div>
+<hr />
+<h3>Concept 1 — Ground Truth First, With Warm-Up Discipline</h3>
+<p>Every recall number in this file has depended on one thing: an exact brute-force ground
+truth computed once, over a frozen query workload, and reused as the reference every
+configuration is scored against. Comparing two configurations against two different query
+sets, or against ground truth recomputed differently each time, measures noise, not the
+configurations.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+import numpy as np
+
+rng = np.random.default_rng(40)
+n, d = 5000, 32
+points = rng.normal(size=(n, d)).astype(np.float32)
+queries = rng.normal(size=(40, d)).astype(np.float32)
+
+def brute_force_topk(points, query, k=10):
+    return np.argsort(np.linalg.norm(points - query, axis=1))[:k]
+
+for q in queries[:5]:        # warm-up, discarded
+    brute_force_topk(points, q)
+
+t0 = time.perf_counter()
+ground_truth = [brute_force_topk(points, q).tolist() for q in queries[5:]]
+elapsed = time.perf_counter() - t0
+print(f&quot;brute-force ground truth: {len(ground_truth)} queries in {elapsed*1000:.1f} ms &quot;
+      f&quot;({elapsed/len(ground_truth)*1000:.3f} ms/query)&quot;)
+print(&quot;first query top-10 ids:&quot;, ground_truth[0])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Remove the warm-up loop entirely and re-time the same 35 ground-truth queries. Compare the
+per-query timing with and without warm-up, and state whether brute-force ground truth
+computation is sensitive to the same first-call cost that Week 01 Day 1 measured for
+vectorised cosine similarity.</p>
+<p><strong>Starting point:</strong> The <code>brute_force_topk</code> timing block from this concept's Example, run
+once with the 5-query warm-up loop intact and once with it deleted.</p>
+<p>Expected output: the warmed run measured here processed all 35 queries in single-digit
+milliseconds total, well under 1 ms per query (wall-clock timing is hardware-dependent —
+trust the shape of the comparison, not the specific millisecond figure, when re-running
+this on different hardware). Removing warm-up should show a similar or slightly elevated
+first-query
+cost on this workload — brute-force top-k is a much simpler, more uniform operation per call
+than the BLAS dynamic-dispatch case Week 01 measured, so the effect here is expected to be
+far smaller, not absent.</p>
+<hr />
+<h3>Concept 2 — The Recall@10 vs QPS Pareto Table, Across Both Families</h3>
+<p>A single benchmark table with recall@10 and queries-per-second side by side, across HNSW
+and IVF configurations sharing one ground truth, is what lets you spot <strong>dominated</strong>
+configurations — ones where another row exists with equal or better recall <em>and</em> higher
+QPS. A dominated configuration is never the right choice regardless of taste.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing build_graph/search_layer (Day 1 Concept 3) and build_ivf/ivf_search
+# (Day 3 Concept 3) defined earlier this week.
+import time
+import numpy as np
+
+rng = np.random.default_rng(41)
+n, d = 5000, 32
+points = rng.normal(size=(n, d)).astype(np.float32)
+queries = rng.normal(size=(40, d)).astype(np.float32)
+
+def brute_force_topk(points, query, k=10):
+    return np.argsort(np.linalg.norm(points - query, axis=1))[:k]
+ground_truth = [set(brute_force_topk(points, q).tolist()) for q in queries]
+
+def recall_and_qps(search_fn, warmup=5):
+    for q in queries[:warmup]:
+        search_fn(q)
+    t0 = time.perf_counter()
+    recalls = []
+    for i, q in enumerate(queries[warmup:], start=warmup):
+        got = set(search_fn(q))
+        recalls.append(len(got &amp; ground_truth[i]) / 10)
+    elapsed = time.perf_counter() - t0
+    n_measured = len(queries) - warmup
+    return np.mean(recalls), n_measured / elapsed
+
+records = []
+graph, entry = build_graph(points, M=16, ef_construction=100)
+for ef in (16, 32, 64, 128):
+    fn = lambda q, ef=ef: [i for _, i in search_layer(points, graph, entry, q, ef=ef)[:10]]
+    recall, qps = recall_and_qps(fn)
+    records.append((&quot;HNSW&quot;, f&quot;ef_search={ef}&quot;, recall, qps))
+
+centroids, lists = build_ivf(points, nlist=64, seed=2)
+for nprobe in (1, 4, 8, 16):
+    fn = lambda q, nprobe=nprobe: ivf_search(points, centroids, lists, q, nprobe, 10)
+    recall, qps = recall_and_qps(fn)
+    records.append((&quot;IVF&quot;, f&quot;nprobe={nprobe}&quot;, recall, qps))
+
+for family, params, recall, qps in records:
+    print(f&quot;{family:6} {params:16} recall@10={recall:.3f}  qps={qps:.1f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+From the printed table, identify any HNSW row that is dominated by an IVF row (equal or
+higher recall at equal or higher QPS), and any IVF row dominated by an HNSW row. State
+whether the two families' points on this particular table sit on one shared Pareto frontier
+or occupy genuinely separate regions of the recall/QPS space.</p>
+<p><strong>Starting point:</strong> The printed <code>(family, params, recall, qps)</code> table from this concept's
+Example.</p>
+<p>Expected output: HNSW measured here gave recall@10 / QPS of 0.734/658.7 (<code>ef_search=16</code>),
+0.914/392.0 (32), 0.986/200.8 (64), 0.994/93.4 (128); IVF gave 0.123/17893.1
+(<code>nprobe=1</code>), 0.383/12376.9 (4), 0.571/8053.1 (8), 0.769/4510.2 (16). No row here is
+dominated in the strict sense — every row with higher recall also has lower QPS within its
+own family, and the two families occupy different bands (IVF's numpy-vectorised candidate
+scan is far faster per query at low recall; HNSW reaches materially higher recall than any
+IVF row shown reached at <code>nprobe&lt;=16</code>). Read the IVF QPS figures with real caution: this
+toy's IVF search is a vectorised numpy candidate scan, while the HNSW search is a pure-Python
+object-graph walk — the QPS gap here is partly an implementation-language artifact of this
+lesson's code, not a general HNSW-vs-IVF performance claim; production libraries implement
+both in optimized native code. (Exact QPS figures are hardware-dependent — recall@10 is the
+number worth comparing run to run; QPS is only meaningful relative to other rows measured on
+the same machine in the same run.)</p>
+<hr />
+<h3>Concept 3 — Build Time, Resident Memory, and a Record That Refuses to Omit a Parameter</h3>
+<p>Recall and QPS without build time and memory beside them is an incomplete comparison — a
+configuration that wins on both but takes eleven hours to build, or that only fits in RAM on
+paper, is not actually the winner. And a benchmark record with an unstated parameter is not
+reproducible: a missing default is a silent assumption, not a documented one.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+import datetime
+
+REQUIRED_KEYS = (&quot;index&quot;, &quot;m_or_nlist&quot;, &quot;ef_construction_or_train_seed&quot;, &quot;ef_search_or_nprobe&quot;)
+
+def benchmark_record(config, recall, qps, build_s, rss_mb):
+    missing = [k for k in REQUIRED_KEYS if k not in config]
+    if missing:
+        raise ValueError(f&quot;benchmark_record refuses an incomplete config, missing: {missing}&quot;)
+    return {
+        &quot;timestamp&quot;: datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        &quot;config&quot;: config,
+        &quot;recall_at_10&quot;: recall,
+        &quot;qps&quot;: qps,
+        &quot;build_seconds&quot;: build_s,
+        &quot;resident_mb&quot;: rss_mb,
+    }
+
+good_config = {&quot;index&quot;: &quot;hnsw&quot;, &quot;m_or_nlist&quot;: 16, &quot;ef_construction_or_train_seed&quot;: 100,
+               &quot;ef_search_or_nprobe&quot;: 64}
+rec = benchmark_record(good_config, recall=0.986, qps=200.8, build_s=32.72, rss_mb=78)
+print(json.dumps(rec, indent=2))
+
+bad_config = {&quot;index&quot;: &quot;hnsw&quot;, &quot;m_or_nlist&quot;: 16}  # ef_search missing
+try:
+    benchmark_record(bad_config, recall=0.9, qps=100, build_s=1.0, rss_mb=10)
+except ValueError as e:
+    print(&quot;raised as expected:&quot;, e)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>REQUIRED_KEYS</code> to also require a <code>&quot;corpus_n&quot;</code> field, then attempt to record the
+<code>good_config</code> benchmark from this concept's Example without adding that field. Confirm the
+function refuses it, then fix the config and confirm it succeeds.</p>
+<p><strong>Starting point:</strong> The <code>benchmark_record</code> function and <code>good_config</code> dict from this
+concept's Example, plus <code>REQUIRED_KEYS</code> with <code>&quot;corpus_n&quot;</code> appended.</p>
+<p>Expected output: a raised <code>ValueError</code> naming <code>['corpus_n']</code> as missing against the
+unmodified <code>good_config</code>, then a successful JSON record once <code>good_config[&quot;corpus_n&quot;] = 5000</code> is added. <code>recall=0.986</code>, <code>qps=200.8</code> and <code>build_s=32.72</code> are this file's own Day 5
+Concept 2 measurement for <code>hnsw ef_search=64</code>, carried over rather than re-measured, per this
+concept's own rule that a benchmark record must state what was actually run. <code>rss_mb=78</code> is
+the peak resident set size <code>resource.getrusage(resource.RUSAGE_SELF).ru_maxrss</code> reported for
+that same Day 5 Concept 2 script (all HNSW and IVF configurations together, not per-config)
+— a figure this small only because the corpus here is 5,000 vectors at 32 dimensions; Day 1
+Concept 2's byte formula is what should be trusted for realistic million-vector RAM
+planning, not this toy's process-level RSS.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> An on-prem benchmark run competes for the same hardware as everything else
+scheduled that night. Two runs of the identical config, one at 21:00 and one at 02:00, can
+show meaningfully different QPS for reasons that have nothing to do with the index — record
+the wall-clock window alongside the numbers, the same discipline Week 01 Day 5 established.</p>
+<p><strong>Compliance angle:</strong> A declared recall@k figure, backed by a versioned benchmark harness and
+a frozen query set, is the kind of evidence an EU AI Act Article 15 accuracy claim or an
+internal model-risk review actually wants — a number nobody can reproduce because the
+harness has since changed is not evidence, it is an anecdote with more decimal places.</p>
+<p><strong>What breaks in production:</strong> The benchmark that qualified a configuration at launch is
+never rerun as the corpus grows or its distribution shifts. The Pareto table in the launch
+deck is treated as a permanent fact about the index rather than a snapshot of one corpus at
+one point in time — exactly the same failure mode Week 01 closed on, now with two index
+families' worth of parameters that can each silently drift out of the configuration that was
+actually measured.</p>
+<hr />
+<h2>Architecture Decision — Week 04</h2>
+<p><strong>Choosing between:</strong> HNSW vs. IVF-PQ, for a fixed on-prem RAM budget that the corpus may or
+may not fit inside.</p>
+<p><strong>Rule of thumb:</strong> choose HNSW when query latency at high recall dominates the decision and
+the full, uncompressed corpus fits comfortably in the RAM budget the hardware procurement
+cycle actually granted — Day 1's formula (<code>d*4 + M*2*4</code> bytes/vector) is the number to check
+against that budget before committing, not after. Choose IVF-PQ when the corpus does not fit
+resident in RAM at full precision, or is projected not to within the current hardware's
+lifetime, and a refine/rerank pass against a colder store of full vectors can buy back the
+recall PQ's compression gives up — accepting that the refine step re-introduces a real, if
+partial, storage requirement for those full vectors somewhere. Both choices carry a rebuild
+cadence, not a reconfiguration cadence: HNSW's <code>M</code> and IVF's <code>nlist</code> both require a full
+rebuild (and, for IVF, a fresh k-means training pass whose training-sample floor Day 3
+measured) to change, so plan corpus-growth-triggered rebuilds as a scheduled operational
+event, not an emergency response. And whichever family is chosen, treat its rebuild as a
+training-drift risk in its own right — an IVF quantizer trained on last year's claim-type mix
+degrades exactly the way any other trained model degrades against a shifted distribution,
+which is a reason to monitor recall@k continuously (Week 01's closing point) rather than
+treat the choice between these two families as a one-time decision.</p>
+<div class="pager"><a class="btn ghost" href="week-03.html">&larr; Week 03</a><a class="btn ghost" href="week-05.html">Week 05 &rarr;</a></div>
+</main></body></html>

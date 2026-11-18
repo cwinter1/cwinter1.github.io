@@ -1,0 +1,1652 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 26 — Automated Evaluation with Ragas/TruLens</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/llm-evaluation" target="_blank" rel="noopener">What is LLM Evaluation?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/llm-as-a-judge" target="_blank" rel="noopener">What is LLM as a Judge?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/ai-agent-evaluation" target="_blank" rel="noopener">How to Evaluate AI Agents?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="26" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 26 — Automated Evaluation with Ragas/TruLens</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>5 — Compound AI Systems &amp; Evaluation / RAG (24-27)</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Turning &quot;does the RAG pipeline look right when I read the output&quot; into a repeatable, versioned, regression-checked score.</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 24's <code>retrieve()</code>/<code>CORPUS</code> and Week 25's <code>first_stage</code>/<code>second_stage</code>/<code>doc_lookup</code> are the retrieval/reranking system this week evaluates — Day 1's golden set and Day 2-3's metrics are built against real calls into that same code, not a disconnected toy pipeline.</td>
+</tr>
+<tr>
+<td>Copies in</td>
+<td><code>Curriculum/Week_11_Advanced_AI/W11_D5_Final_AI_Project.ipynb</code> CONCEPT 7 (<code>JudgeScore</code>/<code>judge_llm</code>/<code>llm_as_judge</code>) and CONCEPT 8 (<code>content_words</code>/<code>faithfulness_score</code>/<code>relevancy_score</code>) — genuinely adapted, not referenced, into Day 4 and Day 2 respectively. See each day's opening note for exactly what was kept vs. extended.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8-10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. Package availability checked directly in this sandbox, in the order the day table needs them: <code>ragas</code> (0.4.3, the current PyPI release) installs cleanly, but <code>import ragas</code> itself raises <code>ModuleNotFoundError: No module named 'langchain_community.chat_models.vertexai'</code> under the <code>langchain</code> 1.4.1 / <code>langchain-community</code> 0.4.2 pair this track already depends on for Week 24 (<code>langchain-community</code> sunset that module; <code>ragas</code> 0.4.3's own <code>ragas/llms/base.py</code> still imports it unconditionally at module load, before any judge call is ever made). Confirmed reproducible in a clean venv too, and confirmed NOT fixable by pinning <code>langchain-community</code> down to a version that still ships that module (<code>0.3.27</code>) without breaking <code>langchain-openai</code>'s own newer <code>langchain-core</code> requirement the same way — a genuine, three-way dependency conflict, not a transient install hiccup. Per known-issues.md item 3, <code>ragas</code>'s actual Python API (<code>EvaluationDataset</code>, <code>SingleTurnSample</code>, the <code>evaluate()</code> call shape) is shown as REAL MODE reference syntax, checked against the real library in an isolated venv where the conflict doesn't apply (so the syntax is confirmed correct, just not importable in THIS shared environment) — Day 2's genuinely executed content is a hand-rolled implementation of the same four metrics' underlying logic. <code>trulens_eval</code>/<code>trulens-core</code>/<code>trulens-apps-langchain</code> (2.14.0) import cleanly with no such conflict and coexist fine with <code>langchain</code> 1.4.1/<code>langgraph</code> — Day 3 is genuinely executed, including a real <code>TruChain</code>-instrumented <code>RunnableSequence</code> and a real local SQLite eval-run database, with two real gotchas (an internal <code>TP.submit</code> bug in this version's default OTel-tracing feedback path, and noisy unconditional <code>print()</code> instrumentation logging) found, worked around, and disclosed in Day 3's own opening note rather than hidden.</td>
+</tr>
+</tbody>
+</table>
+<p>No prior week's Architecture Decision is reused here; this week's is new.</p>
+<p>Weeks 24-25 built retrieval and reranking and proved, by measurement, when the extra stage
+earned its cost. Both weeks' proof rested on one labeled set the builder wrote once and
+trusted. This week questions that trust: a golden set is itself a claim that needs its own
+quality bar (Day 1), a metric is only as good as what it can actually distinguish (Day 2-3),
+a judge — human or LLM — has its own failure modes (Day 4), and none of it is worth anything
+unless it runs the same way, on the same schedule, as every other regression check in the
+codebase (Day 5).</p>
+<hr />
+<h2 id="day-1">Day 1 — RAG Failure Taxonomy and Golden Sets</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="26-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=NNq2Y0YbyyM" target="_blank" rel="noopener"><b>RAG - HOW to MEASURE : Recall@k, MRR, NDCG &amp; AI Governance</b><small>Aperion · 9:28</small></a></li><li><a href="https://www.youtube.com/watch?v=u12MxA-LPSY" target="_blank" rel="noopener"><b>What are Golden Datasets? (And Why You Need One for AI Testing)</b><small>TestinGil  - Gil Zilberfeld · 4:16</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=RAG%20evaluation%20golden%20dataset%20ground%20truth%20annotation" target="_blank" rel="noopener">Search YouTube: RAG evaluation golden dataset ground truth annotation</a></p></div>
+<hr />
+<h3>Concept 1 — Retrieval Failure vs. Generation Failure</h3>
+<p>A RAG pipeline has exactly two places to go wrong, and they call for completely different
+fixes: the retriever can fail to surface the document that actually answers the question
+(no metric downstream of retrieval can recover from this — the generator never saw the right
+text), or retrieval can succeed while the generator still produces a wrong or unsupported
+answer from a context that DID contain the right material. Picking a metric before knowing
+which failure mode you are chasing is backwards — <code>context_recall</code>/<code>context_precision</code>
+(Day 2) diagnose the first, <code>faithfulness</code>/<code>answer_relevancy</code> (Day 2) diagnose the second, and
+conflating them (blaming the generator for a retrieval miss, or vice versa) sends an
+engineering fix to the wrong stage of the pipeline. This reuses Week 24's <code>retrieve()</code> and
+<code>CORPUS</code> unchanged as the retrieval stage under test.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import math
+
+def tokenize(text):
+    return text.lower().replace(&quot;,&quot;, &quot; &quot;).replace(&quot;.&quot;, &quot; &quot;).split()
+
+VOCAB = {
+    &quot;free&quot;, &quot;look&quot;, &quot;period&quot;, &quot;cancel&quot;, &quot;cancellation&quot;, &quot;refund&quot;, &quot;premium&quot;, &quot;return&quot;,
+    &quot;days&quot;, &quot;reinstate&quot;, &quot;reinstatement&quot;, &quot;lapse&quot;, &quot;lapsed&quot;, &quot;grace&quot;, &quot;deductible&quot;,
+    &quot;waive&quot;, &quot;waiver&quot;, &quot;beneficiary&quot;, &quot;change&quot;, &quot;claim&quot;, &quot;rider&quot;, &quot;endorsement&quot;,
+    &quot;underwriting&quot;, &quot;medical&quot;, &quot;exam&quot;, &quot;glass&quot;, &quot;windshield&quot;, &quot;crack&quot;, &quot;chip&quot;, &quot;repair&quot;,
+    &quot;comprehensive&quot;, &quot;coverage&quot;, &quot;towing&quot;, &quot;rock&quot;, &quot;roadside&quot;, &quot;rental&quot;, &quot;reimbursement&quot;,
+    &quot;flood&quot;, &quot;water&quot;, &quot;basement&quot;, &quot;sump&quot;, &quot;pump&quot;, &quot;backup&quot;, &quot;sewer&quot;, &quot;drain&quot;, &quot;mold&quot;,
+    &quot;wind&quot;, &quot;hail&quot;, &quot;roof&quot;, &quot;shingle&quot;, &quot;storm&quot;, &quot;damage&quot;, &quot;fire&quot;, &quot;smoke&quot;, &quot;theft&quot;,
+    &quot;liability&quot;, &quot;bodily&quot;, &quot;injury&quot;, &quot;property&quot;, &quot;umbrella&quot;, &quot;excess&quot;, &quot;earthquake&quot;,
+}
+
+def bow(text):
+    toks = tokenize(text)
+    return {t: toks.count(t) for t in toks if t in VOCAB}
+
+def cosine(v1, v2):
+    common = set(v1) &amp; set(v2)
+    dot = sum(v1[t] * v2[t] for t in common)
+    n1 = math.sqrt(sum(x * x for x in v1.values())) or 1.0
+    n2 = math.sqrt(sum(x * x for x in v2.values())) or 1.0
+    return dot / (n1 * n2)
+
+# Reusing Week 24&#x27;s CORPUS shape and retrieve() unchanged -- extended with the same
+# property-line documents Week 25 added, since this week&#x27;s golden set spans both lines.
+CORPUS = [
+    (&quot;DOC-B&quot;, &quot;Roadside assistance: towing, flat tire changes, and lockout service are included at no extra premium under the standard auto rider.&quot;),
+    (&quot;DOC-C&quot;, &quot;Rental reimbursement: a daily rental car allowance applies while a covered vehicle is in the shop after an approved claim.&quot;),
+    (&quot;DOC-5&quot;, &quot;Grace period for premium payment: coverage stays active for 31 days past the due date before the policy lapses for nonpayment.&quot;),
+    (&quot;DOC-4&quot;, &quot;Deductible waiver rider: this rider waives the standard deductible for the first claim filed after the rider&#x27;s effective date.&quot;),
+    (&quot;DOC-A&quot;, &quot;Auto glass coverage: chip and crack repair to the windshield or any vehicle glass is covered in full with no deductible under the standard comprehensive endorsement, regardless of how the damage occurred.&quot;),
+    (&quot;DOC-1&quot;, &quot;Free look period: a new auto policy may be canceled within 10 days of issue for a full premium refund, no questions asked.&quot;),
+    (&quot;DOC-2&quot;, &quot;Reinstatement after lapse: a lapsed policy can be reinstated within 90 days of lapse if all past-due premium is paid, without new underwriting.&quot;),
+    (&quot;DOC-3&quot;, &quot;Beneficiary changes: the policyholder may change the named beneficiary at any time before a claim is filed, using the standard change-of-beneficiary form.&quot;),
+    (&quot;DOC-6&quot;, &quot;Sump pump backup coverage: damage from sump pump or sewer drain backup is covered up to the rider limit, separate from the standard flood exclusion.&quot;),
+    (&quot;DOC-7&quot;, &quot;Wind and hail roof damage: shingle damage from a wind or hail storm is covered under the standard property policy, subject to the wind hail deductible.&quot;),
+    (&quot;DOC-8&quot;, &quot;Mold remediation: mold caused by a covered water damage event is covered up to a sublimit; mold from long term neglect is excluded.&quot;),
+    (&quot;DOC-9&quot;, &quot;Umbrella excess liability: this policy provides additional liability coverage above the underlying auto and homeowners policy limits for bodily injury and property damage claims.&quot;),
+    (&quot;DOC-10&quot;, &quot;Fire and smoke damage: direct fire damage and resulting smoke damage to the dwelling and personal property are covered under the base property policy with no separate sublimit.&quot;),
+]
+doc_lookup = {doc_id: text for doc_id, text in CORPUS}
+
+def retrieve(query_text, k=3, corpus=CORPUS):
+    qv = bow(query_text)
+    scored = [(doc_id, cosine(qv, bow(text))) for doc_id, text in corpus]
+    scored.sort(key=lambda x: -x[1])
+    return scored[:k]
+
+def classify_rag_failure(question, relevant_doc_id, generated_answer, ground_truth_answer, k=3):
+    retrieved_ids = [d for d, _ in retrieve(question, k=k)]
+    retrieval_ok = relevant_doc_id in retrieved_ids
+    generation_ok = ground_truth_answer.lower() in generated_answer.lower()
+    if retrieval_ok and generation_ok:
+        return &quot;PASS&quot;
+    if not retrieval_ok:
+        return &quot;RETRIEVAL_FAILURE&quot;
+    return &quot;GENERATION_FAILURE&quot;
+
+cases = [
+    (&quot;what is the grace period for premium payment&quot;, &quot;DOC-5&quot;,
+     &quot;The grace period is 31 days.&quot;, &quot;31 days&quot;),
+    (&quot;what is the grace period for premium payment&quot;, &quot;DOC-5&quot;,
+     &quot;Coverage is active immediately.&quot;, &quot;31 days&quot;),
+    (&quot;can someone else be added to receive money from my policy&quot;, &quot;DOC-3&quot;,
+     &quot;Sure, that&#x27;s easy to arrange.&quot;, &quot;change-of-beneficiary form&quot;),
+]
+for question, relevant_id, answer, truth in cases:
+    verdict = classify_rag_failure(question, relevant_id, answer, truth)
+    print(f&quot;{verdict:&lt;18} q={question[:38]!r}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>PASS               q=&#x27;what is the grace period for premium p&#x27;
+GENERATION_FAILURE q=&#x27;what is the grace period for premium p&#x27;
+RETRIEVAL_FAILURE  q=&#x27;can someone else be added to receive m&#x27;
+</code></pre><p>The second case retrieves <code>DOC-5</code> correctly (it is literally in the query) but the answer
+never states the actual figure — a generation failure the retriever has no way to prevent.
+The third case's vague phrasing (&quot;receive money from my policy&quot;) shares almost no vocabulary
+with <code>DOC-3</code>'s actual text (&quot;beneficiary&quot;, &quot;change-of-beneficiary form&quot;), so the bag-of-words
+retriever never surfaces it at all — no generator, however good, can recover the right answer
+from a context that was never handed to it. Two different failures, two different fixes.</p>
+<p><strong>Exercise:</strong>
+Using <code>classify_rag_failure</code> and <code>retrieve</code> from this concept's Example, classify the case
+below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>sump_question = &quot;does my policy cover damage from a sump pump backing up&quot;
+sump_relevant = &quot;DOC-6&quot;
+sump_answer = &quot;Sump pump and sewer drain backup damage is covered up to the rider limit.&quot;
+sump_truth = &quot;covered up to the rider limit&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>PASS
+</code></pre><hr />
+<h3>Concept 2 — Golden Set Records: Question, Ground Truth, Reference Contexts</h3>
+<p>A golden-set record is not just a question-and-answer pair — it also needs to name WHICH
+document(s) the answer should come from, so a later regression check can tell &quot;the answer
+changed because retrieval changed&quot; apart from &quot;the answer changed because the generator
+changed&quot; even before running the full pipeline. Storing this as a <code>dataclass</code> (not a loose
+dict, per this track's Week 1 Royal Road habit carried through the whole <code>Curriculum/</code>
+track) makes a record's required fields explicit and lets a linter catch a record built
+without one.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import List
+
+# Reusing CORPUS, doc_lookup from Concept 1
+
+@dataclass
+class GoldenRecord:
+    question: str
+    ground_truth_answer: str
+    reference_context_ids: List[str]
+    category: str  # coverage_scope | procedural | exclusion | timing
+
+golden_set = [
+    GoldenRecord(
+        question=&quot;How many days do I have to reinstate a lapsed policy?&quot;,
+        ground_truth_answer=&quot;90 days from the date of lapse, with all past-due premium paid.&quot;,
+        reference_context_ids=[&quot;DOC-2&quot;],
+        category=&quot;timing&quot;,
+    ),
+    GoldenRecord(
+        question=&quot;Is mold damage covered under my property policy?&quot;,
+        ground_truth_answer=&quot;Only mold caused by a covered water damage event, up to a sublimit; mold from long-term neglect is excluded.&quot;,
+        reference_context_ids=[&quot;DOC-8&quot;],
+        category=&quot;exclusion&quot;,
+    ),
+]
+
+for rec in golden_set:
+    ref_text = doc_lookup[rec.reference_context_ids[0]]
+    print(f&quot;[{rec.category}] {rec.question}&quot;)
+    print(f&quot;  ground truth: {rec.ground_truth_answer}&quot;)
+    print(f&quot;  reference context: {ref_text[:60]}...&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>[timing] How many days do I have to reinstate a lapsed policy?
+  ground truth: 90 days from the date of lapse, with all past-due premium paid.
+  reference context: Reinstatement after lapse: a lapsed policy can be reinstated...
+[exclusion] Is mold damage covered under my property policy?
+  ground truth: Only mold caused by a covered water damage event, up to a sublimit; mold from long-term neglect is excluded.
+  reference context: Mold remediation: mold caused by a covered water damage even...
+</code></pre><p><strong>Exercise:</strong>
+Using <code>GoldenRecord</code> and <code>doc_lookup</code> from this concept's Example, build and print a record
+for the case below, in the same format the Example printed.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>deductible_record = GoldenRecord(
+    question=&quot;Is my deductible waived if this is my first claim?&quot;,
+    ground_truth_answer=&quot;Yes, the deductible waiver rider waives the standard deductible for the first claim filed after the rider effective date.&quot;,
+    reference_context_ids=[&quot;DOC-4&quot;],
+    category=&quot;coverage_scope&quot;,
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>[coverage_scope] Is my deductible waived if this is my first claim?
+  ground truth: Yes, the deductible waiver rider waives the standard deductible for the first claim filed after the rider effective date.
+  reference context: Deductible waiver rider: this rider waives the standard dedu...
+</code></pre><hr />
+<h3>Concept 3 — Annotation Guidelines for Policy-Language Ambiguity</h3>
+<p>Insurance policy text is written with deliberate hedges (&quot;may&quot;, &quot;at the company's
+discretion&quot;, &quot;subject to underwriting&quot;) that a single annotator can read past without
+noticing — and a golden-set record built from a hedge, presented as a flat fact, teaches the
+evaluation harness to penalize an honestly-hedged model answer as if it were wrong. A cheap
+guardrail: scan every candidate ground-truth answer for known ambiguity markers before it
+enters the golden set, and route any hit to a second annotator rather than accepting the
+first annotator's read silently.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>AMBIGUITY_MARKERS = {
+    &quot;may&quot;, &quot;at the company&#x27;s discretion&quot;, &quot;subject to underwriting&quot;, &quot;generally&quot;,
+    &quot;typically&quot;, &quot;in most cases&quot;, &quot;reasonable&quot;, &quot;as applicable&quot;, &quot;without limitation&quot;,
+}
+
+def flag_ambiguous_ground_truth(ground_truth_answer):
+    lowered = ground_truth_answer.lower()
+    hits = sorted(m for m in AMBIGUITY_MARKERS if m in lowered)
+    return hits
+
+review_queue = []
+candidates = [
+    &quot;The grace period is 31 days from the due date.&quot;,
+    &quot;Claims may be approved at the company&#x27;s discretion depending on the circumstances.&quot;,
+    &quot;Mold remediation is covered up to a sublimit, subject to underwriting review of the source of water damage.&quot;,
+]
+for text in candidates:
+    hits = flag_ambiguous_ground_truth(text)
+    status = &quot;NEEDS SECOND ANNOTATOR&quot; if hits else &quot;single-annotator OK&quot;
+    print(f&quot;{status:&lt;24} markers={hits}  text={text[:50]!r}&quot;)
+    if hits:
+        review_queue.append(text)
+
+print(f&quot;flagged for review: {len(review_queue)}/{len(candidates)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>single-annotator OK      markers=[]  text=&#x27;The grace period is 31 days from the due date.&#x27;
+NEEDS SECOND ANNOTATOR   markers=[&quot;at the company&#x27;s discretion&quot;, &#x27;may&#x27;]  text=&quot;Claims may be approved at the company&#x27;s discretion&quot;
+NEEDS SECOND ANNOTATOR   markers=[&#x27;subject to underwriting&#x27;]  text=&#x27;Mold remediation is covered up to a sublimit, subj&#x27;
+flagged for review: 2/3
+</code></pre><p>This does not resolve the ambiguity automatically — that still needs a human second read
+— it only makes sure the ambiguous cases are never accepted into the golden set on one
+person's first pass, the same single-point-of-failure risk Day 1's own golden-set-quality
+framing exists to catch before Day 2's metrics ever run against it.</p>
+<p><strong>Exercise:</strong>
+Using <code>flag_ambiguous_ground_truth</code> from this concept's Example, check the candidate below
+and print in the same format.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>candidate = &quot;Coverage generally applies, but is subject to underwriting review.&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>NEEDS SECOND ANNOTATOR   markers=[&#x27;generally&#x27;, &#x27;subject to underwriting&#x27;]  text=&#x27;Coverage generally applies, but is subject to unde&#x27;
+</code></pre><hr />
+<h3>Concept 4 — A 50-Question Synthetic Seed Set With No Real PII</h3>
+<p>A golden set needs enough coverage to catch a regression in any one part of the pipeline,
+but hand-writing 50 distinct questions is slow and error-prone to keep unique. Generating
+them from a small template x topic grid is faster, guarantees no duplicate question text,
+and — because every question is built from a fixed vocabulary describing generic policy
+topics rather than any real customer's data — never has a chance to contain PII in the
+first place. The PII check below runs anyway, not because template generation could
+plausibly leak anything, but because it is the same check a REAL ingested question set
+would need, and running it here proves the check itself works before it is trusted on real
+input.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+DOC_IDS = [&quot;DOC-1&quot;, &quot;DOC-2&quot;, &quot;DOC-3&quot;, &quot;DOC-4&quot;, &quot;DOC-5&quot;, &quot;DOC-6&quot;, &quot;DOC-7&quot;, &quot;DOC-8&quot;,
+           &quot;DOC-9&quot;, &quot;DOC-10&quot;, &quot;DOC-A&quot;, &quot;DOC-B&quot;, &quot;DOC-C&quot;]
+
+TEMPLATES = [
+    &quot;What does {topic} cover?&quot;,
+    &quot;How long is the {topic} period?&quot;,
+    &quot;Is {topic} covered under my policy?&quot;,
+    &quot;What is excluded from {topic}?&quot;,
+]
+TOPICS = [
+    &quot;the free look&quot;, &quot;reinstatement&quot;, &quot;beneficiary changes&quot;, &quot;deductible waivers&quot;,
+    &quot;auto glass repair&quot;, &quot;roadside assistance&quot;, &quot;rental reimbursement&quot;,
+    &quot;sump pump backup&quot;, &quot;wind and hail roof&quot;, &quot;mold remediation&quot;,
+    &quot;umbrella liability&quot;, &quot;fire and smoke damage&quot;, &quot;the grace period&quot;,
+]
+
+def build_seed_set(n):
+    records = []
+    i = 0
+    while len(records) &lt; n:
+        template = TEMPLATES[i % len(TEMPLATES)]
+        topic = TOPICS[i % len(TOPICS)]
+        doc_id = DOC_IDS[i % len(DOC_IDS)]
+        records.append({
+            &quot;id&quot;: f&quot;Q-{i + 1:03d}&quot;,
+            &quot;question&quot;: template.format(topic=topic),
+            &quot;source_doc&quot;: doc_id,
+        })
+        i += 1
+    return records
+
+PII_PATTERNS = [
+    re.compile(r&quot;\b\d{3}-\d{2}-\d{4}\b&quot;),        # SSN-shaped
+    re.compile(r&quot;\b\d{9,16}\b&quot;),                  # account/card-number-shaped
+    re.compile(r&quot;\b[\w.+-]+@[\w-]+\.[\w.-]+\b&quot;),  # email
+]
+
+def contains_pii(text):
+    return any(p.search(text) for p in PII_PATTERNS)
+
+seed_set = build_seed_set(50)
+print(f&quot;seed set size: {len(seed_set)}&quot;)
+print(f&quot;unique question texts: {len(set(r[&#x27;question&#x27;] for r in seed_set))}&quot;)
+pii_hits = [r for r in seed_set if contains_pii(r[&#x27;question&#x27;])]
+print(f&quot;records containing PII-shaped text: {len(pii_hits)}&quot;)
+print(&quot;sample:&quot;, seed_set[0], seed_set[-1])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>seed set size: 50
+unique question texts: 50
+records containing PII-shaped text: 0
+sample: {&#x27;id&#x27;: &#x27;Q-001&#x27;, &#x27;question&#x27;: &#x27;What does the free look cover?&#x27;, &#x27;source_doc&#x27;: &#x27;DOC-1&#x27;} {&#x27;id&#x27;: &#x27;Q-050&#x27;, &#x27;question&#x27;: &#x27;How long is the umbrella liability period?&#x27;, &#x27;source_doc&#x27;: &#x27;DOC-A&#x27;}
+</code></pre><p><strong>Exercise:</strong>
+Using <code>build_seed_set</code> and <code>contains_pii</code> from this concept's Example, build a 10-record
+seed set and print its size, unique-question count, and PII-hit count in the same format.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>small_n = 10
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>small set size: 10
+unique question texts: 10
+records containing PII-shaped text: 0
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> the retrieval/generation split in Concept 1 matters more, not less, once
+the retriever sits in front of a mainframe-sourced corpus (Weeks 13/18's undocumented
+COBOL-copybook estate) — a retrieval failure there is often a stale or missing extract, not
+a bad embedding, and the taxonomy tells an on-call engineer which team owns the fix before
+they start debugging the wrong layer.</p>
+<p><strong>Compliance angle:</strong> Concept 3's ambiguity flagging is not optional polish for a BFSI golden
+set — a ground-truth answer that silently drops a policy's real &quot;subject to underwriting&quot;
+hedge and gets scored as flatly true becomes an evaluation harness that rewards a model for
+promising coverage the policy never actually guarantees, which is a real regulatory exposure
+if that model output reaches a customer.</p>
+<p><strong>What breaks in production:</strong> a golden set built once at launch and never revisited drifts
+out of sync with the corpus the moment a product team ships new policy language — the same
+staleness risk Week 25 closed on, restated here as a data problem instead of a model problem:
+Day 5's harness only ever measures against what Day 1 built, so Day 1's own maintenance
+cadence is part of the system, not a one-time setup task.</p>
+<hr />
+<h2 id="day-2">Day 2 — Ragas Metrics End to End</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="26-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=kof_Z_Z_inM" target="_blank" rel="noopener"><b>RAGAS Retrieval Evaluation in Python: Measure Context Recall and Precision</b><small>Professor Py: Information Retrieval with Python · 7:24</small></a></li><li><a href="https://www.youtube.com/watch?v=7_LTU0LA374" target="_blank" rel="noopener"><b>RAG Evaluation: Precision, Recall, Faithfulness, RAGAS Explained Clearly</b><small>Logical Lenses · 12:19</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Ragas%20RAG%20evaluation%20faithfulness%20context%20precision%20tutorial" target="_blank" rel="noopener">Search YouTube: Ragas RAG evaluation faithfulness context precision tutorial</a></p></div>
+<hr />
+<p>The Metadata table above already covers the package finding this day has to work around:
+<code>ragas</code> 0.4.3 installs but does not import in this sandbox, because its <code>ragas/llms/base.py</code>
+still unconditionally imports a module <code>langchain-community</code> sunset, and that conflicts with
+the <code>langchain</code> 1.4.1 pin Week 24 already committed this track to. The four metrics below are
+genuinely executed, hand-rolled implementations of the same underlying logic <code>faithfulness</code>
+and <code>answer_relevancy</code> compute — directly adapting <code>content_words</code>/<code>faithfulness_score</code>/
+<code>relevancy_score</code> from <code>Curriculum/Week_11_Advanced_AI/W11_D5_Final_AI_Project.ipynb</code>
+CONCEPT 8 (renamed <code>answer_relevancy_score</code> here to match <code>ragas</code>'s real metric name), and
+extending the same word-overlap approach to <code>context_precision</code> and <code>context_recall</code>, which
+that file never built. Every one of these four is a stand-in for what <code>ragas</code> computes with
+an LLM judge under the hood — disclosed honestly, the same way <code>Week_11_D5</code> disclosed its
+own pair — not presented as the genuine library's output.</p>
+<h3>Concept 1 — What Faithfulness, Answer Relevancy, Context Precision, and Context Recall Each Measure</h3>
+<p><code>ragas</code>'s four RAG metrics split cleanly along Concept 1's retrieval/generation line from
+Day 1. <code>context_precision</code> and <code>context_recall</code> grade retrieval: precision asks what
+fraction of what was retrieved was actually relevant (noise in the retrieved set costs
+precision even if the right document is also there), recall asks whether everything the
+ground-truth answer needed was retrieved at all (a real answer can require content spread
+across more than one document). <code>faithfulness</code> and <code>answer_relevancy</code> grade generation once
+retrieval is fixed: faithfulness asks what fraction of the generated answer's own content is
+actually supported by the retrieved context (an unfaithful answer is a hallucination even if
+it happens to be correct), answer_relevancy asks what fraction of the question the answer
+actually addresses (a faithful answer can still dodge the question that was asked).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing retrieve, doc_lookup, CORPUS from Day 1 Concept 1
+
+STOPWORDS = {&quot;the&quot;, &quot;a&quot;, &quot;an&quot;, &quot;is&quot;, &quot;was&quot;, &quot;were&quot;, &quot;are&quot;, &quot;of&quot;, &quot;to&quot;, &quot;in&quot;,
+             &quot;on&quot;, &quot;for&quot;, &quot;and&quot;, &quot;or&quot;, &quot;by&quot;, &quot;with&quot;, &quot;this&quot;, &quot;that&quot;, &quot;what&quot;,
+             &quot;how&quot;, &quot;did&quot;, &quot;do&quot;, &quot;does&quot;, &quot;it&quot;, &quot;its&quot;, &quot;my&quot;, &quot;your&quot;}
+
+def content_words(text):
+    words = text.lower().replace(&quot;,&quot;, &quot;&quot;).replace(&quot;.&quot;, &quot;&quot;).replace(&quot;?&quot;, &quot;&quot;).split()
+    return {w for w in words if w not in STOPWORDS}
+
+def faithfulness_score(answer, context):
+    a_words = content_words(answer)
+    c_words = content_words(context)
+    if not a_words:
+        return 0.0
+    return len(a_words &amp; c_words) / len(a_words)
+
+def answer_relevancy_score(question, answer):
+    q_words = content_words(question)
+    a_words = content_words(answer)
+    if not q_words:
+        return 0.0
+    return len(q_words &amp; a_words) / len(q_words)
+
+def context_precision(retrieved_ids, relevant_ids):
+    if not retrieved_ids:
+        return 0.0
+    relevant_set = set(relevant_ids)
+    hits = sum(1 for cid in retrieved_ids if cid in relevant_set)
+    return hits / len(retrieved_ids)
+
+def context_recall(ground_truth_answer, retrieved_context_texts):
+    gt_words = content_words(ground_truth_answer)
+    if not gt_words:
+        return 0.0
+    covered = set()
+    for text in retrieved_context_texts:
+        covered |= content_words(text)
+    return len(gt_words &amp; covered) / len(gt_words)
+
+question = &quot;How many days do I have to reinstate a lapsed policy?&quot;
+relevant_id = &quot;DOC-2&quot;
+ground_truth = &quot;90 days from the date of lapse, with all past-due premium paid.&quot;
+answer = &quot;You have 90 days from the date of lapse to reinstate, as long as past-due premium is paid.&quot;
+
+retrieved = [d for d, _ in retrieve(question, k=3)]
+retrieved_texts = [doc_lookup[d] for d in retrieved]
+
+f = faithfulness_score(answer, &quot; &quot;.join(retrieved_texts))
+r = answer_relevancy_score(question, answer)
+cp = context_precision(retrieved, [relevant_id])
+cr = context_recall(ground_truth, retrieved_texts)
+
+print(f&quot;retrieved: {retrieved}&quot;)
+print(f&quot;faithfulness={f:.2f}  answer_relevancy={r:.2f}  context_precision={cp:.2f}  context_recall={cr:.2f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>retrieved: [&#x27;DOC-2&#x27;, &#x27;DOC-5&#x27;, &#x27;DOC-1&#x27;]
+faithfulness=0.54  answer_relevancy=0.43  context_precision=0.33  context_recall=0.89
+</code></pre><p><code>context_recall</code> is high (0.89) — between them, the top-3 retrieved documents contain almost
+every content word the ground truth needs. <code>context_precision</code> is low (0.33) — only one of
+those three documents (<code>DOC-2</code>) is actually the relevant one; <code>DOC-5</code> and <code>DOC-1</code> are noise
+that happened to share enough vocabulary to rank in the top 3. A pipeline can score well on
+recall and poorly on precision at the same time, and the two numbers together, not either
+alone, tell you whether the retriever needs a narrower <code>k</code> or a better ranker (Week 25).</p>
+<p><strong>Exercise:</strong>
+Using <code>faithfulness_score</code>, <code>answer_relevancy_score</code>, <code>context_precision</code>, <code>context_recall</code>,
+and <code>retrieve</code>/<code>doc_lookup</code> from this concept's Example, compute all four metrics for the
+case below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>mold_question = &quot;Is mold damage covered under my property policy?&quot;
+mold_relevant = &quot;DOC-8&quot;
+mold_truth = &quot;Only mold caused by a covered water damage event, up to a sublimit; mold from long-term neglect is excluded.&quot;
+mold_answer = &quot;Mold is covered only if it results from a covered water damage event, subject to a sublimit.&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>retrieved: [&#x27;DOC-8&#x27;, &#x27;DOC-10&#x27;, &#x27;DOC-9&#x27;]
+faithfulness=0.64  answer_relevancy=0.50  context_precision=0.33  context_recall=0.85
+</code></pre><hr />
+<h3>Concept 2 — Building an <code>EvaluationDataset</code> and Calling <code>evaluate()</code></h3>
+<p><code>ragas</code>'s real workflow wraps each (question, answer, retrieved context, reference) tuple in
+a <code>SingleTurnSample</code>, collects them into an <code>EvaluationDataset</code>, and hands the whole dataset
+plus a metric list to <code>evaluate()</code>, which runs every metric over every row and returns
+per-row scores plus dataset-level averages. The syntax below is real <code>ragas</code> 0.4.3 API,
+confirmed correct against the installed package in an isolated environment where this
+sandbox's <code>langchain</code>-version conflict does not apply — it is shown as reference syntax
+because the conflict means it cannot actually import and run here, not because the syntax
+itself is invented. <code>run_eval</code>/<code>aggregate</code> below then build and run the equivalent shape by
+hand: an <code>EvalCase</code> per row, a runner that produces the same four per-row scores Concept 1
+computed individually, and an aggregate step matching what <code>evaluate()</code>'s dataset-level
+average returns.</p>
+<p><strong>REAL MODE — not executed (see Metadata table for why):</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from ragas import EvaluationDataset, SingleTurnSample
+from ragas.metrics.collections import Faithfulness, AnswerRelevancy, ContextPrecision, ContextRecall
+from ragas import evaluate
+
+samples = [
+    SingleTurnSample(
+        user_input=&quot;How many days do I have to reinstate a lapsed policy?&quot;,
+        response=&quot;You have 90 days from the date of lapse, as long as past-due premium is paid.&quot;,
+        retrieved_contexts=[doc_lookup[&quot;DOC-2&quot;], doc_lookup[&quot;DOC-5&quot;], doc_lookup[&quot;DOC-1&quot;]],
+        reference=&quot;90 days from the date of lapse, with all past-due premium paid.&quot;,
+    ),
+]
+dataset = EvaluationDataset(samples=samples)
+result = evaluate(
+    dataset=dataset,
+    metrics=[Faithfulness(), AnswerRelevancy(), ContextPrecision(), ContextRecall()],
+)
+print(result)  # per-row scores and dataset-level averages, e.g. {&#x27;faithfulness&#x27;: 0.91, ...}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (shape only — this needs a live judge LLM this sandbox does not have):</p>
+<pre><code>an EvaluationResult with one row per SingleTurnSample and a dataset-level average per metric
+</code></pre><p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+@dataclass
+class EvalCase:
+    question: str
+    relevant_doc_id: str
+    ground_truth_answer: str
+    generated_answer: str
+
+def run_eval(cases, k=3):
+    rows = []
+    for case in cases:
+        retrieved = [d for d, _ in retrieve(case.question, k=k)]
+        retrieved_texts = [doc_lookup[d] for d in retrieved]
+        rows.append({
+            &quot;question&quot;: case.question,
+            &quot;faithfulness&quot;: round(faithfulness_score(case.generated_answer, &quot; &quot;.join(retrieved_texts)), 4),
+            &quot;answer_relevancy&quot;: round(answer_relevancy_score(case.question, case.generated_answer), 4),
+            &quot;context_precision&quot;: round(context_precision(retrieved, [case.relevant_doc_id]), 4),
+            &quot;context_recall&quot;: round(context_recall(case.ground_truth_answer, retrieved_texts), 4),
+        })
+    return rows
+
+def aggregate(rows, metric_names):
+    return {m: round(sum(r[m] for r in rows) / len(rows), 4) for m in metric_names}
+
+cases = [
+    EvalCase(
+        question=&quot;How many days do I have to reinstate a lapsed policy?&quot;,
+        relevant_doc_id=&quot;DOC-2&quot;,
+        ground_truth_answer=&quot;90 days from the date of lapse, with all past-due premium paid.&quot;,
+        generated_answer=&quot;You have 90 days from the date of lapse to reinstate, as long as past-due premium is paid.&quot;,
+    ),
+    EvalCase(
+        question=&quot;Is mold damage covered under my property policy?&quot;,
+        relevant_doc_id=&quot;DOC-8&quot;,
+        ground_truth_answer=&quot;Only mold caused by a covered water damage event, up to a sublimit; mold from long-term neglect is excluded.&quot;,
+        generated_answer=&quot;Mold is covered only if it results from a covered water damage event, subject to a sublimit.&quot;,
+    ),
+]
+
+rows = run_eval(cases)
+for row in rows:
+    print(f&quot;{row[&#x27;question&#x27;][:45]:&lt;47} faithfulness={row[&#x27;faithfulness&#x27;]}  answer_relevancy={row[&#x27;answer_relevancy&#x27;]}  context_precision={row[&#x27;context_precision&#x27;]}  context_recall={row[&#x27;context_recall&#x27;]}&quot;)
+
+metric_names = [&quot;faithfulness&quot;, &quot;answer_relevancy&quot;, &quot;context_precision&quot;, &quot;context_recall&quot;]
+print(&quot;dataset averages:&quot;, aggregate(rows, metric_names))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>How many days do I have to reinstate a lapsed   faithfulness=0.5385  answer_relevancy=0.4286  context_precision=0.3333  context_recall=0.8889
+Is mold damage covered under my property poli   faithfulness=0.6364  answer_relevancy=0.5  context_precision=0.3333  context_recall=0.8462
+dataset averages: {&#x27;faithfulness&#x27;: 0.5875, &#x27;answer_relevancy&#x27;: 0.4643, &#x27;context_precision&#x27;: 0.3333, &#x27;context_recall&#x27;: 0.8676}
+</code></pre><p><strong>Exercise:</strong>
+Using <code>EvalCase</code>, <code>run_eval</code>, and this concept's Example, run and print the case below in
+the same format as one row of the Example's loop.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>deductible_case = EvalCase(
+    question=&quot;Is my deductible waived if this is my first claim?&quot;,
+    relevant_doc_id=&quot;DOC-4&quot;,
+    ground_truth_answer=&quot;Yes, the deductible waiver rider waives the standard deductible for the first claim filed after the rider effective date.&quot;,
+    generated_answer=&quot;Yes, your deductible is waived for the first claim filed after the rider took effect.&quot;,
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Is my deductible waived if this is my first c   faithfulness=0.6  answer_relevancy=0.8  context_precision=0.3333  context_recall=0.9167
+</code></pre><hr />
+<h3>Concept 3 — Choosing and Pinning the Judge LLM</h3>
+<p>Every one of Concept 1-2's metrics needs a judge to decide &quot;does this content word count as
+support&quot; in the real <code>ragas</code> library — a real LLM call, not the word-overlap stand-in used
+here. Which model, which version, and at what decoding temperature all change the score a
+real judge returns for the identical input, so a judge configuration that is not written
+down and versioned makes a metric drift unexplainably between two runs that were both,
+supposedly, evaluating &quot;the same&quot; pipeline. Pinning it as a validated config — not a loose
+string passed at the call site — makes drift traceable: a score change either comes from the
+pipeline changing or from the judge config changing, and the config's own version field says
+which.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+
+APPROVED_JUDGE_MODELS = {&quot;claude-sonnet-5&quot;, &quot;gpt-4o-mini&quot;, &quot;claude-haiku-4&quot;}
+
+@dataclass
+class JudgeConfig:
+    model: str
+    version: str
+    temperature: float
+    pinned_at: str  # ISO date the config was frozen, for the audit trail
+
+class JudgeConfigError(ValueError):
+    pass
+
+def validate_judge_config(config):
+    if config.model not in APPROVED_JUDGE_MODELS:
+        raise JudgeConfigError(f&quot;model {config.model!r} is not on the approved judge list&quot;)
+    if config.temperature != 0:
+        raise JudgeConfigError(
+            f&quot;temperature={config.temperature} is non-deterministic; judge configs must pin temperature=0&quot;
+        )
+    if not config.version:
+        raise JudgeConfigError(&quot;model version must be pinned, not left as &#x27;latest&#x27;&quot;)
+    return True
+
+good_config = JudgeConfig(model=&quot;claude-sonnet-5&quot;, version=&quot;2026-02-01&quot;, temperature=0.0, pinned_at=&quot;2026-09-18&quot;)
+print(&quot;good config valid:&quot;, validate_judge_config(good_config))
+
+bad_configs = [
+    JudgeConfig(model=&quot;claude-sonnet-5&quot;, version=&quot;2026-02-01&quot;, temperature=0.7, pinned_at=&quot;2026-09-18&quot;),
+    JudgeConfig(model=&quot;some-unreviewed-model&quot;, version=&quot;1.0&quot;, temperature=0.0, pinned_at=&quot;2026-09-18&quot;),
+]
+for cfg in bad_configs:
+    try:
+        validate_judge_config(cfg)
+        print(&quot;unexpectedly valid:&quot;, cfg)
+    except JudgeConfigError as e:
+        print(f&quot;rejected: {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>good config valid: True
+rejected: temperature=0.7 is non-deterministic; judge configs must pin temperature=0
+rejected: model &#x27;some-unreviewed-model&#x27; is not on the approved judge list
+</code></pre><p><strong>Exercise:</strong>
+Using <code>JudgeConfig</code>, <code>validate_judge_config</code>, and <code>JudgeConfigError</code> from this concept's
+Example, validate the config below and print the result.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>missing_version_config = JudgeConfig(model=&quot;gpt-4o-mini&quot;, version=&quot;&quot;, temperature=0.0, pinned_at=&quot;2026-09-18&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>rejected: model version must be pinned, not left as &#x27;latest&#x27;
+</code></pre><hr />
+<h3>Concept 4 — Quantifying Metric Variance Across Repeated Identical Runs</h3>
+<p>A judge LLM called at a nonzero decoding temperature scores the exact same
+(question, answer, context) triple slightly differently on repeated calls, purely from
+sampling noise — a well-documented property of temperature-based decoding, not something
+this sandbox needs a live API to demonstrate the SHAPE of. <code>simulated_judge_score</code> below
+stands in for that real behavior deterministically: a temperature-scaled random offset,
+seeded so this block's own output is reproducible on every run. Comparing <code>temperature=0</code>
+against a nonzero temperature shows exactly why Concept 3 pins temperature=0 for a judge
+whose scores need to be trusted run to run.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import random
+import statistics
+
+def simulated_judge_score(base_score, temperature, rng):
+    noise = rng.uniform(-temperature, temperature)
+    return max(0.0, min(1.0, round(base_score + noise, 4)))
+
+def run_n_times(base_score, temperature, n, seed):
+    rng = random.Random(seed)
+    return [simulated_judge_score(base_score, temperature, rng) for _ in range(n)]
+
+base_score = 0.75
+for temperature in [0.0, 0.15]:
+    scores = run_n_times(base_score, temperature, n=8, seed=42)
+    spread = round(max(scores) - min(scores), 4)
+    stdev = round(statistics.pstdev(scores), 4)
+    print(f&quot;temperature={temperature}  scores={scores}&quot;)
+    print(f&quot;  spread={spread}  stdev={stdev}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>temperature=0.0  scores=[0.75, 0.75, 0.75, 0.75, 0.75, 0.75, 0.75, 0.75]
+  spread=0.0  stdev=0.0
+temperature=0.15  scores=[0.7918, 0.6075, 0.6825, 0.667, 0.8209, 0.803, 0.8677, 0.6261]
+  spread=0.2602  stdev=0.0924
+</code></pre><p>At <code>temperature=0.0</code> the eight &quot;repeated identical runs&quot; return the literal same score every
+time — a metric computed this way is exactly reproducible, which is what makes a later score
+change trustworthy as a real regression signal. At <code>temperature=0.15</code> the same eight calls
+spread across a 0.26 range with a standard deviation of about 0.09 — a single run's score at
+this temperature is not, by itself, distinguishable from ordinary sampling noise of roughly
+that size, which is the real, practical argument for Concept 3's temperature=0 rule rather
+than an abstract preference for determinism.</p>
+<p><strong>Exercise:</strong>
+Using <code>simulated_judge_score</code> and <code>run_n_times</code> from this concept's Example, run the case
+below and print in the same two-line format.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ex_base = 0.6
+ex_temp = 0.05
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>temperature=0.05  scores=[0.5824, 0.5651, 0.6151, 0.5572, 0.6036]
+  spread=0.0579  stdev=0.022
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> a real judge LLM call means a real per-call latency and a real per-call
+cost against Week 23's own budget/quota gates — running <code>context_precision</code>/
+<code>context_recall</code>/<code>faithfulness</code>/<code>answer_relevancy</code> over even a modest golden set multiplies
+that cost by 4x per row, which is a genuine reason production eval pipelines sample rather
+than score every request every time.</p>
+<p><strong>Compliance angle:</strong> Concept 3's judge-config pinning is the same discipline Week 17's
+model-card versioning required for the pipeline itself — an examiner asking &quot;how do you know
+this score means what you say it means&quot; needs a traceable, dated answer, not &quot;we called
+whatever model was configured that week.&quot;</p>
+<p><strong>What breaks in production:</strong> treating one evaluation run's score as ground truth without
+Concept 4's variance context is how a team chases a phantom regression (or misses a real one)
+— a score that moved by less than the judge's own measured noise floor is not evidence of
+anything, and a harness that doesn't report that floor invites exactly that mistake.</p>
+<hr />
+<h2 id="day-3">Day 3 — TruLens Feedback Functions</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="26-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=ul5huLywzZk" target="_blank" rel="noopener"><b>Evaluate and Optimize RAG with TruLens (full tutorial)</b><small>Johannes Jolkkonen | Funktio AI · 32:45</small></a></li><li><a href="https://www.youtube.com/watch?v=_M6P8e9Eufg" target="_blank" rel="noopener"><b>Evaluating Agentic Retrieval with Ragas &amp; TruLens</b><small>Auro AI · 12:59</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=TruLens%20RAG%20triad%20feedback%20functions%20groundedness%20evaluation" target="_blank" rel="noopener">Search YouTube: TruLens RAG triad feedback functions groundedness evaluation</a></p></div>
+<hr />
+<p><code>trulens_eval</code>/<code>trulens-core</code>/<code>trulens-apps-langchain</code> (2.14.0) import cleanly in this
+sandbox and coexist fine with the <code>langchain</code> 1.4.1 pin <code>ragas</code> conflicted with — the whole
+day below is genuinely executed. Two real gotchas were found and worked around while
+prototyping, both worth stating up front since they shape every Example in this day:</p>
+<ol>
+<li>This version's default feedback-evaluation path (OTel tracing, on by default) has an
+internal bug — attaching a <code>Feedback</code> to <code>TruChain</code> at construction time
+(<code>TruChain(..., feedbacks=[...])</code>) raises <code>AttributeError: 'TP' object has no attribute 'submit'</code> the instant a chain call tries to score it, confirmed directly, not assumed
+from documentation. The workaround below never passes <code>feedbacks=</code> at construction —
+every score in this day is computed afterward with <code>Feedback.run(record=..., app=...)</code>,
+which uses a different, working code path entirely.</li>
+<li><code>TruSession</code> is a genuine process-wide singleton: constructing a second one with a
+DIFFERENT <code>database_url</code> does not start a fresh database — it silently returns the SAME
+session object still pointed at the first database, so records from an earlier
+construction keep accumulating instead of resetting. Confirmed directly: running this
+day's own logging Concept twice in one process without a fix left database row counts
+growing (3, then 6) instead of resetting. The fix used everywhere below is a single fixed
+<code>db_path</code> plus an explicit <code>session.reset_database()</code> call right after construction,
+which genuinely does clear prior state regardless of how many times the process
+constructs a session pointed at it.</li>
+</ol>
+<p>Separately, <code>TruChain</code>'s own instrumentation setup calls a bare, unconditional <code>print()</code> for
+every class it wraps (<code>instrumenting &lt;class ...&gt; for base &lt;class ...&gt;</code>) — real library
+output, not a bug, but noisy enough that every <code>TruChain(...)</code> construction below wraps it in
+<code>contextlib.redirect_stdout</code> so it doesn't bury this day's actual, documented output.</p>
+<h3>Concept 1 — The RAG Triad: Groundedness, Context Relevance, Answer Relevance</h3>
+<p>TruLens frames RAG evaluation as a triangle with the question, the retrieved context, and
+the generated answer at its three corners, and a score for each of the three EDGES:
+groundedness checks the answer-to-context edge (is the answer actually supported by what was
+retrieved — the same axis <code>ragas</code>'s <code>faithfulness</code> measures, under TruLens's own name),
+context relevance checks the question-to-context edge (did retrieval fetch something that
+actually relates to the question — the same axis as <code>context_precision</code>), and answer
+relevance checks the question-to-answer edge (does the answer actually address the question
+— the same axis as <code>answer_relevancy</code>). Different library, same triangle.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing retrieve, doc_lookup from Day 1 Concept 1
+
+STOPWORDS = {&quot;the&quot;, &quot;a&quot;, &quot;an&quot;, &quot;is&quot;, &quot;was&quot;, &quot;were&quot;, &quot;are&quot;, &quot;of&quot;, &quot;to&quot;, &quot;in&quot;,
+             &quot;on&quot;, &quot;for&quot;, &quot;and&quot;, &quot;or&quot;, &quot;by&quot;, &quot;with&quot;, &quot;this&quot;, &quot;that&quot;, &quot;what&quot;,
+             &quot;how&quot;, &quot;did&quot;, &quot;do&quot;, &quot;does&quot;, &quot;it&quot;, &quot;its&quot;, &quot;my&quot;, &quot;your&quot;}
+
+def content_words(text):
+    words = text.lower().replace(&quot;,&quot;, &quot;&quot;).replace(&quot;.&quot;, &quot;&quot;).replace(&quot;?&quot;, &quot;&quot;).split()
+    return {w for w in words if w not in STOPWORDS}
+
+def groundedness_score(answer, context):
+    a_words = content_words(answer)
+    c_words = content_words(context)
+    if not a_words:
+        return 0.0
+    return round(len(a_words &amp; c_words) / len(a_words), 4)
+
+def context_relevance_score(question, context):
+    q_words = content_words(question)
+    c_words = content_words(context)
+    if not q_words:
+        return 0.0
+    return round(len(q_words &amp; c_words) / len(q_words), 4)
+
+def answer_relevance_score(question, answer):
+    q_words = content_words(question)
+    a_words = content_words(answer)
+    if not q_words:
+        return 0.0
+    return round(len(q_words &amp; a_words) / len(q_words), 4)
+
+question = &quot;How many days do I have to reinstate a lapsed policy?&quot;
+context = doc_lookup[&quot;DOC-2&quot;]
+answer = &quot;You have 90 days from the date of lapse to reinstate, as long as past-due premium is paid.&quot;
+
+g = groundedness_score(answer, context)
+cr = context_relevance_score(question, context)
+ar = answer_relevance_score(question, answer)
+print(f&quot;groundedness={g}  context_relevance={cr}  answer_relevance={ar}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>groundedness=0.4615  context_relevance=0.4286  answer_relevance=0.4286
+</code></pre><p><strong>Exercise:</strong>
+Using <code>groundedness_score</code>, <code>context_relevance_score</code>, and <code>answer_relevance_score</code> from
+this concept's Example, compute the triad for the case below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>mold_question = &quot;Is mold damage covered under my property policy?&quot;
+mold_context = doc_lookup[&quot;DOC-8&quot;]
+mold_answer = &quot;Mold is covered only if it results from a covered water damage event, subject to a sublimit.&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>groundedness=0.5455  context_relevance=0.5  answer_relevance=0.5
+</code></pre><hr />
+<h3>Concept 2 — Instrumenting a Chain With <code>TruChain</code></h3>
+<p><code>TruChain</code> wraps a real LangChain <code>Runnable</code> and records every call: input, output, and the
+call graph underneath, without changing what the chain itself does. The chain below reuses
+Day 1's <code>retrieve()</code> as its retrieval step, wired into a two-step <code>RunnableSequence</code> the same
+shape Week 24/25 built by hand with plain functions — <code>TruChain</code> needs a genuine LangChain
+object to instrument, which is the one piece of LangChain machinery this week's chain
+actually needs.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os, io, contextlib, tempfile
+
+os.environ.setdefault(&quot;TRULENS_OTEL_TRACING&quot;, &quot;0&quot;)
+
+from trulens.apps.langchain import TruChain
+from trulens.core import TruSession
+from langchain_core.runnables import RunnableLambda
+
+# Fixed path + reset_database() -- TruSession is a real process-wide singleton (see this
+# day&#x27;s opening note); a fresh tempfile path alone would NOT give a clean database.
+db_path = os.path.join(tempfile.gettempdir(), &quot;trulens_w26_eval.sqlite&quot;)
+session = TruSession(database_url=f&quot;sqlite:///{db_path}&quot;)
+session.reset_database()
+
+def retrieve_step(question):
+    top_id = retrieve(question, k=1)[0][0]
+    return {&quot;question&quot;: question, &quot;context&quot;: doc_lookup[top_id]}
+
+def generate_step(state):
+    return f&quot;Based on policy text: {state[&#x27;context&#x27;][:60]}...&quot;
+
+rag_chain = RunnableLambda(retrieve_step) | RunnableLambda(generate_step)
+
+with contextlib.redirect_stdout(io.StringIO()):
+    tru_recorder = TruChain(rag_chain, app_name=&quot;w26_policy_qa&quot;, app_version=&quot;v1&quot;)
+
+def ask(question):
+    with tru_recorder as recording:
+        answer = rag_chain.invoke(question)
+    top_id = retrieve(question, k=1)[0][0]
+    context = doc_lookup[top_id]
+    return recording.records[0], answer, context
+
+record, answer, context = ask(&quot;How many days do I have to reinstate a lapsed policy?&quot;)
+print(&quot;chain output:&quot;, answer)
+print(&quot;record main_input:&quot;, record.main_input)
+print(&quot;record main_output:&quot;, record.main_output)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>chain output: Based on policy text: Reinstatement after lapse: a lapsed policy can be reinstated...
+record main_input: How many days do I have to reinstate a lapsed policy?
+record main_output: Based on policy text: Reinstatement after lapse: a lapsed policy can be reinstated...
+</code></pre><p>The instrumented chain runs exactly as it would unwrapped — <code>TruChain</code> only observes the
+call — but <code>recording.records[0]</code> now holds a real <code>Record</code> object TruLens itself produced,
+not a value this lesson constructed by hand, which is what Concept 3's feedback functions
+score against next.</p>
+<p><strong>Exercise:</strong>
+Using <code>ask</code> from this concept's Example, run the question below and print in the same
+format.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>deductible_question = &quot;Is my deductible waived if this is my first claim?&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>chain output: Based on policy text: Deductible waiver rider: this rider waives the standard dedu...
+record main_input: Is my deductible waived if this is my first claim?
+record main_output: Based on policy text: Deductible waiver rider: this rider waives the standard dedu...
+</code></pre><hr />
+<h3>Concept 3 — Custom <code>Feedback</code> Definitions and Per-Record Drill-Down</h3>
+<p>A TruLens <code>Feedback</code> wraps a plain scoring function and declares, via <code>.on_input()</code>/
+<code>.on_output()</code>, which parts of a <code>Record</code> that function receives. Running each feedback
+against ONE specific record — rather than only ever seeing a dataset-wide average — is the
+per-record drill-down a dashboard's detail view gives you: which exact question got a low
+groundedness score, and what its actual retrieved context and generated answer were, not
+just &quot;average groundedness dropped.&quot;</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from trulens.core import Feedback
+
+def groundedness_feedback(input_str, output_str):
+    return groundedness_score(output_str, context)
+
+def context_relevance_feedback(input_str, output_str):
+    return context_relevance_score(input_str, context)
+
+def answer_relevance_feedback(input_str, output_str):
+    return answer_relevance_score(input_str, output_str)
+
+with contextlib.redirect_stdout(io.StringIO()):
+    f_groundedness = Feedback(groundedness_feedback, name=&quot;groundedness&quot;).on_input().on_output()
+    f_context_relevance = Feedback(context_relevance_feedback, name=&quot;context_relevance&quot;).on_input().on_output()
+    f_answer_relevance = Feedback(answer_relevance_feedback, name=&quot;answer_relevance&quot;).on_input().on_output()
+
+print(f&quot;question: {record.main_input}&quot;)
+for feedback in [f_groundedness, f_context_relevance, f_answer_relevance]:
+    result = feedback.run(record=record, app=tru_recorder)
+    print(f&quot;  {feedback.name:&lt;18} = {result.result}&quot;)
+    session.add_feedback(result)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>question: How many days do I have to reinstate a lapsed policy?
+  groundedness       = 0.8
+  context_relevance  = 0.4286
+  answer_relevance   = 0.2857
+</code></pre><p><code>groundedness</code> (0.8) is high — the chain's own <code>generate_step</code> literally echoes the retrieved
+context, so almost everything the answer says is drawn straight from it. <code>answer_relevance</code>
+(0.2857) is the lowest of the three — the chain's canned <code>&quot;Based on policy text: ...&quot;</code>
+template never actually states the number of days the question asked for, only quotes the
+source. Same record, three genuinely different verdicts, which is the entire point of
+scoring each edge of the triad separately instead of one blended number.</p>
+<p><strong>Exercise:</strong>
+Using <code>Feedback</code> and the scoring functions from this concept's Example, drill into the
+record below in the same format. <code>ded_record</code>/<code>ded_context</code> come from running <code>ask()</code> on
+Concept 2's exercise question.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ded_record, ded_answer, ded_context = ask(&quot;Is my deductible waived if this is my first claim?&quot;)
+
+def ded_groundedness_feedback(input_str, output_str):
+    return groundedness_score(output_str, ded_context)
+
+def ded_context_relevance_feedback(input_str, output_str):
+    return context_relevance_score(input_str, ded_context)
+
+def ded_answer_relevance_feedback(input_str, output_str):
+    return answer_relevance_score(input_str, output_str)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>question: Is my deductible waived if this is my first claim?
+  groundedness       = 0.6
+  context_relevance  = 0.6
+  answer_relevance   = 0.2
+</code></pre><hr />
+<h3>Concept 4 — Logging Every Eval Run to the TruLens Database for Trend Review</h3>
+<p>Every <code>session.add_feedback(result)</code> call in Concept 3 wrote a real row into the SQLite
+database <code>db_path</code> points at — not just an in-memory score this process will forget on exit.
+<code>session.get_records_and_feedback()</code> reads that same database back as a table: one row per
+recorded chain call, one column per feedback function that ever scored it. That table is the
+actual object a trend review looks at — not a single run's printed score, but every run's
+score sitting side by side, queryable by any later process that opens the same database.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing ask, groundedness_score, context_relevance_score, answer_relevance_score,
+# tru_recorder, session from Concepts 2-3
+
+questions = [
+    &quot;Is mold damage covered under my property policy?&quot;,
+    &quot;What is the grace period for premium payment?&quot;,
+]
+for q in questions:
+    rec, ans, ctx = ask(q)
+
+    def gf(input_str, output_str, _ctx=ctx):
+        return groundedness_score(output_str, _ctx)
+
+    def crf(input_str, output_str, _ctx=ctx):
+        return context_relevance_score(input_str, _ctx)
+
+    def arf(input_str, output_str):
+        return answer_relevance_score(input_str, output_str)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        fg = Feedback(gf, name=&quot;groundedness&quot;).on_input().on_output()
+        fc = Feedback(crf, name=&quot;context_relevance&quot;).on_input().on_output()
+        fa = Feedback(arf, name=&quot;answer_relevance&quot;).on_input().on_output()
+    for feedback in [fg, fc, fa]:
+        result = feedback.run(record=rec, app=tru_recorder)
+        session.add_feedback(result)
+
+session.force_flush()
+import time
+time.sleep(0.5)
+df, feedback_cols = session.get_records_and_feedback(app_ids=[tru_recorder.app_id])
+print(f&quot;logged runs: {len(df)}&quot;)
+print(sorted(feedback_cols))
+trend = df[[&quot;input&quot;] + sorted(feedback_cols)].sort_values(&quot;input&quot;).round(4)
+for _, row in trend.iterrows():
+    print(row[&quot;input&quot;][:40], {c: row[c] for c in sorted(feedback_cols)})
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>logged runs: 3
+[&#x27;answer_relevance&#x27;, &#x27;context_relevance&#x27;, &#x27;groundedness&#x27;]
+How many days do I have to reinstate a l {&#x27;answer_relevance&#x27;: 0.2857, &#x27;context_relevance&#x27;: 0.4286, &#x27;groundedness&#x27;: 0.8}
+Is mold damage covered under my property {&#x27;answer_relevance&#x27;: 0.6667, &#x27;context_relevance&#x27;: 0.5, &#x27;groundedness&#x27;: 0.6}
+What is the grace period for premium pay {&#x27;answer_relevance&#x27;: 0.75, &#x27;context_relevance&#x27;: 0.75, &#x27;groundedness&#x27;: 0.8}
+</code></pre><p>Three separate calls, three separate rows, all queryable together from the same database —
+this IS the trend review: a fourth run next week reads the same table and a reviewer sees
+whether <code>answer_relevance</code> on this app has been trending up or down across every run that
+has ever been logged against it, not just the one they happen to remember.</p>
+<p><strong>Exercise:</strong>
+Using <code>ask</code>, the feedback pattern, and <code>session</code> from this concept's Example, capture the
+row count before logging one more question, log it, then print the before/after/increase
+(this reads correctly regardless of how many rows earlier exercises in this file already
+logged).</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>before_df, before_cols = session.get_records_and_feedback(app_ids=[tru_recorder.app_id])
+before_count = len(before_df)
+extra_question = &quot;Is my deductible waived if this is my first claim?&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>logged runs before: 3  after: 4  increase: 1
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> <code>TruChain</code>'s instrumentation only sees what the LangChain <code>Runnable</code>
+graph exposes — a mainframe-sourced retrieval step invoked through a plain Python function
+(Weeks 13/18's pattern) has to be wrapped in a <code>RunnableLambda</code>, as this day's own
+<code>retrieve_step</code> was, before TruLens can record anything about it at all; an un-wrapped call
+is invisible to the recorder, not merely unscored.</p>
+<p><strong>Compliance angle:</strong> Concept 4's persistent, queryable eval-run database is the concrete
+artifact an internal model-risk review actually wants to see — &quot;here is every scored run
+this app has ever produced, queryable by date&quot; is a real answer to &quot;how do you know this
+system still works,&quot; where a slide deck summarizing &quot;we tested it once&quot; is not.</p>
+<p><strong>What breaks in production:</strong> this day's <code>Feedback.run(record=..., app=...)</code> workaround
+exists BECAUSE the library's own default path (<code>feedbacks=</code> at construction) has a real bug
+in the currently-installed version — pinning a library version without re-verifying its
+actual behavior against the specific workflow a lesson (or a production pipeline) depends on
+is exactly how a &quot;should just work&quot; integration silently breaks; Concept 3's manual scoring
+is not a stylistic choice, it is the only path that was proven to work here.</p>
+<hr />
+<h2 id="day-4">Day 4 — LLM-as-Judge Reliability</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="26-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=o-bZc-Ba03M" target="_blank" rel="noopener"><b>23.How to Evaluate LLMs: BLEU, BERTScore, LLM-as-a-Judge &amp; Benchmarks</b><small>AI Academy · 14:31</small></a></li><li><a href="https://www.youtube.com/watch?v=_GhRA3rScz0" target="_blank" rel="noopener"><b>Why Your LLM Judge is Biased (And How to Fix It)</b><small>ML Simplified · 8:40</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LLM%20as%20a%20judge%20bias%20calibration%20human%20agreement%20evaluation" target="_blank" rel="noopener">Search YouTube: LLM as a judge bias calibration human agreement evaluation</a></p></div>
+<hr />
+<p>Days 1-3 both leaned on an LLM judge without questioning the judge itself. This day does:
+<code>JudgeScore</code>/the rubric-vs-vague contrast in Concept 1 genuinely adapts
+<code>Curriculum/Week_11_Advanced_AI/W11_D5_Final_AI_Project.ipynb</code> CONCEPT 7's <code>JudgeScore</code>
+Pydantic model and <code>judge_llm</code>/<code>llm_as_judge</code> pattern — that file built ONE deterministic
+judge stand-in and never questioned whether its own ask was any good; this extends the same
+<code>JudgeScore</code> shape to compare a vague ask against an explicit rubric side by side, which
+<code>W11_D5</code> never did.</p>
+<h3>Concept 1 — Rubric-Based Scoring vs. a Vague Quality Ask</h3>
+<p>&quot;Rate this answer 1-5&quot; gives a judge nothing to anchor a score to beyond its own guess at
+what &quot;good&quot; means, and a real judge under that prompt reliably falls back to surface signals
+like length and topical overlap — this concept's deterministic stand-in makes that failure
+mode concrete rather than asserting it. An explicit rubric names what each score tier
+actually requires, so a judge working from it has something checkable to point to, not a
+vibe.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pydantic import BaseModel, Field
+
+class JudgeScore(BaseModel):
+    score: int = Field(ge=1, le=5)
+    reasoning: str
+
+RUBRIC = &quot;&quot;&quot;
+Score 5: directly and completely answers the question with the specific figure or fact asked for.
+Score 4: answers the question correctly but omits a minor supporting detail.
+Score 3: partially relevant but missing the specific figure or fact asked for.
+Score 2: on-topic but does not actually answer what was asked.
+Score 1: does not address the question at all.
+&quot;&quot;&quot;
+
+def judge_vague(question, answer):
+    # Deterministic stand-in for a real judge call with a vague ask (&quot;rate this answer&quot;).
+    # Anchored only to &quot;does it look long and on-topic,&quot; never checking for the SPECIFIC
+    # fact the question needed.
+    overlap = len(set(question.lower().split()) &amp; set(answer.lower().split()))
+    if len(answer) &gt; 60 and overlap &gt;= 1:
+        return {&quot;score&quot;: 5, &quot;reasoning&quot;: &quot;Looks thorough and on-topic.&quot;}
+    return {&quot;score&quot;: 2, &quot;reasoning&quot;: &quot;Seems short or off-topic.&quot;}
+
+def judge_with_rubric(question, answer, required_fact):
+    # Deterministic stand-in for a real judge call given RUBRIC as its system prompt --
+    # explicitly checks for the fact the rubric&#x27;s score-5 tier requires.
+    if required_fact.lower() in answer.lower():
+        return {&quot;score&quot;: 5, &quot;reasoning&quot;: f&quot;States the required fact: {required_fact!r}.&quot;}
+    overlap = len(set(question.lower().split()) &amp; set(answer.lower().split()))
+    if overlap &gt;= 2:
+        return {&quot;score&quot;: 3, &quot;reasoning&quot;: f&quot;On-topic but missing the required fact: {required_fact!r}.&quot;}
+    return {&quot;score&quot;: 1, &quot;reasoning&quot;: &quot;Does not address the question.&quot;}
+
+question = &quot;How many days do I have to reinstate a lapsed policy?&quot;
+long_but_wrong_answer = &quot;Reinstating a lapsed policy is an important process that policyholders should understand well before it becomes necessary to use it.&quot;
+correct_answer = &quot;You have 90 days from the date of lapse to reinstate.&quot;
+required_fact = &quot;90 days&quot;
+
+for label, answer in [(&quot;long_but_wrong&quot;, long_but_wrong_answer), (&quot;correct&quot;, correct_answer)]:
+    vague = JudgeScore(**judge_vague(question, answer))
+    rubric = JudgeScore(**judge_with_rubric(question, answer, required_fact))
+    print(f&quot;{label}: vague_score={vague.score}  rubric_score={rubric.score}  rubric_reasoning={rubric.reasoning}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>long_but_wrong: vague_score=5  rubric_score=3  rubric_reasoning=On-topic but missing the required fact: &#x27;90 days&#x27;.
+correct: vague_score=2  rubric_score=5  rubric_reasoning=States the required fact: &#x27;90 days&#x27;.
+</code></pre><p>The vague judge gets both cases backwards: it rewards the long, waffling non-answer with a 5
+because it &quot;looks thorough,&quot; and penalizes the short, correct answer with a 2 because it
+&quot;seems short.&quot; The rubric-anchored judge gets both right, because it has something concrete
+to check for instead of a length heuristic masquerading as a quality judgment.</p>
+<p><strong>Exercise:</strong>
+Using <code>JudgeScore</code>, <code>judge_vague</code>, and <code>judge_with_rubric</code> from this concept's Example,
+score both answers below against <code>mold_required_fact</code> and print in the same format.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>mold_question = &quot;Is mold damage covered under my property policy?&quot;
+mold_required_fact = &quot;covered water damage&quot;
+mold_long_wrong = &quot;Mold can be a serious issue for homeowners and is often misunderstood by policyholders everywhere.&quot;
+mold_correct = &quot;Mold is covered only if it results from a covered water damage event.&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>long_wrong: vague_score=5  rubric_score=3  rubric_reasoning=On-topic but missing the required fact: &#x27;covered water damage&#x27;.
+correct: vague_score=5  rubric_score=5  rubric_reasoning=States the required fact: &#x27;covered water damage&#x27;.
+</code></pre><hr />
+<h3>Concept 2 — Position Bias and Verbosity Bias in Pairwise Judging</h3>
+<p>A pairwise judge (&quot;which of these two answers is better&quot;) has two well-documented failure
+modes distinct from a single-answer rubric judge's: verbosity bias (a longer answer scores
+higher independent of correctness) and position bias (on a genuine tie, whichever answer was
+shown FIRST tends to win). Both are real, published findings about LLM judges, not invented
+for this lesson — the stand-in below encodes them explicitly so the debiasing technique in
+the second half is provably doing something.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def naive_pairwise_judge(answer_first, answer_second):
+    # Deterministic stand-in encoding both documented biases: verbosity (longer wins) and,
+    # on a tie, position (first-shown wins).
+    len_first, len_second = len(answer_first), len(answer_second)
+    if len_first &gt; len_second:
+        return &quot;first&quot;
+    if len_second &gt; len_first:
+        return &quot;second&quot;
+    return &quot;first&quot;
+
+answer_a = &quot;Coverage stays active for 31 days past the due date.&quot;
+answer_b = &quot;Your policy will not lapse for nonpayment until 31 days have passed since the due date, giving you time to catch up.&quot;
+
+print(&quot;order (A, B):&quot;, naive_pairwise_judge(answer_a, answer_b))
+print(&quot;order (B, A):&quot;, naive_pairwise_judge(answer_b, answer_a))
+
+identical_a = &quot;Coverage is active for 31 days.&quot;
+identical_b = &quot;Coverage is active for 31 days.&quot;
+print(&quot;identical, order (A, B):&quot;, naive_pairwise_judge(identical_a, identical_b))
+print(&quot;identical, order (B, A):&quot;, naive_pairwise_judge(identical_b, identical_a))
+
+def position_bias_corrected_judge(answer_a, answer_b):
+    &quot;&quot;&quot;Run the judge in BOTH orders and only declare a winner if both orders agree --
+    the standard debiasing technique for a pairwise judge&#x27;s position bias.&quot;&quot;&quot;
+    verdict_forward = naive_pairwise_judge(answer_a, answer_b)
+    verdict_backward = naive_pairwise_judge(answer_b, answer_a)
+    forward_winner = &quot;a&quot; if verdict_forward == &quot;first&quot; else &quot;b&quot;
+    backward_winner = &quot;b&quot; if verdict_backward == &quot;first&quot; else &quot;a&quot;
+    if forward_winner == backward_winner:
+        return forward_winner
+    return &quot;tie (position-dependent disagreement)&quot;
+
+print(&quot;corrected(A vs B, different lengths):&quot;, position_bias_corrected_judge(answer_a, answer_b))
+print(&quot;corrected(A vs A, identical):&quot;, position_bias_corrected_judge(identical_a, identical_b))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>order (A, B): second
+order (B, A): first
+identical, order (A, B): first
+identical, order (B, A): first
+corrected(A vs B, different lengths): b
+corrected(A vs A, identical): tie (position-dependent disagreement)
+</code></pre><p><code>answer_b</code> wins regardless of which position it is shown in (verbosity bias, but at least
+CONSISTENT) — the corrected judge agrees, <code>b</code>. The two identical answers both &quot;win&quot; whichever
+position they are shown in FIRST, which is pure position bias with zero content signal behind
+it — the corrected judge catches the contradiction (forward run says <code>identical_a</code> wins,
+backward run says <code>identical_b</code> wins, they disagree) and reports a tie instead of confidently
+declaring a fake winner.</p>
+<p><strong>Exercise:</strong>
+Using <code>naive_pairwise_judge</code> and <code>position_bias_corrected_judge</code> from this concept's Example,
+run both orders and the corrected judge on the pair below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>short_answer = &quot;You have 90 days.&quot;
+long_answer = &quot;You have a full ninety days from the date your policy lapsed to reinstate it without new underwriting, as long as all past-due premium is paid in full.&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>order (short, long): second
+order (long, short): first
+corrected: b
+</code></pre><hr />
+<h3>Concept 3 — Agreement With Human Labels via Cohen's Kappa</h3>
+<p>Raw agreement rate (&quot;the judge matched the human 80% of the time&quot;) overstates how good a
+judge is whenever the underlying label set is imbalanced — a judge that always guesses the
+majority label gets a high raw agreement rate for free, without ever actually discriminating
+between cases. Cohen's kappa corrects for exactly this: it measures agreement ABOVE what each
+rater's own label distribution would produce by chance alone.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from collections import Counter
+
+def cohens_kappa(judge_labels, human_labels):
+    n = len(judge_labels)
+    assert n == len(human_labels) and n &gt; 0
+    observed_agreement = sum(1 for j, h in zip(judge_labels, human_labels) if j == h) / n
+
+    judge_counts = Counter(judge_labels)
+    human_counts = Counter(human_labels)
+    labels = set(judge_counts) | set(human_counts)
+    expected_agreement = sum(
+        (judge_counts.get(l, 0) / n) * (human_counts.get(l, 0) / n) for l in labels
+    )
+
+    if expected_agreement == 1.0:
+        return 1.0
+    return round((observed_agreement - expected_agreement) / (1 - expected_agreement), 4)
+
+judge_labels = [&quot;PASS&quot;, &quot;PASS&quot;, &quot;FAIL&quot;, &quot;PASS&quot;, &quot;FAIL&quot;, &quot;PASS&quot;, &quot;PASS&quot;, &quot;FAIL&quot;, &quot;PASS&quot;, &quot;FAIL&quot;]
+human_labels = [&quot;PASS&quot;, &quot;PASS&quot;, &quot;FAIL&quot;, &quot;FAIL&quot;, &quot;FAIL&quot;, &quot;PASS&quot;, &quot;PASS&quot;, &quot;FAIL&quot;, &quot;PASS&quot;, &quot;PASS&quot;]
+
+agreement_rate = sum(1 for j, h in zip(judge_labels, human_labels) if j == h) / len(judge_labels)
+kappa = cohens_kappa(judge_labels, human_labels)
+print(f&quot;raw agreement: {agreement_rate:.2f}  Cohen&#x27;s kappa: {kappa}&quot;)
+
+always_pass_labels = [&quot;PASS&quot;] * 10
+always_pass_agreement = sum(1 for j, h in zip(always_pass_labels, human_labels) if j == h) / len(human_labels)
+always_pass_kappa = cohens_kappa(always_pass_labels, human_labels)
+print(f&quot;always-PASS judge: raw agreement: {always_pass_agreement:.2f}  Cohen&#x27;s kappa: {always_pass_kappa}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>raw agreement: 0.80  Cohen&#x27;s kappa: 0.5833
+always-PASS judge: raw agreement: 0.60  Cohen&#x27;s kappa: 0.0
+</code></pre><p>The real judge's 0.80 raw agreement corresponds to a kappa of 0.58 — solid but not perfect
+agreement beyond chance. A judge that just always says PASS gets a 0.60 raw agreement rate on
+this mostly-PASS set (looking almost as good by the naive number) but kappa correctly reports
+it as exactly 0.0 — no better than chance, because it never actually discriminates between the
+two labels at all.</p>
+<p><strong>Exercise:</strong>
+Using <code>cohens_kappa</code> from this concept's Example, compute the raw agreement and kappa for the
+label pair below, printed in the same format.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>judge_labels_2 = [&quot;PASS&quot;, &quot;FAIL&quot;, &quot;PASS&quot;, &quot;PASS&quot;, &quot;FAIL&quot;, &quot;FAIL&quot;, &quot;PASS&quot;, &quot;FAIL&quot;]
+human_labels_2 = [&quot;PASS&quot;, &quot;FAIL&quot;, &quot;FAIL&quot;, &quot;PASS&quot;, &quot;FAIL&quot;, &quot;PASS&quot;, &quot;PASS&quot;, &quot;FAIL&quot;]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>raw agreement: 0.75  Cohen&#x27;s kappa: 0.5
+</code></pre><hr />
+<h3>Concept 4 — Cheap-Judge Screening With Strong-Judge Escalation on Disagreement</h3>
+<p>Running an expensive, high-quality judge on every single evaluation case is wasteful when
+most cases are unambiguous — a cheap, fast judge can screen the easy cases (a clean pass with
+the exact fact present) and only escalate the genuinely uncertain ones to a slower, more
+capable judge, which is the same cheap-then-strong cascade Week 23 built for cost routing,
+applied here to judging instead of generation.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def cheap_judge(question, answer, required_fact):
+    # Fast, cheap: pure keyword presence, no nuance.
+    return 5 if required_fact.lower() in answer.lower() else 1
+
+def strong_judge(question, answer, required_fact):
+    # Slower, more expensive: partial credit for on-topic-but-incomplete answers.
+    if required_fact.lower() in answer.lower():
+        return 5
+    overlap = len(set(question.lower().split()) &amp; set(answer.lower().split()))
+    if overlap &gt;= 2:
+        return 3
+    return 1
+
+UNCERTAIN_BAND = {1, 2, 3, 4}  # anything short of a clean 5 gets a second opinion
+
+def cascaded_judge(cases):
+    results = []
+    escalated = 0
+    for question, answer, required_fact in cases:
+        cheap_score = cheap_judge(question, answer, required_fact)
+        if cheap_score in UNCERTAIN_BAND:
+            escalated += 1
+            final_score = strong_judge(question, answer, required_fact)
+            source = &quot;strong (escalated)&quot;
+        else:
+            final_score = cheap_score
+            source = &quot;cheap&quot;
+        results.append((question[:35], final_score, source))
+    return results, escalated
+
+cases = [
+    (&quot;How many days to reinstate a lapsed policy?&quot;, &quot;You have 90 days from the date of lapse.&quot;, &quot;90 days&quot;),
+    (&quot;How many days to reinstate a lapsed policy?&quot;, &quot;Reinstatement is possible if you contact us promptly.&quot;, &quot;90 days&quot;),
+    (&quot;Is my deductible waived for a first claim?&quot;, &quot;Yes, the deductible is waived for the first claim filed.&quot;, &quot;waived&quot;),
+]
+results, escalated = cascaded_judge(cases)
+for question, score, source in results:
+    print(f&quot;{question:&lt;38} score={score}  source={source}&quot;)
+print(f&quot;escalated to strong judge: {escalated}/{len(cases)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>How many days to reinstate a lapsed    score=5  source=cheap
+How many days to reinstate a lapsed    score=1  source=strong (escalated)
+Is my deductible waived for a first    score=5  source=cheap
+escalated to strong judge: 1/3
+</code></pre><p>Two of three cases were resolved by the cheap judge alone — only the case where the fact was
+genuinely absent needed the strong judge's partial-credit nuance, and even there the strong
+judge still correctly scored it low (the answer never actually states the 90-day figure, it
+just gestures at the topic).</p>
+<p><strong>Exercise:</strong>
+Using <code>cheap_judge</code>, <code>strong_judge</code>, and <code>cascaded_judge</code> from this concept's Example, run
+the cascade over the cases below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>extra_cases = [
+    (&quot;Is my deductible waived for a first claim?&quot;, &quot;Deductible policies vary by insurer and state regulation.&quot;, &quot;waived&quot;),
+    (&quot;What is the grace period for premium payment?&quot;, &quot;The grace period is 31 days past the due date.&quot;, &quot;31 days&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Is my deductible waived for a first    score=1  source=strong (escalated)
+What is the grace period for premiu    score=5  source=cheap
+escalated to strong judge: 1/2
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> a cheap-judge/strong-judge cascade (Concept 4) is the same tiered-review
+pattern a claims department already runs on human adjusters — most claims get a fast,
+junior-adjuster pass, and only the genuinely ambiguous ones escalate to a senior reviewer;
+applying it to LLM judging is a direct transfer, not a new idea borrowed from ML research.</p>
+<p><strong>Compliance angle:</strong> Concept 3's kappa-against-human-labels check is the actual evidence an
+internal model-risk review wants before an automated judge is allowed to gate a deployment
+unsupervised — &quot;the judge agrees with our human reviewers at kappa=0.58, measured on N
+labeled cases&quot; is auditable; &quot;we eyeballed a few outputs and they looked fine&quot; is not.</p>
+<p><strong>What breaks in production:</strong> Concept 1's vague-ask failure mode is the most common real
+mistake in a first eval harness — &quot;rate this response 1-10&quot; is the intuitive first thing to
+write, and it is precisely the prompt shape that silently rewards a long, confident,
+wrong answer over a short, correct one; catching this requires actually checking judge output
+against known-correct cases (as this concept did), not just eyeballing that the judge
+&quot;seems reasonable.&quot;</p>
+<hr />
+<h2 id="day-5">Day 5 — Eval Harness as a Package</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="26-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=BOMTsc4R39M" target="_blank" rel="noopener"><b>Scale LLM Regression Tests with pytest Parametrize in Python</b><small>Professor Py: AI Engineering · 8:21</small></a></li><li><a href="https://www.youtube.com/watch?v=xemXH_Mq-l8" target="_blank" rel="noopener"><b>Practical Regression Testing Strategies for AI Agents - May 05, 2026</b><small>Shade of Hue | AI in Testing · 5:05</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=pytest%20evaluation%20harness%20LLM%20regression%20testing%20python" target="_blank" rel="noopener">Search YouTube: pytest evaluation harness LLM regression testing python</a></p></div>
+<hr />
+<p>Days 1-4 each built a real, individually-run metric. None of them are worth anything unless
+they run automatically, on a schedule, the same way any other regression check in the
+codebase does — this day turns the pieces built across the week into exactly that: a real
+<code>pytest</code> suite, cached and seeded so a score only moves when the pipeline actually changes,
+a JSON artifact per run, and a version-controlled config naming what &quot;pass&quot; means.</p>
+<h3>Concept 1 — pytest-Parameterized Eval Cases Over the Golden Set</h3>
+<p><code>pytest.mark.parametrize</code> turns each golden-set record from Day 1 into its own test case,
+run and reported individually — a failure names exactly which question regressed, not just
+&quot;the eval suite failed.&quot; The test module below is written to a real temp file and run with
+a real <code>pytest.main()</code> call, not simulated; a small <code>pytest</code> plugin collects pass/fail
+counts programmatically instead of parsing pytest's own printed summary line, since that
+line's timing text (<code>&quot;3 passed in 0.05s&quot;</code>) genuinely varies run to run and would make this
+block's output undocumentable.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os, tempfile, textwrap, io, contextlib
+import pytest
+
+# The test module below embeds retrieve()/CORPUS directly (a condensed copy of Day 1
+# Concept 1&#x27;s own logic) rather than importing them from an outer module -- this file has
+# no installable package structure of its own for a real `from myapp.retrieval import
+# retrieve` to target, so the self-contained version is the one that is honestly runnable
+# as a genuine, standalone pytest.main() call, not simulated.
+RETRIEVAL_SOURCE = textwrap.dedent(&quot;&quot;&quot;
+    import math
+
+    def tokenize(text):
+        return text.lower().replace(&quot;,&quot;, &quot; &quot;).replace(&quot;.&quot;, &quot; &quot;).split()
+
+    VOCAB = {&quot;reinstate&quot;, &quot;reinstatement&quot;, &quot;lapse&quot;, &quot;lapsed&quot;, &quot;days&quot;, &quot;grace&quot;, &quot;period&quot;,
+             &quot;premium&quot;, &quot;mold&quot;, &quot;water&quot;, &quot;damage&quot;, &quot;covered&quot;, &quot;beneficiary&quot;, &quot;claim&quot;}
+
+    def bow(text):
+        toks = tokenize(text)
+        return {t: toks.count(t) for t in toks if t in VOCAB}
+
+    def cosine(v1, v2):
+        common = set(v1) &amp; set(v2)
+        dot = sum(v1[t] * v2[t] for t in common)
+        n1 = math.sqrt(sum(x * x for x in v1.values())) or 1.0
+        n2 = math.sqrt(sum(x * x for x in v2.values())) or 1.0
+        return dot / (n1 * n2)
+
+    CORPUS = [
+        (&quot;DOC-2&quot;, &quot;Reinstatement after lapse: a lapsed policy can be reinstated within 90 days of lapse if all past-due premium is paid, without new underwriting.&quot;),
+        (&quot;DOC-5&quot;, &quot;Grace period for premium payment: coverage stays active for 31 days past the due date before the policy lapses for nonpayment.&quot;),
+        (&quot;DOC-8&quot;, &quot;Mold remediation: mold caused by a covered water damage event is covered up to a sublimit; mold from long term neglect is excluded.&quot;),
+        (&quot;DOC-3&quot;, &quot;Beneficiary changes: the policyholder may change the named beneficiary at any time before a claim is filed, using the standard change-of-beneficiary form.&quot;),
+    ]
+
+    def retrieve(query_text, k=3, corpus=CORPUS):
+        qv = bow(query_text)
+        scored = [(doc_id, cosine(qv, bow(text))) for doc_id, text in corpus]
+        scored.sort(key=lambda x: -x[1])
+        return scored[:k]
+&quot;&quot;&quot;)
+
+TEST_BODY = textwrap.dedent(&quot;&quot;&quot;
+    GOLDEN_CASES = [
+        (&quot;How many days do I have to reinstate a lapsed policy?&quot;, &quot;DOC-2&quot;),
+        (&quot;Is mold damage covered under my property policy?&quot;, &quot;DOC-8&quot;),
+        (&quot;What is the grace period for premium payment?&quot;, &quot;DOC-5&quot;),
+    ]
+
+    import pytest
+
+    @pytest.mark.parametrize(&quot;question,relevant_doc_id&quot;, GOLDEN_CASES)
+    def test_retrieval_finds_relevant_doc(question, relevant_doc_id):
+        retrieved_ids = [d for d, _ in retrieve(question, k=3)]
+        assert relevant_doc_id in retrieved_ids
+&quot;&quot;&quot;)
+
+test_dir = tempfile.mkdtemp()
+test_path = os.path.join(test_dir, &quot;test_golden_retrieval.py&quot;)
+with open(test_path, &quot;w&quot;) as f:
+    f.write(RETRIEVAL_SOURCE + TEST_BODY)
+
+class ResultCollector:
+    def __init__(self):
+        self.passed = 0
+        self.failed = 0
+
+    def pytest_runtest_logreport(self, report):
+        if report.when != &quot;call&quot;:
+            return
+        if report.passed:
+            self.passed += 1
+        elif report.failed:
+            self.failed += 1
+
+collector = ResultCollector()
+with contextlib.redirect_stdout(io.StringIO()):
+    # --import-mode=importlib: without it, pytest identifies a collected test file by
+    # basename alone, and a SECOND generated file also named test_golden_retrieval.py
+    # (as this week&#x27;s own Exercise, and any later re-run in the same process, produces)
+    # raises a real &quot;import file mismatch&quot; collection error against the first one still
+    # cached in sys.modules -- confirmed directly, not a hypothetical.
+    exit_code = pytest.main([&quot;-q&quot;, &quot;--import-mode=importlib&quot;, test_path], plugins=[collector])
+
+print(f&quot;passed: {collector.passed}  failed: {collector.failed}  exit_code: {exit_code}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>passed: 3  failed: 0  exit_code: 0
+</code></pre><p><strong>Exercise:</strong>
+Using <code>RETRIEVAL_SOURCE</code>, the test-module pattern, and <code>ResultCollector</code> from this concept's
+Example, run the cases below (<code>GOLDEN_CASES_2</code>, deliberately including one case from Day 1
+that fails retrieval) and print in the same format.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>GOLDEN_CASES_2 = [
+    (&quot;can someone else be added to receive money from my policy&quot;, &quot;DOC-3&quot;),
+    (&quot;What is the grace period for premium payment?&quot;, &quot;DOC-5&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>passed: 1  failed: 1  exit_code: 1
+</code></pre><hr />
+<h3>Concept 2 — Deterministic Seeding and Cached Retrieval Fixtures</h3>
+<p>A regression suite re-runs the exact same golden questions on every CI trigger, often many
+times a day — without caching, that is redundant retrieval work for input that never
+changes, and worse, it opens the door to a score drifting between two runs of &quot;the same&quot;
+suite purely from something incidental (a smoke test sampling a different random subset
+each time) rather than a real system change. <code>functools.lru_cache</code> makes repeat lookups of
+the identical question free, and a seeded <code>random.Random</code> makes a sampled subset of the
+golden set identical across runs — together, a score can only move because the pipeline
+under test moved, which is the entire point of a regression check.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from functools import lru_cache
+import random
+
+# Reusing retrieve from Day 1 Concept 1, aliased here so the cache wrapper&#x27;s own name
+# stays free for the cached version
+_raw_retrieve = retrieve
+
+call_count = {&quot;n&quot;: 0}
+
+@lru_cache(maxsize=256)
+def cached_retrieve(question, k=3):
+    call_count[&quot;n&quot;] += 1
+    return tuple(_raw_retrieve(question, k=k))
+
+q = &quot;How many days do I have to reinstate a lapsed policy?&quot;
+r1 = cached_retrieve(q, k=3)
+r2 = cached_retrieve(q, k=3)
+r3 = cached_retrieve(q, k=3)
+print(f&quot;result 1 == result 2 == result 3: {r1 == r2 == r3}&quot;)
+print(f&quot;underlying retrieve() actually called: {call_count[&#x27;n&#x27;]} time(s) for 3 lookups&quot;)
+
+other_q = &quot;Is mold damage covered under my property policy?&quot;
+for _ in range(5):
+    cached_retrieve(other_q, k=3)
+print(f&quot;underlying retrieve() called: {call_count[&#x27;n&#x27;]} time(s) total (2 distinct questions, 8 lookups)&quot;)
+
+def sample_golden_subset(golden_questions, n, seed):
+    rng = random.Random(seed)
+    return sorted(rng.sample(golden_questions, n))
+
+golden_pool = [
+    &quot;How many days do I have to reinstate a lapsed policy?&quot;,
+    &quot;Is mold damage covered under my property policy?&quot;,
+    &quot;What is the grace period for premium payment?&quot;,
+    &quot;Is my deductible waived if this is my first claim?&quot;,
+    &quot;Is umbrella liability included automatically?&quot;,
+]
+sample_1 = sample_golden_subset(golden_pool, n=3, seed=7)
+sample_2 = sample_golden_subset(golden_pool, n=3, seed=7)
+print(f&quot;same seed -&gt; same smoke-test sample: {sample_1 == sample_2}&quot;)
+print(sample_1)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>result 1 == result 2 == result 3: True
+underlying retrieve() actually called: 1 time(s) for 3 lookups
+underlying retrieve() called: 2 time(s) total (2 distinct questions, 8 lookups)
+same seed -&gt; same smoke-test sample: True
+[&#x27;Is mold damage covered under my property policy?&#x27;, &#x27;Is my deductible waived if this is my first claim?&#x27;, &#x27;What is the grace period for premium payment?&#x27;]
+</code></pre><p>Three identical calls for the same question hit the underlying <code>retrieve()</code> exactly once —
+the cache absorbs the other two entirely. The 5 repeated <code>other_q</code> lookups add exactly one
+more real call, not five. And the same <code>seed=7</code> produces the identical 3-question sample
+both times it is drawn, which is what makes a &quot;quick smoke-test subset&quot; a legitimate part of
+a regression suite instead of a source of its own false alarms.</p>
+<p><strong>Exercise:</strong>
+Using <code>cached_retrieve</code>, <code>call_count</code>, and <code>sample_golden_subset</code> from this concept's
+Example, call <code>cached_retrieve</code> on the new question below twice, print how many NEW calls
+that added to the underlying <code>retrieve()</code>, and draw a 2-question sample at the seed below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>new_q = &quot;Is umbrella liability included automatically?&quot;
+new_seed = 3
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>new calls to underlying retrieve(): 1
+[&#x27;Is mold damage covered under my property policy?&#x27;, &#x27;Is umbrella liability included automatically?&#x27;]
+</code></pre><hr />
+<h3>Concept 3 — A JSON Scorecard Artifact Written Per Run</h3>
+<p>A score printed to a terminal and never saved is worthless to next week's run — a scorecard
+written as a real JSON file on disk is a durable artifact another process (a CI step, a
+dashboard, Day 5's own config-driven gate in Concept 4) can read back later, and the same
+shape every run produces makes runs directly comparable. <code>run_id</code> here is derived
+deterministically from the run's own question set (a hash, not a wall-clock timestamp) so
+this block's output stays reproducible under <code>--repeat</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json, os, hashlib, tempfile
+
+# Reusing retrieve, doc_lookup from Day 1 Concept 1, faithfulness_score from Day 2 Concept 1
+
+def build_scorecard(cases):
+    rows = []
+    for question, relevant_id, answer in cases:
+        retrieved = [d for d, _ in retrieve(question, k=3)]
+        context = doc_lookup[retrieved[0]] if retrieved else &quot;&quot;
+        rows.append({
+            &quot;question&quot;: question,
+            &quot;retrieved_top&quot;: retrieved[0] if retrieved else None,
+            &quot;relevant_doc_id&quot;: relevant_id,
+            &quot;retrieval_correct&quot;: relevant_id in retrieved,
+            &quot;faithfulness&quot;: round(faithfulness_score(answer, context), 4),
+        })
+    run_key = &quot;|&quot;.join(r[&quot;question&quot;] for r in rows)
+    run_id = hashlib.sha256(run_key.encode()).hexdigest()[:12]
+    return {&quot;run_id&quot;: run_id, &quot;case_count&quot;: len(rows), &quot;cases&quot;: rows}
+
+cases = [
+    (&quot;How many days do I have to reinstate a lapsed policy?&quot;, &quot;DOC-2&quot;,
+     &quot;You have 90 days from the date of lapse to reinstate.&quot;),
+    (&quot;Is mold damage covered under my property policy?&quot;, &quot;DOC-8&quot;,
+     &quot;Mold is covered only if it results from a covered water damage event.&quot;),
+]
+scorecard = build_scorecard(cases)
+
+out_path = os.path.join(tempfile.gettempdir(), &quot;w26_scorecard.json&quot;)
+with open(out_path, &quot;w&quot;) as f:
+    json.dump(scorecard, f, indent=2, sort_keys=True)
+
+with open(out_path) as f:
+    reloaded = json.load(f)
+
+print(f&quot;run_id: {scorecard[&#x27;run_id&#x27;]}&quot;)
+print(f&quot;case_count: {scorecard[&#x27;case_count&#x27;]}&quot;)
+print(f&quot;round trip matches: {reloaded == scorecard}&quot;)
+for row in scorecard[&quot;cases&quot;]:
+    print(f&quot;  {row[&#x27;question&#x27;][:40]:&lt;42} correct={row[&#x27;retrieval_correct&#x27;]}  faithfulness={row[&#x27;faithfulness&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>run_id: 9b969d1fb57c
+case_count: 2
+round trip matches: True
+  How many days do I have to reinstate a l   correct=True  faithfulness=0.375
+  Is mold damage covered under my property   correct=True  faithfulness=0.6667
+</code></pre><p><code>run_id</code> is a real SHA-256 hash of the run's own question set, truncated to 12 hex
+characters — deterministic (the same case list always produces the same <code>run_id</code>, unlike a
+timestamp) while still distinguishing a run over a different case list from this one.</p>
+<p><strong>Exercise:</strong>
+Using <code>build_scorecard</code> from this concept's Example, build and print a scorecard for the
+case below in the same format.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>grace_cases = [
+    (&quot;What is the grace period for premium payment?&quot;, &quot;DOC-5&quot;, &quot;The grace period is 31 days past the due date.&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>run_id: 8e18d63d241a
+case_count: 1
+  What is the grace period for premium pay   correct=True  faithfulness=1.0
+</code></pre><hr />
+<h3>Concept 4 — Thresholds and Metric Weights in a Version-Controlled Config File</h3>
+<p>Hard-coding &quot;faithfulness must be above 0.3&quot; inside the test function that checks it makes
+the threshold invisible to anyone reviewing the eval policy itself, and any change to it is
+indistinguishable from a change to the test logic in a code review's diff. Pulling weights
+and thresholds into a small, version-controlled config file — genuinely written to and read
+back from disk here, the same as <code>Week_23_D5</code>'s budget/threshold config pattern — makes the
+eval POLICY a reviewable, diffable artifact separate from the harness code that enforces it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json, os, tempfile
+
+EVAL_CONFIG = {
+    &quot;weights&quot;: {&quot;faithfulness&quot;: 0.4, &quot;context_precision&quot;: 0.3, &quot;context_recall&quot;: 0.3},
+    &quot;thresholds&quot;: {&quot;composite_min&quot;: 0.55, &quot;faithfulness_min&quot;: 0.3},
+}
+
+config_path = os.path.join(tempfile.gettempdir(), &quot;w26_eval_config.json&quot;)
+with open(config_path, &quot;w&quot;) as f:
+    json.dump(EVAL_CONFIG, f, indent=2, sort_keys=True)
+
+with open(config_path) as f:
+    config = json.load(f)
+
+class EvalGateError(ValueError):
+    pass
+
+def composite_score(metrics, config):
+    weights = config[&quot;weights&quot;]
+    return round(sum(metrics[m] * w for m, w in weights.items()), 4)
+
+def evaluate_gate(metrics, config):
+    composite = composite_score(metrics, config)
+    faithfulness_floor = config[&quot;thresholds&quot;][&quot;faithfulness_min&quot;]
+    if metrics[&quot;faithfulness&quot;] &lt; faithfulness_floor:
+        raise EvalGateError(
+            f&quot;faithfulness {metrics[&#x27;faithfulness&#x27;]} below floor {faithfulness_floor}&quot;
+        )
+    composite_floor = config[&quot;thresholds&quot;][&quot;composite_min&quot;]
+    if composite &lt; composite_floor:
+        raise EvalGateError(f&quot;composite {composite} below floor {composite_floor}&quot;)
+    return composite
+
+healthy_metrics = {&quot;faithfulness&quot;: 0.62, &quot;context_precision&quot;: 0.55, &quot;context_recall&quot;: 0.71}
+regressed_metrics = {&quot;faithfulness&quot;: 0.20, &quot;context_precision&quot;: 0.55, &quot;context_recall&quot;: 0.71}
+
+for label, metrics in [(&quot;healthy&quot;, healthy_metrics), (&quot;regressed&quot;, regressed_metrics)]:
+    try:
+        score = evaluate_gate(metrics, config)
+        print(f&quot;{label}: PASS  composite={score}&quot;)
+    except EvalGateError as e:
+        print(f&quot;{label}: FAIL  {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>healthy: PASS  composite=0.626
+regressed: FAIL  faithfulness 0.2 below floor 0.3
+</code></pre><p>The regressed case is caught by the per-metric <code>faithfulness_min</code> floor before the
+composite is even checked — <code>evaluate_gate</code> deliberately checks the individual floor first,
+because a bad enough score on ONE metric should fail the gate outright even if the other two
+metrics are strong enough to pull a blended composite number above its own threshold.</p>
+<p><strong>Exercise:</strong>
+Using <code>evaluate_gate</code>, <code>EvalGateError</code>, and <code>config</code> from this concept's Example, evaluate
+the metrics below, where no single metric crosses its own floor but the composite still
+fails.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>composite_regressed_metrics = {&quot;faithfulness&quot;: 0.35, &quot;context_precision&quot;: 0.30, &quot;context_recall&quot;: 0.40}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>FAIL  composite 0.35 below floor 0.55
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> the same config-driven gate pattern (Concept 4) is what should sit in
+front of any legacy-sourced pipeline change too, not just an LLM's — a schema-drift fix in
+Week 18's catalog code deserves the identical &quot;does this regress the numbers we already
+trust&quot; gate this week built for RAG, not a special exemption because the change touches old
+infrastructure instead of a model.</p>
+<p><strong>Compliance angle:</strong> the JSON scorecard (Concept 3) plus the config file (Concept 4)
+together ARE the audit trail a model-risk review asks for: every run's actual scores,
+against a dated, version-controlled statement of what &quot;pass&quot; meant at the time that run
+happened — reconstructing either one after the fact from memory or a Slack thread is not an
+acceptable substitute.</p>
+<p><strong>What breaks in production:</strong> a harness that only ever gets run manually, by hand, before
+a release is not a regression check, it is a one-time spot-check with extra steps — the
+whole value of Concept 1's <code>pytest</code> shape is that it plugs into the exact same CI trigger
+every other test in the repo already uses, which is where Week 27 picks this up next.</p>
+<hr />
+<h2>Architecture Decision — Week 26</h2>
+<p>Choosing between: <strong>hand-rolled, word-overlap metric functions</strong> (this week's Day 1-2/5
+default, genuinely portable and dependency-free) vs. <strong><code>ragas</code>'s real, LLM-judged metrics</strong>
+(the industry-standard library, but confirmed unable to import in this specific environment
+because of a real dependency conflict with <code>langchain</code> 1.4.1) vs. <strong><code>TruLens</code>'s
+instrumentation-plus-dashboard approach</strong> (genuinely working here, real per-record
+drill-down and a persistent query-able database, at the cost of wiring an actual LangChain
+chain through a real recorder).</p>
+<p>Rule of thumb: default to the <strong>hand-rolled metric</strong> for anything that has to run
+everywhere, cheaply, on every commit — Day 5's <code>pytest</code> suite, Day 1's golden-set validation,
+any check that needs to be fast and free of a live LLM call. Move to <strong><code>ragas</code></strong> (once its
+own dependency stack is reconciled with whatever else a given deployment needs — the
+conflict found this week is specific to this sandbox's exact <code>langchain</code> pin, not a
+permanent property of the library) when a team needs the industry-standard, LLM-judged
+metrics for a periodic, budgeted evaluation run, not every commit — the same
+cheap-then-strong logic Day 4's judge cascade already argued for judging individually applies
+at the metric-library level too. Move to <strong><code>TruLens</code></strong> specifically when per-record
+drill-down and a persistent, query-able history of every eval run (Day 3 Concept 4) matter
+more than the metric computation itself — a team debugging WHY a score dropped needs exactly
+what <code>TruChain</code>'s recorded <code>Record</code> objects give them, which a bare metric number never will.</p>
+<p>The actual failure case for any of the three, proven across this week rather than assumed: a
+metric — hand-rolled, <code>ragas</code>, or <code>TruLens</code> — is only as trustworthy as the golden set it is
+measured against (Day 1), the judge configuration behind it if an LLM is involved (Day 2
+Concept 3, Day 4), and the gate that decides what a regression actually is (Day 5 Concept 4).
+Picking the &quot;best&quot; library and skipping those three is how a team ships an evaluation
+harness that LOOKS rigorous and catches nothing — this week's real, repeated gotchas
+(<code>ragas</code>'s import conflict, <code>TruLens</code>'s <code>TP.submit</code> bug and singleton <code>TruSession</code>, a vague
+judge prompt scoring a wrong answer higher than a right one) are each exactly the kind of
+thing a harness with the discipline this week built — golden-set quality checks, judge
+variance measurement, human-agreement kappa, and a version-controlled gate — is designed to
+survive discovering, rather than being invalidated by.</p>
+<hr />
+<div class="pager"><a class="btn ghost" href="week-25.html">&larr; Week 25</a><a class="btn ghost" href="week-27.html">Week 27 &rarr;</a></div>
+</main></body></html>

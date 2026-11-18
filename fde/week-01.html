@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 01 — Vector Search Fundamentals</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/what-are-embeddings" target="_blank" rel="noopener">What are Embeddings?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/cosine-similarity" target="_blank" rel="noopener">How does Cosine Similarity work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/how-does-a-vector-database-work" target="_blank" rel="noopener">How does a Vector Database work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/how-does-approximate-nearest-neighbor-ann-search-work" target="_blank" rel="noopener">How does ANN Search work?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="01" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 01 — Vector Search Fundamentals</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>1 — Real-Time Vector Infrastructure &amp; Streaming</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Expert</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Working Python and NumPy; comfort reading O(n) cost arguments. No prior vector-database experience assumed.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>7–9 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td><code>W01_D1_Vector_Search_Fundamentals.ipynb</code> — runnable coverage of Days 1, 2 and 4. Days 3 and 5 are reading-and-measurement days with no notebook counterpart yet.</td>
+</tr>
+</tbody>
+</table>
+<p><code>Curriculum/Week_10_AI_Engineering</code> covered how embeddings are <em>generated</em> (tokenization,
+transformer encoding, attention). This track picks up from there: everything below is
+about how you <em>search</em> embeddings once you already have them, and what breaks when there
+are ten million of them sitting in a bank.</p>
+<hr />
+<h2 id="day-1">Day 1 — Brute-Force k-NN From Scratch</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="01-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=e9U0QAFbfLI" target="_blank" rel="noopener"><b>Cosine Similarity, Clearly Explained!!!</b><small>StatQuest with Josh Starmer · 10:14</small></a></li><li><a href="https://www.youtube.com/watch?v=m_CooIRM3UI" target="_blank" rel="noopener"><b>Cosine similarity, cosine distance explained | Math, Statistics for data science, machine learning</b><small>codebasics · 12:28</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=vector%20similarity%20search%20from%20scratch%20numpy%20cosine%20similarity" target="_blank" rel="noopener">Search YouTube: vector similarity search from scratch numpy cosine similarity</a></p></div>
+<hr />
+<h3>Concept 1 — Similarity Search Is a Matrix Multiply</h3>
+<p>A vector search is not a lookup. There is no key to match on. You have a query vector and
+a pile of stored vectors, and you score the query against every stored vector, then keep
+the best few.</p>
+<p>For cosine similarity the score between query <code>q</code> and stored vector <code>v</code> is
+<code>dot(q, v) / (||q|| * ||v||)</code>. Run that over every row of a matrix and you have brute-force
+k-nearest-neighbour search. Vectorised, the whole scoring pass is one matrix-vector
+product — which is why NumPy does this far faster than a Python loop even though the
+asymptotic cost is identical.</p>
+<p>Data engineering analogy: this is a full table scan with a computed column in the ORDER BY.
+No index is involved yet. That framing matters, because every later week is about building
+the index that lets you stop scanning.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+claim_notes = [
+    &quot;Water damage to kitchen ceiling from upstairs pipe burst&quot;,
+    &quot;Rear-end collision at intersection, minor bumper damage&quot;,
+    &quot;Theft of laptop and jewelry from vehicle&quot;,
+]
+# Stand-in embeddings. A real system gets these from an embedding model.
+rng = np.random.default_rng(0)
+vectors = rng.normal(size=(3, 8))
+query = rng.normal(size=8)
+
+# Vectorised cosine: one matrix-vector product, then divide by the norms.
+scores = (vectors @ query) / (np.linalg.norm(vectors, axis=1) * np.linalg.norm(query))
+for i, s in enumerate(scores):
+    print(f&quot;{i}  {s: .4f}  {claim_notes[i]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Rewrite the scoring above as an explicit Python <code>for</code> loop calling <code>np.dot</code> once per row,
+and time both versions on a <code>(50_000, 768)</code> random matrix using <code>time.perf_counter()</code>.
+Call each version once and discard that timing before you measure, then take the best of
+five runs. Confirm the two produce the same ranking with <code>np.array_equal</code> on the argsort.</p>
+<p><strong>Starting point:</strong> The vectorised scoring block from this concept's Example, and a fresh <code>rng = np.random.default_rng(0)</code> with <code>corpus = rng.random((50_000, 768), dtype=np.float32)</code> and one query row drawn the same way.</p>
+<p>Expected output: identical rankings from both versions, and the vectorised form roughly
+2-3x faster once warmed up. On a 4-core sandbox this measured 354 ms for the loop against
+149 ms vectorised.</p>
+<p>Two things worth noticing rather than glossing over, because both bite in real
+environments. First, the gap is far smaller than the &quot;vectorise everything&quot; folklore
+suggests — the loop still calls into optimised NumPy per row, so what you save is Python
+interpreter overhead, not the arithmetic. Second, that discarded first call matters: on a
+cold kernel the same measurement came out at 352 ms for the loop against 2342 ms
+vectorised, i.e. the vectorised version measured <strong>6x slower</strong>, because the BLAS library
+pays a one-time dynamic-architecture dispatch cost on its first big call. If you skip the
+warm-up you will measure that startup cost and conclude the wrong thing. This is a general
+benchmarking hazard, not a NumPy quirk, and Day 5 returns to it.</p>
+<hr />
+<h3>Concept 2 — Top-k Without a Full Sort</h3>
+<p>Sorting every score to take the top 5 is wasted work: <code>np.argsort</code> is O(n log n) over the
+whole array when you only need the k best. <code>np.argpartition</code> is O(n) — it partially orders
+the array so that position k splits &quot;at least as good&quot; from &quot;worse&quot;, without ordering
+either side. You then sort only those k.</p>
+<p>At n = 3 this is irrelevant. At n = 10 million it is the difference between sorting ten
+million floats per query and touching each one once.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+rng = np.random.default_rng(1)
+scores = rng.normal(size=1_000_000)
+k = 5
+
+# Partition puts the k largest anywhere in the last k slots, unordered.
+top_k_unordered = np.argpartition(scores, -k)[-k:]
+# Then order just those k.
+top_k = top_k_unordered[np.argsort(-scores[top_k_unordered])]
+
+print(&quot;indices:&quot;, top_k)
+print(&quot;scores :&quot;, np.round(scores[top_k], 4))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Time <code>np.argsort(-scores)[:5]</code> against the partition-then-sort version above on the same
+one-million-element array, and assert both return the same five indices in the same order.</p>
+<p><strong>Starting point:</strong> The one-million-element <code>scores</code> array and the <code>np.argpartition</code> top-k snippet from this concept's Example.</p>
+<p>Expected output: the same five indices from both, with the partition version measurably
+faster. Note that the gap widens as n grows and narrows as k approaches n.</p>
+<hr />
+<h3>Concept 3 — The Cost Model That Forces an Index</h3>
+<p>Brute-force search costs O(n · d) multiply-adds per query: one pass over n vectors, d
+dimensions each. Put real numbers in it.</p>
+<p>A bank with ten million historical transaction memos, embedded at 1024 dimensions, needs
+about 1.024e10 multiply-adds for a single query. That is not a rounding error you can
+optimise away with better Python — it is roughly a second of pure arithmetic per query on
+a single core, before you have touched the network or the database.</p>
+<p>The exactness you buy with that cost is real, though, and worth naming: brute force
+returns the true nearest neighbours, always. That is an audit property, not a performance
+one, and it is occasionally the reason to keep it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>n, d = 10_000_000, 1024
+mults = n * d
+bytes_f32 = n * d * 4
+
+print(f&quot;multiply-adds per query : {mults:.3e}&quot;)
+print(f&quot;corpus size (float32)   : {bytes_f32 / 1024**3:.1f} GiB&quot;)
+print(f&quot;corpus size (float16)   : {bytes_f32 / 2 / 1024**3:.1f} GiB&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Compute the same three figures for a smaller, more typical starting corpus: 250,000 claim
+notes at 768 dimensions. Then state, in one sentence, whether brute force is defensible at
+that size and why.</p>
+<p><strong>Starting point:</strong> The cost-model block from this concept's Example (<code>mults = n * d</code> and the float32/float16 corpus-size prints), re-run at <code>n = 250_000</code>, <code>d = 768</code>.</p>
+<p>Expected output: roughly 1.9e8 multiply-adds per query and under a gigabyte of float32
+storage — small enough that brute force is genuinely fine, which is the honest answer for
+most first deployments.</p>
+<hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> The ten-million-memo corpus in Concept 3 does not arrive as a tidy
+Parquet file. It arrives as a nightly fixed-width extract off the core banking platform,
+and the memo field is a 40-character truncated column that has been overloaded for two
+decades. Sizing your index against the row count is easy; discovering the text is
+truncated, uppercase and full of branch-specific abbreviations is the real Week 1 of a
+real engagement.</p>
+<p><strong>Compliance angle:</strong> Exact brute-force search has one property an approximate index does
+not: it is reproducible and explainable without qualification. If a regulator asks why a
+particular historical claim was surfaced as similar, &quot;we compared against every record and
+these scored highest&quot; is a complete answer. Keep that in mind before assuming the fastest
+option is automatically the right one for a regulated decision path.</p>
+<p><strong>What breaks in production:</strong> Loading the whole corpus into a NumPy array works on your
+laptop with a sample and dies on the real volume. A 10M x 1024 float32 matrix is about 39
+GiB resident — more RAM than most on-prem application servers are given. The failure is
+not slow search; it is the process being killed during load.</p>
+<hr />
+<h2 id="day-2">Day 2 — Distance Metrics and Normalization</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="01-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=WKWvAYLL28c" target="_blank" rel="noopener"><b>Day 30 : Choosing the Right Vector Similarity Metric: Cosine vs Euclidean vs Dot Product Explained</b><small>Cloud and Coffee with Navnit · 6:22</small></a></li><li><a href="https://www.youtube.com/watch?v=xTaDx3tbYMs" target="_blank" rel="noopener"><b>5. Cosine Similarity vs. Euclidean Distance vs. Dot Product: Choosing the Right Metric for AI Search</b><small>SH AI Academy · 6:14</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=cosine%20similarity%20vs%20euclidean%20distance%20vs%20dot%20product%20embeddings" target="_blank" rel="noopener">Search YouTube: cosine similarity vs euclidean distance vs dot product embeddings</a></p></div>
+<hr />
+<h3>Concept 1 — Three Metrics and What Each Measures</h3>
+<p>Three operators dominate vector search, and vector databases expose all three:</p>
+<ul>
+<li><strong>Cosine similarity</strong> measures the angle between vectors and ignores their length.
+Higher is more similar, bounded in [-1, 1].</li>
+<li><strong>Euclidean (L2) distance</strong> measures straight-line distance and is sensitive to length.
+Lower is more similar, bounded in [0, inf).</li>
+<li><strong>Inner product (dot product)</strong> is unbounded and rewards both alignment and magnitude.</li>
+</ul>
+<p>For text embeddings, cosine is the usual default, because the length of an embedding
+vector often varies with incidental things — document length, model quirks — rather than
+with meaning. But &quot;usual default&quot; is not &quot;always correct&quot;, which Concept 3 gets to.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+rng = np.random.default_rng(2)
+v = rng.normal(size=(4, 8))
+q = rng.normal(size=8)
+
+cos = (v @ q) / (np.linalg.norm(v, axis=1) * np.linalg.norm(q))
+l2 = np.linalg.norm(v - q, axis=1)
+ip = v @ q
+
+for i in range(4):
+    print(f&quot;{i}  cos={cos[i]: .4f}  l2={l2[i]: .4f}  ip={ip[i]: .4f}&quot;)
+print(&quot;best by cosine:&quot;, int(np.argmax(cos)))
+print(&quot;best by l2    :&quot;, int(np.argmin(l2)))
+print(&quot;best by ip    :&quot;, int(np.argmax(ip)))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the code above, find a random seed where the three metrics disagree about which
+vector is closest. Print the seed and the three winners.</p>
+<p><strong>Starting point:</strong> The three-metric comparison block from this concept's Example, with its fixed seed lifted into a loop variable so you can sweep seeds.</p>
+<p>Expected output: a seed value and three indices that are not all the same — disagreement
+is easy to produce with unnormalized random vectors, which is exactly the point being set
+up for Concept 2.</p>
+<hr />
+<h3>Concept 2 — Normalization Collapses the Difference</h3>
+<p>Here is the fact that resolves most of the metric debate. For <strong>unit-length</strong> vectors:</p>
+<pre><code>||a - b||^2 = 2 - 2 * cos(a, b)
+</code></pre><p>Squared L2 distance is a strictly decreasing function of cosine similarity. That means for
+normalized vectors, cosine and L2 produce <strong>identical rankings</strong>. Not similar rankings —
+identical. The same holds for inner product, since with <code>||a|| = ||b|| = 1</code> the inner
+product <em>is</em> the cosine.</p>
+<p>This matters practically because most production embedding models emit L2-normalized
+vectors by default. So the metric argument you will read online is largely moot for the
+models you will actually use, and the real decision becomes a cost question: cosine
+requires computing norms per comparison, inner product does not. That is why vector
+databases document inner product as the faster choice for pre-normalized data.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+rng = np.random.default_rng(3)
+v = rng.normal(size=(6, 8))
+q = rng.normal(size=8)
+v = v / np.linalg.norm(v, axis=1, keepdims=True)   # normalize
+q = q / np.linalg.norm(q)
+
+cos_rank = np.argsort(-(v @ q))
+l2_rank = np.argsort(np.linalg.norm(v - q, axis=1))
+
+print(&quot;cosine ranking:&quot;, cos_rank.tolist())
+print(&quot;l2 ranking    :&quot;, l2_rank.tolist())
+print(&quot;identical     :&quot;, cos_rank.tolist() == l2_rank.tolist())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Verify the identity numerically: for two random unit vectors, print <code>||a-b||^2</code> and
+<code>2 - 2*cos(a,b)</code> side by side and assert they match with <code>np.isclose</code>. Then repeat without
+normalizing and observe that the identity no longer holds.</p>
+<p><strong>Starting point:</strong> Two random vectors at any dimension, each divided by its own <code>np.linalg.norm</code>, and the same pair left unnormalized for the second half of the exercise.</p>
+<p>Expected output: the two quantities equal to floating-point tolerance for unit vectors,
+and clearly unequal once you skip normalization.</p>
+<hr />
+<h3>Concept 3 — Match the Metric to the Model, Not to Taste</h3>
+<p>The metric is not a free choice. An embedding model is trained with a particular similarity
+function in its objective, and its vector space is shaped around that function. Using a
+different metric at query time is not guaranteed to be wrong, but it is unvalidated —
+you are measuring the space in a way its training never optimised for.</p>
+<p>The practical rule: read the model card, use the metric the model documents, and normalize
+if the model expects normalized input. Then keep the choice in configuration, not scattered
+across call sites, because changing it later means rebuilding every index that was built
+under the old operator class.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># The choice belongs in one config object, not inline at each call site.
+INDEX_CONFIG = {
+    &quot;model_id&quot;: &quot;example-embedding-model-v2&quot;,
+    &quot;dim&quot;: 1024,
+    &quot;normalize&quot;: True,          # per the model card
+    &quot;metric&quot;: &quot;inner_product&quot;,  # valid because vectors are pre-normalized
+}
+
+def score(vectors, query, cfg=INDEX_CONFIG):
+    if cfg[&quot;normalize&quot;]:
+        return vectors @ query          # cosine, since both sides are unit length
+    norms = __import__(&quot;numpy&quot;).linalg.norm(vectors, axis=1)
+    return (vectors @ query) / (norms * __import__(&quot;numpy&quot;).linalg.norm(query))
+
+print(INDEX_CONFIG[&quot;metric&quot;], &quot;with normalize =&quot;, INDEX_CONFIG[&quot;normalize&quot;])
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Write down, for your own current stack, where an index-metric choice would have to be
+recorded so that a future model swap does not silently mix two metrics in one collection.
+Name the specific file or table.</p>
+<p><strong>Starting point:</strong> No code. Your own current stack: the file, schema or table where an embedding model id and the index metric built against it are recorded today — or the absence of one.</p>
+<p>Expected output: a concrete location — a config file, a migration, or a metadata column —
+not a general intention. If you cannot name one, that is the finding.</p>
+<hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> Claim notes off a legacy core are wildly uneven in length: a 12-character
+&quot;TOTAL LOSS&quot; beside a 4,000-character adjuster narrative. That length variation is exactly
+what cosine is insensitive to and raw inner product is not — so on unnormalized legacy text
+the metric choice genuinely changes results, unlike the clean normalized case in Concept 2.</p>
+<p><strong>Compliance angle:</strong> Changing the metric changes which records are retrieved, which
+changes what a model sees, which under EU AI Act Article 11 documentation duties is a
+change worth recording. Treat the metric as a versioned property of the index, not a
+tuning knob someone can adjust in a console.</p>
+<p><strong>What breaks in production:</strong> Mixing normalized and unnormalized vectors in one
+collection. It fails silently — no error, just quietly wrong rankings for the subset that
+was written under the other convention. This is why <code>normalize</code> belongs in the same config
+object as <code>model_id</code> and <code>dim</code>.</p>
+<hr />
+<h2 id="day-3">Day 3 — Embedding Geometry and Dimensionality</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="01-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=9Tf-_mJhOkU" target="_blank" rel="noopener"><b>The Curse of Dimensionality</b><small>DataMListic · 8:07</small></a></li><li><a href="https://www.youtube.com/watch?v=QfwwqRNYWTw" target="_blank" rel="noopener"><b>Curse of Dimensionality Explained: Why High Dimensions Break Machine Learning</b><small>Insightforge | AI &amp; Data Science · 7:39</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=curse%20of%20dimensionality%20high%20dimensional%20vector%20space%20explained" target="_blank" rel="noopener">Search YouTube: curse of dimensionality high dimensional vector space explained</a></p></div>
+<hr />
+<h3>Concept 1 — Storage Is the First Real Constraint</h3>
+<p>Before latency, before recall, there is RAM. Most vector indexes want to be resident in
+memory, and the arithmetic is unforgiving:</p>
+<pre><code>bytes = n_vectors x dimensions x bytes_per_component
+</code></pre><p>One million vectors at 1024 dimensions in float32 is about 4.1 GB (3.8 GiB) of raw vectors
+— before the index structure, which adds its own overhead on top. Halving to float16 halves
+that, at some accuracy cost. This single calculation decides more architectures than any
+benchmark does.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def corpus_bytes(n, dim, bytes_per=4):
+    return n * dim * bytes_per
+
+for n in (100_000, 1_000_000, 10_000_000):
+    f32 = corpus_bytes(n, 1024, 4)
+    f16 = corpus_bytes(n, 1024, 2)
+    print(f&quot;{n:&gt;10,} vectors  float32={f32/1024**3:6.2f} GiB  float16={f16/1024**3:6.2f} GiB&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a third column estimating HNSW graph overhead: assume <code>M = 16</code> neighbours per node
+stored as 4-byte ids, so <code>n * 16 * 4</code> bytes of edges. Print the combined footprint and
+identify the first row that exceeds a 16 GiB server.</p>
+<p><strong>Starting point:</strong> The <code>corpus_bytes(n, dim, bytes_per=4)</code> helper and the <code>(100_000, 1_000_000, 10_000_000)</code> loop from this concept's Example, plus <code>M = 16</code> and <code>SERVER_BUDGET_GIB = 16</code>.</p>
+<p>Expected output: edge overhead of roughly 61 MiB per million vectors — small next to the
+vectors themselves — with the 10M row clearly past a 16 GiB budget in float32.</p>
+<hr />
+<h3>Concept 2 — Distances Concentrate as Dimension Grows</h3>
+<p>In high dimensions, the distances from a query to all points in a random cloud become
+increasingly similar to one another. The ratio between the nearest and farthest distance
+tends toward 1. This is the practical face of the &quot;curse of dimensionality&quot;, and it has a
+direct consequence: the <em>contrast</em> your search relies on gets weaker as d grows, all else
+equal.</p>
+<p>Real embeddings are not uniform random clouds — they have structure, which is precisely why
+search works at all at 768 or 1536 dimensions. But the effect is real enough that it
+explains why naive high-dimensional indexing degrades, and why measuring recall on your own
+data matters more than trusting a dimension count.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+rng = np.random.default_rng(4)
+for d in (2, 16, 128, 1024):
+    pts = rng.normal(size=(2000, d))
+    q = rng.normal(size=d)
+    dists = np.linalg.norm(pts - q, axis=1)
+    print(f&quot;d={d:&gt;5}  min={dists.min():8.3f}  max={dists.max():8.3f}  &quot;
+          f&quot;max/min={dists.max()/dists.min():.3f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Re-run the example but replace the uniform random cloud with clustered data: generate 4
+cluster centres and sample points around them with small noise. Then measure the max/min
+ratio <strong>twice</strong> — once with an independent random query (drawn the same way as the example
+above), and once with a query drawn near one of the centres, <code>centres[0] + small_noise</code>.
+Compare both against the unclustered case at d = 1024.</p>
+<p><strong>Starting point:</strong> The distance-concentration block from this concept's Example, with the uniform random cloud replaced by 4 cluster centres and points sampled around them with small noise.</p>
+<p>Expected output: the independent query gives a ratio near or slightly <em>below</em> the
+unclustered baseline — roughly 1.05 at tight noise against about 1.17 unclustered. The
+near-cluster query is the one that produces dramatically more contrast: around 21 at noise
+0.05, falling toward the baseline as noise grows.</p>
+<p>That two-way comparison is the actual lesson, and it is easy to get backwards. Structure
+alone does not restore contrast — a query landing nowhere near any cluster sees a
+tightly-concentrated wall of distances regardless of how well-clustered the data is. What
+restores contrast is structure <em>plus</em> a query that lands inside it. That is exactly the
+real case: an embedded query about water damage lands near the water-damage cluster, which
+is why search works on real embeddings at 1024 dimensions and does not work on uniform
+noise.</p>
+<hr />
+<h3>Concept 3 — Reducing Dimensions Moves Recall</h3>
+<p>Cutting dimensions is tempting: it shrinks storage and speeds every comparison. It also
+changes the geometry your recall depends on, and the loss is not uniform — it usually hurts
+hardest on the near-duplicate pairs you most wanted to find.</p>
+<p>The rule is not &quot;never reduce&quot; but &quot;never reduce blind&quot;. Any dimension reduction, whether
+PCA, a smaller model, or a model's own Matryoshka-style truncation, is a change that has
+to be measured on your own query set against the full-dimension baseline, exactly like an
+index parameter change.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+rng = np.random.default_rng(5)
+full = rng.normal(size=(500, 256))
+full /= np.linalg.norm(full, axis=1, keepdims=True)
+q = full[0]
+
+# Truncate to the first 64 dims and re-normalize -- the cheapest possible reduction.
+trunc = full[:, :64]
+trunc = trunc / np.linalg.norm(trunc, axis=1, keepdims=True)
+
+top_full = np.argsort(-(full @ q))[:10]
+top_trunc = np.argsort(-(trunc @ q[:64] / np.linalg.norm(q[:64])))[:10]
+overlap = len(set(top_full.tolist()) &amp; set(top_trunc.tolist()))
+print(f&quot;top-10 overlap after 4x truncation: {overlap}/10&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Sweep the truncation width over <code>[256, 192, 128, 64, 32, 16]</code> and plot or print the top-10
+overlap at each width. Identify the first sampled width where overlap drops below 8/10.</p>
+<p><strong>Starting point:</strong> The truncation-and-overlap block from this concept's Example, and the width list <code>[256, 192, 128, 64, 32, 16]</code>.</p>
+<p>Expected output: full overlap at no truncation, falling off quickly from there — at these
+sampled widths the overlap drops below 8/10 by width 192 (7/10) and reaches 1/10 by width
+32. That is the first <em>sampled</em> crossing, not the true one: sweep every integer width on
+this same seed and the real first sub-8/10 crossing sits nearer 229. A coarse sweep locates
+a knee, it does not pin it down — worth remembering before quoting a threshold from one.</p>
+<p>Read that decline with one caveat: these are unstructured Gaussian vectors, the worst case
+for truncation, because there is no learned structure concentrated in the leading
+dimensions for truncation to preserve. Real embeddings degrade more gracefully, and models
+trained with Matryoshka-style objectives are explicitly built so that prefixes remain
+usable. The transferable lesson is the method — sweep and measure against a full-dimension
+baseline — not this particular curve.</p>
+<hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> On-prem sizing is fixed years in advance through a hardware procurement
+cycle. You do not get to add RAM when the corpus grows; you get to justify a capital
+request. Concept 1's arithmetic is the input to that justification, and getting it wrong by
+a factor of two is a budget conversation, not a config change.</p>
+<p><strong>Compliance angle:</strong> Data residency can forbid the obvious escape hatch. &quot;Move it to a
+managed cloud vector service with more memory&quot; is not available when customer data must
+remain in-country and on-premises, so the storage math has to close on hardware you
+actually control.</p>
+<p><strong>What breaks in production:</strong> Someone swaps in a model with a different dimension and the
+index silently accepts vectors of the wrong width, or rejects them at write time deep in a
+batch job at 02:00. Assert dimension at the ingestion boundary, not at the database.</p>
+<hr />
+<h2 id="day-4">Day 4 — HNSW Mental Model</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="01-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=chz74Mtd1AA" target="_blank" rel="noopener"><b>Vector Search &amp; Approximate Nearest Neighbors (ANN) | FAISS (HNSW &amp; IVF)</b><small>Mustafa Zaki · 18:37</small></a></li><li><a href="https://www.youtube.com/watch?v=9NvO-VdjY80" target="_blank" rel="noopener"><b>Exact vs Approximate (HNSW) Nearest Neighbors in Vector Databases</b><small>Redis · 6:10</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=HNSW%20algorithm%20explained%20approximate%20nearest%20neighbor" target="_blank" rel="noopener">Search YouTube: HNSW algorithm explained approximate nearest neighbor</a></p></div>
+<hr />
+<h3>Concept 1 — A Layered Proximity Graph</h3>
+<p>HNSW (Hierarchical Navigable Small World) is the index behind most production vector
+databases. The structure: every vector is a node in a graph, connected to some of its
+near neighbours. Nodes are assigned to layers with exponentially decreasing probability, so
+the top layer is very sparse and the bottom layer contains everything.</p>
+<p>The sparse upper layers act as long-range links across the space; the dense bottom layer
+gives fine-grained local resolution. If you know skip lists, the layer assignment is the
+same idea applied to a graph rather than a linked list.</p>
+<p>Malkov and Yashunin's original paper characterises the search as scaling logarithmically
+with the number of elements. That is the property that makes it worth building.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+# Layer assignment: geometric, controlled by mL. Most nodes land only on layer 0.
+rng = np.random.default_rng(6)
+mL = 1 / np.log(16)          # the usual 1/ln(M) choice
+levels = np.floor(-np.log(rng.random(100_000)) * mL).astype(int)
+
+for lvl in range(levels.max() + 1):
+    count = int((levels == lvl).sum())
+    print(f&quot;layer {lvl}: {count:&gt;7,} nodes ({count/len(levels)*100:6.3f}%)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Re-run the layer assignment with <code>M = 4</code> and with <code>M = 64</code> (adjusting <code>mL = 1/ln(M)</code>) and
+compare how many layers each produces for the same 100,000 nodes.</p>
+<p><strong>Starting point:</strong> The layer-assignment block from this concept's Example at 100,000 nodes, with <code>M</code> and <code>mL = 1/ln(M)</code> as parameters rather than constants.</p>
+<p>Expected output: larger <code>M</code> gives a smaller <code>mL</code> and therefore fewer, flatter layers;
+smaller <code>M</code> produces more layers. Each run's exact counts vary with the seed — the trend is
+what matters.</p>
+<hr />
+<h3>Concept 2 — Greedy Descent Is the Whole Search</h3>
+<p>Query time is simple to describe. Start at a fixed entry point in the top layer. Move
+greedily to whichever neighbour is closer to the query. When no neighbour improves, drop to
+the next layer down and repeat. At the bottom layer, instead of keeping just the single
+best, keep a dynamic candidate list of size <code>ef</code> and return the best k from it.</p>
+<p>That <code>ef</code> parameter (<code>ef_search</code> at query time) is the recall dial: larger means more
+candidates explored, better recall, more latency. It must be at least k.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+def greedy_step(points, neighbours, current, query):
+    &quot;&quot;&quot;One greedy hop: move to the closest neighbour, or stay if none is better.&quot;&quot;&quot;
+    best, best_d = current, np.linalg.norm(points[current] - query)
+    for nb in neighbours[current]:
+        d = np.linalg.norm(points[nb] - query)
+        if d &lt; best_d:
+            best, best_d = nb, d
+    return best, best_d
+
+rng = np.random.default_rng(7)
+points = rng.normal(size=(20, 2))
+neighbours = {i: np.argsort(np.linalg.norm(points - points[i], axis=1))[1:4].tolist()
+              for i in range(20)}
+query = rng.normal(size=2)
+
+cur = 0
+for hop in range(10):
+    nxt, d = greedy_step(points, neighbours, cur, query)
+    print(f&quot;hop {hop}: node {cur} -&gt; {nxt}  dist={d:.4f}&quot;)
+    if nxt == cur:
+        print(&quot;no improving neighbour; stopped&quot;)
+        break
+    cur = nxt
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Compare the node the greedy walk converges to against the true nearest neighbour found by
+brute force over all 20 points. Then re-run from several different starting nodes.</p>
+<p><strong>Starting point:</strong> The 20-point graph and the <code>greedy()</code> walk from this concept's Example, plus a brute-force scan over the same 20 points for ground truth.</p>
+<p>Expected output: the walk usually reaches the true nearest neighbour, but not from every
+starting point — which is a two-dimensional demonstration of the exact approximation that
+HNSW trades away.</p>
+<hr />
+<h3>Concept 3 — Where Approximation Loses the True Neighbour</h3>
+<p>Greedy descent can get stuck. If the true nearest neighbour is not reachable through a
+chain of strictly-improving hops from where you started, you will not find it. That is the
+whole source of HNSW's recall loss, and it explains the shape of the queries that fail:</p>
+<ul>
+<li>Queries landing in sparse regions of the space, where local connectivity is poor.</li>
+<li>True neighbours that are isolated — connected to their own cluster but weakly linked to
+where the search entered.</li>
+<li>Anything reachable only through a temporarily <em>worse</em> hop, which greedy search refuses.</li>
+</ul>
+<p>Raising <code>ef_search</code> mitigates this by keeping more candidates in flight rather than
+committing to the single best at each step. It reduces the failure rate; it does not
+eliminate it.</p>
+<p>One clarification worth holding onto, because it is commonly muddled: HNSW's logarithmic
+scaling is a property of <em>this</em> graph-descent design. IVF-family indexes — covered
+alongside HNSW in Week 04 — use a completely different cluster-then-probe approach with
+different scaling behaviour. They are separate algorithm families, not two settings of one
+knob.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+rng = np.random.default_rng(8)
+points = rng.normal(size=(200, 4))
+neighbours = {i: np.argsort(np.linalg.norm(points - points[i], axis=1))[1:6].tolist()
+              for i in range(200)}
+
+def greedy(entry, query):
+    cur = entry
+    while True:
+        cand = min(neighbours[cur], key=lambda n: np.linalg.norm(points[n] - query))
+        if np.linalg.norm(points[cand] - query) &gt;= np.linalg.norm(points[cur] - query):
+            return cur
+        cur = cand
+
+misses = 0
+trials = 200
+for t in range(trials):
+    q = rng.normal(size=4)
+    true_nn = int(np.argmin(np.linalg.norm(points - q, axis=1)))
+    if greedy(entry=0, query=q) != true_nn:
+        misses += 1
+print(f&quot;greedy-from-fixed-entry missed the true NN on {misses}/{trials} queries&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Modify <code>greedy()</code> to keep the best <code>ef = 5</code> candidates at each step instead of only the
+single best, and re-measure the miss rate over the same 200 queries.</p>
+<p><strong>Starting point:</strong> The <code>greedy()</code> function and the 200-query miss-rate harness from this concept's Example.</p>
+<p>Expected output: a clearly lower miss rate with the wider candidate list — on this setup
+the fixed-entry greedy walk misses roughly 131 of 200, while keeping the best 5 candidates
+drops that to around 57, best 10 to around 29, and best 20 to around 12. More candidates,
+better recall, more distance computations per query: the recall-versus-latency tradeoff
+reproduced in miniature.</p>
+<p>Do not read that 131/200 as HNSW's real miss rate. This toy deliberately strips out the
+two things that make HNSW work — there is no layer hierarchy, so there are no long-range
+links to cross the space, and every search starts from the same fixed node 0. A real HNSW
+index with those restored reaches well over 90% recall at sane <code>ef_search</code> values. What
+the toy isolates is the failure <em>mechanism</em>, not the failure <em>rate</em>.</p>
+<hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> HNSW builds are expensive and single-shot: changing <code>M</code> means rebuilding
+the index, not reconfiguring it. On-prem, that rebuild competes for the same machine as the
+nightly batch. The build window, not the build time, is usually the binding constraint.</p>
+<p><strong>Compliance angle:</strong> An approximate index means the answer to &quot;did you consider every
+record?&quot; is formally no. For a screening or monitoring control where completeness is the
+point — sanctions screening being the obvious one — that answer may be unacceptable, and an
+exact pass is required regardless of cost. Know which of your use cases are in that
+category before choosing an index.</p>
+<p><strong>What breaks in production:</strong> <code>ef_search</code> left at a library default that was tuned for a
+benchmark, not your corpus. Nothing errors. Recall is simply lower than anyone believes,
+and nobody finds out until someone checks a result by hand.</p>
+<hr />
+<h2 id="day-5">Day 5 — Recall and Latency Measurement</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="01-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=IKKQhJP1I5k" target="_blank" rel="noopener"><b>Precision@K &amp; Recall@K: Evaluate Search Results</b><small>Professor Py: AI Foundations · 7:16</small></a></li><li><a href="https://www.youtube.com/watch?v=TEjdykexhY0" target="_blank" rel="noopener"><b>ANN Benchmarking in Python: Recall@K + P95 Latency (HNSWlib vs FAISS)</b><small>Professor Py: Information Retrieval with Python · 7:26</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=measuring%20recall%20at%20k%20approximate%20nearest%20neighbor%20benchmark" target="_blank" rel="noopener">Search YouTube: measuring recall at k approximate nearest neighbor benchmark</a></p></div>
+<hr />
+<h3>Concept 1 — Recall@k Against Brute-Force Ground Truth</h3>
+<p>You cannot tune what you have not measured, and for approximate search the measurement is
+recall@k: of the k true nearest neighbours, how many did the index actually return?</p>
+<p>The ground truth comes from brute force. That is the one place the expensive exact search
+earns its cost unambiguously — run it once, offline, over a fixed query set, and keep the
+results as the reference every index configuration is scored against.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+def recall_at_k(approx_ids, true_ids, k):
+    &quot;&quot;&quot;Fraction of the true top-k that appear anywhere in the approximate top-k.&quot;&quot;&quot;
+    return len(set(approx_ids[:k]) &amp; set(true_ids[:k])) / k
+
+true_ids = [12, 7, 44, 3, 91]
+approx_ids = [12, 44, 58, 3, 7]
+print(&quot;recall@5:&quot;, recall_at_k(approx_ids, true_ids, 5))
+print(&quot;recall@3:&quot;, recall_at_k(approx_ids, true_ids, 3))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Build a 50-query ground-truth set over a random 20,000-vector corpus using brute force,
+then simulate an approximate index by randomly dropping 10% of candidates before ranking.
+Report mean recall@10 across the 50 queries.</p>
+<p><strong>Starting point:</strong> A fresh corpus of 20,000 random vectors at 128 dimensions and 50 queries drawn the same way, plus the <code>recall_at_k(approx_ids, true_ids, k)</code> helper from this concept's Example.</p>
+<p>Expected output: mean recall@10 somewhat below 1.0 and reasonably stable across reruns.
+Report the mean with the spread, not a single number from one query.</p>
+<hr />
+<h3>Concept 2 — Report Percentiles, Never the Mean</h3>
+<p>Mean latency hides exactly the behaviour that matters. Vector search latency is
+right-skewed: most queries are fast, a minority traverse far more of the graph. A p99 that
+is ten times the p50 is normal, and it is the p99 that decides whether an interactive
+application feels broken.</p>
+<p>Report p50, p95 and p99. Discard warm-up runs — the first queries after an index loads pay
+page-cache and allocation costs that are not representative. And keep the query workload
+fixed, because comparing two configurations on two different query sets measures nothing.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np, time
+
+def measure(fn, queries, warmup=10):
+    for q in queries[:warmup]:      # warm-up, results discarded
+        fn(q)
+    lat = []
+    for q in queries[warmup:]:
+        t0 = time.perf_counter()
+        fn(q)
+        lat.append((time.perf_counter() - t0) * 1000)
+    lat = np.array(lat)
+    return {
+        &quot;p50_ms&quot;: float(np.percentile(lat, 50)),
+        &quot;p95_ms&quot;: float(np.percentile(lat, 95)),
+        &quot;p99_ms&quot;: float(np.percentile(lat, 99)),
+        &quot;mean_ms&quot;: float(lat.mean()),
+        &quot;n&quot;: len(lat),
+    }
+
+rng = np.random.default_rng(9)
+corpus = rng.normal(size=(20_000, 128))
+queries = rng.normal(size=(200, 128))
+search = lambda q: np.argpartition(-(corpus @ q), 10)[:10]
+print(measure(search, queries))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Run <code>measure()</code> twice in the same process without resetting anything, and compare the two
+result dicts. Then run it once with <code>warmup=0</code> and compare again.</p>
+<p><strong>Starting point:</strong> The <code>measure()</code> function from this concept's Example, called twice in one process.</p>
+<p>Expected output: the <code>warmup=0</code> run shows a noticeably worse p99 than the warmed runs. This
+is the concrete reason warm-up exclusion is not optional bookkeeping.</p>
+<hr />
+<h3>Concept 3 — A Benchmark Harness You Can Rerun</h3>
+<p>A benchmark is only useful if a future you can rerun it unchanged. That means the query
+set, the corpus, the ground truth and the config are all fixed artifacts, and the output is
+a structured record rather than console output someone screenshots.</p>
+<p>The output you want per configuration: recall@k, p50/p95/p99 latency, index build time and
+resident memory. Build time and memory belong in the same record as recall, because a
+configuration that wins on recall and takes eleven hours to build is not actually the
+winner.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json, platform, datetime
+
+def benchmark_record(config, recall, latency, build_s, rss_mb):
+    return {
+        &quot;timestamp&quot;: datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        &quot;host&quot;: platform.node(),
+        &quot;config&quot;: config,                 # every index parameter, no defaults implied
+        &quot;recall_at_10&quot;: recall,
+        &quot;latency_ms&quot;: latency,            # the p50/p95/p99 dict from Concept 2
+        &quot;build_seconds&quot;: build_s,
+        &quot;resident_mb&quot;: rss_mb,
+    }
+
+rec = benchmark_record(
+    config={&quot;index&quot;: &quot;hnsw&quot;, &quot;m&quot;: 16, &quot;ef_construction&quot;: 200, &quot;ef_search&quot;: 64},
+    recall=0.94,
+    latency={&quot;p50_ms&quot;: 1.8, &quot;p95_ms&quot;: 6.1, &quot;p99_ms&quot;: 11.4},
+    build_s=412.0,
+    rss_mb=5120,
+)
+print(json.dumps(rec, indent=2))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend <code>benchmark_record()</code> so it refuses to produce a record when any index parameter is
+absent from <code>config</code> — raise on a missing key rather than letting a default slip through
+unrecorded. Then explain in one line why an unrecorded default makes the whole record
+untrustworthy.</p>
+<p><strong>Starting point:</strong> The <code>benchmark_record(config, recall, latency, build_s, rss_mb)</code> function from this concept's Example, and a <code>config</code> dict with <code>ef_search</code> deliberately absent.</p>
+<p>Expected output: a raised exception naming the missing parameter, and the observation that
+a record you cannot reproduce from is not a measurement, it is an anecdote.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> Benchmarking on a shared on-prem host means the nightly batch is your
+noisy neighbour. A p99 measured at 21:00 and one measured at 02:00 can differ by an order
+of magnitude for reasons that have nothing to do with your index. Record the wall-clock
+window in the benchmark record.</p>
+<p><strong>Compliance angle:</strong> EU AI Act Article 15 expects declared accuracy metrics for high-risk
+systems. Recall@k measured against an exact baseline is precisely the kind of declared,
+reproducible metric that supports such a claim — provided the harness is versioned and the
+result is an artifact, not a screenshot in a slide deck.</p>
+<p><strong>What breaks in production:</strong> Recall is measured once, at launch, and never again. The
+corpus grows, its distribution shifts, and the <code>ef_search</code> that gave 94% recall on 200,000
+vectors quietly gives far less on two million. Recall is a monitored metric, not a
+launch-day certificate.</p>
+<hr />
+<h2>Architecture Decision — Week 01</h2>
+<p><strong>Choosing between:</strong> exact brute-force k-NN vs. an approximate nearest-neighbour index
+(the HNSW or IVF families).</p>
+<p><strong>Rule of thumb:</strong> use exact brute force while the corpus is small enough that a full scan
+fits the latency budget — in practice up to roughly the low hundreds of thousands of
+vectors on a single node — or whenever completeness is a control requirement rather than a
+preference, sanctions and screening paths being the clearest example. Move to an ANN index
+when scan latency breaches the budget, the corpus outgrows a single machine's memory, or
+query volume makes per-query CPU the dominant cost. Having moved, treat recall@k as a
+monitored production metric rather than a one-time acceptance test, because the point at
+which an ANN configuration stops being good enough is a moving target set by corpus growth,
+not a fixed property of the index.</p>
+<div class="pager"><a class="btn ghost" href="week-00.html">&larr; Week 00</a><a class="btn ghost" href="week-02.html">Week 02 &rarr;</a></div>
+</main></body></html>

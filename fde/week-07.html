@@ -1,0 +1,950 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 07 — Streaming Vector Infra Against Legacy Sources</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="07" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 07 — Streaming Vector Infra Against Legacy Sources</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>1 — Real-Time Vector Infrastructure &amp; Streaming (closes Phase 1)</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Expert</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 06 Kafka/Redpanda streaming ingestion (consumer groups, offsets, idempotent content-hash upsert); comfort reading SQL. No prior CDC experience assumed.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. Every genuinely new mechanic this week is MSSQL/Oracle change-data-capture internals — <code>sys.sp_cdc_enable_table</code>, <code>cdc.fn_cdc_get_all_changes_*</code>, <code>DBMS_LOGMNR</code> — that need a live SQL Server or Oracle instance this sandbox does not have. Those blocks are marked REAL MODE below with API-correct syntax and a shape-only expected output. Everywhere the underlying <em>logic</em> does not require the real database — watermark polling, staleness arithmetic, event-time merging — this file's code blocks are genuinely runnable pure-Python/stdlib, and every number attached to one was actually measured here, not invented.</td>
+</tr>
+</tbody>
+</table>
+<p>Week 06 built the pipeline: Kafka topics, consumer groups, idempotent upsert into the
+vector index. This week's lesson is that <strong>the source, not the pipeline, sets the latency
+floor</strong>. No amount of downstream engineering makes a mainframe nightly batch extract
+arrive sooner, and pretending otherwise is how a beautifully engineered streaming
+pipeline ends up fed by a source that was never going to keep up with it.</p>
+<hr />
+<h2 id="day-1">Day 1 — Log-Based CDC from MSSQL</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=E0KpqD3SM1U" target="_blank" rel="noopener"><b>Configure Change Data Capture (CDC) In SQL Server | Easy SQL Tutorial</b><small>The SQL Guy · 6:41</small></a></li><li><a href="https://www.youtube.com/watch?v=CXICaJRmFWg" target="_blank" rel="noopener"><b>MS SQL Server :: English: CDC - Change Data Capture</b><small>Wally Pons · 22:38</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=SQL%20Server%20change%20data%20capture%20CDC%20tutorial%20log%20based" target="_blank" rel="noopener">Search YouTube: SQL Server change data capture CDC tutorial log based</a></p></div>
+<hr />
+<h3>Concept 1 — Enabling Capture, and What It Actually Creates</h3>
+<p><code>sys.sp_cdc_enable_table</code> is not a flag you flip; it provisions real objects. Enabling
+capture on a table creates a <strong>capture instance</strong> (default name <code>&lt;schema&gt;_&lt;table&gt;</code>, e.g.
+<code>dbo_Claim</code>), a change table (<code>cdc.dbo_Claim_CT</code>), and two SQL Server Agent jobs (capture
+and cleanup) — which means capture requires SQL Server Agent running, not just the
+database engine.</p>
+<p>A table can carry at most <strong>two capture instances at once</strong>. That limit looks like an
+arbitrary restriction until you need to change a captured table's schema without an
+outage: you enable a second instance against the new schema, let both run side by side
+while consumers migrate, then drop the old one. It is the schema-evolution escape hatch,
+not a quota to work around.</p>
+<p><code>@supports_net_changes = 1</code> (net-change queries, one row per key instead of every
+intermediate change) requires the table to have a primary key, or an explicit
+<code>@index_name</code> naming a unique index to use instead.</p>
+<p><strong>Example:</strong></p>
+<p><strong>REAL MODE — not executed here; requires a live SQL Server instance with Agent running:</strong></p>
+<pre><code>EXEC sys.sp_cdc_enable_db;  -- once per database
+
+EXEC sys.sp_cdc_enable_table
+    @source_schema      = N&#x27;dbo&#x27;,
+    @source_name        = N&#x27;Claim&#x27;,
+    @role_name          = NULL,               -- NULL = no access-control gating role
+    @supports_net_changes = 1,                 -- requires a PK, or @index_name below
+    @capture_instance   = N&#x27;dbo_Claim&#x27;;        -- default; a second instance could be
+                                                -- &#x27;dbo_Claim_v2&#x27; during a schema migration
+</code></pre><p><strong>Exercise:</strong>
+A <code>PolicyEndorsement</code> table has a composite key and no single-column primary key that
+qualifies for net changes. Write the <code>sys.sp_cdc_enable_table</code> call that supplies
+<code>@index_name</code> pointing at an existing unique index <code>UQ_PolicyEndorsement_Composite</code>
+instead of relying on <code>@supports_net_changes</code>'s default primary-key requirement, and state
+which SQL Server Agent jobs must be running afterward for capture to actually produce
+rows.</p>
+<p><strong>Starting point:</strong> The <code>sys.sp_cdc_enable_table</code> call shape from this concept's REAL MODE
+example, with <code>@source_name = N'PolicyEndorsement'</code> and no qualifying primary key.</p>
+<p>Expected output: a call adding <code>@index_name = N'UQ_PolicyEndorsement_Composite'</code> alongside
+<code>@supports_net_changes = 1</code>, plus the answer that both the <strong>capture job</strong>
+(<code>cdc.&lt;capture_instance&gt;_capture</code>) and the <strong>cleanup job</strong> (<code>cdc.&lt;capture_instance&gt;_cleanup</code>)
+must be running — capture populates the change table, cleanup enforces retention, and a
+disabled Agent leaves capture silently producing nothing.</p>
+<hr />
+<h3>Concept 2 — Reading an LSN Range</h3>
+<p>Change rows are read by LSN range, not by timestamp. <code>sys.fn_cdc_get_min_lsn('dbo_Claim')</code>
+gives the oldest LSN still retained; <code>sys.fn_cdc_get_max_lsn()</code> gives the newest LSN
+captured anywhere in the database. <code>cdc.fn_cdc_get_all_changes_dbo_Claim(@from_lsn, @to_lsn, N'all')</code> returns every changed row in that range; <code>N'all update old'</code> additionally
+returns the before-image of every update as a separate row.</p>
+<p><code>sys.fn_cdc_increment_lsn(@last_lsn)</code> bumps a checkpoint LSN forward by the smallest
+possible amount, so the next range starts strictly after the last row already read instead
+of re-reading its boundary. <code>sys.fn_cdc_map_time_to_lsn('smallest greater than or equal', @dt)</code> converts a wall-clock time into a starting LSN — the one legitimate way to seed a
+brand-new consumer from &quot;start capturing from now&quot;.</p>
+<p><strong>Example:</strong></p>
+<p><strong>REAL MODE — not executed here; requires a live SQL Server instance:</strong></p>
+<pre><code>DECLARE @from_lsn BINARY(10) = sys.fn_cdc_get_min_lsn(&#x27;dbo_Claim&#x27;);
+DECLARE @to_lsn   BINARY(10) = sys.fn_cdc_get_max_lsn();
+
+SELECT * FROM cdc.fn_cdc_get_all_changes_dbo_Claim(@from_lsn, @to_lsn, N&#x27;all update old&#x27;);
+
+-- Next cycle: never re-read the row at @to_lsn itself.
+DECLARE @next_from_lsn BINARY(10) = sys.fn_cdc_increment_lsn(@to_lsn);
+</code></pre><p><strong>Exercise:</strong>
+Write a pure-Python checkpoint-advance helper that models the increment-and-validate step
+a consumer runs between polls: given the last LSN read and the source's current
+<code>min_lsn</code>, it must refuse to advance if the new checkpoint would fall behind <code>min_lsn</code>
+(the reseed case Concept 4 covers), and otherwise return the next LSN to start from.</p>
+<p><strong>Starting point:</strong> LSNs modeled as plain Python integers (standing in for the real
+10-byte binary LSN). A function signature <code>advance_checkpoint(last_lsn_read, min_lsn)</code>.</p>
+<p>Expected output: for <code>advance_checkpoint(1000, 900)</code>, the next checkpoint <code>1001</code> (the
+smallest valid increment); for <code>advance_checkpoint(1000, 1500)</code>, a raised error or a
+<code>&quot;reseed_required&quot;</code> result rather than a silently wrong LSN — the min_lsn has already
+passed the point this consumer thinks it is at.</p>
+<hr />
+<h3>Concept 3 — <code>__$operation</code> and Update Semantics</h3>
+<p>Every change row carries <code>__$operation</code>: <strong>1 = delete, 2 = insert, 3 = before-update
+image, 4 = after-update image</strong>. Queried with <code>N'all'</code>, an update surfaces only as a
+single op-4 row. Queried with <code>N'all update old'</code>, it surfaces as an op-3/op-4 pair
+sharing the same <code>__$start_lsn</code> and <code>__$seqval</code> — the pair is how you recover both the
+old and new values of an update.</p>
+<p>The ordering key across everything is <code>(__$start_lsn, __$seqval)</code> — never the business
+<code>modified_at</code> column, which is stamped by application code and says nothing about
+capture order. <code>__$update_mask</code> is a bitmask over the table's columns; paired with
+<code>sys.fn_cdc_is_bit_set(@column_ordinal, __$update_mask)</code>, it tells you whether a specific
+column actually changed in that row — the mechanism that lets an update skip a re-embed
+when only, say, a status flag changed and the narrative text did not.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+# __$operation codes: 1=delete, 2=insert, 3=before-update image, 4=after-update image.
+NARRATIVE_COL_ORDINAL = 3  # ordinal of the notes/narrative column this index embeds
+
+@dataclasses.dataclass
+class CdcRow:
+    start_lsn: int
+    seqval: int
+    operation: int
+    claim_id: int
+    update_mask: frozenset  # column ordinals changed in this row (set on op 3 and 4)
+    narrative: str
+
+
+def translate_cdc_rows(rows):
+    &quot;&quot;&quot;Ordered vector-index ops from a raw &#x27;all update old&#x27; result set: one upsert
+    per insert/after-update row (skipped if the narrative column did not change),
+    one delete per delete row. A 3/4 pair collapses to a single op off the after
+    image (op 4); the before image (op 3) carries no new information.&quot;&quot;&quot;
+    rows = sorted(rows, key=lambda r: (r.start_lsn, r.seqval))
+    ops = []
+    for row in rows:
+        if row.operation == 1:
+            ops.append((&quot;delete&quot;, row.claim_id, row.start_lsn, row.seqval))
+        elif row.operation == 2:
+            ops.append((&quot;upsert&quot;, row.claim_id, row.narrative, row.start_lsn, row.seqval))
+        elif row.operation == 3:
+            continue
+        elif row.operation == 4:
+            if NARRATIVE_COL_ORDINAL in row.update_mask:
+                ops.append((&quot;upsert&quot;, row.claim_id, row.narrative, row.start_lsn, row.seqval))
+            else:
+                ops.append((&quot;skip-reembed&quot;, row.claim_id, row.start_lsn, row.seqval))
+        else:
+            raise ValueError(f&quot;unknown __$operation code: {row.operation}&quot;)
+    return ops
+
+
+rows = [
+    CdcRow(1000, 1, 2, 501, frozenset(), &quot;Water damage to kitchen ceiling&quot;),
+    CdcRow(1000, 2, 1, 490, frozenset(), &quot;&quot;),
+]
+for op in translate_cdc_rows(rows):
+    print(op)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend the row set with an update pair for claim 501 whose <code>__$update_mask</code> includes the
+narrative column (so it re-embeds), and an update pair for a different claim (777) whose
+mask covers only a status column, not the narrative — it should produce <code>&quot;skip-reembed&quot;</code>,
+not a wasted re-embed call. Run <code>translate_cdc_rows</code> over all six rows in one call.</p>
+<p><strong>Starting point:</strong> The <code>translate_cdc_rows</code> function and the two-row <code>rows</code> list from
+this concept's Example, plus four more <code>CdcRow</code> entries: an op-3/op-4 pair for claim 501
+with <code>update_mask={2, 3}</code>, and an op-3/op-4 pair for claim 777 with <code>update_mask={5}</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>(&#x27;upsert&#x27;, 501, &#x27;Water damage to kitchen ceiling&#x27;, 1000, 1)
+(&#x27;delete&#x27;, 490, 1000, 2)
+(&#x27;upsert&#x27;, 501, &#x27;Water damage to kitchen ceiling, repaired&#x27;, 1005, 2)
+(&#x27;skip-reembed&#x27;, 777, 1005, 4)
+</code></pre><p>The op-3 rows for both pairs vanish from the output — they carry only the before image —
+and claim 777's after-update row is correctly routed to <code>skip-reembed</code> because ordinal 3
+(the narrative column) is absent from its mask.</p>
+<hr />
+<h3>Concept 4 — Retention Is a Data-Loss Clock</h3>
+<p><code>sys.sp_cdc_change_job @job_type = 'cleanup', @retention = 4320</code> sets the default: change
+rows older than <strong>3 days (4320 minutes)</strong> are deleted by the cleanup job, and
+<code>sys.fn_cdc_get_min_lsn</code> advances past them. If a consumer has been down longer than
+retention, the LSN range it needs no longer exists — not slow, gone.</p>
+<p>The less obvious direction of the same clock: while the <strong>capture job</strong> itself lags (not
+the consumer — the SQL Server Agent capture job that reads the transaction log into the
+change table), the transaction log cannot truncate past the oldest change capture has not
+yet processed. A stalled capture job grows the live transaction log, which is a different
+outage than a stalled consumer, and both share the same root cause: something is not
+keeping up with the log.</p>
+<p>The operational rule: validate <code>checkpoint_lsn &gt;= min_lsn</code> before every read, and treat a
+failure as &quot;reseed from a fresh <code>fn_cdc_map_time_to_lsn</code> seed&quot;, not as an error to retry.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>RETENTION_MINUTES_DEFAULT = 4320  # sp_cdc_change_job&#x27;s default @retention, 3 days
+
+def validate_checkpoint(checkpoint_lsn, min_lsn):
+    if checkpoint_lsn &gt;= min_lsn:
+        return &quot;ok&quot;, 0
+    return &quot;reseed_required&quot;, min_lsn - checkpoint_lsn
+
+def outage_hours_tolerated(retention_minutes=RETENTION_MINUTES_DEFAULT, safety_margin_minutes=60):
+    return (retention_minutes - safety_margin_minutes) / 60
+
+print(validate_checkpoint(5000, 4000))
+print(f&quot;outage tolerated at default retention: {outage_hours_tolerated():.1f} hours&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Run three scenarios through <code>validate_checkpoint</code>: a consumer that is current, one two
+days behind with cleanup having run once, and one down over a long weekend with cleanup
+having run twice. Then compute <code>outage_hours_tolerated</code> at 1-day, 3-day, and 7-day
+retention settings.</p>
+<p><strong>Starting point:</strong> The <code>validate_checkpoint</code> and <code>outage_hours_tolerated</code> functions from
+this concept's Example, with checkpoint/min_lsn pairs <code>(5000, 4000)</code>, <code>(6500, 4000)</code>, and
+<code>(6500, 7200)</code> standing in for the three scenarios.</p>
+<p>Expected output (actually run):</p>
+<pre><code>consumer current, cleanup has not run yet               -&gt; ok               gap=0
+consumer 2 days behind, cleanup ran once                -&gt; ok               gap=0
+consumer down over a long weekend, cleanup ran twice    -&gt; reseed_required  gap=700
+
+outage tolerated before reseed (default 3-day retention, 60min safety margin): 71.0 hours
+retention=1 day(s) -&gt; tolerates 23.0 hours of consumer outage
+retention=3 day(s) -&gt; tolerates 71.0 hours of consumer outage
+retention=7 day(s) -&gt; tolerates 167.0 hours of consumer outage
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> Enabling CDC is not your decision to make alone. The DBA team owns
+<code>sp_cdc_enable_table</code>, the change-control window it requires, and the two-instance limit
+that has to stretch across a quarterly schema-release cadence you do not control.</p>
+<p><strong>Compliance angle:</strong> <code>cdc.dbo_Claim_CT</code> is a second, full copy of every changed customer
+record living inside the source database. It is in scope for the same retention and
+erasure obligations as the primary table — a data-subject deletion request that only
+touches <code>dbo.Claim</code> and misses the change table has not actually deleted the data.</p>
+<p><strong>What breaks in production:</strong> A weekend outage longer than the 3-day retention window is
+a silent gap. Nothing errors at the time; it surfaces weeks later during a source-vs-index
+reconciliation job, by which point the change rows that would explain the gap are gone.</p>
+<hr />
+<h2 id="day-2">Day 2 — Oracle Redo Log Constraints</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=mE7LFSqfwY8" target="_blank" rel="noopener"><b>Oracle CDC Setup Tutorial: Stream Oracle Data in Real Time with Estuary</b><small>Estuary · 9:42</small></a></li><li><a href="https://www.youtube.com/watch?v=rDeD7C-bIBo" target="_blank" rel="noopener"><b>Oracle LogMiner Explained: Read Redo Logs, SCNs &amp; CDC in Oracle Database 26ai</b><small>Into the Oracle-verse · 17:11</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Oracle%20LogMiner%20supplemental%20logging%20change%20data%20capture%20tutorial" target="_blank" rel="noopener">Search YouTube: Oracle LogMiner supplemental logging change data capture tutorial</a></p></div>
+<hr />
+<h3>Concept 1 — Supplemental Logging Comes First</h3>
+<p>Without supplemental logging, Oracle redo carries only the columns an <code>UPDATE</code> actually
+changed, plus the row's <code>ROWID</code> — enough to redo/undo the transaction, not enough to
+reconstruct a full &quot;here is the whole row after this change&quot; image for a downstream
+consumer. <code>ALTER DATABASE ADD SUPPLEMENTAL LOG DATA</code> (minimal) is the baseline every CDC
+setup requires; <code>ADD SUPPLEMENTAL LOG DATA (PRIMARY KEY, UNIQUE) COLUMNS</code> at the database
+level identifies changed rows by key; <code>ALTER TABLE claims ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS</code> at the table level is what actually gives you full before/after row images for a
+specific table.</p>
+<p>Verify with <code>V$DATABASE.SUPPLEMENTAL_LOG_DATA_MIN</code> (database-level minimal logging) and
+<code>DBA_LOG_GROUPS</code> (table-level column groups). Turning this on is a capacity decision, not
+a config toggle — every logged column on every write adds to redo volume, on every
+transaction, forever, not just the ones a consumer cares about.</p>
+<p><strong>Example:</strong></p>
+<p><strong>REAL MODE — not executed here; requires a live Oracle instance:</strong></p>
+<pre><code>ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA (PRIMARY KEY, UNIQUE) COLUMNS;
+ALTER TABLE claims ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
+
+SELECT SUPPLEMENTAL_LOG_DATA_MIN FROM V$DATABASE;
+SELECT * FROM DBA_LOG_GROUPS WHERE TABLE_NAME = &#x27;CLAIMS&#x27;;
+</code></pre><p><strong>Exercise:</strong>
+A DBA enables only database-level minimal supplemental logging and asks why LogMiner
+still cannot reconstruct full row images for the <code>CLAIMS</code> table's <code>UPDATE</code> statements.
+Name the exact statement missing, and identify which <code>DBA_LOG_GROUPS</code> row would appear
+once it is run.</p>
+<p><strong>Starting point:</strong> The three <code>ALTER</code> statements from this concept's REAL MODE example, and
+the fact that only the first has been run.</p>
+<p>Expected output: the missing statement is the table-level <code>ALTER TABLE claims ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS</code>; once run, <code>DBA_LOG_GROUPS</code> gains an <code>ALL COLUMNS</code>
+log group row for <code>CLAIMS</code>. Minimal logging alone gives Oracle enough to guarantee
+consistent reads internally, but not enough to hand a downstream miner a full row image.</p>
+<hr />
+<h3>Concept 2 — LogMiner and SCN Checkpointing</h3>
+<p><code>DBMS_LOGMNR.ADD_LOGFILE</code> registers archived redo logs to mine; <code>START_LOGMNR(STARTSCN =&gt; ..., ENDSCN =&gt; ..., OPTIONS =&gt; DBMS_LOGMNR.DICT_FROM_ONLINE_CATALOG + DBMS_LOGMNR.COMMITTED_DATA_ONLY)</code> starts the session, using the online data dictionary and
+returning only committed changes. Results land in <code>V$LOGMNR_CONTENTS</code>, with columns <code>SCN</code>,
+<code>COMMIT_SCN</code>, <code>XID</code>, <code>OPERATION</code>, <code>SQL_REDO</code>, <code>SEG_NAME</code>.</p>
+<p>The checkpoint for the next mining run must be the highest <strong><code>COMMIT_SCN</code></strong> seen, never
+the row <code>SCN</code>. A long transaction writes rows at SCNs that are older than the SCN at which
+it actually commits and becomes visible; checkpointing on row SCN can replay rows twice or,
+worse, skip a transaction whose commit is still pending. <code>CONTINUOUS_MINE</code> — the option
+that used to let LogMiner track new redo automatically — was deprecated in 12.2 and
+desupported from 19c, so a real pipeline manages its own <code>ADD_LOGFILE</code> calls as new
+archived logs appear.</p>
+<p><strong>Example:</strong></p>
+<p><strong>REAL MODE — not executed here; requires a live Oracle instance:</strong></p>
+<pre><code>BEGIN
+  DBMS_LOGMNR.ADD_LOGFILE(LOGFILENAME =&gt; &#x27;/arch/redo_001.arc&#x27;, OPTIONS =&gt; DBMS_LOGMNR.NEW);
+  DBMS_LOGMNR.ADD_LOGFILE(LOGFILENAME =&gt; &#x27;/arch/redo_002.arc&#x27;, OPTIONS =&gt; DBMS_LOGMNR.ADDFILE);
+  DBMS_LOGMNR.START_LOGMNR(
+    STARTSCN =&gt; :last_checkpoint_commit_scn,
+    OPTIONS  =&gt; DBMS_LOGMNR.DICT_FROM_ONLINE_CATALOG + DBMS_LOGMNR.COMMITTED_DATA_ONLY);
+END;
+/
+
+SELECT SCN, COMMIT_SCN, XID, OPERATION, SEG_NAME, SQL_REDO
+FROM V$LOGMNR_CONTENTS
+ORDER BY COMMIT_SCN, XID;
+</code></pre><p><strong>Exercise:</strong>
+Given a set of mined rows spanning three transactions with interleaved row SCNs, order
+them for replay and compute the correct restart checkpoint — the highest <code>COMMIT_SCN</code>
+that is fully represented in this batch — and show why checkpointing on the highest raw
+<code>SCN</code> instead would be wrong.</p>
+<p><strong>Starting point:</strong> Four <code>MinedRow(scn, commit_scn, xid, operation, seg_name, sql_redo)</code>
+records: two rows from transaction <code>tx-A</code> (commit_scn 1050), one from <code>tx-B</code> (commit_scn
+1040), one from <code>tx-C</code> (commit_scn 1060) — with <code>tx-A</code>'s rows carrying lower raw SCNs
+(1001, 1010) than <code>tx-C</code>'s single row (SCN 1020) despite committing later.</p>
+<p>Expected output (actually run):</p>
+<pre><code>commit_scn=1040 scn=1005 xid=tx-B INSERT CLAIMS
+commit_scn=1050 scn=1001 xid=tx-A INSERT CLAIMS
+commit_scn=1050 scn=1010 xid=tx-A UPDATE CLAIMS
+commit_scn=1060 scn=1020 xid=tx-C DELETE CLAIMS
+
+restart checkpoint (highest fully-seen commit_scn): 1060
+note: naive max(row.scn) would give 1020 -- wrong, that is a row SCN not a commit SCN
+</code></pre><p>Replay order groups by <code>COMMIT_SCN</code> (<code>tx-B</code> first, despite its row SCN 1005 sitting between
+<code>tx-A</code>'s two row SCNs) and the restart checkpoint is 1060 — the naive <code>max(scn)</code> of 1020
+would have been a row SCN belonging to a transaction that actually committed <em>before</em>
+<code>tx-A</code>'s later-committing rows, an inversion that would corrupt replay order on the next run.</p>
+<hr />
+<h3>Concept 3 — Archive-Log Retention and RAC Thread Ordering</h3>
+<p>LogMiner reads <strong>archived</strong> redo logs, not the live online logs. An RMAN backup-and-delete
+policy, or Fast Recovery Area (FRA) space pressure evicting old archived logs, can delete a
+log before it has been mined — the exact same class of loss as MSSQL's 3-day cleanup, just
+governed by a different team's backup policy instead of a CDC retention setting.</p>
+<p>Oracle RAC gives <strong>each instance its own redo thread</strong>. A two-node RAC cluster produces two
+independent thread-1 and thread-2 archived log sequences. Mining only the logs from one
+instance silently loses every change written by the other — there is no error, the miner
+simply never sees rows that were never added to it. A correct pipeline adds every thread's
+logs and merges the results by <code>COMMIT_SCN</code> across threads, and must be able to detect when
+one thread's logs are simply missing from what was mined.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+@dataclasses.dataclass
+class ThreadRow:
+    thread_id: int
+    commit_scn: int
+    xid: str
+    sql_redo: str
+
+def merge_threads(rows_by_thread, mined_threads):
+    all_rows = []
+    for thread_id in mined_threads:
+        all_rows.extend(rows_by_thread.get(thread_id, []))
+    all_rows.sort(key=lambda r: (r.commit_scn, r.thread_id))
+    return all_rows
+
+def detect_missing_threads(expected_threads, mined_threads):
+    return sorted(set(expected_threads) - set(mined_threads))
+
+thread1 = [ThreadRow(1, 2001, &quot;t1-A&quot;, &quot;insert into claims values (601, ...)&quot;)]
+thread2 = [ThreadRow(2, 2005, &quot;t2-A&quot;, &quot;insert into claims values (602, ...)&quot;)]
+rows_by_thread = {1: thread1, 2: thread2}
+print(merge_threads(rows_by_thread, mined_threads=[1, 2]))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a second row to each thread (a later <code>UPDATE</code> on thread 1, a <code>DELETE</code> on thread 2), then
+run <code>merge_threads</code> and <code>detect_missing_threads</code> twice: once with both threads correctly
+added to <code>LogMiner</code>, once with only thread 1 added — the real mistake this concept is
+about. Report how many changes go missing in the second case.</p>
+<p><strong>Starting point:</strong> The <code>merge_threads</code>, <code>detect_missing_threads</code> functions and the two
+one-row threads from this concept's Example, an <code>expected_threads = [1, 2]</code> cluster
+definition, plus one more <code>ThreadRow</code> appended to each thread (<code>thread1</code> gets a
+commit_scn-2015 update, <code>thread2</code> gets a commit_scn-2020 delete).</p>
+<p>Expected output (actually run):</p>
+<pre><code>merged (both threads mined):
+  thread=1 commit_scn=2001 insert into claims values (601, ...)
+  thread=2 commit_scn=2005 insert into claims values (602, ...)
+  thread=1 commit_scn=2015 update claims set status=&#x27;CLOSED&#x27; where id=601
+  thread=2 commit_scn=2020 delete from claims where id=555
+missing threads: none
+
+merged (only thread 1 mined -- the bug):
+  thread=1 commit_scn=2001 insert into claims values (601, ...)
+  thread=1 commit_scn=2015 update claims set status=&#x27;CLOSED&#x27; where id=601
+missing threads: [2]
+rows silently lost: 2 of 4 total changes
+</code></pre><p>Half the real changes disappear from the merged stream, with no error anywhere — <code>thread=2</code>
+just never shows up.</p>
+<hr />
+<h3>Concept 4 — Mine It or Buy It: LogMiner vs GoldenGate/XStream</h3>
+<p><code>DBMS_LOGMNR</code> ships with the database and costs nothing to license, but every mining
+session runs on the source instance's own CPU unless the pipeline is deliberately built to
+mine downstream (e.g. against a standby). <strong>XStream Out</strong> is an API that <strong>requires an
+Oracle GoldenGate license</strong> — it is not a free alternative interface to the same redo data,
+it is a licensed product's capture path. GoldenGate itself is a separate paid product on
+top of the database license. Debezium's Oracle connector defaults to plain LogMiner and can
+use XStream only where that license already exists.</p>
+<p>This is a procurement decision with a real cost line, not a technical preference: mining
+CPU on the source has a cost that scales with data volume, while a license has a cost that
+does not scale with volume at all. The two costs cross at some volume, and only a written
+estimate of both tells you which side of that crossing you are on.</p>
+<p><strong>Example:</strong></p>
+<p><strong>REAL MODE — not executed here; a procurement/licensing decision, not a runnable API call:</strong></p>
+<pre><code>XStream Out API call requires: an active Oracle GoldenGate license bound to the source
+database, an XStream administrator user, and an outbound server configured via
+DBMS_XSTREAM_ADM.CREATE_OUTBOUND. There is no code path that reaches XStream Out without
+that license already being in place.
+</code></pre><p><strong>Exercise:</strong>
+Using an illustrative (not vendor-quoted) mining CPU cost per row and source CPU hourly
+cost, compute the daily mining cost at several row-per-day volumes and find the row volume
+at which that daily cost crosses a stated illustrative GoldenGate annual license cost
+amortized per day.</p>
+<p><strong>Starting point:</strong> <code>ASSUMED_CPU_SECONDS_PER_MINED_ROW = 0.002</code>,
+<code>ASSUMED_SOURCE_CPU_HOURLY_COST = 4.00</code>, <code>ASSUMED_GOLDENGATE_ANNUAL_LICENCE = 60_000</code> — all
+explicitly labelled illustrative assumptions, not price quotes.</p>
+<p>Expected output (actually run):</p>
+<pre><code>      10,000 rows/day -&gt; mining CPU cost $    0.02/day  vs licence $164.38/day
+     100,000 rows/day -&gt; mining CPU cost $    0.22/day  vs licence $164.38/day
+   1,000,000 rows/day -&gt; mining CPU cost $    2.22/day  vs licence $164.38/day
+  10,000,000 rows/day -&gt; mining CPU cost $   22.22/day  vs licence $164.38/day
+ 100,000,000 rows/day -&gt; mining CPU cost $  222.22/day  vs licence $164.38/day
+
+break-even volume: 295,890,411 mined rows/day
+below that volume, mining on-source is the cheaper choice; above it, a licensed
+downstream-mining product (or moving LogMiner off the source instance) starts to pay for itself
+</code></pre><p>At 100 million rows/day, on-source mining cost ($222/day) already exceeds the illustrative
+license cost ($164/day) — the break-even sits at roughly 296 million rows/day under these
+assumptions. The transferable lesson is the method (compute both costs as a function of
+volume and find where they cross), not these specific dollar figures.</p>
+<hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> Supplemental logging and archive-log retention belong to the DBA team,
+not to you. A pipeline design that assumes <code>ALL COLUMNS</code> logging exists on a table you do
+not own is a request you have to make and get approved, not a configuration you can apply
+yourself.</p>
+<p><strong>Compliance angle:</strong> <code>SQL_REDO</code> in <code>V$LOGMNR_CONTENTS</code> reconstructs literal customer field
+values as executable SQL text. That text flowing into a downstream system is customer data
+in a new, less-controlled form — it needs the same access controls as the source table, not
+looser ones because it arrived through a log-mining pipeline instead of a query.</p>
+<p><strong>What breaks in production:</strong> An FRA space-pressure policy change made by the storage team,
+with no communication to the pipeline owner, silently starts evicting archived logs before
+the miner reads them. The miner does not error; it just never sees the changes that were in
+the evicted logs.</p>
+<hr />
+<h2 id="day-3">Day 3 — Polling CDC and Watermarks</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=kpDCESpyic4" target="_blank" rel="noopener"><b>12. ADF Incremental Load Design Patterns | Watermark, Tumbling, CDC in Azure Data Factory</b><small>Cloudpandith · 14:02</small></a></li><li><a href="https://www.youtube.com/watch?v=W8b73KV4GKs" target="_blank" rel="noopener"><b>DP-700 Lesson 5: Loading Patterns | Full and Incremental Loads, CDC, Watermarks, SCD, Streaming</b><small>Cert Espresso · 5:09</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=incremental%20extract%20watermark%20CDC%20polling%20vs%20log%20based%20comparison" target="_blank" rel="noopener">Search YouTube: incremental extract watermark CDC polling vs log based comparison</a></p></div>
+<hr />
+<h3>Concept 1 — The High-Watermark Loop and Its Safety Lag</h3>
+<p>Polling CDC has no log to read — it queries <code>modified_at &gt; :last_seen</code> on a schedule. The
+lower bound is not simply the last row's timestamp; it steps back by a <strong>safety lag</strong> every
+cycle (<code>modified_at &gt; high_watermark - safety_lag</code>), deliberately re-reading a window of
+rows that were already processed. This only works because the downstream upsert is
+idempotent — Week 06's content-hash key means re-applying the same row twice is a no-op,
+not a duplicate. A tuple cursor <code>(modified_at, pk)</code> breaks ties when two rows share the
+exact same timestamp, which plain single-column timestamp comparison cannot do.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import datetime as dt
+
+SAFETY_LAG = dt.timedelta(seconds=30)
+
+class Source:
+    def __init__(self, rows):
+        self.rows = rows
+    def query(self, lower, upper):
+        return [(pk, ts) for pk, ts in self.rows if lower &lt; ts &lt;= upper]
+
+def poll_once(source, high_watermark, now, safety_lag=SAFETY_LAG):
+    &quot;&quot;&quot;Query from (high_watermark - safety_lag) to now; the lower bound steps back
+    by the safety lag every cycle, re-reading that overlap deliberately.&quot;&quot;&quot;
+    lower = high_watermark - safety_lag
+    hits = source.query(lower, now)
+    new_high_watermark = max([ts for _, ts in hits] + [high_watermark])
+    return hits, new_high_watermark
+
+base = dt.datetime(2026, 1, 1, 12, 0, 0)
+source = Source([(1, base + dt.timedelta(seconds=5)), (2, base + dt.timedelta(seconds=40))])
+hits, wm = poll_once(source, base - dt.timedelta(seconds=1), base + dt.timedelta(seconds=60))
+print(hits, wm)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Extend the source with rows at 75s, 100s, 142s and 178s, then run three poll cycles 60
+seconds apart (at t=60, 120, 180) tracking the watermark across cycles. Report total
+row-reads across the three cycles against the number of distinct rows the source actually
+holds, and explain the gap.</p>
+<p><strong>Starting point:</strong> The <code>poll_once</code> function and <code>Source</code> class from this concept's Example,
+a 6-row source (<code>(1, +5s)</code>, <code>(2, +40s)</code>, <code>(3, +75s)</code>, <code>(4, +100s)</code>, <code>(5, +142s)</code>,
+<code>(6, +178s)</code>), and an initial <code>high_watermark = base - 1s</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>cycle 0: query &gt; 11:59:29 up to 12:01:00  rows_read=[1, 2]  high_watermark=12:00:40
+cycle 1: query &gt; 12:00:10 up to 12:02:00  rows_read=[2, 3, 4]  high_watermark=12:01:40
+cycle 2: query &gt; 12:01:10 up to 12:03:00  rows_read=[3, 4, 5, 6]  high_watermark=12:02:58
+
+total row-reads across 3 cycles: 9  vs 6 distinct rows (source has 6 total) -- the gap is rows re-read inside the safety-lag overlap
+</code></pre><p>9 row-reads against 6 distinct rows: rows 2, 3 and 4 are each read twice, once in the cycle
+they first appear and again inside the following cycle's 30-second lookback. That
+duplication is deliberate and only safe because the upsert is idempotent.</p>
+<hr />
+<h3>Concept 2 — Long-Running Transactions Commit Behind the Watermark</h3>
+<p><code>modified_at</code> is stamped <strong>at write time</strong>, inside the transaction, but the row only
+becomes visible to a poller <strong>at commit</strong>. A transaction that opens at T and commits at
+T+8 minutes writes a timestamp of T, but a poller cannot see that row until T+8. If the
+watermark has already advanced past T by the time the row becomes visible, the row is
+<strong>permanently</strong> missed — not delayed, gone, because the next poll's lower bound is already
+ahead of it. The safety lag has to exceed the <em>longest</em> transaction duration the source
+sees, not just clock skew between servers. <code>rowversion</code>/identity columns share this exact
+flaw: the value is assigned at write time, not at commit.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import random
+random.seed(11)
+N = 5000
+durations = [round(random.expovariate(1/3) if random.random() &gt; 0.02
+                    else random.expovariate(1/240), 2) for _ in range(N)]
+
+def count_permanently_missed(durations, safety_lag_seconds):
+    return sum(1 for d in durations if d &gt; safety_lag_seconds)
+
+print(count_permanently_missed(durations, 30))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Sweep the safety lag across 5, 15, 30, 60, 120, 300 and 600 seconds against the same
+5,000-transaction duration distribution (a realistic skew: most transactions finish in a
+few seconds, a rare long tail runs minutes), and report the permanently-missed count and
+percentage at each. Also report the longest observed transaction and its p99.</p>
+<p><strong>Starting point:</strong> The <code>durations</code> list and <code>count_permanently_missed</code> function from this
+concept's Example, generated once with <code>random.seed(11)</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>safety_lag=   5s  permanently missed:  1012 / 5000 (20.24%)
+safety_lag=  15s  permanently missed:   115 / 5000 ( 2.30%)
+safety_lag=  30s  permanently missed:    89 / 5000 ( 1.78%)
+safety_lag=  60s  permanently missed:    76 / 5000 ( 1.52%)
+safety_lag= 120s  permanently missed:    57 / 5000 ( 1.14%)
+safety_lag= 300s  permanently missed:    27 / 5000 ( 0.54%)
+safety_lag= 600s  permanently missed:     7 / 5000 ( 0.14%)
+
+longest observed transaction: 1147.8s, p99: 144.9s
+rowversion/identity columns share this flaw -- the value is assigned at write, not at commit
+</code></pre><p>Even a 10-minute (600s) safety lag still permanently loses 7 of 5,000 rows here, because
+the longest observed transaction in this distribution ran nearly 19 minutes. Tuning the lag
+down &quot;to make it fresher&quot; trades directly against this count, with no error to signal it
+happened.</p>
+<hr />
+<h3>Concept 3 — Hard Deletes Are Invisible; Chunking Without Locking</h3>
+<p>Polling can only ever match rows against <code>modified_at &gt; watermark</code> — a <code>DELETE</code> leaves no
+row to match, so polling <strong>never observes a delete</strong>. The remedy is one of: a soft-delete
+flag the application sets instead of deleting, a trigger-writing audit table, or a
+scheduled key-set reconciliation comparing the full source key set against the index's key
+set (this feeds directly into Week 11's monitoring). An orphaned vector left behind by an
+unobserved delete keeps being retrieved as if the record still existed.</p>
+<p>Extracting the full key set for reconciliation should not be one long table scan under a
+lock: chunk it with keyset pagination (<code>WHERE pk &gt; :last_pk ORDER BY pk</code> fetching a fixed
+chunk size) under snapshot isolation. <code>NOLOCK</code> is not a substitute — under <code>NOLOCK</code> a page
+split during the scan can cause a row to be read twice or missed entirely, the opposite of
+the reliability reconciliation needs.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import random
+random.seed(12)
+SOURCE_TOTAL_KEYS = 50_000
+source_keys = set(range(1, SOURCE_TOTAL_KEYS + 1))
+index_keys = set(range(1, SOURCE_TOTAL_KEYS + 1))
+deleted = set(random.sample(sorted(source_keys), 37))
+source_keys -= deleted
+
+def reconcile(source_keys, index_keys):
+    return index_keys - source_keys, source_keys - index_keys
+
+orphans, missing = reconcile(source_keys, index_keys)
+print(len(orphans), orphans == deleted)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Confirm the reconciled orphan set matches the known deleted set exactly, then estimate
+chunked-extraction wall time for the 50,000-key source at chunk sizes 500, 2,000 and
+10,000, using an illustrative 8ms round trip per chunk.</p>
+<p><strong>Starting point:</strong> The <code>reconcile</code> function, <code>source_keys</code>/<code>index_keys</code>/<code>deleted</code> sets from
+this concept's Example, and a <code>chunked_extract_cost(total_keys, chunk_size, ms_per_chunk_roundtrip)</code> helper computing <code>ceil(total_keys / chunk_size)</code> chunks.</p>
+<p>Expected output (actually run):</p>
+<pre><code>source keys: 49,963  index keys: 50,000
+orphaned vectors found by reconciliation: 37
+orphan ids match known deletes exactly: True
+chunk_size=   500  chunks=100  estimated wall time=0.80s
+chunk_size= 2,000  chunks= 25  estimated wall time=0.20s
+chunk_size=10,000  chunks=  5  estimated wall time=0.04s
+</code></pre><p>Reconciliation recovers exactly the 37 keys that were deleted at the source — the set
+comparison is exact, no false positives or misses — and larger chunks trade round-trip
+count for a longer transaction window held per chunk, a tradeoff to tune against the
+source's own lock-duration tolerance.</p>
+<hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> Polling is frequently the <em>only</em> option, not a fallback of convenience —
+plenty of DBA teams will not enable CDC on the OLTP core that runs actual claims
+processing, full stop, and polling against a read replica is the only door left open.</p>
+<p><strong>Compliance angle:</strong> An orphaned vector is retained personal data after a deletion request
+has already been honored at the source. A scheduled reconciliation job is the control that
+makes &quot;we also delete it from the index&quot; true in practice rather than only in policy.</p>
+<p><strong>What breaks in production:</strong> Someone tunes the safety lag down to &quot;make search fresher&quot;
+without checking the source's transaction-duration distribution first. Nothing errors.
+Rows silently and permanently disappear from the index at a rate nobody is watching, and
+Concept 2's arithmetic is the only way to see it coming instead of finding it by accident.</p>
+<hr />
+<h2 id="day-4">Day 4 — Batch Windows and Staleness Budgets</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=L7B0AvBWqQA" target="_blank" rel="noopener"><b>Batch processing and real time </b><small>Lourdhu shobana Shobana · 5:29</small></a></li><li><a href="https://www.youtube.com/watch?v=qTCaJdQC518" target="_blank" rel="noopener"><b>Cross-Platform Mainframe Data Integration — No Code Required</b><small>  VirtualZ | Your Data. Where You Need It. Now. · 41:53</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=mainframe%20nightly%20batch%20window%20data%20freshness%20near%20real%20time%20integration" target="_blank" rel="noopener">Search YouTube: mainframe nightly batch window data freshness near real time integration</a></p></div>
+<hr />
+<h3>Concept 1 — The Batch Window Is a Physical Constraint</h3>
+<p>A mainframe nightly cycle — online region down at 23:30, batch jobs run overnight, the
+extract lands around 04:40 — is scheduled around the business day and the batch job
+dependency graph, not around your pipeline's SLA. The floor for anything downstream of that
+extract is <code>extract_landing_time + your_own_processing_time</code>, and no engineering on the
+downstream side moves the first term. This is worth stating plainly, because it is the
+single most common latency-budget mistake in this space: engineering effort spent shaving
+seconds off a pipeline that is fed by an extract that will not exist for another six hours.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import datetime as dt
+EXTRACT_LANDS_AT = dt.time(4, 40)
+
+def earliest_freshness(extract_lands_at, processing_minutes):
+    landed = dt.datetime.combine(dt.date(2026, 1, 1), extract_lands_at)
+    return (landed + dt.timedelta(minutes=processing_minutes)).time()
+
+print(earliest_freshness(EXTRACT_LANDS_AT, 22))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Compute the earliest honest freshness for three downstream use cases sharing the same
+04:40 extract: a raw bronze copy (4 minutes processing), the full schema-mapped/embedded/
+upserted path (22 minutes), and a full nightly reconciliation feed (55 minutes). Compare
+all three against an 08:00 business-day start.</p>
+<p><strong>Starting point:</strong> <code>EXTRACT_LANDS_AT = dt.time(4, 40)</code> and the <code>earliest_freshness</code>
+function from this concept's Example, plus the three processing-minute figures above.</p>
+<p>Expected output (actually run):</p>
+<pre><code>extract lands at 04:40
+
+raw copy to bronze (no transform)                           earliest honest freshness: 04:44
+schema-mapped, embedded, upserted to the vector index       earliest honest freshness: 05:02
+full nightly reconciliation feed (source vs index key diff) earliest honest freshness: 05:35
+
+business day starts at 08:00 -- every use case above clears it, so &#x27;ready before business open&#x27; is achievable here
+but note: none of these three can ever promise anything earlier than 04:40 regardless of how the downstream pipeline is engineered
+</code></pre><p>All three land comfortably before the 08:00 business day here, which is the case <em>for this
+extract time</em> — the number that matters is 04:40, and every other figure is downstream of
+it.</p>
+<hr />
+<h3>Concept 2 — Writing a Staleness Budget Per Use Case</h3>
+<p>The professional deliverable this week builds toward is not a faster pipeline; it is a
+written, per-use-case <strong>maximum acceptable staleness</strong>, agreed with the business, checked
+against what the source can actually deliver (Concept 1's floor, or Day 3's polling floor,
+or Day 1/2's CDC floor). Feasibility gets marked explicitly, in the document, rather than
+discovered later when someone complains an answer was stale — &quot;explicitly infeasible, given
+this source, unless we escalate to X&quot; is a legitimate, professional answer.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+@dataclasses.dataclass
+class UseCase:
+    name: str
+    source: str
+    max_staleness_seconds: int
+
+SOURCE_FLOOR_SECONDS = {&quot;mssql_claims_cdc&quot;: 45, &quot;mainframe_policy_core&quot;: 6 * 3600}
+
+def verdict(uc, floors):
+    floor = floors[uc.source]
+    return &quot;FEASIBLE&quot; if uc.max_staleness_seconds &gt;= floor else &quot;INFEASIBLE&quot;
+
+uc = UseCase(&quot;real-time fraud alert similarity search&quot;, &quot;mssql_claims_cdc&quot;, 60)
+print(verdict(uc, SOURCE_FLOOR_SECONDS))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Build the budget table for four use cases against three sources (MSSQL CDC at 45s floor,
+Oracle polling at 300s floor, mainframe batch at 6-hour floor): a fraud-alert search
+against CDC (60s budget), an underwriter lookup against polling (900s budget), an
+agent-assist tool against the mainframe source (1800s budget), and a nightly regulatory
+report against the mainframe source (6-hour budget). Mark each feasible or infeasible.</p>
+<p><strong>Starting point:</strong> The <code>UseCase</code> dataclass, <code>SOURCE_FLOOR_SECONDS</code> dict and <code>verdict</code>
+function from this concept's Example, extended with the Oracle-polling floor (300s) and
+the four <code>UseCase</code> rows above.</p>
+<p>Expected output (actually run):</p>
+<pre><code>use case                                      source                         budget    floor  verdict
+real-time fraud alert similarity search       mssql_claims_cdc                  60s      45s  FEASIBLE
+underwriter policy lookup during a call       oracle_underwriting_polling      900s     300s  FEASIBLE
+agent assist during a live claims call        mainframe_policy_core           1800s   21600s  INFEASIBLE -- source cannot meet this budget
+nightly regulatory exposure report            mainframe_policy_core          21600s   21600s  FEASIBLE
+</code></pre><p>The agent-assist row is the interesting one: a 30-minute staleness budget sounds generous
+until you check it against a source whose floor is 6 hours. No downstream engineering
+closes that gap; only a different source, or an honest renegotiation of the budget, does.</p>
+<hr />
+<h3>Concept 3 — Catch-Up Backfill and Event-Time Merge</h3>
+<p>A catch-up backfill (reprocessing a period after an outage, or the daily nightly file
+itself) must apply changes ordered by <strong>event time</strong>, not arrival order — last-writer-wins
+keyed on <code>(entity, event_time, seq)</code>. Applying in arrival order lets a chronologically
+older batch record silently overwrite a chronologically newer value that a live stream
+already wrote.</p>
+<p>The nightly file is, from a streaming watermark's point of view, one enormous burst of
+&quot;late&quot; data — every record in it arrived hours after events with similar event times were
+already processed. A naive watermark policy drops anything that late as unusable, which
+throws away the whole file. The fix is an <strong>allowed-lateness</strong> window: records within it
+merge normally; records past it route to a side output for out-of-band reconciliation
+instead of vanishing.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+@dataclasses.dataclass
+class Event:
+    entity: str
+    event_time: float
+    arrival_time: float
+    seq: int
+    value: str
+    source: str
+
+def last_writer_wins_merge(events):
+    latest = {}
+    for ev in sorted(events, key=lambda e: (e.entity, e.event_time, e.seq)):
+        cur = latest.get(ev.entity)
+        if cur is None or (ev.event_time, ev.seq) &gt;= (cur.event_time, cur.seq):
+            latest[ev.entity] = ev
+    return latest
+
+events = [Event(&quot;claim-501&quot;, 10.0, 10.001, 0, &quot;status=OPEN&quot;, &quot;stream&quot;),
+          Event(&quot;claim-501&quot;, 14.0, 14.001, 0, &quot;status=CLOSED&quot;, &quot;stream&quot;)]
+print(last_writer_wins_merge(events))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a batch record for claim-501 that carries <code>event_time=23.917</code> (chronologically the
+newest for that claim) but <code>arrival_time=28.667</code> (roughly 14 hours after the last stream
+event for it), plus a second entity (claim-777) with one stream event and one genuinely
+stale batch record whose <code>event_time</code> is far <em>behind</em> the stream event despite arriving in
+the same batch file. Run <code>last_writer_wins_merge</code>, then implement a watermark policy with 2
+hours of allowed lateness that routes anything further behind to a side output.</p>
+<p><strong>Starting point:</strong> The <code>Event</code> dataclass and <code>last_writer_wins_merge</code> function from this
+concept's Example, the two existing <code>claim-501</code> stream events, plus: a batch event for
+claim-501 (<code>event_time=23.917, arrival_time=28.667</code>), a stream event for claim-777
+(<code>event_time=33.0, arrival_time=33.001</code>), and a stale batch event for claim-777
+(<code>event_time=2.0, arrival_time=28.667</code>).</p>
+<p>Expected output (actually run):</p>
+<pre><code>last-writer-wins merge result (by event_time, not arrival order):
+  claim-501: status=CLOSED, adjuster_note=final payout recorded  (event_time=23.917, source=batch)
+  claim-777: status=CLOSED  (event_time=33.0, source=stream)
+
+watermark policy: 4 events merged on-time, 1 routed to side output
+  SIDE OUTPUT: claim-777 event_time=2.0 value=&#x27;status=REOPENED (stale reprocessing artifact)&#x27;
+</code></pre><p>Claim-501's batch record correctly wins the merge over its earlier stream event, because
+event-time ordering (not arrival order) decided it. Claim-777's stale record is the one the
+allowed-lateness window catches and routes to the side output instead of either dropping it
+silently or letting it corrupt the merge as if it were current.</p>
+<hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> The batch window's schedule is owned by a mainframe scheduler team, and
+moving it — even by 20 minutes — is a change-advisory-board item with its own lead time,
+not a parameter in your pipeline config.</p>
+<p><strong>Compliance angle:</strong> A model or agent answering from data whose staleness was never
+declared has no defensible answer to &quot;how current was this when you used it?&quot; A written
+staleness budget, versioned per use case, is the evidence artifact that closes that gap.</p>
+<p><strong>What breaks in production:</strong> The nightly backfill and the intraday incremental overlap on
+the same entity, and the older value wins — because whoever wired the merge ordered it by
+arrival time, which is exactly what Concept 3 exists to prevent.</p>
+<hr />
+<h2 id="day-5">Day 5 — Real-Time vs Near-Real-Time — ADR</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="07-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=ODnp_cSt1kw" target="_blank" rel="noopener"><b>Batch vs. Streaming vs. Near-Real-Time Data</b><small>NextGen Analytics, LLC | Data &amp; AI Consulting · 7:21</small></a></li><li><a href="https://www.youtube.com/watch?v=j9jU5-jq2Fg" target="_blank" rel="noopener"><b>Batch vs Real-Time Processing | Data Engineering Explained</b><small>AI Data Hub · 6:21</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=real%20time%20vs%20near%20real%20time%20data%20architecture%20decision%20streaming%20vs%20batch" target="_blank" rel="noopener">Search YouTube: real time vs near real time data architecture decision streaming vs batch</a></p></div>
+<hr />
+<h3>Concept 1 — A Source Capability Matrix, System by System</h3>
+<p>The only honest way to set a latency target is to build a matrix, one row per source
+system, of what mechanism it actually supports, what it costs, and what its floor latency
+genuinely is — then derive achievable end-to-end freshness from that, never the reverse.
+The matrix has to include the row where the honest entry is &quot;nightly&quot;: pretending otherwise
+does not change the mainframe's schedule, it only produces a documented promise nobody can
+keep.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+@dataclasses.dataclass
+class SourceCapability:
+    name: str
+    mechanism: str
+    floor_latency_seconds: int
+    delete_visible: bool
+
+sources = [
+    SourceCapability(&quot;MSSQL claims OLTP&quot;, &quot;log-based CDC&quot;, 30, True),
+    SourceCapability(&quot;Mainframe policy core&quot;, &quot;nightly batch extract&quot;, 6 * 3600, False),
+]
+
+def achievable_freshness(source, downstream_seconds):
+    return source.floor_latency_seconds + downstream_seconds
+
+for s in sources:
+    print(s.name, achievable_freshness(s, 15))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add two more sources (Oracle underwriting via LogMiner polling at a 120s floor, and Oracle
+policy admin via high-watermark polling at a 300s floor, deletes not visible), compute
+achievable end-to-end freshness for all four at a 15-second downstream processing cost, and
+identify the worst-case floor across the whole set.</p>
+<p><strong>Starting point:</strong> The <code>SourceCapability</code> dataclass, <code>sources</code> list and
+<code>achievable_freshness</code> function from this concept's Example, extended with the two
+additional <code>SourceCapability</code> rows above.</p>
+<p>Expected output (actually run):</p>
+<pre><code>source                       mechanism                         floor  deletes   end-to-end
+MSSQL claims OLTP            log-based CDC                       30s      yes          45s
+Oracle underwriting          LogMiner polling (no GoldenGate licence)     120s      yes         135s
+Oracle policy admin (busy OLTP) high-watermark polling             300s       no         315s
+Mainframe policy core        nightly batch extract            21600s       no         6.0h
+
+honest programme-wide floor if forced to one SLA: Mainframe policy core at 6.0 hours -- the honest answer for that source is &#x27;nightly&#x27;, not &#x27;near real time&#x27;
+</code></pre><p>If the programme is forced to a single, uniform SLA across all four sources, that SLA is 6
+hours — set by the slowest source, not the fastest. Anything tighter is a promise the
+mainframe source cannot keep.</p>
+<hr />
+<h3>Concept 2 — The Cost of Forcing CDC Onto a Source That Cannot Support It</h3>
+<p>Every mechanism from Day 1-3 has a real cost when pushed past what the source can
+comfortably support: aggressive polling against a busy OLTP core adds query contention on
+top of the transactional workload it was already carrying; full supplemental logging on a
+busy Oracle instance grows redo volume on every write, forever; MSSQL's CDC capture lag
+blocks transaction-log truncation, and a log volume that fills because capture never caught
+up takes down every write on the source — the CDC consumer becomes the outage, not a
+symptom of one. The mainframe case is the cleanest: there is no mechanism to push past its
+limits, because there is no mechanism at all besides the nightly file.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ASSUMED_QUERY_COST_MS = 8
+def poll_load(interval_seconds, query_cost_ms=ASSUMED_QUERY_COST_MS):
+    qps = 1 / interval_seconds
+    return qps, qps * query_cost_ms
+
+print(poll_load(5))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Compute polling load (queries/sec and ms consumed/sec) at 30s, 10s, 5s and 1s intervals
+against an illustrative 500 ms/s OLTP contention budget, expressed as percentage of budget
+consumed. Separately, compute how long an illustrative 200 GB transaction log volume takes
+to fill at an illustrative 40 MB/min growth rate if MSSQL CDC capture lag never catches up.</p>
+<p><strong>Starting point:</strong> The <code>poll_load</code> function from this concept's Example, plus
+<code>OLTP_CORE_QUERY_BUDGET_PER_SEC = 500</code>, <code>ASSUMED_LOG_GROWTH_MB_PER_MIN_ACTIVE_WRITES = 40</code>
+and <code>ASSUMED_LOG_DISK_MB = 200_000</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>polling interval vs OLTP contention (single poller, illustrative 8ms query cost):
+  every  30s  -&gt; 0.033 qps  0.267 ms/s consumed (0.0533% of illustrative budget)
+  every  10s  -&gt; 0.100 qps  0.800 ms/s consumed (0.1600% of illustrative budget)
+  every   5s  -&gt; 0.200 qps  1.600 ms/s consumed (0.3200% of illustrative budget)
+  every   1s  -&gt; 1.000 qps  8.000 ms/s consumed (1.6000% of illustrative budget)
+  -- a single poller barely registers; the real risk is many pollers x many tables,
+     each independently tuned down to &#x27;make it fresher&#x27; without a shared budget
+
+capture-job lag vs log disk exhaustion (illustrative 40 MB/min growth, 200 GB log volume):
+  time until the log volume fills if capture never catches up: 5000 minutes (83.3 hours)
+  once the log volume is full, every write on the source transaction fails --
+  the CDC consumer&#x27;s lag has become the primary outage, not a side effect of one
+</code></pre><p>A single poller's own load is negligible even at 1-second intervals — the real risk is many
+pollers, each tuned individually with no shared view of the aggregate. The log-growth
+arithmetic gives a harder number: an unrecovered capture lag on this illustrative
+configuration has roughly 83 hours before the log volume itself becomes the outage.</p>
+<hr />
+<h3>Concept 3 — Hybrid: Stream Where Possible, Batch Where Not, One Index</h3>
+<p>The design this week has been building toward: <strong>one</strong> vector index, fed by whichever
+mechanism each source actually supports, with per-record <strong>provenance</strong> —
+<code>source_system</code>, <code>mechanism</code>, <code>event_time</code>, <code>ingested_at</code>, <code>staleness_seconds</code> — carried on
+every record. Query time then <strong>annotates or refuses</strong> a result that is older than the
+requesting use case's staleness budget, instead of returning every record as if the index
+were uniformly fresh. The index looking uniform is exactly the failure mode Day 4's Reality
+Check named: nobody remembers a third of it is 14 hours old until an answer built on it is
+wrong.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses, datetime as dt
+
+@dataclasses.dataclass
+class UnifiedRecord:
+    entity_id: str
+    source_system: str
+    mechanism: str
+    event_time: dt.datetime
+    ingested_at: dt.datetime
+    staleness_seconds: float
+
+def build_unified_record(entity_id, source_system, mechanism, event_time, ingested_at):
+    return UnifiedRecord(entity_id, source_system, mechanism, event_time, ingested_at,
+                          (ingested_at - event_time).total_seconds())
+
+def freshness_gate(record, max_staleness_seconds):
+    if record.staleness_seconds &gt; max_staleness_seconds:
+        return &quot;REFUSED&quot;
+    return &quot;OK&quot;
+
+now = dt.datetime(2026, 1, 2, 8, 0, 0)
+rec = build_unified_record(&quot;claim-501&quot;, &quot;mssql_claims_oltp&quot;, &quot;cdc&quot;, now - dt.timedelta(seconds=40), now)
+print(freshness_gate(rec, 60))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Build unified records for three entities from three different mechanisms (CDC at 40s
+staleness, polling at 6 minutes staleness, batch at 14 hours staleness), then run each
+through <code>freshness_gate</code> against two use-case budgets: a 60-second fraud-alert budget and a
+1800-second agent-assist budget.</p>
+<p><strong>Starting point:</strong> The <code>UnifiedRecord</code>, <code>build_unified_record</code> and <code>freshness_gate</code>
+functions from this concept's Example, plus the polling record (<code>event_time = now - 6min</code>)
+and the batch record (<code>event_time = now - 14h</code>), each <code>ingested_at=now</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>claim-501      mechanism=cdc      use_case=fraud alert   -&gt; OK        (record is 40s stale, within 60s budget)
+claim-501      mechanism=cdc      use_case=agent assist  -&gt; OK        (record is 40s stale, within 1800s budget)
+uw-9981        mechanism=polling  use_case=fraud alert   -&gt; REFUSED   (record is 360s stale, budget is 60s)
+uw-9981        mechanism=polling  use_case=agent assist  -&gt; OK        (record is 360s stale, within 1800s budget)
+policy-4471    mechanism=batch    use_case=fraud alert   -&gt; REFUSED   (record is 50400s stale, budget is 60s)
+policy-4471    mechanism=batch    use_case=agent assist  -&gt; REFUSED   (record is 50400s stale, budget is 1800s)
+</code></pre><p>The same index, the same query, produces a different verdict per use case for the same
+record — which is the entire point of carrying staleness as data instead of assuming
+uniform freshness across the index.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> This ADR's real audience is not another data engineer — it is the DBA
+team, the mainframe scheduler team, and whoever owns the Oracle licensing budget, because
+every latency target in it is a constraint on their systems, not a request to your own
+pipeline.</p>
+<p><strong>Compliance angle:</strong> A declared, versioned staleness budget per use case is the evidence
+artifact a regulator or auditor actually wants — proof the organisation knew how fresh its
+data was allowed to be for a given decision, rather than a retroactive excuse after an
+answer built on stale data caused a problem.</p>
+<p><strong>What breaks in production:</strong> The unified index looks the same at every query regardless
+of which source fed a given record. Nobody remembers a third of it is 14 hours old until
+someone traces a wrong answer back to a mainframe-sourced record that was already stale
+when it was ingested.</p>
+<hr />
+<h2>Architecture Decision — Week 07</h2>
+<p><strong>Choosing between:</strong> log-based CDC (seconds), polling micro-batch (minutes), and scheduled
+batch (hours) — decided <strong>per source system, not per programme</strong>.</p>
+<p><strong>Rule of thumb:</strong> Pick the mechanism the source can actually support, and derive the
+latency target from that choice — never the reverse. Do not set a &quot;near real time&quot; target
+first and then go looking for a mechanism to hit it; Day 4 and Day 5 both showed what that
+produces: a written promise a mainframe extract or an unwilling DBA team was never going to
+keep.</p>
+<p>Use log-based CDC where the platform team will actually enable and fund it (SQL Server
+Agent running, an Oracle supplemental-logging change accepted, archive-log retention long
+enough to cover realistic outages) and where delete-visibility and strict ordering
+genuinely matter — sanctions-adjacent and fraud-adjacent paths, where a missed delete or an
+out-of-order update is not just stale, it is wrong. Use polling with a safety lag that
+provably exceeds the longest transaction the source actually produces (Day 3, Concept 2 —
+measure it, do not assume it), paired with a scheduled key-set reconciliation job to catch
+the hard deletes polling structurally cannot see, wherever CDC is refused rather than
+merely inconvenient. Use scheduled batch, and say so plainly in the documentation as
+&quot;nightly&quot;, wherever the source only ever produces a batch — a mainframe nightly extract is
+not &quot;near real time with a long tail&quot;; it is batch, and disguising it as anything else is
+exactly the failure mode this ADR exists to prevent. Escalate to a licensed product
+(GoldenGate/XStream, or an equivalent) only when a written staleness budget for a specific,
+named use case proves that budget is infeasible any other way (Day 2, Concept 4's
+break-even method) — never as a default first reach, because the license cost is real and
+recurring whether or not the volume ever justifies it.</p>
+<p>The deliverable of Phase 1, taken as a whole, is not a single uniformly fast pipeline — it
+is <strong>one vector index carrying per-record provenance</strong> (<code>source_system</code>, <code>mechanism</code>,
+<code>event_time</code>, <code>ingested_at</code>, <code>staleness_seconds</code>) and a <strong>written, per-use-case staleness
+budget</strong> checked against what each source can actually deliver, with query-time logic that
+annotates or refuses a result older than its use case allows rather than presenting the
+whole index as uniformly fresh. The failure mode this entire phase exists to prevent is
+Weeks 01 through 06 building a beautifully engineered streaming vector pipeline against a
+source that structurally cannot feed it — HNSW tuning, hybrid search and Kafka ingestion
+all optimizing the wrong end of a system whose floor was set, from day one, by a mainframe
+batch window nobody asked about.</p>
+<div class="pager"><a class="btn ghost" href="week-06.html">&larr; Week 06</a><a class="btn ghost" href="week-08.html">Week 08 &rarr;</a></div>
+</main></body></html>

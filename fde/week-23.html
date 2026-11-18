@@ -1,0 +1,1717 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 23 — Token/Cost Optimization at Scale</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/how-does-prompt-caching-work" target="_blank" rel="noopener">How does Prompt Caching work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/llm-routing" target="_blank" rel="noopener">LLM Routing<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/how-does-semantic-caching-work" target="_blank" rel="noopener">How does Semantic Caching work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/llm-inference-optimization" target="_blank" rel="noopener">LLM Inference Optimization<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="23" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 23 — Token/Cost Optimization at Scale</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>4 — LLMOps &amp; Distributed Infrastructure</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Advanced · closes Phase 4</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 08's Circuit Breaker instinct (fail cheap, fail fast) and Week 17's <code>estimate_query_cost</code>/<code>cost_guard</code>/token-budget/canary-routing patterns (Curriculum <code>W17_D4_Cost_Governance.ipynb</code>, genuinely reused and re-grounded in claims-processing spend rather than BigQuery bytes-scanned) inform this week throughout. Week 19's LangGraph retry/checkpoint habits and Week 22's tool-tier metadata are assumed background, not directly reused. No prior FinOps or LLM-provider billing-console experience assumed.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. This week is almost entirely pure-Python control-flow and accounting logic — cost calculators, cache-key/TTL simulations, routing decision functions, budget/quota enforcement — that genuinely executes with no live LLM API call, the same shape Week 17 used successfully for BigQuery-cost governance. <code>tiktoken</code> imports cleanly in this sandbox but <code>tiktoken.get_encoding(...)</code> fetches its BPE vocabulary file from a host this sandbox's egress proxy blocks (the exact gap known-issues.md item 9 already documents for this same package) — Day 1's local-tokenizer content therefore uses a hand-rolled word-count heuristic, disclosed honestly, in place of a real BPE count. Anywhere a concept's own subject is a live API behavior — a real <code>cache_control</code> breakpoint on an Anthropic/OpenAI call, or a real OpenTelemetry collector receiving spans — it is shown as REAL MODE reference syntax while the surrounding logic (cost aggregation, cache simulation with real hit/miss counting, routing decisions, budget enforcement with real raised exceptions) is built and verified as genuine, executed code.</td>
+</tr>
+</tbody>
+</table>
+<p>Weeks 19-22 built an agent that runs reliably, retrieves the right context, scales its
+compute, and touches a legacy core safely. None of that says anything about what it
+costs to run at the volume a real BFSI deployment sees — tens of thousands of claims,
+policy lookups, and compliance checks a day, each one a chain of LLM calls whose price
+was decided by a provider's pricing page, not by this track's own code. This week closes
+Phase 4 by making that cost visible, attributable, and governable: counting spend the way
+a claims operation actually reports it (cost per claim, not cost per thousand tokens),
+keeping a prompt's static prefix cache-eligible, deciding when a cheaper model or a
+cached answer is safe to use instead of a fresh call, and treating a cost regression as a
+release-blocking defect with the same seriousness as a quality regression.</p>
+<hr />
+<h2 id="day-1">Day 1 — Unit Economics and Token Accounting</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="23-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=ShQ9wz1GjHs" target="_blank" rel="noopener"><b>Track AI Token Usage by Team &amp; Feature in Claude Code with OpenTelemetry (Part 4)</b><small>Azure with Mike Stephenson · 6:10</small></a></li><li><a href="https://www.youtube.com/watch?v=JnQXEMHh3aw" target="_blank" rel="noopener"><b>OpenTelemetry for GenAI and the OpenLLMetry project</b><small>OpenObservability Talks · 1:01:09</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=OpenTelemetry%20GenAI%20semantic%20conventions%20LLM%20token%20cost%20tracking" target="_blank" rel="noopener">Search YouTube: OpenTelemetry GenAI semantic conventions LLM token cost tracking</a></p></div>
+<hr />
+<h3>Concept 1 — Cost Per Claim Processed, Not Cost Per Thousand Tokens</h3>
+<p>A dashboard that reports &quot;$0.004 per 1,000 tokens&quot; tells a BFSI operations lead nothing
+they can act on — nobody budgets a claims department in tokens. The number that actually
+matters is the fully-loaded cost of processing ONE claim end to end, across every LLM call
+that claim's run made, at whatever model tier each call used. Reporting cost-per-1k-tokens
+alongside cost-per-claim can even be actively misleading: an escalated claim that made two
+calls (a cheap triage pass, then an expensive full-agent pass) can show a SMALLER
+cost-per-1k-tokens figure than a simple one-call claim, purely because its later call had a
+larger token count to average against — even though its total dollar cost per claim is far
+higher.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+@dataclasses.dataclass
+class ModelPricing:
+    name: str
+    input_per_1k: float
+    output_per_1k: float
+
+PRICING = {
+    &quot;claims-triage-mini&quot;: ModelPricing(&quot;claims-triage-mini&quot;, 0.00025, 0.00125),
+    &quot;claims-agent-v3.2&quot;: ModelPricing(&quot;claims-agent-v3.2&quot;, 0.003, 0.015),
+}
+
+def call_cost_usd(model_name, input_tokens, output_tokens):
+    p = PRICING[model_name]
+    return (input_tokens / 1000) * p.input_per_1k + (output_tokens / 1000) * p.output_per_1k
+
+@dataclasses.dataclass
+class ClaimRun:
+    claim_id: str
+    calls: list  # list of (model_name, input_tokens, output_tokens)
+
+def cost_per_claim(run):
+    return sum(call_cost_usd(m, i, o) for m, i, o in run.calls)
+
+def cost_per_1k_tokens_view(run):
+    total_tokens = sum(i + o for _, i, o in run.calls)
+    total_cost = cost_per_claim(run)
+    if total_tokens == 0:
+        return 0.0
+    return (total_cost / total_tokens) * 1000
+
+simple_claim = ClaimRun(&quot;CLM-88213&quot;, calls=[(&quot;claims-triage-mini&quot;, 800, 120)])
+escalated_claim = ClaimRun(&quot;CLM-88214&quot;, calls=[
+    (&quot;claims-triage-mini&quot;, 800, 60),
+    (&quot;claims-agent-v3.2&quot;, 4200, 900),
+])
+
+for run in [simple_claim, escalated_claim]:
+    print(f&quot;{run.claim_id}: cost_per_claim=${cost_per_claim(run):.4f}  cost_per_1k_tokens=${cost_per_1k_tokens_view(run):.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>CLM-88213: cost_per_claim=$0.0003  cost_per_1k_tokens=$0.0004
+CLM-88214: cost_per_claim=$0.0264  cost_per_1k_tokens=$0.0044
+</code></pre><p>Notice <code>CLM-88214</code> costs 88x more per claim than <code>CLM-88213</code>, but its cost-per-1k-tokens
+figure is only about 11x higher — the per-1k view compresses the real gap because the
+escalated claim's larger token volume dilutes the average.</p>
+<p><strong>Exercise:</strong>
+Write <code>report_cost_per_claim(batch)</code> returning a list of <code>(claim_id, rounded_cost)</code> tuples
+for every claim in <code>claim_batch</code>, then print each row, the batch total, and the average
+cost per claim.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>claim_batch = [
+    ClaimRun(&quot;CLM-90001&quot;, calls=[(&quot;claims-triage-mini&quot;, 700, 100)]),
+    ClaimRun(&quot;CLM-90002&quot;, calls=[(&quot;claims-triage-mini&quot;, 650, 90), (&quot;claims-agent-v3.2&quot;, 3800, 700)]),
+    ClaimRun(&quot;CLM-90003&quot;, calls=[(&quot;claims-triage-mini&quot;, 900, 140)]),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>ClaimRun</code>, <code>cost_per_claim</code>, and <code>call_cost_usd</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>CLM-90001: $0.0003
+CLM-90002: $0.0222
+CLM-90003: $0.0004
+batch total=$0.0229  avg_per_claim=$0.0076
+</code></pre><hr />
+<h3>Concept 2 — OpenTelemetry GenAI Attributes for Attribution</h3>
+<p>The OpenTelemetry GenAI semantic conventions define a stable attribute vocabulary for LLM
+spans — <code>gen_ai.request.model</code>, <code>gen_ai.usage.input_tokens</code>, <code>gen_ai.usage.output_tokens</code>,
+<code>gen_ai.system</code> — so cost and usage data from any provider lands in the same shape a
+tracing backend already knows how to query, instead of every team inventing its own field
+names. This sandbox has no live OpenTelemetry collector to export spans to, but the
+attribute SHAPE and the attribution fields a BFSI deployment adds alongside it
+(<code>tenant.id</code>, <code>use_case</code>, <code>pipeline.stage</code>) are genuine, checkable Python objects here —
+nothing about validating that shape needs a real collector running.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>@dataclasses.dataclass
+class GenAISpan:
+    name: str
+    attributes: dict
+
+def make_genai_span(model, input_tokens, output_tokens, tenant, use_case, pipeline_stage):
+    return GenAISpan(
+        name=&quot;chat&quot;,
+        attributes={
+            &quot;gen_ai.request.model&quot;: model,
+            &quot;gen_ai.usage.input_tokens&quot;: input_tokens,
+            &quot;gen_ai.usage.output_tokens&quot;: output_tokens,
+            &quot;gen_ai.system&quot;: &quot;anthropic&quot;,
+            &quot;tenant.id&quot;: tenant,
+            &quot;use_case&quot;: use_case,
+            &quot;pipeline.stage&quot;: pipeline_stage,
+        },
+    )
+
+def span_cost_usd(span):
+    return call_cost_usd(
+        span.attributes[&quot;gen_ai.request.model&quot;],
+        span.attributes[&quot;gen_ai.usage.input_tokens&quot;],
+        span.attributes[&quot;gen_ai.usage.output_tokens&quot;],
+    )
+
+spans = [
+    make_genai_span(&quot;claims-triage-mini&quot;, 800, 120, &quot;tenant-acme&quot;, &quot;claims_triage&quot;, &quot;intake&quot;),
+    make_genai_span(&quot;claims-agent-v3.2&quot;, 4200, 900, &quot;tenant-acme&quot;, &quot;claims_triage&quot;, &quot;adjudication&quot;),
+    make_genai_span(&quot;claims-triage-mini&quot;, 500, 80, &quot;tenant-globex&quot;, &quot;policy_qa&quot;, &quot;intake&quot;),
+]
+
+for s in spans:
+    a = s.attributes
+    print(f&quot;{a[&#x27;tenant.id&#x27;]:12s} {a[&#x27;pipeline.stage&#x27;]:12s} model={a[&#x27;gen_ai.request.model&#x27;]:20s} cost=${span_cost_usd(s):.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>tenant-acme  intake       model=claims-triage-mini   cost=$0.0003
+tenant-acme  adjudication model=claims-agent-v3.2    cost=$0.0261
+tenant-globex intake       model=claims-triage-mini   cost=$0.0002
+</code></pre><p>A real deployment would export each span with
+<code>tracer.start_span(&quot;chat&quot;, attributes=span.attributes)</code> against a configured OTLP
+exporter — REAL MODE, since this sandbox has no collector to receive it; the attribute
+dict itself is exactly what would be attached either way.</p>
+<p><strong>Exercise:</strong>
+Write <code>spans_missing_attribution(spans_list)</code> that returns a list of
+<code>(span, missing_fields)</code> pairs for every span missing any of <code>tenant.id</code>, <code>use_case</code>,
+<code>pipeline.stage</code>, or <code>gen_ai.request.model</code> (treat <code>None</code> or <code>&quot;&quot;</code> as missing too). Run it
+against <code>check_spans</code> and print the count checked, the count with gaps, and each gap's
+missing fields.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>raw_spans = [
+    make_genai_span(&quot;claims-triage-mini&quot;, 600, 90, &quot;tenant-acme&quot;, &quot;claims_triage&quot;, &quot;intake&quot;),
+    make_genai_span(&quot;claims-agent-v3.2&quot;, 3900, 750, &quot;tenant-acme&quot;, &quot;claims_triage&quot;, &quot;adjudication&quot;),
+    make_genai_span(&quot;claims-triage-mini&quot;, 450, 70, &quot;tenant-initech&quot;, &quot;claims_triage&quot;, &quot;intake&quot;),
+]
+unattributed_span = GenAISpan(name=&quot;chat&quot;, attributes={
+    &quot;gen_ai.request.model&quot;: &quot;claims-triage-mini&quot;,
+    &quot;gen_ai.usage.input_tokens&quot;: 300,
+    &quot;gen_ai.usage.output_tokens&quot;: 40,
+    &quot;gen_ai.system&quot;: &quot;anthropic&quot;,
+})
+check_spans = raw_spans + [unattributed_span]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>GenAISpan</code> and <code>make_genai_span</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>spans checked=4  spans_missing_attribution=1
+  missing fields: [&#x27;tenant.id&#x27;, &#x27;use_case&#x27;, &#x27;pipeline.stage&#x27;]
+</code></pre><hr />
+<h3>Concept 3 — Local Tokenizer Counts vs. Billed Usage, and Where They Diverge</h3>
+<p>A pre-flight budget check needs a token estimate before the call ever happens, so it has
+to be computed locally with no network round trip. But a local estimate is never exactly
+what the provider bills — BPE tokenization splits on sub-word boundaries that don't line
+up with word boundaries, especially for the exact strings a BFSI prompt is full of: policy
+numbers, currency figures, dates. This sandbox cannot demonstrate the gap against a REAL
+BPE tokenizer: <code>tiktoken</code> imports cleanly, but <code>tiktoken.get_encoding(&quot;cl100k_base&quot;)</code>
+fetches its vocabulary file from <code>openaipublic.blob.core.windows.net</code>, and this sandbox's
+egress proxy rejects that host —</p>
+<pre><code>requests.exceptions.ProxyError: ... Tunnel connection failed: 403 Forbidden ...
+openaipublic.blob.core.windows.net
+</code></pre><p>— confirmed directly, the same gap known-issues.md item 9 already found for this exact
+package. The estimate below is therefore a genuine, hand-rolled word-count heuristic
+(roughly 1.3 tokens per English word, the same approximation this track's own Curriculum
+content already uses), not a stand-in FOR tiktoken pretending to be it — and the
+<code>billed_actual</code> figures are values a real provider usage response would report, used here
+to demonstrate the divergence math, not measured by a live call.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def local_token_estimate(text):
+    &quot;&quot;&quot;A cheap, no-network approximation -- ~1.3 tokens per word for English
+    prose. This is not what a provider bills; it&#x27;s what a service can
+    compute locally before a call to budget and pre-flight check.&quot;&quot;&quot;
+    return int(len(text.split()) * 1.3)
+
+def divergence_pct(local_estimate, billed_actual):
+    if billed_actual == 0:
+        return 0.0
+    return (billed_actual - local_estimate) / billed_actual * 100
+
+# billed_actual values stand in for a provider&#x27;s real usage response
+# (gen_ai.usage.input_tokens on the response span) -- genuinely different
+# from the word-count heuristic because BPE boundaries don&#x27;t match word
+# boundaries, especially for policy numbers and currency figures.
+sample_texts = [
+    (&quot;plain_prose&quot;, &quot;Please confirm the customer&#x27;s mailing address on file.&quot;),
+    (&quot;claim_reference&quot;, &quot;Claim CLM-88213 policy POL-445920 balance $12,450.75 as of 2026-09-18.&quot;),
+]
+billed_actual = {&quot;plain_prose&quot;: 12, &quot;claim_reference&quot;: 34}
+
+for label, text in sample_texts:
+    local = local_token_estimate(text)
+    billed = billed_actual[label]
+    print(f&quot;{label}: local_estimate={local} billed_actual={billed} divergence={divergence_pct(local, billed):.1f}%&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>plain_prose: local_estimate=10 billed_actual=12 divergence=16.7%
+claim_reference: local_estimate=11 billed_actual=34 divergence=67.6%
+</code></pre><p>Plain prose diverges by under 17%; the claim reference, dense with policy numbers and a
+dollar figure, diverges by nearly 68% — exactly the kind of text a claims pipeline sends
+constantly, and exactly why a local estimate alone is not a safe substitute for reading
+the real usage figure back off the response.</p>
+<p><strong>Exercise:</strong>
+Write <code>build_divergence_report(texts, billed_map)</code> that returns a list of
+<code>(label, local_estimate, billed_actual, divergence_pct)</code> tuples for each text, print every
+row, then find and print the row with the largest absolute divergence.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>review_texts = [
+    (&quot;short_query&quot;, &quot;What is my current balance?&quot;),
+    (&quot;dense_reference&quot;, &quot;Policy POL-778821 renewal date 2027-03-01 premium $884.29 endorsement E-4.&quot;),
+    (&quot;long_prose&quot;, &quot;The customer called to dispute a duplicate charge on their October statement and requested a written confirmation of the refund timeline.&quot;),
+]
+review_billed = {&quot;short_query&quot;: 8, &quot;dense_reference&quot;: 29, &quot;long_prose&quot;: 33}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>local_token_estimate</code> and <code>divergence_pct</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>short_query: local=6 billed=8 divergence=25.0%
+dense_reference: local=11 billed=29 divergence=62.1%
+long_prose: local=27 billed=33 divergence=18.2%
+largest divergence: dense_reference at 62.1%
+</code></pre><hr />
+<h3>Concept 4 — Splitting Spend by Tenant, Use Case, and Pipeline Stage Before Optimizing Anything</h3>
+<p>Optimizing before you know where the money is going is how a team ends up caching the
+cheap path and leaving the expensive one untouched. The same <code>gen_ai.*</code> attribution fields
+Concept 2 attached to every span make it possible to answer &quot;which tenant, which use
+case, which pipeline stage&quot; BEFORE reaching for prompt caching, model routing, or batching
+— grouping the exact same span data by different attribute keys is the whole mechanism,
+no new instrumentation required.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import collections
+
+def aggregate_spend(spans_list, group_by):
+    totals = collections.defaultdict(float)
+    for s in spans_list:
+        key = tuple(s.attributes[k] for k in group_by)
+        totals[key] += span_cost_usd(s)
+    return dict(totals)
+
+by_tenant = aggregate_spend(spans, [&quot;tenant.id&quot;])
+by_tenant_stage = aggregate_spend(spans, [&quot;tenant.id&quot;, &quot;pipeline.stage&quot;])
+
+print(&quot;by tenant:&quot;)
+for k, v in sorted(by_tenant.items()):
+    print(f&quot;  {k[0]}: ${v:.4f}&quot;)
+print(&quot;by tenant + stage:&quot;)
+for k, v in sorted(by_tenant_stage.items()):
+    print(f&quot;  {k}: ${v:.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>by tenant:
+  tenant-acme: $0.0264
+  tenant-globex: $0.0002
+by tenant + stage:
+  (&#x27;tenant-acme&#x27;, &#x27;adjudication&#x27;): $0.0261
+  (&#x27;tenant-acme&#x27;, &#x27;intake&#x27;): $0.0003
+  (&#x27;tenant-globex&#x27;, &#x27;intake&#x27;): $0.0002
+</code></pre><p><code>tenant-acme</code>'s spend is almost entirely the <code>adjudication</code> stage, not <code>intake</code> — the
+stage-level split is what tells an engineer WHERE to spend optimization effort, something
+the tenant-only total alone cannot show.</p>
+<p><strong>Exercise:</strong>
+Write <code>spend_by(group_by, spans_list)</code> (a thin wrapper over <code>aggregate_spend</code>) and use it
+to group <code>mixed_spans</code> by <code>use_case</code>. Print each use case's total spend, then print the
+single highest-spend use case.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>mixed_spans = spans + raw_spans
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>aggregate_spend</code> from this concept's Example; <code>spans</code> and <code>raw_spans</code> from Concepts 2-3.</p>
+<p>Expected output (actually run):</p>
+<pre><code>use_case=claims_triage: $0.0499
+use_case=policy_qa: $0.0002
+highest-spend use_case: claims_triage at $0.0499
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> a claims platform built before LLM calls existed has no <code>claim_id</code> on
+any of its existing cost-tracking tables — attribution has to be bolted on by tagging
+every span at call time (<code>tenant.id</code>, <code>use_case</code>, <code>pipeline.stage</code>) rather than joined in
+after the fact from a system that was never designed to carry it.</p>
+<p><strong>Compliance angle:</strong> per-tenant cost attribution is not just a FinOps convenience in a
+multi-tenant BFSI platform — it is the same data a tenant-level billing dispute or an
+internal chargeback audit needs, so the attribution fields have to be trustworthy enough
+to stand behind in that context, not an approximate label added as an afterthought.</p>
+<p><strong>What breaks in production:</strong> a local token estimate used as a hard pre-flight gate
+(reject anything over a threshold before sending) will reject requests the provider would
+have accepted, and admit requests the provider bills far more for than expected, purely
+from the local/billed divergence Concept 3 measured — a production budget gate needs
+either a wide safety margin around the local estimate or a real tokenizer library, not the
+bare word-count heuristic used here for its no-network property alone.</p>
+<hr />
+<h2 id="day-2">Day 2 — Prompt Caching and Prefix Stability</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="23-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=u57EnkQaUTY" target="_blank" rel="noopener"><b>What is Prompt Caching? Optimize LLM Latency with AI Transformers</b><small>IBM Technology · 9:06</small></a></li><li><a href="https://www.youtube.com/watch?v=SkM4k4SKvCM" target="_blank" rel="noopener"><b>Prompt Caching Explained: Stop Overpaying for AI Agents</b><small>Hugging Face · 17:16</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=prompt%20caching%20LLM%20API%20cache%20control%20cost%20reduction" target="_blank" rel="noopener">Search YouTube: prompt caching LLM API cache control cost reduction</a></p></div>
+<hr />
+<h3>Concept 1 — Cache Breakpoints and the TTL They Carry</h3>
+<p>A provider's prompt cache is opt-in per block: a request marks specific content with a
+<code>cache_control</code> breakpoint, and only content up to and including that marker becomes
+eligible for a cache hit on a later request. Each breakpoint carries its own TTL — how
+long the cached prefix stays warm before it has to be rewritten. Content the agent
+generates fresh every turn (the actual user message) is never marked; only genuinely
+static content — a system prompt, a tool schema, a policy document — is a breakpoint
+candidate. This sandbox cannot make a real cache-control call to a live provider, but the
+decision of WHICH blocks to mark and what TTL to give them is genuine, checkable logic
+here regardless.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code>import dataclasses
+
+@dataclasses.dataclass
+class CacheBreakpoint:
+    block_label: str
+    ttl_seconds: int
+
+@dataclasses.dataclass
+class PromptBlock:
+    label: str
+    content: str
+    cache_control: CacheBreakpoint | None = None
+
+def mark_cache_breakpoint(block, ttl_seconds=300):
+    # Real Anthropic API shape (REAL MODE reference, not executed here):
+    #   {&quot;type&quot;: &quot;text&quot;, &quot;text&quot;: block.content,
+    #    &quot;cache_control&quot;: {&quot;type&quot;: &quot;ephemeral&quot;, &quot;ttl&quot;: &quot;5m&quot;}}
+    return dataclasses.replace(block, cache_control=CacheBreakpoint(block.label, ttl_seconds))
+
+system_block = PromptBlock(&quot;system_policy&quot;, &quot;You are a claims assistant. Follow policy PL-100. &quot; * 40)
+tool_block = PromptBlock(&quot;tool_schema&quot;, &quot;Available tools: get_policy_balance, renew_policy. &quot; * 20)
+per_request_block = PromptBlock(&quot;user_turn&quot;, &quot;What is the balance on POL-445920?&quot;)
+
+system_block = mark_cache_breakpoint(system_block, ttl_seconds=300)
+tool_block = mark_cache_breakpoint(tool_block, ttl_seconds=300)
+# per_request_block deliberately NOT marked -- it changes every call
+
+for b in [system_block, tool_block, per_request_block]:
+    cached = &quot;cached&quot; if b.cache_control else &quot;not cached&quot;
+    ttl = f&quot;ttl={b.cache_control.ttl_seconds}s&quot; if b.cache_control else &quot;&quot;
+    print(f&quot;{b.label:15s} {cached:12s} {ttl}&quot;)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>system_policy   cached       ttl=300s
+tool_schema     cached       ttl=300s
+user_turn       not cached   
+</code></pre><p><strong>Exercise:</strong>
+Write <code>mark_all_static_blocks(blocks, ttl_seconds=300)</code> that applies <code>mark_cache_breakpoint</code>
+to every block in a list. Apply it to <code>static_blocks</code> with a 600-second TTL, print each
+marked block's <code>cache_control</code>, and print one line confirming every block ended up marked.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>policy_doc_block = PromptBlock(&quot;policy_doc&quot;, &quot;Section 4.2: claims over $10,000 require supervisor review. &quot; * 15)
+few_shot_block = PromptBlock(&quot;few_shot_examples&quot;, &quot;Example 1: ... Example 2: ... &quot; * 10)
+static_blocks = [policy_doc_block, few_shot_block]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>PromptBlock</code> and <code>mark_cache_breakpoint</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>policy_doc: cache_control=CacheBreakpoint(block_label=&#x27;policy_doc&#x27;, ttl_seconds=600)
+few_shot_examples: cache_control=CacheBreakpoint(block_label=&#x27;few_shot_examples&#x27;, ttl_seconds=600)
+all static blocks marked: True
+</code></pre><hr />
+<h3>Concept 2 — Ordering Static Content Ahead of Per-Request Content</h3>
+<p>A provider's cache matches on the prompt's PREFIX, byte for byte, starting from the very
+first token. If per-request content (today's user message, a live balance figure) sits
+anywhere before the static system/tool/policy content, the prefix is never byte-stable
+across two requests, and every request becomes a cache miss regardless of how many
+breakpoints are marked. The fix is purely an ordering rule: static content always comes
+first, in the same order, every time; dynamic content always comes last.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def assemble_prompt(static_blocks, dynamic_blocks):
+    # Static, cacheable content MUST come first and in a stable order --
+    # any per-request content before it (even a single differing byte)
+    # invalidates the cache for everything that follows it.
+    return static_blocks + dynamic_blocks
+
+def prompt_prefix_bytes(blocks, up_to):
+    return &quot;&quot;.join(b.content for b in blocks[:up_to]).encode(&quot;utf-8&quot;)
+
+correct_order = assemble_prompt([system_block, tool_block], [per_request_block])
+wrong_order = assemble_prompt([per_request_block, system_block], [tool_block])
+
+# Two different requests sharing the same static content, correct order:
+per_request_block_b = PromptBlock(&quot;user_turn&quot;, &quot;What is the balance on POL-990112?&quot;)
+correct_order_b = assemble_prompt([system_block, tool_block], [per_request_block_b])
+
+prefix_a = prompt_prefix_bytes(correct_order, up_to=2)
+prefix_b = prompt_prefix_bytes(correct_order_b, up_to=2)
+print(f&quot;correct order: prefix identical across requests = {prefix_a == prefix_b}&quot;)
+
+wrong_order_b = assemble_prompt([per_request_block_b, system_block], [tool_block])
+wrong_prefix_a = prompt_prefix_bytes(wrong_order, up_to=1)
+wrong_prefix_b = prompt_prefix_bytes(wrong_order_b, up_to=1)
+print(f&quot;wrong order (dynamic first): prefix identical across requests = {wrong_prefix_a == wrong_prefix_b}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>correct order: prefix identical across requests = True
+wrong order (dynamic first): prefix identical across requests = False
+</code></pre><p><strong>Exercise:</strong>
+Write <code>is_prefix_stable(request_a_blocks, request_b_blocks, static_block_count)</code> that
+compares the first <code>static_block_count</code> blocks' combined bytes between two requests. Run
+it against both configurations in <code>request_configs</code> and print each result.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>request_configs = [
+    (&quot;well_ordered&quot;, [system_block, tool_block, per_request_block], [system_block, tool_block, per_request_block_b], 2),
+    (&quot;dynamic_leading&quot;, [per_request_block, system_block, tool_block], [per_request_block_b, system_block, tool_block], 1),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>prompt_prefix_bytes</code> from this concept's Example; <code>system_block</code>, <code>tool_block</code>,
+<code>per_request_block</code>, <code>per_request_block_b</code> from Concepts 1-2.</p>
+<p>Expected output (actually run):</p>
+<pre><code>well_ordered: prefix_stable=True
+dynamic_leading: prefix_stable=False
+</code></pre><hr />
+<h3>Concept 3 — Minimum Cacheable Prefix Length and the Write/Read Price Asymmetry</h3>
+<p>Providers set a minimum token count below which a prefix isn't cache-eligible at all — a
+short system prompt is simply too small to bother caching. Above that floor, caching still
+isn't free: the FIRST request that populates the cache pays a WRITE premium (more than an
+uncached call would cost), and only SUBSEQUENT requests that hit the warm cache get the
+steep READ discount. A cache only pays for itself once enough hit-priced requests have
+run to offset that one write premium.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>MIN_CACHEABLE_TOKENS = 1024  # provider-documented floor below which caching isn&#x27;t offered
+
+def estimate_tokens(text):
+    return int(len(text.split()) * 1.3)
+
+def cache_write_cost(tokens, input_price_per_1k):
+    # Real providers charge a WRITE premium (Anthropic: 1.25x base for a
+    # 5-minute TTL) -- the first call that populates the cache costs MORE
+    # than an uncached call would.
+    return (tokens / 1000) * input_price_per_1k * 1.25
+
+def cache_read_cost(tokens, input_price_per_1k):
+    # A cache HIT is billed at a steep discount (Anthropic: 0.1x base).
+    return (tokens / 1000) * input_price_per_1k * 0.1
+
+def cache_eligible(prefix_text):
+    return estimate_tokens(prefix_text) &gt;= MIN_CACHEABLE_TOKENS
+
+short_prefix = &quot;You are a claims assistant.&quot;
+long_prefix = (&quot;You are a claims assistant. Follow policy PL-100 for every claim over &quot;
+               &quot;$1,000. &quot; * 65)
+
+for label, prefix in [(&quot;short_prefix&quot;, short_prefix), (&quot;long_prefix&quot;, long_prefix)]:
+    tokens = estimate_tokens(prefix)
+    print(f&quot;{label}: tokens={tokens} cache_eligible={cache_eligible(prefix)}&quot;)
+
+INPUT_PRICE_PER_1K = 0.003
+tokens = estimate_tokens(long_prefix)
+write_cost = cache_write_cost(tokens, INPUT_PRICE_PER_1K)
+read_cost = cache_read_cost(tokens, INPUT_PRICE_PER_1K)
+uncached_cost = (tokens / 1000) * INPUT_PRICE_PER_1K
+print(f&quot;tokens={tokens}  write=${write_cost:.5f}  read=${read_cost:.5f}  uncached=${uncached_cost:.5f}&quot;)
+print(f&quot;break-even: cache pays off after {write_cost / (uncached_cost - read_cost):.2f} cache-hit calls&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>short_prefix: tokens=6 cache_eligible=False
+long_prefix: tokens=1098 cache_eligible=True
+tokens=1098  write=$0.00412  read=$0.00033  uncached=$0.00329
+break-even: cache pays off after 1.39 cache-hit calls
+</code></pre><p><strong>Exercise:</strong>
+Write <code>net_savings_after_n_calls(tokens, input_price_per_1k, n_calls)</code> computing the
+difference between the all-uncached total cost and the write-once-plus-reads total cost
+for <code>n_calls</code> requests sharing the same cached prefix. Print the result for 1, 2, 5, and
+20 calls.</p>
+<p><strong>Starting point:</strong> <code>tokens</code>, <code>INPUT_PRICE_PER_1K</code>, <code>cache_write_cost</code>, and
+<code>cache_read_cost</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>n_calls=  1: net_savings=$-0.00082
+n_calls=  2: net_savings=$0.00214
+n_calls=  5: net_savings=$0.01103
+n_calls= 20: net_savings=$0.05550
+</code></pre><p>A single call is a net LOSS versus not caching at all — the write premium always costs
+more than one uncached call — and the cache only becomes worthwhile once enough later
+calls hit it at the read discount.</p>
+<hr />
+<h3>Concept 4 — Cache-Hit Rate as a Deploy-Gating Metric</h3>
+<p>A cache that never actually hits is worse than useless — it pays the write premium on
+every request with none of the read-discount payoff, usually because a recent deploy
+broke prefix stability (Concept 2) without anyone noticing until the bill arrived. Tracking
+hit rate as a first-class metric, and gating a deploy on it directly, catches that
+regression before it reaches production traffic at scale, the same way a quality
+regression gate would.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+
+@dataclasses.dataclass
+class CacheStats:
+    hits: int = 0
+    misses: int = 0
+
+    @property
+    def hit_rate(self):
+        total = self.hits + self.misses
+        return self.hits / total if total else 0.0
+
+class PrefixCacheSimulator:
+    &quot;&quot;&quot;An in-memory stand-in for a provider&#x27;s real prompt cache -- tracks
+    hit/miss by the byte-identical static prefix, the same mechanism a real
+    cache keys on.&quot;&quot;&quot;
+
+    def __init__(self):
+        self._store = {}  # prefix_hash -&gt; expiry_time
+        self.stats = CacheStats()
+
+    def _hash(self, prefix_bytes):
+        return hashlib.sha256(prefix_bytes).hexdigest()
+
+    def request(self, prefix_bytes, ttl_seconds, now):
+        key = self._hash(prefix_bytes)
+        expiry = self._store.get(key)
+        if expiry is not None and now &lt; expiry:
+            self.stats.hits += 1
+            hit = True
+        else:
+            self.stats.misses += 1
+            hit = False
+        self._store[key] = now + ttl_seconds
+        return hit
+
+MIN_DEPLOY_HIT_RATE = 0.70
+
+sim = PrefixCacheSimulator()
+static_prefix = prompt_prefix_bytes([system_block, tool_block], 2)
+t = 0.0
+for i in range(10):
+    hit = sim.request(static_prefix, ttl_seconds=300, now=t)
+    t += 1.0
+print(f&quot;hits={sim.stats.hits} misses={sim.stats.misses} hit_rate={sim.stats.hit_rate:.2f}&quot;)
+print(f&quot;deploy_gate: hit_rate &gt;= {MIN_DEPLOY_HIT_RATE} -&gt; {&#x27;PASS&#x27; if sim.stats.hit_rate &gt;= MIN_DEPLOY_HIT_RATE else &#x27;BLOCK&#x27;}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>hits=9 misses=1 hit_rate=0.90
+deploy_gate: hit_rate &gt;= 0.7 -&gt; PASS
+</code></pre><p>The very first request is always a miss (nothing cached yet) — a 0.90 hit rate over 10
+requests, not 1.00, is the correct and expected shape.</p>
+<p><strong>Exercise:</strong>
+Write <code>evaluate_deploy_gate(sim_obj, min_hit_rate=MIN_DEPLOY_HIT_RATE)</code> that raises
+<code>ValueError</code> naming the actual vs. required hit rate if <code>sim_obj.stats.hit_rate</code> is below
+the gate, else returns the hit rate. Run <code>poor_sim</code> (10 requests, each with a DIFFERENT
+prefix — simulating a broken prefix-ordering deploy) through the gate and catch the
+<code>ValueError</code>; then run the healthy <code>sim</code> from this concept's Example through the same gate
+and print its passing rate.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>poor_sim = PrefixCacheSimulator()
+t = 0.0
+for i in range(10):
+    drifting_prefix = static_prefix + str(i).encode()
+    poor_sim.request(drifting_prefix, ttl_seconds=300, now=t)
+    t += 1.0
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>PrefixCacheSimulator</code>, <code>MIN_DEPLOY_HIT_RATE</code>, and <code>sim</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>poor_sim hit_rate=0.00
+gate: BLOCKED -- deploy blocked: cache hit_rate 0.00 below gate 0.7
+good sim gate: PASS at hit_rate=0.90
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> a claims-processing prompt's &quot;static&quot; content often includes a policy
+document exported from an on-prem document-management system with unstable formatting
+(inconsistent whitespace, a regenerated timestamp header) — the export pipeline itself
+has to be made byte-stable before the prompt can ever get a cache hit, not just the
+prompt-assembly code.</p>
+<p><strong>Compliance angle:</strong> a cached policy-document prefix served stale past a real policy
+revision is a genuine compliance risk, not just a cost concern — Day 3's TTL/invalidation
+handling for a mid-day policy re-version is the direct continuation of this same
+breakpoint mechanism, not a separate problem.</p>
+<p><strong>What breaks in production:</strong> the <code>PrefixCacheSimulator</code> here is a single in-memory
+process; a real multi-instance deployment behind a load balancer needs the SAME static
+prefix routed to instances sharing a cache (or a provider-side cache, not a local one) or
+every instance independently pays the write premium with none of them individually
+reaching a useful hit rate, even though the aggregate traffic would easily clear it.</p>
+<hr />
+<h2 id="day-3">Day 3 — Semantic Caching and Context Budgets</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="23-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=wUqX0IMjJk4" target="_blank" rel="noopener"><b>Semantic Cache for AI: Cut LLM API Costs by 90% (Vector Similarity &amp; Invalidation) ⚡</b><small>Parag Dhawan · 7:12</small></a></li><li><a href="https://www.youtube.com/watch?v=SHqEZDYjp7U" target="_blank" rel="noopener"><b>Semantic Caching A 70% Discount With a 14.9% Problem</b><small>Beo Beo · 8:29</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=semantic%20cache%20LLM%20similarity%20threshold%20invalidation" target="_blank" rel="noopener">Search YouTube: semantic cache LLM similarity threshold invalidation</a></p></div>
+<hr />
+<h3>Concept 1 — Embedding-Similarity Cache With a Tuned Threshold and Per-Tenant Namespaces</h3>
+<p>Day 2's prefix cache only hits on a byte-identical prompt. Most repeated questions are
+NOT byte-identical — &quot;What is my current balance?&quot; and &quot;What amount do I currently owe?&quot;
+mean the same thing but share almost no bytes. A semantic cache instead embeds the
+question and looks up the nearest PREVIOUSLY-ANSWERED question by cosine similarity,
+returning that cached answer only above a tuned similarity threshold. This sandbox has no
+live embedding API, so <code>fake_embed</code> below is a genuine, deterministic, keyword-bucket
+stand-in (not a real model) — it is enough to demonstrate real threshold-tuning behavior
+(paraphrases cluster near 1.0, unrelated questions near 0.0), which is the actual subject
+here, without needing a live model. Namespacing the cache BY TENANT (a separate entry list
+per tenant, never searched across tenants) keeps one tenant's cached answers — which may
+reflect tenant-specific policy terms — from ever leaking into another tenant's response.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+import math
+
+def cosine_similarity(a, b):
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+def fake_embed(text):
+    &quot;&quot;&quot;Deterministic stand-in for a real embedding model (this sandbox has
+    no live embedding API). Buckets the text into a small set of hand-picked
+    semantic axes based on keyword presence, so paraphrases of the SAME
+    question land close together and different questions land far apart --
+    enough to demonstrate threshold-tuning behavior genuinely, without a
+    live model.&quot;&quot;&quot;
+    axes = [&quot;balance&quot;, &quot;renew&quot;, &quot;claim_status&quot;, &quot;password&quot;]
+    keywords = {
+        &quot;balance&quot;: [&quot;balance&quot;, &quot;owe&quot;, &quot;amount due&quot;],
+        &quot;renew&quot;: [&quot;renew&quot;, &quot;renewal&quot;, &quot;expir&quot;],
+        &quot;claim_status&quot;: [&quot;claim&quot;, &quot;status&quot;],
+        &quot;password&quot;: [&quot;password&quot;, &quot;login&quot;, &quot;reset&quot;],
+    }
+    vec = []
+    lowered = text.lower()
+    for axis in axes:
+        score = sum(1.0 for kw in keywords[axis] if kw in lowered)
+        vec.append(score)
+    if sum(vec) == 0:
+        vec = [0.1, 0.1, 0.1, 0.1]
+    return vec
+
+@dataclasses.dataclass
+class SemanticCacheEntry:
+    tenant: str
+    question_embedding: list
+    answer: str
+    written_at: float
+    ttl_seconds: float
+
+class SemanticCache:
+    def __init__(self, similarity_threshold=0.90):
+        self.similarity_threshold = similarity_threshold
+        self._entries = {}  # tenant -&gt; list[SemanticCacheEntry]
+
+    def lookup(self, tenant, question, now):
+        emb = fake_embed(question)
+        best = None
+        best_sim = 0.0
+        for entry in self._entries.get(tenant, []):
+            if now &gt;= entry.written_at + entry.ttl_seconds:
+                continue
+            sim = cosine_similarity(emb, entry.question_embedding)
+            if sim &gt; best_sim:
+                best_sim, best = sim, entry
+        if best is not None and best_sim &gt;= self.similarity_threshold:
+            return best.answer, best_sim
+        return None, best_sim
+
+    def store(self, tenant, question, answer, now, ttl_seconds=3600):
+        emb = fake_embed(question)
+        self._entries.setdefault(tenant, []).append(
+            SemanticCacheEntry(tenant, emb, answer, now, ttl_seconds)
+        )
+
+cache = SemanticCache(similarity_threshold=0.90)
+cache.store(&quot;tenant-acme&quot;, &quot;What is my current balance?&quot;, &quot;Your balance is $412.50.&quot;, now=0.0)
+
+paraphrase = &quot;What amount do I currently owe?&quot;
+different_question = &quot;How do I reset my password?&quot;
+
+for tenant, q in [(&quot;tenant-acme&quot;, paraphrase), (&quot;tenant-acme&quot;, different_question)]:
+    answer, sim = cache.lookup(tenant, q, now=1.0)
+    print(f&quot;{q!r}: sim={sim:.2f} hit={answer is not None}&quot;)
+
+# per-tenant namespace: same question text, different tenant -&gt; no cross-tenant hit
+other_tenant_answer, other_sim = cache.lookup(&quot;tenant-globex&quot;, paraphrase, now=1.0)
+print(f&quot;cross-tenant lookup: sim={other_sim:.2f} hit={other_tenant_answer is not None}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>&#x27;What amount do I currently owe?&#x27;: sim=1.00 hit=True
+&#x27;How do I reset my password?&#x27;: sim=0.00 hit=False
+cross-tenant lookup: sim=0.00 hit=False
+</code></pre><p><strong>Exercise:</strong>
+Write <code>run_lookup_batch(cache_obj, tenant, questions, now)</code> returning a list of
+<code>(label, similarity, hit)</code> tuples. Run it against <code>test_questions</code> on a fresh cache
+seeded with a renewal-date question.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>cache2 = SemanticCache(similarity_threshold=0.90)
+cache2.store(&quot;tenant-initech&quot;, &quot;When does my policy renew?&quot;, &quot;Your policy renews on 2027-03-01.&quot;, now=0.0)
+test_questions = [
+    (&quot;renewal_paraphrase&quot;, &quot;What is my renewal date?&quot;),
+    (&quot;unrelated&quot;, &quot;What is my claim status?&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>SemanticCache</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>renewal_paraphrase: sim=1.00 hit=True
+unrelated: sim=0.00 hit=False
+</code></pre><hr />
+<h3>Concept 2 — Invalidation and TTL When a Policy Document Is Re-Versioned Mid-Day</h3>
+<p>A TTL alone is not enough for a semantic cache backing policy-dependent answers: a claims
+policy document can be re-versioned in the middle of a business day, and every cached
+answer that was generated under the OLD version is now potentially wrong, regardless of
+how much of its TTL window remains. The fix is tagging every cache entry with the source
+document version it was answered under, and invalidating by that tag directly the moment
+a re-version happens — not waiting for TTL expiry to catch up.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def invalidate_by_source_version(cache_obj, tenant, source_doc, old_version, new_version):
+    # A real deployment tags each cache entry with the policy-doc version it
+    # was answered under; re-versioning invalidates every entry tagged with
+    # the OLD version for that tenant, regardless of its TTL.
+    entries = cache_obj._entries.get(tenant, [])
+    kept = [e for e in entries if getattr(e, &quot;source_version&quot;, new_version) != old_version]
+    removed = len(entries) - len(kept)
+    cache_obj._entries[tenant] = kept
+    return removed
+
+@dataclasses.dataclass
+class VersionedCacheEntry(SemanticCacheEntry):
+    source_version: str = &quot;v1&quot;
+
+versioned_cache = SemanticCache(similarity_threshold=0.90)
+versioned_cache._entries[&quot;tenant-acme&quot;] = [
+    VersionedCacheEntry(&quot;tenant-acme&quot;, fake_embed(&quot;What is the claim deadline?&quot;),
+                         &quot;You have 30 days to file.&quot;, written_at=0.0, ttl_seconds=3600, source_version=&quot;policy_v1&quot;),
+    VersionedCacheEntry(&quot;tenant-acme&quot;, fake_embed(&quot;What is my balance?&quot;),
+                         &quot;Your balance is $200.&quot;, written_at=0.0, ttl_seconds=3600, source_version=&quot;policy_v2&quot;),
+]
+
+removed = invalidate_by_source_version(versioned_cache, &quot;tenant-acme&quot;, &quot;policy_doc&quot;, &quot;policy_v1&quot;, &quot;policy_v2&quot;)
+print(f&quot;entries removed after re-version: {removed}&quot;)
+print(f&quot;entries remaining: {len(versioned_cache._entries[&#x27;tenant-acme&#x27;])}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>entries removed after re-version: 1
+entries remaining: 1
+</code></pre><p><strong>Exercise:</strong>
+Write <code>invalidation_report(cache_obj, tenant, old_version, new_version)</code> returning a dict
+with <code>before</code>, <code>removed</code>, and <code>after</code> entry counts. Run it against <code>versioned_cache2</code>
+(three entries, two tagged <code>policy_v3</code>, one tagged <code>policy_v4</code>), invalidating <code>policy_v3</code>.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>versioned_cache2 = SemanticCache(similarity_threshold=0.90)
+versioned_cache2._entries[&quot;tenant-globex&quot;] = [
+    VersionedCacheEntry(&quot;tenant-globex&quot;, fake_embed(&quot;What is the renewal grace period?&quot;),
+                         &quot;You have a 15-day grace period.&quot;, written_at=0.0, ttl_seconds=3600, source_version=&quot;policy_v3&quot;),
+    VersionedCacheEntry(&quot;tenant-globex&quot;, fake_embed(&quot;What is the claim deadline?&quot;),
+                         &quot;You have 45 days to file.&quot;, written_at=0.0, ttl_seconds=3600, source_version=&quot;policy_v3&quot;),
+    VersionedCacheEntry(&quot;tenant-globex&quot;, fake_embed(&quot;What is my balance?&quot;),
+                         &quot;Your balance is $50.&quot;, written_at=0.0, ttl_seconds=3600, source_version=&quot;policy_v4&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>invalidate_by_source_version</code> and <code>VersionedCacheEntry</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>{&#x27;before&#x27;: 3, &#x27;removed&#x27;: 2, &#x27;after&#x27;: 1}
+</code></pre><hr />
+<h3>Concept 3 — When Caching Is Unsafe Because the Answer Depends on Live State</h3>
+<p>Not every question is safe to answer from a cache no matter how well it matches semantically.
+&quot;What is my current balance?&quot; and &quot;Do I have an open claim?&quot; have a DIFFERENT correct answer
+every time they're asked, even worded identically, because the answer depends on account
+state that changes independently of the question. Caching these anyway would silently
+serve a stale balance or a stale claim status — worse than a slow answer, a WRONG one.
+The fix is a keyword/intent classifier that routes live-state-dependent questions around
+the cache entirely, straight to a live lookup, before the cache is ever consulted.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>LIVE_STATE_KEYWORDS = (&quot;balance&quot;, &quot;open claim&quot;, &quot;claim status&quot;, &quot;current amount&quot;, &quot;owe&quot;)
+
+def is_cache_safe(question):
+    lowered = question.lower()
+    return not any(kw in lowered for kw in LIVE_STATE_KEYWORDS)
+
+def cached_lookup_or_live(cache_obj, tenant, question, now, live_answer_fn):
+    if not is_cache_safe(question):
+        return live_answer_fn(question), &quot;live_required&quot;
+    answer, sim = cache_obj.lookup(tenant, question, now)
+    if answer is not None:
+        return answer, &quot;cache_hit&quot;
+    live_result = live_answer_fn(question)
+    cache_obj.store(tenant, question, live_result, now)
+    return live_result, &quot;cache_miss_stored&quot;
+
+def fake_live_answer(question):
+    return f&quot;[live system answer for: {question}]&quot;
+
+questions_to_check = [
+    &quot;What is my current balance?&quot;,
+    &quot;What are your business hours?&quot;,
+    &quot;Do I have an open claim?&quot;,
+]
+for q in questions_to_check:
+    safe = is_cache_safe(q)
+    print(f&quot;{q!r}: cache_safe={safe}&quot;)
+
+print()
+
+route_cache = SemanticCache(similarity_threshold=0.90)
+for q in [&quot;What are your business hours?&quot;, &quot;What is my current balance?&quot;]:
+    answer, route = cached_lookup_or_live(route_cache, &quot;tenant-acme&quot;, q, now=0.0, live_answer_fn=fake_live_answer)
+    print(f&quot;{q!r}: route={route} answer={answer}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>&#x27;What is my current balance?&#x27;: cache_safe=False
+&#x27;What are your business hours?&#x27;: cache_safe=True
+&#x27;Do I have an open claim?&#x27;: cache_safe=False
+
+&#x27;What are your business hours?&#x27;: route=cache_miss_stored answer=[live system answer for: What are your business hours?]
+&#x27;What is my current balance?&#x27;: route=live_required answer=[live system answer for: What is my current balance?]
+</code></pre><p><strong>Exercise:</strong>
+Write <code>classify_and_route(cache_obj, tenant, questions, now, live_answer_fn)</code> returning
+a list of <code>(question, route)</code> pairs. Run it against <code>exercise_questions</code> on <code>route_cache</code>
+(already warmed by this concept's Example) and print each route plus the total count of
+<code>live_required</code> routes.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>exercise_questions = [
+    &quot;What is my current claim status?&quot;,
+    &quot;What documents do I need for a renewal?&quot;,
+    &quot;How much do I owe this month?&quot;,
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>cached_lookup_or_live</code>, <code>fake_live_answer</code>, and <code>route_cache</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>&#x27;What is my current claim status?&#x27;: live_required
+&#x27;What documents do I need for a renewal?&#x27;: cache_miss_stored
+&#x27;How much do I owe this month?&#x27;: live_required
+live_required_count=2
+</code></pre><hr />
+<h3>Concept 4 — Trimming Retrieved Context Through Reranking Instead of Enlarging the Window</h3>
+<p>A common but wasteful reflex when a RAG answer looks weak is to raise the retrieval
+<code>top_k</code> or the model's context window — more context, more tokens, more cost, with no
+guarantee the extra chunks are actually relevant. Reranking the ALREADY-retrieved chunks
+by relevance and trimming to a fixed token budget gets the opposite effect: the same or
+better answer quality (only the genuinely relevant chunks make the cut) at a bounded,
+predictable cost, regardless of how many chunks the initial retrieval step returned.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>@dataclasses.dataclass
+class RetrievedChunk:
+    chunk_id: str
+    text: str
+    relevance_score: float
+
+def rerank_and_trim(chunks, token_budget, tokens_per_chunk=150):
+    ranked = sorted(chunks, key=lambda c: c.relevance_score, reverse=True)
+    kept = []
+    used = 0
+    for c in ranked:
+        if used + tokens_per_chunk &gt; token_budget:
+            continue
+        kept.append(c)
+        used += tokens_per_chunk
+    return kept, used
+
+candidate_chunks = [
+    RetrievedChunk(&quot;c1&quot;, &quot;Section 4.2: claims over $10,000 require review.&quot;, 0.92),
+    RetrievedChunk(&quot;c2&quot;, &quot;Section 1.1: general policy overview.&quot;, 0.31),
+    RetrievedChunk(&quot;c3&quot;, &quot;Section 4.3: supervisor sign-off procedure.&quot;, 0.87),
+    RetrievedChunk(&quot;c4&quot;, &quot;Appendix C: unrelated vendor contact list.&quot;, 0.12),
+    RetrievedChunk(&quot;c5&quot;, &quot;Section 4.1: claim filing deadlines.&quot;, 0.75),
+]
+
+kept, used_tokens = rerank_and_trim(candidate_chunks, token_budget=400)
+print(f&quot;kept={[c.chunk_id for c in kept]} used_tokens={used_tokens}&quot;)
+print(f&quot;would have used {len(candidate_chunks) * 150} tokens without trimming&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>kept=[&#x27;c1&#x27;, &#x27;c3&#x27;] used_tokens=300
+would have used 750 tokens without trimming
+</code></pre><p>Only the two highest-relevance chunks fit within a 400-token budget at 150 tokens each
+(a third chunk would push to 450, over budget) — the lower-relevance vendor-contact and
+policy-overview chunks are dropped entirely rather than truncated.</p>
+<p><strong>Exercise:</strong>
+Write <code>trim_report(chunks, token_budget, tokens_per_chunk=150)</code> returning a dict with
+<code>kept</code> chunk ids, <code>dropped</code> chunk ids, and <code>used_tokens</code>. Run it against
+<code>larger_candidate_set</code> (the original five chunks plus two more) with a 350-token budget.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>larger_candidate_set = candidate_chunks + [
+    RetrievedChunk(&quot;c6&quot;, &quot;Section 4.4: escalation contact for disputed claims.&quot;, 0.81),
+    RetrievedChunk(&quot;c7&quot;, &quot;Appendix A: office holiday schedule.&quot;, 0.05),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>rerank_and_trim</code> and <code>candidate_chunks</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>{&#x27;kept&#x27;: [&#x27;c1&#x27;, &#x27;c3&#x27;], &#x27;dropped&#x27;: [&#x27;c2&#x27;, &#x27;c4&#x27;, &#x27;c5&#x27;, &#x27;c6&#x27;, &#x27;c7&#x27;], &#x27;used_tokens&#x27;: 300}
+</code></pre><p>Note <code>c6</code>, despite scoring 0.81 (higher than <code>c5</code>'s 0.75), still gets dropped — a 350-token
+budget at 150 tokens per chunk only fits two chunks regardless of which two rank highest.</p>
+<hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> a real embedding model would need to be re-run over the ENTIRE cache
+whenever the underlying claims taxonomy changes (a new claim-type code added, an old one
+retired) — <code>fake_embed</code>'s fixed keyword axes here stand in for that same maintenance
+burden a real embedding model doesn't remove, just moves.</p>
+<p><strong>Compliance angle:</strong> Concept 3's live-state routing is not merely a correctness
+optimization — silently serving a cached, stale balance or claim status to a customer is
+the kind of concrete, provable harm a regulator or an internal audit would treat as a
+genuine incident, not a caching nuance.</p>
+<p><strong>What breaks in production:</strong> <code>LIVE_STATE_KEYWORDS</code>'s keyword list is a genuine, real
+maintenance liability — a new phrasing for a balance question that doesn't contain any of
+the listed keywords silently slips past the live-state check and gets cached anyway,
+exactly the kind of gap that only shows up after a customer complains about a wrong
+number, not at build time.</p>
+<hr />
+<h2 id="day-4">Day 4 — Tier Routing Cascades and Batching</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="23-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=RusDomMuG80" target="_blank" rel="noopener"><b>Why Your LLM Bill Is a Routing Bug, Not a Model Problem | #NEWIT</b><small>GilliLab IT Professional Engineeri Logic Salt · 24:50</small></a></li><li><a href="https://www.youtube.com/watch?v=7kZ9mOlxuZo" target="_blank" rel="noopener"><b>LLM Routing: Stop Paying Premium Prices for Simple Prompts</b><small>Node &amp; Neural · 5:03</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LLM%20model%20routing%20cascade%20cheap%20model%20escalation%20cost" target="_blank" rel="noopener">Search YouTube: LLM model routing cascade cheap model escalation cost</a></p></div>
+<p>Most teams skip tier routing and send every request to the most capable model &quot;to be
+safe.&quot; Then the bill arrives, and the fix under deadline pressure is usually a blunt,
+untested cutover to a cheaper model everywhere — including the ambiguous cases that
+genuinely needed the expensive one. Skipping this day doesn't just cost money; it trades
+a known, disclosed risk (an escalation floor you chose and can tune) for an undisclosed
+one (a blanket downgrade nobody load-tested against the hard cases).</p>
+<p>The four routing concepts below share one decision flow — a message gets a confidence
+signal, that signal is compared to a floor, and the outcome picks a tier:</p>
+<pre><code>flowchart TD
+    A[Incoming message] --&gt; B[Cheap-tier triage classify]
+    B --&gt; C{Confidence signal}
+    C --&gt;|single hand-set number, Concept 1| D[Compare to ESCALATION_CONFIDENCE_FLOOR]
+    C --&gt;|vote fraction across N samples, Concept 5| D
+    D --&gt;|below floor| E[Escalate to full model]
+    D --&gt;|at or above floor| F[Resolve tier via ROUTING_CONFIG, Concept 2]
+    F --&gt; G[Cheap-tier model]
+    E --&gt; H[Expensive-tier model]
+</code></pre><hr />
+<h3>Concept 1 — A Cheap Triage Model With Escalation Triggered by Low Verifier Confidence</h3>
+<p>Sending every request to the most capable (and most expensive) model is the default that
+costs the most and needs the least engineering. A tiered cascade sends everything to a
+cheap, fast triage pass FIRST, and only escalates to the expensive model when the cheap
+pass's own confidence in its classification is too low to trust — not based on the
+question's topic, but on how CONFIDENT the classifier itself is in its own answer. This
+sandbox has no live triage model, so <code>triage_classify</code> below is a genuine, deterministic
+keyword scorer standing in for one — its confidence values are hand-set to demonstrate
+real escalation behavior (high confidence on clear cases, low on ambiguous ones), the
+same mechanism a real classifier's own logit-derived confidence would drive.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+@dataclasses.dataclass
+class TriageResult:
+    label: str
+    confidence: float
+
+def triage_classify(text):
+    &quot;&quot;&quot;Cheap-tier classifier stand-in: a small deterministic keyword scorer,
+    not a real model call. Its confidence is intentionally LOW for anything
+    it can&#x27;t confidently pattern-match, which is exactly what should
+    trigger escalation.&quot;&quot;&quot;
+    lowered = text.lower()
+    if &quot;duplicate charge&quot; in lowered or &quot;refund&quot; in lowered:
+        return TriageResult(&quot;billing_dispute&quot;, 0.94)
+    if &quot;balance&quot; in lowered:
+        return TriageResult(&quot;balance_inquiry&quot;, 0.97)
+    if &quot;unusual&quot; in lowered or &quot;not sure&quot; in lowered or &quot;complicated&quot; in lowered:
+        return TriageResult(&quot;unclear&quot;, 0.42)
+    return TriageResult(&quot;general&quot;, 0.55)
+
+ESCALATION_CONFIDENCE_FLOOR = 0.75
+
+def route_with_escalation(text):
+    triage = triage_classify(text)
+    if triage.confidence &lt; ESCALATION_CONFIDENCE_FLOOR:
+        return &quot;escalate_to_full_model&quot;, triage
+    return &quot;cheap_tier_handles_it&quot;, triage
+
+test_messages = [
+    &quot;What is my current balance?&quot;,
+    &quot;I see a duplicate charge and want a refund.&quot;,
+    &quot;My situation is complicated and I&#x27;m not sure how the policy applies here.&quot;,
+]
+for msg in test_messages:
+    route, triage = route_with_escalation(msg)
+    print(f&quot;{msg!r}: label={triage.label} confidence={triage.confidence:.2f} route={route}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>&#x27;What is my current balance?&#x27;: label=balance_inquiry confidence=0.97 route=cheap_tier_handles_it
+&#x27;I see a duplicate charge and want a refund.&#x27;: label=billing_dispute confidence=0.94 route=cheap_tier_handles_it
+&quot;My situation is complicated and I&#x27;m not sure how the policy applies here.&quot;: label=unclear confidence=0.42 route=escalate_to_full_model
+</code></pre><p><strong>Exercise:</strong>
+Write <code>route_batch(messages)</code> returning a list of <code>(message, route, triage_result)</code>
+tuples. Run it against <code>review_messages</code>, print each row's route and confidence, then
+print the total count of messages that escalated.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>review_messages = [
+    &quot;How much do I owe this month?&quot;,
+    &quot;This is an unusual case involving two overlapping policies.&quot;,
+    &quot;I&#x27;d like a refund for the duplicate charge from last week.&quot;,
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>route_with_escalation</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>&#x27;How much do I owe this month?&#x27;: route=escalate_to_full_model confidence=0.55
+&#x27;This is an unusual case involving two overlapping policies.&#x27;: route=escalate_to_full_model confidence=0.42
+&quot;I&#x27;d like a refund for the duplicate charge from last week.&quot;: route=cheap_tier_handles_it confidence=0.94
+escalated_count=2
+</code></pre><p>Note &quot;How much do I owe this month?&quot; escalates even though it's a balance-shaped
+question — the keyword stand-in doesn't recognize &quot;owe&quot; the way it recognizes &quot;balance&quot;,
+landing it in the low-confidence <code>general</code> bucket. A real classifier would need broader
+training coverage to avoid the same class of gap.</p>
+<hr />
+<h3>Concept 2 — Classifier-Based Routing Held in Configuration, Not Hard-Coded at Each Call Site</h3>
+<p>If the mapping from a triage label to a specific model lives as an <code>if/elif</code> chain
+scattered across every call site that needs routing, changing which model handles
+<code>balance_inquiry</code> means finding and editing every one of those call sites correctly. Held
+instead as a single configuration dict that every call site reads from, the same change
+is one edit, and every caller picks it up automatically — the same &quot;policy in config, not
+code&quot; pattern this track has used for guardrails and permission tiers in earlier weeks.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>ROUTING_CONFIG = {
+    &quot;balance_inquiry&quot;: {&quot;tier&quot;: &quot;cheap&quot;, &quot;model&quot;: &quot;claims-triage-mini&quot;},
+    &quot;billing_dispute&quot;: {&quot;tier&quot;: &quot;mid&quot;, &quot;model&quot;: &quot;claims-agent-v2.1&quot;},
+    &quot;general&quot;: {&quot;tier&quot;: &quot;cheap&quot;, &quot;model&quot;: &quot;claims-triage-mini&quot;},
+    &quot;unclear&quot;: {&quot;tier&quot;: &quot;expensive&quot;, &quot;model&quot;: &quot;claims-agent-v3.2&quot;},
+}
+DEFAULT_ROUTE = {&quot;tier&quot;: &quot;expensive&quot;, &quot;model&quot;: &quot;claims-agent-v3.2&quot;}
+
+def resolve_model_for_label(label, config=ROUTING_CONFIG):
+    return config.get(label, DEFAULT_ROUTE)
+
+for label in [&quot;balance_inquiry&quot;, &quot;billing_dispute&quot;, &quot;totally_unseen_label&quot;]:
+    route = resolve_model_for_label(label)
+    print(f&quot;{label}: tier={route[&#x27;tier&#x27;]} model={route[&#x27;model&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>balance_inquiry: tier=cheap model=claims-triage-mini
+billing_dispute: tier=mid model=claims-agent-v2.1
+totally_unseen_label: tier=expensive model=claims-agent-v3.2
+</code></pre><p>An unrecognized label falls back to the EXPENSIVE tier by default, not the cheap one —
+the safe failure direction for a routing gap is &quot;cost more, but stay correct,&quot; never
+silently routing an unrecognized case to an under-powered model.</p>
+<p><strong>Exercise:</strong>
+Write <code>apply_routing_config(labels, config)</code> returning <code>{label: route_dict}</code> for a list
+of labels. Build <code>updated_config</code> as a copy of <code>ROUTING_CONFIG</code> with <code>balance_inquiry</code>
+repointed to a new <code>claims-triage-nano</code> model, then compare <code>before</code>/<code>after</code> routing for
+<code>[&quot;balance_inquiry&quot;, &quot;unclear&quot;]</code> under the old and new config.</p>
+<p><strong>Starting point:</strong> <code>resolve_model_for_label</code> and <code>ROUTING_CONFIG</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>before: {&#x27;balance_inquiry&#x27;: {&#x27;tier&#x27;: &#x27;cheap&#x27;, &#x27;model&#x27;: &#x27;claims-triage-mini&#x27;}, &#x27;unclear&#x27;: {&#x27;tier&#x27;: &#x27;expensive&#x27;, &#x27;model&#x27;: &#x27;claims-agent-v3.2&#x27;}}
+after:  {&#x27;balance_inquiry&#x27;: {&#x27;tier&#x27;: &#x27;cheap&#x27;, &#x27;model&#x27;: &#x27;claims-triage-nano&#x27;}, &#x27;unclear&#x27;: {&#x27;tier&#x27;: &#x27;expensive&#x27;, &#x27;model&#x27;: &#x27;claims-agent-v3.2&#x27;}}
+balance_inquiry model changed without touching call sites: True
+</code></pre><hr />
+<h3>Concept 3 — Moving Asynchronous Work to a Batch Endpoint for Roughly Half Price</h3>
+<p>Work that doesn't need an answer within the same request cycle — a nightly reconciliation
+job scoring thousands of claims, a weekly summary report — doesn't need synchronous,
+real-time pricing either. Providers commonly price a batch endpoint (submit a large job,
+poll for completion, fetch results later) at roughly half the synchronous per-token rate,
+in exchange for giving up the immediate response. The submit/poll/fetch SHAPE is genuine,
+executable async logic here; the actual live batch endpoint call needs a real provider
+account this sandbox does not have, so that one call stays reference syntax inside the
+Example below while the surrounding cost math and async control flow run for real.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code>import asyncio
+
+SYNC_PRICE_PER_1K_INPUT = 0.003
+BATCH_PRICE_PER_1K_INPUT = 0.0015  # providers commonly price batch at ~50% of sync
+
+@dataclasses.dataclass
+class BatchJobRequest:
+    request_id: str
+    input_tokens: int
+    output_tokens: int
+
+def estimate_batch_savings(requests, sync_price=SYNC_PRICE_PER_1K_INPUT, batch_price=BATCH_PRICE_PER_1K_INPUT):
+    total_input_tokens = sum(r.input_tokens for r in requests)
+    sync_cost = (total_input_tokens / 1000) * sync_price
+    batch_cost = (total_input_tokens / 1000) * batch_price
+    return sync_cost, batch_cost, sync_cost - batch_cost
+
+nightly_reconciliation_batch = [
+    BatchJobRequest(&quot;job-1&quot;, 1200, 300),
+    BatchJobRequest(&quot;job-2&quot;, 980, 250),
+    BatchJobRequest(&quot;job-3&quot;, 1500, 400),
+]
+
+sync_cost, batch_cost, savings = estimate_batch_savings(nightly_reconciliation_batch)
+print(f&quot;sync_cost=${sync_cost:.4f}  batch_cost=${batch_cost:.4f}  savings=${savings:.4f}  savings_pct={savings/sync_cost*100:.1f}%&quot;)
+
+async def simulate_batch_submit_poll_fetch(requests):
+    # Real batch API shape (REAL MODE reference, not executed here):
+    #   batch = client.messages.batches.create(requests=[...])
+    #   while client.messages.batches.retrieve(batch.id).processing_status != &quot;ended&quot;:
+    #       await asyncio.sleep(poll_interval)
+    #   results = client.messages.batches.results(batch.id)
+    await asyncio.sleep(0.05)  # simulated submit latency
+    return {&quot;batch_id&quot;: &quot;batch-nightly-001&quot;, &quot;request_count&quot;: len(requests), &quot;status&quot;: &quot;ended&quot;}
+
+batch_result = asyncio.run(simulate_batch_submit_poll_fetch(nightly_reconciliation_batch))
+print(f&quot;batch submitted: {batch_result}&quot;)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>sync_cost=$0.0110  batch_cost=$0.0055  savings=$0.0055  savings_pct=50.0%
+batch submitted: {&#x27;batch_id&#x27;: &#x27;batch-nightly-001&#x27;, &#x27;request_count&#x27;: 3, &#x27;status&#x27;: &#x27;ended&#x27;}
+</code></pre><p><strong>Exercise:</strong>
+Write <code>batch_vs_sync_report(requests)</code> returning a dict with <code>sync_cost_usd</code>,
+<code>batch_cost_usd</code>, <code>savings_usd</code>, and <code>savings_pct</code> (each rounded). Run it against
+<code>weekly_summary_batch</code>.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>weekly_summary_batch = [
+    BatchJobRequest(&quot;job-4&quot;, 2200, 500),
+    BatchJobRequest(&quot;job-5&quot;, 1750, 380),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>estimate_batch_savings</code> and <code>BatchJobRequest</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>{&#x27;sync_cost_usd&#x27;: 0.0119, &#x27;batch_cost_usd&#x27;: 0.0059, &#x27;savings_usd&#x27;: 0.0059, &#x27;savings_pct&#x27;: 50.0}
+</code></pre><hr />
+<h3>Concept 4 — Constrained Output Schemas and Stop Sequences to Cut Output Tokens Directly</h3>
+<p>Output tokens are typically billed at a HIGHER per-1k rate than input tokens (5x is
+common), so trimming a verbose free-text answer down to exactly the fields the caller
+actually needs cuts cost disproportionately to how little text is removed. Constraining
+the model's output to a JSON schema (or cutting generation early with a stop sequence) is
+a direct, structural fix — not a prompting nudge to &quot;be concise&quot; that the model may or may
+not follow.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+
+def estimate_tokens(text):
+    return int(len(text.split()) * 1.3)
+
+def unconstrained_answer(question):
+    # A verbose free-text answer -- what a model produces with no output
+    # constraint at all.
+    return (f&quot;Thank you for reaching out. Regarding your question about &quot;
+            f&quot;&#x27;{question}&#x27;, I have reviewed the relevant policy details and &quot;
+            f&quot;can confirm the following information applies to your account &quot;
+            f&quot;based on our records.&quot;)
+
+def constrained_answer(question, schema_fields):
+    # A constrained-schema answer: JSON with only the fields the caller
+    # actually needs, no filler prose. A real call would pass a JSON-schema
+    # response_format or a stop_sequence like &quot;\n}&quot; to force this shape;
+    # here the constraint is enforced by construction.
+    return json.dumps({f: &quot;...&quot; for f in schema_fields})
+
+q = &quot;What is my policy renewal date?&quot;
+free_text = unconstrained_answer(q)
+structured = constrained_answer(q, [&quot;renewal_date&quot;])
+
+free_tokens = estimate_tokens(free_text)
+structured_tokens = estimate_tokens(structured)
+print(f&quot;unconstrained: {free_tokens} tokens&quot;)
+print(f&quot;constrained:   {structured_tokens} tokens&quot;)
+print(f&quot;output token reduction: {(free_tokens - structured_tokens) / free_tokens * 100:.1f}%&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>unconstrained: 46 tokens
+constrained:   2 tokens
+output token reduction: 95.7%
+</code></pre><p><strong>Exercise:</strong>
+Write <code>compare_output_costs(pairs, output_price_per_1k=0.015)</code> returning a list of
+<code>(question, free_tokens, structured_tokens, saved_usd)</code> tuples for each
+<code>(question, schema_fields)</code> pair. Run it against <code>questions_and_schemas</code>, print each row,
+and print the total saved across both.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>questions_and_schemas = [
+    (&quot;What is my balance and due date?&quot;, [&quot;balance&quot;, &quot;due_date&quot;]),
+    (&quot;Is my claim approved?&quot;, [&quot;claim_status&quot;]),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>unconstrained_answer</code>, <code>constrained_answer</code>, and <code>estimate_tokens</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>&#x27;What is my balance and due date?&#x27;: free=48 structured=5 saved=$0.000645
+&#x27;Is my claim approved?&#x27;: free=44 structured=2 saved=$0.00063
+total_saved=$0.001275
+</code></pre><hr />
+<h3>Concept 5 — Producing a Genuine Confidence Signal Instead of a Hand-Set Number</h3>
+<p>Concept 1's <code>triage.confidence</code> was hand-set to demonstrate the escalation mechanism — a
+real system needs an actual answer to &quot;where does that number come from,&quot; and the honest
+answer has two separate parts that are easy to conflate. Part one: get a TYPED decision
+out of the classifier instead of parsing free text for a verdict (the same
+<code>PASS</code>/<code>FLAGGED</code>-parsing fragility this repo's own <code>news</code> pipeline hit and eventually
+fixed with self-consistency voting — see its <code>CLAUDE.md</code> decisions #61/#69/#72/#75).
+Pydantic validates the shape genuinely, with no live call needed:</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from pydantic import BaseModel
+from typing import Literal
+
+class TriageDecision(BaseModel):
+    label: Literal[&quot;balance_inquiry&quot;, &quot;billing_dispute&quot;, &quot;unclear&quot;, &quot;general&quot;]
+    confidence: float
+
+good = TriageDecision(label=&quot;balance_inquiry&quot;, confidence=0.97)
+print(f&quot;validated: label={good.label} confidence={good.confidence}&quot;)
+
+try:
+    TriageDecision(label=&quot;not_a_real_label&quot;, confidence=0.9)
+    print(&quot;BUG: should have rejected an out-of-enum label&quot;)
+except Exception as e:
+    print(f&quot;rejected out-of-enum label as expected: {type(e).__name__}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>validated: label=balance_inquiry confidence=0.97
+rejected out-of-enum label as expected: ValidationError
+</code></pre><p>Part two is the part a typed schema does NOT solve: <code>good.confidence</code> above is still just
+whatever number the classifier chose to report in that field — as uncalibrated as if it
+had written the same number into a sentence. A structured-output library (<code>instructor</code>'s
+<code>from_anthropic</code>/<code>from_openai</code> wrapping a <code>response_model=</code> argument, or a provider's own
+strict JSON-schema/tool-use mode) fixes the PARSING problem, never the CALIBRATION one.
+This sandbox has no live LLM API key, so the actual call stays reference syntax:</p>
+<p><strong>REAL MODE — not executed (no live LLM API key in this sandbox):</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># import instructor
+# from anthropic import Anthropic
+# client = instructor.from_anthropic(Anthropic())
+# decision = client.messages.create(
+#     model=&quot;claude-...&quot;, max_tokens=200, response_model=TriageDecision,
+#     messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: f&quot;Classify this claims message: {text}&quot;}],
+# )
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>An honest, genuinely executable proxy for confidence is self-consistency: sample the
+classifier several times and use the winning label's VOTE FRACTION, an empirical
+frequency, rather than trusting any single call's self-reported figure. The stand-in
+below hand-sets each message's sample outcomes the same deliberate way Concept 1's
+<code>triage_classify</code> hand-sets its confidence — tight agreement on a clear case, real split
+on an ambiguous one:</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def simulate_n_samples(text):
+    &quot;&quot;&quot;Stand-in for calling a classifier N times at temperature&gt;0 and
+    collecting each sample&#x27;s label. Hand-set per input to demonstrate
+    real self-consistency behavior (tight agreement on a clear case,
+    split on an ambiguous one).&quot;&quot;&quot;
+    lowered = text.lower()
+    if &quot;duplicate charge&quot; in lowered or &quot;refund&quot; in lowered:
+        return [&quot;billing_dispute&quot;] * 5
+    if &quot;balance&quot; in lowered:
+        return [&quot;balance_inquiry&quot;] * 4 + [&quot;general&quot;] * 1
+    if &quot;unusual&quot; in lowered or &quot;not sure&quot; in lowered or &quot;complicated&quot; in lowered:
+        return [&quot;unclear&quot;, &quot;general&quot;, &quot;unclear&quot;, &quot;billing_dispute&quot;, &quot;unclear&quot;]
+    return [&quot;general&quot;] * 3 + [&quot;balance_inquiry&quot;] * 2
+
+def vote_fraction_confidence(samples):
+    counts = {}
+    for s in samples:
+        counts[s] = counts.get(s, 0) + 1
+    winner = max(counts, key=counts.get)
+    return winner, counts[winner] / len(samples)
+
+def route_with_sampled_confidence(text, floor=ESCALATION_CONFIDENCE_FLOOR):
+    label, fraction = vote_fraction_confidence(simulate_n_samples(text))
+    route = &quot;escalate_to_full_model&quot; if fraction &lt; floor else &quot;cheap_tier_handles_it&quot;
+    return route, label, fraction
+
+test_messages = [
+    &quot;What is my current balance?&quot;,
+    &quot;I see a duplicate charge and want a refund.&quot;,
+    &quot;My situation is complicated and I&#x27;m not sure how the policy applies here.&quot;,
+]
+for msg in test_messages:
+    route, label, fraction = route_with_sampled_confidence(msg)
+    print(f&quot;{msg!r}: label={label} vote_fraction={fraction:.2f} route={route}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>&#x27;What is my current balance?&#x27;: label=balance_inquiry vote_fraction=0.80 route=cheap_tier_handles_it
+&#x27;I see a duplicate charge and want a refund.&#x27;: label=billing_dispute vote_fraction=1.00 route=cheap_tier_handles_it
+&quot;My situation is complicated and I&#x27;m not sure how the policy applies here.&quot;: label=unclear vote_fraction=0.60 route=escalate_to_full_model
+</code></pre><p>Vote fraction is still not a mathematically calibrated probability — it is an empirical
+frequency over however many samples were actually drawn, nothing more. Genuine
+calibration needs held-out labeled outcomes plus a post-hoc fit (Platt scaling or isotonic
+regression) or conformal prediction for real confidence intervals; a single-token forced
+choice can also read a genuine per-token probability off OpenAI's <code>logprobs</code>/
+<code>top_logprobs</code>, but only for that narrow case, and Anthropic's API exposes no equivalent
+at all. None of these tools hand you calibration for free — they hand you an honest number
+to calibrate, which is a different and smaller claim than &quot;the model's own confidence.&quot;
+(A newer category of vendor-native &quot;typed decision&quot; model claiming to return a calibrated
+probability directly emerged in 2026; worth watching, but with no production BFSI track
+record yet, not a tool to anchor a design on.)</p>
+<p><strong>Exercise:</strong>
+Write <code>route_batch_sampled(messages)</code> returning a list of <code>(message, route, label, vote_fraction)</code> tuples using <code>route_with_sampled_confidence</code>. Run it against
+<code>review_messages</code>, print each row, then print the total count of messages that escalated.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>review_messages = [
+    &quot;How much do I owe this month?&quot;,
+    &quot;This is an unusual case involving two overlapping policies.&quot;,
+    &quot;I&#x27;d like a refund for the duplicate charge from last week.&quot;,
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>route_with_sampled_confidence</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>&#x27;How much do I owe this month?&#x27;: label=general vote_fraction=0.60 route=escalate_to_full_model
+&#x27;This is an unusual case involving two overlapping policies.&#x27;: label=unclear vote_fraction=0.60 route=escalate_to_full_model
+&quot;I&#x27;d like a refund for the duplicate charge from last week.&quot;: label=billing_dispute vote_fraction=1.00 route=cheap_tier_handles_it
+escalated_count=2
+</code></pre><p>Same three messages Concept 1's exercise routed by a single hand-set number now route by
+vote fraction instead — <code>&quot;How much do I owe this month?&quot;</code> still escalates (the sampled
+stand-in splits on it too), but for a disclosed, countable reason (3 of 5 samples landed
+outside the winning label) rather than one opaque float.</p>
+<hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> a triage model's escalation floor tends to drift upward over time as a
+claims taxonomy grows more edge cases the cheap tier was never trained on — the
+<code>ESCALATION_CONFIDENCE_FLOOR</code> constant here needs periodic review against real confidence
+distributions, not a value set once at launch and forgotten.</p>
+<p><strong>Compliance angle:</strong> <code>DEFAULT_ROUTE</code> falling back to the EXPENSIVE tier for an unrecognized
+label is a deliberate compliance-shaped choice, not just a cost one — an unrecognized claim
+type routed to an under-powered model risks an incorrect determination on exactly the kind
+of case that needed the most scrutiny, not the least.</p>
+<p><strong>What breaks in production:</strong> the batch endpoint's roughly-half-price discount only pays
+off if the WORK genuinely tolerates asynchronous turnaround (minutes to hours, not
+milliseconds) — routing a customer-facing, real-time balance inquiry to a batch endpoint
+to save money would leave the customer staring at a spinner for an hour, the wrong
+tradeoff even though the dollar math looks identical to the nightly-reconciliation case.</p>
+<h3>Key Terms — Day 4</h3>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Plain-language</th>
+<th>Precise meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Triage confidence</td>
+<td>&quot;How sure the cheap classifier is&quot;</td>
+<td>A per-call numeric field a classifier returns alongside its label</td>
+</tr>
+<tr>
+<td>Escalation floor</td>
+<td>&quot;The cutoff where we stop trusting the cheap model&quot;</td>
+<td><code>ESCALATION_CONFIDENCE_FLOOR</code>, the threshold a confidence signal must clear to skip the expensive tier</td>
+</tr>
+<tr>
+<td>Structured/typed output</td>
+<td>&quot;The model answers in a fixed shape, not a paragraph&quot;</td>
+<td>A response validated against a schema (e.g. a Pydantic model) instead of free text requiring a parser</td>
+</tr>
+<tr>
+<td>Vote fraction</td>
+<td>&quot;How often the samples agreed&quot;</td>
+<td>The winning label's share of N independent samples — an empirical frequency, not a probability</td>
+</tr>
+<tr>
+<td>Calibration</td>
+<td>&quot;Does the confidence number mean what it says&quot;</td>
+<td>Whether a stated confidence actually matches real-world outcome rates, established only via held-out labeled data and a post-hoc fit (e.g. Platt scaling)</td>
+</tr>
+<tr>
+<td>Tier routing config</td>
+<td>&quot;One table deciding which model handles what&quot;</td>
+<td>A label → model mapping (<code>ROUTING_CONFIG</code>) read by every call site, instead of per-site <code>if/elif</code> logic</td>
+</tr>
+<tr>
+<td>Batch endpoint</td>
+<td>&quot;The slow, cheap lane for work that can wait&quot;</td>
+<td>An asynchronous submit/poll/fetch API priced below the synchronous rate, in exchange for non-immediate results</td>
+</tr>
+<tr>
+<td>Constrained output schema</td>
+<td>&quot;Telling the model exactly which fields to answer with&quot;</td>
+<td>A JSON schema or stop sequence that cuts generation to only the needed fields, reducing billed output tokens directly</td>
+</tr>
+</tbody>
+</table>
+<h3>Self-Check — Day 4</h3>
+<p><strong>Before you start</strong>, answer these from what you already assume — then compare against
+the &quot;after&quot; answers below.</p>
+<ol>
+<li>
+<p>If a cheap classifier says it's &quot;90% confident,&quot; is that number a real, calibrated
+probability?</p>
+<details><summary>Answer</summary>
+<p>No — it's a self-reported number from a single call, uncalibrated by default. This is
+the exact misconception Concept 5 exists to correct. Confirming this before the day
+starts is the point: most people's instinct is to trust the number as-is.</p>
+</details>
+</li>
+<li>
+<p>When a triage label is unrecognized, should the safe default route to the cheap tier
+or the expensive tier?</p>
+<details><summary>Answer</summary>
+<p>The expensive tier. Concept 2's <code>DEFAULT_ROUTE</code> makes this choice explicitly — an
+unrecognized case is exactly the kind that needs the most scrutiny, not the least.</p>
+</details>
+</li>
+</ol>
+<p><strong>After this day</strong>, these should be easy:</p>
+<ol start="3">
+<li>
+<p>What does &quot;vote fraction&quot; measure, and what does it NOT prove?</p>
+<details><summary>Answer</summary>
+<p>It measures how often N independent samples agreed on the winning label — an
+empirical frequency. It does NOT prove the result is a mathematically calibrated
+probability; that needs held-out labeled outcomes plus a post-hoc fit (Concept 5).</p>
+</details>
+</li>
+<li>
+<p>Why does a batch endpoint's ~50% discount NOT apply to every request type?</p>
+<details><summary>Answer</summary>
+<p>Because the discount is traded for giving up an immediate response — it only pays off
+for work that genuinely tolerates asynchronous turnaround (Concept 3's BFSI Reality
+Check: a real-time customer balance inquiry routed to batch would leave the customer
+staring at a spinner for an hour).</p>
+</details>
+</li>
+<li>
+<p>Why does constraining output to a schema cut cost MORE than the same percentage
+reduction in input tokens would?</p>
+<details><summary>Answer</summary>
+<p>Because output tokens are typically billed at a higher per-1k rate than input tokens
+(5x is common, per Concept 4) — the same fractional cut in output volume removes a
+disproportionate share of total cost.</p>
+</details>
+</li>
+</ol>
+<p>If any &quot;after&quot; answer surprised you, that's the day's actual content to revisit — not a
+failure, the same self-consistency-style signal Concept 5 itself teaches: disagreement is
+information, not noise.</p>
+<hr />
+<h2 id="day-5">Day 5 — Budgets Quotas and Cost Regression Gates</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="23-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=T6OEaeesRio" target="_blank" rel="noopener"><b>Monitoring LLM Quality in Production Step by Step</b><small>Zero to Builder: Cloud, AI &amp; Blockchain · 10:06</small></a></li><li><a href="https://www.youtube.com/watch?v=fnSN5tFzx5E" target="_blank" rel="noopener"><b>Databricks Cost Management : System Tables, Genie, &amp; FinOps</b><small>NextGenLakehouse · 18:33</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LLM%20cost%20governance%20budget%20alerting%20production%20dashboard" target="_blank" rel="noopener">Search YouTube: LLM cost governance budget alerting production dashboard</a></p></div>
+<hr />
+<h3>Concept 1 — Per-Tenant Token Budgets and Quota Enforcement</h3>
+<p>A cost governance system that only REPORTS spend after the fact can tell you a tenant blew
+through their budget, but not stop it from happening. Enforcing a hard daily token budget
+per tenant — consumed as requests come in, rejected once exhausted — turns &quot;we noticed the
+overspend in yesterday's report&quot; into &quot;the 47th request today was blocked before it ever
+reached the model,&quot; the same shift from detection to prevention this track's guardrail and
+circuit-breaker content has made in earlier weeks.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+class QuotaExceededError(Exception):
+    pass
+
+@dataclasses.dataclass
+class TenantQuota:
+    tenant: str
+    daily_token_budget: int
+    tokens_used_today: int = 0
+
+    def remaining(self):
+        return max(0, self.daily_token_budget - self.tokens_used_today)
+
+    def consume(self, tokens):
+        if self.tokens_used_today + tokens &gt; self.daily_token_budget:
+            raise QuotaExceededError(
+                f&quot;{self.tenant}: request needs {tokens} tokens but only &quot;
+                f&quot;{self.remaining()} remain of {self.daily_token_budget} daily budget&quot;
+            )
+        self.tokens_used_today += tokens
+        return self.tokens_used_today
+
+quotas = {
+    &quot;tenant-acme&quot;: TenantQuota(&quot;tenant-acme&quot;, daily_token_budget=10000),
+    &quot;tenant-globex&quot;: TenantQuota(&quot;tenant-globex&quot;, daily_token_budget=2000),
+}
+
+requests = [
+    (&quot;tenant-acme&quot;, 3000),
+    (&quot;tenant-globex&quot;, 1500),
+    (&quot;tenant-globex&quot;, 800),  # this should exceed globex&#x27;s remaining 500
+]
+
+for tenant, tokens in requests:
+    q = quotas[tenant]
+    try:
+        used = q.consume(tokens)
+        print(f&quot;{tenant}: consumed {tokens} tokens, used_today={used}, remaining={q.remaining()}&quot;)
+    except QuotaExceededError as e:
+        print(f&quot;{tenant}: BLOCKED -- {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>tenant-acme: consumed 3000 tokens, used_today=3000, remaining=7000
+tenant-globex: consumed 1500 tokens, used_today=1500, remaining=500
+tenant-globex: BLOCKED -- tenant-globex: request needs 800 tokens but only 500 remain of 2000 daily budget
+</code></pre><p><strong>Exercise:</strong>
+Write <code>process_requests(quota_map, request_list)</code> returning a list of
+<code>(tenant, tokens, status, detail)</code> tuples, where <code>status</code> is <code>&quot;allowed&quot;</code> or <code>&quot;blocked&quot;</code>.
+Run it against <code>review_requests</code> on <code>review_quotas</code>, print each row's outcome, and print
+the total blocked count.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>review_quotas = {
+    &quot;tenant-initech&quot;: TenantQuota(&quot;tenant-initech&quot;, daily_token_budget=5000),
+}
+review_requests = [
+    (&quot;tenant-initech&quot;, 2000),
+    (&quot;tenant-initech&quot;, 2000),
+    (&quot;tenant-initech&quot;, 2000),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>TenantQuota</code> and <code>QuotaExceededError</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>tenant-initech: 2000 tokens -&gt; allowed
+tenant-initech: 2000 tokens -&gt; allowed
+tenant-initech: 2000 tokens -&gt; blocked
+blocked_count=1
+</code></pre><p>The third request is blocked even though it asks for the same 2000 tokens as the first
+two — the quota tracks CUMULATIVE usage across the day, not a per-request limit.</p>
+<hr />
+<h3>Concept 2 — Canary Rollout on a Model Swap, Cost and Quality Compared Side by Side</h3>
+<p>Swapping to a cheaper model tier without measuring both sides of the tradeoff is how a
+&quot;cost optimization&quot; quietly becomes a quality regression nobody notices until customers
+complain. A canary rollout — the same deterministic hash-bucketing this track's own
+Curriculum content already uses for prompt canaries — routes a small percentage of real
+traffic to the candidate model and compares its cost AND quality against the stable
+baseline side by side, on the same real traffic mix, before deciding whether to promote
+it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+
+@dataclasses.dataclass
+class CanaryResult:
+    variant: str
+    cost_usd: float
+    quality_score: float
+
+def canary_bucket(request_id, canary_pct=10):
+    bucket = int(hashlib.md5(str(request_id).encode()).hexdigest(), 16) % 100
+    return &quot;canary&quot; if bucket &lt; canary_pct else &quot;stable&quot;
+
+def run_canary_comparison(request_ids, stable_cost, stable_quality, canary_cost, canary_quality, canary_pct=10):
+    results = []
+    for rid in request_ids:
+        variant = canary_bucket(rid, canary_pct)
+        if variant == &quot;canary&quot;:
+            results.append(CanaryResult(variant, canary_cost, canary_quality))
+        else:
+            results.append(CanaryResult(variant, stable_cost, stable_quality))
+    return results
+
+request_ids = [f&quot;req-{i}&quot; for i in range(50)]
+results = run_canary_comparison(
+    request_ids,
+    stable_cost=0.012, stable_quality=0.91,
+    canary_cost=0.007, canary_quality=0.89,
+    canary_pct=10,
+)
+canary_results = [r for r in results if r.variant == &quot;canary&quot;]
+stable_results = [r for r in results if r.variant == &quot;stable&quot;]
+print(f&quot;canary_count={len(canary_results)}  stable_count={len(stable_results)}&quot;)
+avg_canary_cost = sum(r.cost_usd for r in canary_results) / len(canary_results)
+avg_stable_cost = sum(r.cost_usd for r in stable_results) / len(stable_results)
+print(f&quot;avg_canary_cost=${avg_canary_cost:.4f}  avg_stable_cost=${avg_stable_cost:.4f}&quot;)
+print(f&quot;canary_quality={canary_results[0].quality_score}  stable_quality={stable_results[0].quality_score}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>canary_count=5  stable_count=45
+avg_canary_cost=$0.0070  avg_stable_cost=$0.0120
+canary_quality=0.89  stable_quality=0.91
+</code></pre><p><strong>Exercise:</strong>
+Write <code>canary_verdict(canary_results, stable_results, max_quality_drop=0.03)</code> returning a
+dict with <code>quality_drop</code>, <code>cheaper</code> (bool), and <code>promote</code> (bool, true only when the
+canary is cheaper AND its quality drop is within <code>max_quality_drop</code>). Run it against this
+concept's <code>canary_results</code>/<code>stable_results</code>.</p>
+<p><strong>Starting point:</strong> <code>canary_results</code> and <code>stable_results</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>{&#x27;quality_drop&#x27;: 0.02, &#x27;cheaper&#x27;: True, &#x27;promote&#x27;: True}
+</code></pre><hr />
+<h3>Concept 3 — Dashboards and Alerts Keyed to Cost Per Unit of Work, Not Total Monthly Spend</h3>
+<p>A total-monthly-spend dashboard only alerts once the damage has already accumulated over
+weeks. Keying the SAME alert to cost-per-unit-of-work (cost per claim, echoing Day 1's own
+metric) catches a spike on the day it happens, because the ratio moves immediately even
+when the day's claim VOLUME happens to be lower than usual — exactly the case where a raw
+total-cost figure alone can look unremarkable while the underlying unit economics have
+genuinely broken.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>@dataclasses.dataclass
+class DailyMetrics:
+    date: str
+    total_cost_usd: float
+    claims_processed: int
+
+    @property
+    def cost_per_claim(self):
+        return self.total_cost_usd / self.claims_processed if self.claims_processed else 0.0
+
+daily_history = [
+    DailyMetrics(&quot;2026-09-14&quot;, total_cost_usd=48.20, claims_processed=1200),
+    DailyMetrics(&quot;2026-09-15&quot;, total_cost_usd=51.00, claims_processed=1260),
+    DailyMetrics(&quot;2026-09-16&quot;, total_cost_usd=90.00, claims_processed=1180),  # spike
+    DailyMetrics(&quot;2026-09-17&quot;, total_cost_usd=53.10, claims_processed=1310),
+]
+
+for d in daily_history:
+    print(f&quot;{d.date}: total=${d.total_cost_usd:.2f} claims={d.claims_processed} cost_per_claim=${d.cost_per_claim:.5f}&quot;)
+
+ALERT_COST_PER_CLAIM_CEILING = 0.05
+
+def find_alert_days(history, ceiling=ALERT_COST_PER_CLAIM_CEILING):
+    return [d.date for d in history if d.cost_per_claim &gt; ceiling]
+
+alert_days = find_alert_days(daily_history)
+print(f&quot;alert_days (cost_per_claim over ${ALERT_COST_PER_CLAIM_CEILING}): {alert_days}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>2026-09-14: total=$48.20 claims=1200 cost_per_claim=$0.04017
+2026-09-15: total=$51.00 claims=1260 cost_per_claim=$0.04048
+2026-09-16: total=$90.00 claims=1180 cost_per_claim=$0.07627
+2026-09-17: total=$53.10 claims=1310 cost_per_claim=$0.04053
+alert_days (cost_per_claim over $0.05): [&#x27;2026-09-16&#x27;]
+</code></pre><p><strong>Exercise:</strong>
+Write <code>total_monthly_spend(history)</code> and compute whether a total-spend-only alert with a
+$1500 threshold would have caught the <code>2026-09-16</code> spike day BY ITSELF (using only these
+four days' total), versus whether the cost-per-claim alert already caught it.</p>
+<p><strong>Starting point:</strong> <code>daily_history</code> and <code>alert_days</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>total_monthly_spend=$242.30
+would a total-spend-only alert (&gt;$1500) have caught the 09-16 spike day alone: False
+cost-per-claim alert caught it: True
+</code></pre><hr />
+<h3>Concept 4 — Treating a Cost Regression as a Failing Release Gate Alongside a Quality Regression</h3>
+<p>A quality regression already blocks a release in a mature ML pipeline. A cost regression
+of the same magnitude — a new model version that costs 24% more per claim for no quality
+gain — deserves the identical treatment: a hard gate that raises and blocks the release,
+not a dashboard number someone might notice later. Gating on BOTH dimensions together also
+catches the case neither alone would: a candidate that's cheaper AND meaningfully worse in
+quality still fails, because a quality floor exists independent of what the cost trend
+looks like.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>@dataclasses.dataclass
+class ReleaseCandidate:
+    version: str
+    cost_per_claim: float
+    quality_score: float
+
+BASELINE = ReleaseCandidate(&quot;v3.1-baseline&quot;, cost_per_claim=0.0210, quality_score=0.92)
+
+class ReleaseGateError(Exception):
+    pass
+
+def evaluate_release_gate(candidate, baseline=BASELINE, max_cost_increase_pct=15.0, max_quality_drop=0.02):
+    cost_increase_pct = (candidate.cost_per_claim - baseline.cost_per_claim) / baseline.cost_per_claim * 100
+    quality_drop = baseline.quality_score - candidate.quality_score
+    failures = []
+    if cost_increase_pct &gt; max_cost_increase_pct:
+        failures.append(f&quot;cost regression: +{cost_increase_pct:.1f}% (limit {max_cost_increase_pct}%)&quot;)
+    if quality_drop &gt; max_quality_drop:
+        failures.append(f&quot;quality regression: -{quality_drop:.4f} (limit {max_quality_drop})&quot;)
+    if failures:
+        raise ReleaseGateError(f&quot;{candidate.version} BLOCKED: &quot; + &quot;; &quot;.join(failures))
+    return {&quot;version&quot;: candidate.version, &quot;cost_increase_pct&quot;: round(cost_increase_pct, 1), &quot;quality_drop&quot;: round(quality_drop, 4)}
+
+candidates = [
+    ReleaseCandidate(&quot;v3.2-cheaper&quot;, cost_per_claim=0.0195, quality_score=0.915),
+    ReleaseCandidate(&quot;v3.2-cost-regression&quot;, cost_per_claim=0.0260, quality_score=0.925),
+    ReleaseCandidate(&quot;v3.2-quality-regression&quot;, cost_per_claim=0.0205, quality_score=0.88),
+]
+
+for c in candidates:
+    try:
+        result = evaluate_release_gate(c)
+        print(f&quot;{c.version}: PASS  {result}&quot;)
+    except ReleaseGateError as e:
+        print(f&quot;{c.version}: {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>v3.2-cheaper: PASS  {&#x27;version&#x27;: &#x27;v3.2-cheaper&#x27;, &#x27;cost_increase_pct&#x27;: -7.1, &#x27;quality_drop&#x27;: 0.005}
+v3.2-cost-regression: v3.2-cost-regression BLOCKED: cost regression: +23.8% (limit 15.0%)
+v3.2-quality-regression: v3.2-quality-regression BLOCKED: quality regression: -0.0400 (limit 0.02)
+</code></pre><p><strong>Exercise:</strong>
+Write <code>gate_report(candidates_list, baseline=BASELINE)</code> returning a list of
+<code>(version, &quot;PASS&quot; or &quot;BLOCKED&quot;)</code> tuples. Run it against <code>extra_candidates</code> (one candidate
+that regresses on both dimensions, one that's clean on both) and print the pass count.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>extra_candidates = [
+    ReleaseCandidate(&quot;v3.3-both-regress&quot;, cost_per_claim=0.0300, quality_score=0.85),
+    ReleaseCandidate(&quot;v3.3-clean&quot;, cost_per_claim=0.0200, quality_score=0.93),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><code>evaluate_release_gate</code>, <code>ReleaseGateError</code>, and <code>BASELINE</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>v3.3-both-regress: BLOCKED
+v3.3-clean: PASS
+pass_count=1
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> a per-tenant quota is only as trustworthy as the token-counting it's
+built on — Day 1's own local-estimate-vs-billed divergence means a quota enforced purely
+on local estimates can both wrongly block a tenant still under their REAL budget and
+wrongly admit one already over it, unless the enforcement point reconciles against actual
+billed usage on some regular cadence, not just the pre-flight estimate.</p>
+<p><strong>Compliance angle:</strong> <code>ReleaseGateError</code>'s hard block on a 24% cost regression is exactly
+the kind of automated control a FinOps or model-risk review expects to see evidenced, not
+just asserted — a real deployment would want this gate's pass/fail history retained
+alongside the model version it evaluated, the same audit-trail instinct Week 22 built for
+tool calls applied here to releases.</p>
+<p><strong>What breaks in production:</strong> <code>TenantQuota.tokens_used_today</code> resets only if something
+external calls a reset at day boundary — a quota object with no such reset simply never
+gives a tenant their daily allowance back, silently blocking every request from a tenant
+whose quota window never actually rolled over, a bug that looks identical to a genuine
+sustained overspend until someone checks the reset logic specifically.</p>
+<hr />
+<h2>Architecture Decision — Week 23</h2>
+<p>Choosing between: <strong>aggressive caching and routing</strong> (semantic caching with a permissive
+similarity threshold, an escalation-confidence floor tuned low so most traffic stays on
+the cheap tier, and constrained output schemas applied everywhere by default) vs.
+<strong>conservative, correctness-first spend</strong> (caching restricted to content proven
+live-state-independent per Day 3 Concept 3, a high escalation floor that sends more
+traffic to the expensive tier, and free-text output left alone unless a schema is already
+part of the product's contract).</p>
+<p>Rule of thumb: default to <strong>conservative, correctness-first spend</strong> for any request whose
+answer could plausibly depend on account state that changes between cache writes (a
+balance, an open claim's status, anything Day 3's <code>is_cache_safe</code> would flag) or whose
+escalation miss carries real cost (an ambiguous claims-liability question routed to the
+cheap tier and answered wrong). Move to <strong>aggressive caching and routing</strong> only for
+traffic that is provably safe to optimize: genuinely static reference content (policy
+text, FAQ-shaped questions), requests whose triage confidence is measurably reliable
+against a real historical accuracy check (not just a threshold picked once and left
+alone), and batchable, non-interactive work where Day 4's asynchronous discount applies
+with no user waiting on the other end.</p>
+<p>This is not a track-wide, set-once choice — it is the same PER-REQUEST-CLASS decision
+Week 22's Architecture Decision made for write-tool blast radius, applied here to spend
+instead of writes. A new use case defaults to conservative (full-price, uncached, always
+escalated to the capable model) until its own traffic has a measured track record — real
+cache-hit rates, real triage accuracy, real canary comparisons per Day 5 Concept 2 —
+that earns it a deliberate, evidenced move toward the cheaper path. Every one of those
+moves is then protected the same way Day 5 Concept 4 protects a model swap: a cost
+regression is a release-blocking defect, not a metric to note and move past, precisely
+because &quot;optimized last quarter&quot; is not evidence that this quarter's traffic mix, prompt
+content, or provider pricing hasn't quietly made the optimization wrong.</p>
+<hr />
+<div class="pager"><a class="btn ghost" href="week-22.html">&larr; Week 22</a><a class="btn ghost" href="week-24.html">Week 24 &rarr;</a></div>
+</main></body></html>

@@ -1,0 +1,1470 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 09 — Semantic Chunking Strategies</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/chunking-strategies-for-rag" target="_blank" rel="noopener">Chunking strategies for RAG<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/how-does-contextual-retrieval-work" target="_blank" rel="noopener">How does Contextual Retrieval work?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="09" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 09 — Semantic Chunking Strategies</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>2 — Advanced AI Data Pipelines / DataPrep for LLMs</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Expert</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 08 (layout-aware parsing produces the text this week chunks). Working Python.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>9–11 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>None yet. This week is markdown-only — every runnable example below was executed to produce its <code>Expected output:</code>, but no <code>.ipynb</code> has been built for it.</td>
+</tr>
+</tbody>
+</table>
+<p>Week 08 turned a scanned form or a PDF into clean text and structured elements. Before any
+of that text can be embedded and searched, it has to be split into pieces small enough for
+an embedding model's context window and a retrieval system's relevance granularity — that
+splitting decision is this week's whole subject. Four strategies are covered, in order of
+increasing structural awareness: fixed-size splitting (Day 1), which knows nothing about
+the document's structure; recursive splitting (also Day 1), which respects separators but
+still doesn't understand meaning; structure-aware splitting (Day 2), which uses the
+document's own headings and clause boundaries; and embedding-similarity breakpoint
+chunking (Day 3), which finds topic boundaries the document's formatting doesn't mark at
+all. Day 4 covers what travels with a chunk besides its text, and Day 5 measures which
+strategy actually wins on a real retrieval task rather than assuming one does.</p>
+<hr />
+<h2 id="day-1">Day 1 — Fixed and Recursive Chunking</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="09-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=1bbDH3kyf9I" target="_blank" rel="noopener"><b>How to Set the Chunk Size in Document Splitter | RAG | LangChain</b><small>Prompt Engineering · 9:58</small></a></li><li><a href="https://www.youtube.com/watch?v=Fexg17uA7tU" target="_blank" rel="noopener"><b>#21 Text Splitting for RAG Systems | RecursiveCharacterTextSplitter in LangChain #rag #genai</b><small>TechSimPlus Learnings · 13:12</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=recursive%20character%20text%20splitter%20chunk%20size%20overlap%20tokens%20langchain" target="_blank" rel="noopener">Search YouTube: recursive character text splitter chunk size overlap tokens langchain</a></p></div>
+<hr />
+<h3>Concept 1 — Token-Based Sizing Is Not Character Counting</h3>
+<p>An embedding model's context window and a chat model's usable input are both measured in
+<strong>tokens</strong> — the sub-word units a tokenizer produces — not characters or words. A chunk
+sized by character count can silently exceed a model's real token budget on
+text with lots of short, common words (each pulling only fractional-token
+weight in a real BPE vocabulary is not how it works — the actual effect runs the other
+way just as often: uncommon words, numbers, and punctuation each cost <em>more</em> than one
+token per character-run). The only sizing measurement that reflects what a model actually
+sees is a token count from the tokenizer that model uses.</p>
+<p>This sandbox cannot reach <code>tiktoken</code>'s real vocabulary file over the network here (its
+<code>cl100k_base</code> encoding is fetched from Microsoft Blob Storage on first use, and this
+environment's egress proxy blocks that host), so the token counts below use a
+<strong>simplified stand-in tokenizer</strong> — a regex that splits on letter-runs, digit-runs, and
+individual punctuation/symbol characters — instead of real BPE. It is not accurate at the
+sub-word level a real tokenizer operates at, but it demonstrates the same point real BPE
+tokenization makes: a token count is a different number from a character count and from a
+word count, and chunk-size budgets stated in &quot;tokens&quot; have to be measured with a real
+tokenizer, not approximated by dividing character count by four.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+def approx_bpe_tokens(text):
+    &quot;&quot;&quot;Stand-in tokenizer, NOT real BPE -- see prose above. Splits on
+    letter-runs, digit-runs, and individual non-alphanumeric characters.&quot;&quot;&quot;
+    return re.findall(r&quot;[A-Za-z]+|[0-9]+|[^\sA-Za-z0-9]&quot;, text)
+
+doc = (
+&quot;This homeowners policy provides coverage for direct physical loss to the dwelling &quot;
+&quot;and other structures on the residence premises, subject to the exclusions and &quot;
+&quot;conditions stated below. Coverage A applies to the dwelling itself, including &quot;
+&quot;attached structures such as an attached garage. Coverage B applies to other &quot;
+&quot;structures not attached to the dwelling, such as a detached garage or a shed, &quot;
+&quot;up to ten percent of the Coverage A limit unless a higher limit is scheduled. &quot;
+&quot;Coverage does not apply to loss caused by flood, earth movement, or war, &quot;
+&quot;regardless of any other cause or event contributing concurrently or in any &quot;
+&quot;sequence to the loss. The insured must report any loss within sixty days of &quot;
+&quot;discovery and must protect the property from further damage after a loss occurs. &quot;
+&quot;Failure to comply with these duties may result in denial of the claim in whole &quot;
+&quot;or in part, depending on the prejudice caused by the delay.&quot;
+)
+
+toks = approx_bpe_tokens(doc)
+words = doc.split()
+print(&quot;chars:&quot;, len(doc))
+print(&quot;words (str.split):&quot;, len(words))
+print(&quot;approx-tokens (stand-in):&quot;, len(toks))
+print(&quot;chars per approx-token:&quot;, round(len(doc) / len(toks), 2))
+print(&quot;words per approx-token:&quot;, round(len(words) / len(toks), 2))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Take the same <code>doc</code> and compute the approx-token count for just its final sentence
+(&quot;Failure to comply... the delay.&quot;). Compare chars-per-token on that sentence alone
+against the whole-document ratio measured above, and state in one sentence whether a
+short, punctuation-heavy sentence changes the ratio much.</p>
+<p><strong>Starting point:</strong> The <code>approx_bpe_tokens</code> function and <code>doc</code> string from this concept's
+Example, sliced to just the text from <code>&quot;Failure&quot;</code> to the end.</p>
+<p>Expected output: measured here, the whole document is 913 characters, 154 words, and 168
+approx-tokens (5.43 chars/token, 0.92 words/token — commas and periods each count as their
+own token, which is why the approx-token count exceeds the word count). The final
+sentence (&quot;Failure to comply with these duties may result in denial of the claim in whole
+or in part, depending on the prejudice caused by the delay.&quot;) is 155 characters and 27
+approx-tokens, a ratio of 5.74 chars/token — close to the whole-document ratio, because
+punctuation density (this sentence has 2 commas and a period, proportionally similar to
+the whole document) is the main thing that moves this ratio, not sentence length itself.</p>
+<p><strong>REAL MODE — not executed (requires network access to fetch tiktoken's real
+<code>cl100k_base</code> vocabulary, blocked by this sandbox's egress proxy):</strong> in a real environment,
+<code>import tiktoken; enc = tiktoken.get_encoding(&quot;cl100k_base&quot;); len(enc.encode(doc))</code> gives
+the real BPE token count for the same string — expect a genuinely different number from
+the stand-in above, since real BPE merges frequent multi-character sequences into single
+tokens (so common words often cost <em>fewer</em> than one token per 4 characters) while rare
+words, numbers, and unusual capitalization split into <em>more</em> tokens than their character
+count would suggest. <code>tiktoken.encoding_for_model(&quot;gpt-4&quot;)</code> resolves the right encoding
+name for a given model instead of hard-coding <code>cl100k_base</code>.</p>
+<hr />
+<h3>Concept 2 — Recursive Splitting Respects Separators, Fixed-Size Splitting Doesn't</h3>
+<p>A fixed-size splitter cuts every <code>N</code> characters regardless of what's at that boundary — it
+can land inside a word, a number, or a policy clause with equal indifference. LangChain's
+<code>RecursiveCharacterTextSplitter</code> fixes this by trying a list of separators in order (by
+convention <code>[&quot;\n\n&quot;, &quot;\n&quot;, &quot;. &quot;, &quot; &quot;, &quot;&quot;]</code> — paragraph, then line, then sentence, then
+word, then character as the last resort), merging small pieces back together up to the
+target chunk size, and recursing into the next separator only when a piece produced by the
+current one is still too big to fit.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def recursive_split(text, size, overlap, separators):
+    &quot;&quot;&quot;Simplified RecursiveCharacterTextSplitter. Tries separators[0] first;
+    merges split pieces back together up to `size`; recurses into any piece
+    still too big using separators[1:]; falls back to a hard character slice
+    once separators run out.&quot;&quot;&quot;
+    if len(text) &lt;= size:
+        return [text] if text else []
+    if not separators:
+        chunks = []
+        start = 0
+        step = size - overlap
+        while start &lt; len(text):
+            chunks.append(text[start:start + size])
+            start += step
+        return chunks
+
+    sep = separators[0]
+    pieces = list(text) if sep == &quot;&quot; else text.split(sep)
+
+    result = []
+    buf = &quot;&quot;
+    for piece in pieces:
+        candidate = buf + (sep if buf else &quot;&quot;) + piece
+        if len(candidate) &lt;= size:
+            buf = candidate
+        else:
+            if buf:
+                result.append(buf)
+            if len(piece) &gt; size:
+                result.extend(recursive_split(piece, size, overlap, separators[1:]))
+                buf = &quot;&quot;
+            else:
+                buf = piece
+    if buf:
+        result.append(buf)
+    return result
+
+
+def fixed_size_chunks(text, size, overlap=0):
+    chunks = []
+    start = 0
+    step = size - overlap
+    while start &lt; len(text):
+        chunks.append(text[start:start + size])
+        start += step
+    return chunks
+
+
+doc2 = (
+&quot;COVERAGE A -- DWELLING\n\n&quot;
+&quot;This policy covers the dwelling on the residence premises against direct physical loss, &quot;
+&quot;subject to the exclusions below. Coverage extends to attached structures.\n\n&quot;
+&quot;COVERAGE B -- OTHER STRUCTURES\n\n&quot;
+&quot;Other structures not attached to the dwelling are covered up to ten percent of the &quot;
+&quot;Coverage A limit, unless a higher limit is separately scheduled on this policy.\n\n&quot;
+&quot;EXCLUSIONS\n\n&quot;
+&quot;Flood, earth movement, and war are excluded regardless of any other cause or event &quot;
+&quot;contributing concurrently or in any sequence to the loss. Losses caused by neglect &quot;
+&quot;are also excluded.&quot;
+)
+
+separators = [&quot;\n\n&quot;, &quot;\n&quot;, &quot;. &quot;, &quot; &quot;, &quot;&quot;]
+recursive_chunks = recursive_split(doc2, size=120, overlap=0, separators=separators)
+fixed_chunks = fixed_size_chunks(doc2, 120)
+
+
+def count_mid_word_cuts(text, chunks):
+    cuts, pos = 0, 0
+    for c in chunks[:-1]:
+        idx = text.find(c, pos) + len(c)
+        pos = idx
+        if idx &lt; len(text) and text[idx - 1].isalnum() and text[idx].isalnum():
+            cuts += 1
+    return cuts
+
+
+print(f&quot;fixed-size:      {len(fixed_chunks)} chunks, &quot;
+      f&quot;{count_mid_word_cuts(doc2, fixed_chunks)} mid-word cuts&quot;)
+print(f&quot;recursive-split: {len(recursive_chunks)} chunks, &quot;
+      f&quot;{count_mid_word_cuts(doc2, recursive_chunks)} mid-word cuts&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the same <code>doc2</code> and <code>separators</code>, re-run <code>recursive_split</code> at <code>size=60</code> instead of
+120. Report how many chunks result and whether any of them cut inside a word — and if
+any do, identify which separator in the list must have been exhausted for that to happen
+(the fallback case the function's own docstring names).</p>
+<p><strong>Starting point:</strong> The <code>recursive_split</code> function, <code>doc2</code> string, and <code>separators</code> list
+from this concept's Example, called with <code>size=60</code>.</p>
+<p>Expected output: at <code>size=120</code>, fixed-size splitting produced 5 chunks with 2 mid-word
+cuts; recursive splitting produced 10 chunks with 0 mid-word cuts — respecting the
+paragraph and sentence separators means a chunk boundary only falls where the document
+already had a natural break. At <code>size=60</code>, some sections (for example the 89-character
+&quot;Other structures...&quot; sentence) are still longer than 60 characters even after splitting
+on <code>&quot;. &quot;</code> and <code>&quot; &quot;</code> — the space-separator split degrades to individual words in that case,
+which can still occasionally leave a piece needing the final <code>&quot;&quot;</code> fallback (a genuine
+letter-by-letter slice) if a single word or number happened to exceed 60 characters,
+though none does in this particular document.</p>
+<hr />
+<h3>Concept 3 — Overlap Is a Fraction of Chunk Size, and It Duplicates Storage</h3>
+<p>Overlap re-includes the tail of one chunk at the head of the next, so a fact stated right
+at a chunk boundary isn't lost to whichever chunk doesn't get retrieved. It is usually
+expressed as a fraction of the chunk size (a common default is 10-20%), and every
+character of overlap is a character stored twice — once in each of the two chunks it
+appears in.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def fixed_size_chunks(text, size, overlap=0):
+    chunks = []
+    start = 0
+    step = size - overlap
+    while start &lt; len(text):
+        chunks.append(text[start:start + size])
+        start += step
+    return chunks
+
+doc = (
+&quot;This homeowners policy provides coverage for direct physical loss to the dwelling &quot;
+&quot;and other structures on the residence premises, subject to the exclusions and &quot;
+&quot;conditions stated below. Coverage A applies to the dwelling itself, including &quot;
+&quot;attached structures such as an attached garage. Coverage B applies to other &quot;
+&quot;structures not attached to the dwelling, such as a detached garage or a shed, &quot;
+&quot;up to ten percent of the Coverage A limit unless a higher limit is scheduled. &quot;
+&quot;Coverage does not apply to loss caused by flood, earth movement, or war, &quot;
+&quot;regardless of any other cause or event contributing concurrently or in any &quot;
+&quot;sequence to the loss. The insured must report any loss within sixty days of &quot;
+&quot;discovery and must protect the property from further damage after a loss occurs. &quot;
+&quot;Failure to comply with these duties may result in denial of the claim in whole &quot;
+&quot;or in part, depending on the prejudice caused by the delay.&quot;
+)
+
+for overlap_frac in (0.0, 0.1, 0.2, 0.4):
+    size = 200
+    overlap = int(size * overlap_frac)
+    chunks = fixed_size_chunks(doc, size, overlap)
+    total_stored = sum(len(c) for c in chunks)
+    inflation = (total_stored / len(doc) - 1) * 100
+    print(f&quot;overlap_frac={overlap_frac:.1f}  overlap_chars={overlap:&gt;3}  &quot;
+          f&quot;chunks={len(chunks):&gt;2}  stored_chars={total_stored:&gt;4}  &quot;
+          f&quot;inflation={inflation:.1f}%&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Re-run the same sweep with <code>size=500</code> instead of 200, keeping the same <code>overlap_frac</code>
+values. State whether a larger base chunk size makes the same overlap fraction cost more
+or less extra storage in absolute characters, and explain why in one sentence referencing
+how many chunk boundaries a 913-character document has at each size.</p>
+<p><strong>Starting point:</strong> The overlap sweep from this concept's Example, with <code>size</code> changed to
+<code>500</code>.</p>
+<p>Expected output: at <code>size=200</code>, storage inflation measured here was 0.0% (overlap_frac
+0.0, 5 chunks), 10.2% (0.1, 6 chunks), 21.9% (0.2, 6 chunks), and 60.6% (0.4, 8 chunks) —
+inflation is not linear in overlap fraction because it also depends on how many chunk
+boundaries exist to overlap across. At <code>size=500</code>, the document only has 2 chunk
+boundaries, so far less total overlap is possible regardless of fraction — the same
+overlap fraction costs less absolute storage on fewer, larger chunks simply because there
+are fewer boundaries for it to apply at.</p>
+<hr />
+<h3>Concept 4 — Mid-Sentence Truncation Is the Concrete Damage Fixed-Size Splitting Causes</h3>
+<p>Concept 2 measured that fixed-size splitting cuts mid-word; the same indifference to
+structure also cuts mid-sentence and mid-clause, which is the damage that actually matters
+for retrieval — a chunk ending &quot;the policy excludes losses caused by&quot; carries none of the
+information a reader (or a retrieval system) needs, and the chunk that continues &quot;flood,
+earth movement, or war&quot; is equally useless without the clause it's completing.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def fixed_size_chunks(text, size, overlap=0):
+    chunks = []
+    start = 0
+    step = size - overlap
+    while start &lt; len(text):
+        chunks.append(text[start:start + size])
+        start += step
+    return chunks
+
+doc = (
+&quot;The policy excludes losses caused by flood, earth movement, or war, regardless of &quot;
+&quot;any other cause or event contributing concurrently or in any sequence to the loss. &quot;
+&quot;The policy also excludes losses caused by neglect, wear and tear, or gradual &quot;
+&quot;deterioration, and losses that occur while the dwelling has been vacant for more &quot;
+&quot;than sixty consecutive days.&quot;
+)
+
+for size in (80, 120, 160):
+    chunks = fixed_size_chunks(doc, size)
+    # a chunk &quot;ends mid-sentence&quot; if its last character isn&#x27;t sentence-ending
+    # punctuation and it isn&#x27;t the final chunk.
+    mid_sentence_endings = sum(
+        1 for c in chunks[:-1] if c.rstrip()[-1] not in &quot;.!?&quot;
+    )
+    print(f&quot;size={size:&gt;3}  chunks={len(chunks)}  &quot;
+          f&quot;mid-sentence endings={mid_sentence_endings}/{len(chunks)-1}&quot;)
+    print(f&quot;    chunk 0 ends: ...{chunks[0][-45:]!r}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the same <code>doc</code> and <code>fixed_size_chunks</code>, find the smallest <code>size</code> (checking every
+10 characters from 40 upward) at which zero chunks end mid-sentence, purely by
+coincidence of where <code>size</code> happens to land relative to this specific document's sentence
+boundaries. State whether this means fixed-size chunking has &quot;solved&quot; mid-sentence
+truncation at that size, or whether it's a coincidence specific to this document.</p>
+<p><strong>Starting point:</strong> The <code>fixed_size_chunks</code> function and <code>doc</code> string from this concept's
+Example, with <code>size</code> swept from 40 to 400 in steps of 10.</p>
+<p>Expected output: at <code>size=80</code>, chunking produced 5 chunks, and all 4 non-final chunks
+ended mid-sentence measured here; at <code>size=120</code>, 3 chunks, and both of the 2 non-final
+chunks ended mid-sentence; at <code>size=160</code>, 3 chunks, and both non-final chunks again ended
+mid-sentence — the count of mid-sentence endings tracks how many non-final chunks exist
+far more than it improves as <code>size</code> grows, because nothing about the algorithm is aware of
+sentence boundaries at any size. Whatever specific <code>size</code> value happens to produce zero
+mid-sentence endings on this one document (the sweep will find one, since the document is
+finite and boundaries are discrete) is a coincidence of this document's specific sentence
+lengths, not a property of fixed-size chunking — the same <code>size</code> value chunking a
+different document will cut mid-sentence just as indifferently as any other size does
+here, which is exactly why Concept 2's recursive approach exists.</p>
+<hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> A batch DataPrep job re-chunking a whole claims-document archive after a
+chunking-strategy change is a full re-embed of every chunk, not an incremental update —
+this is exactly the &quot;full reindex&quot; cost Week 11's incremental-embedding economics were
+built to avoid, and it recurs every time the chunking strategy itself changes, not just
+when source documents change.</p>
+<p><strong>Compliance angle:</strong> A chunk boundary that splits an exclusion clause from the condition
+that limits it (for example, &quot;flood is excluded&quot; landing in one chunk, &quot;unless caused by a
+covered peril&quot; landing in the next) is not just a quality problem — a chatbot that
+retrieves only the first chunk and states the exclusion as absolute is giving a materially
+wrong answer about coverage, which is a real E&amp;O and consumer-protection exposure, not an
+abstract retrieval-quality metric.</p>
+<p><strong>What breaks in production:</strong> A chunking pipeline tuned and validated against long-form
+policy wording gets pointed at short customer-service call transcripts without
+re-validation, because &quot;it already works.&quot; Fixed-size and even recursive splitting behave
+very differently on a document made of many short speaker turns than on a document made of
+long formal paragraphs — the failure is silent, since the pipeline still runs and produces
+chunks, they are just badly shaped for the new document type.</p>
+<hr />
+<h2 id="day-2">Day 2 — Structure-Aware Policy Chunking</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="09-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=LCrX6_evdtk" target="_blank" rel="noopener"><b>Markdown Header Text Splitter Chunking Method Demo</b><small>Tech With Mala · 6:49</small></a></li><li><a href="https://www.youtube.com/watch?v=pIGRwMjhMaQ" target="_blank" rel="noopener"><b>Chunking Strategies in RAG: Optimising Data for Advanced AI Responses</b><small>Mervin Praison · 14:02</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=markdown%20header%20aware%20chunking%20documents%20structure%20RAG" target="_blank" rel="noopener">Search YouTube: markdown header aware chunking documents structure RAG</a></p></div>
+<hr />
+<h3>Concept 1 — Splitting on Section and Clause Headings, Not Paragraphs</h3>
+<p>Policy wording (and most formal legal/financial documents) has an explicit structure the
+document itself declares — ALL-CAPS section titles (<code>DECLARATIONS</code>, <code>COVERAGE A</code>,
+<code>EXCLUSIONS</code>), numbered clauses, or markdown headers in a digitized version. Splitting on
+those headings, rather than on paragraph breaks the way Day 1's recursive splitter does,
+means every chunk boundary coincides with a boundary the document's own author already
+drew — a section is never split mid-way through by an algorithm that doesn't know what the
+section is about.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+def split_on_headings(text, heading_pattern=r&quot;^[A-Z][A-Z0-9 /&amp;\-]{3,60}$&quot;):
+    &quot;&quot;&quot;Split on ALL-CAPS section-title lines -- a real, simple structural
+    heuristic that works because policy wording conventionally uses
+    ALL-CAPS section headers.&quot;&quot;&quot;
+    lines = text.split(&quot;\n&quot;)
+    sections = []
+    current_heading = None
+    current_body = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and re.match(heading_pattern, stripped):
+            if current_heading is not None:
+                sections.append((current_heading, &quot;\n&quot;.join(current_body).strip()))
+            current_heading = stripped
+            current_body = []
+        else:
+            current_body.append(line)
+    if current_heading is not None:
+        sections.append((current_heading, &quot;\n&quot;.join(current_body).strip()))
+    return sections
+
+policy = &quot;&quot;&quot;DECLARATIONS
+
+Named insured: Jane Doe. Policy period: 12 months from inception date.
+
+COVERAGE A -- DWELLING
+
+This policy covers the dwelling on the residence premises against direct physical loss,
+subject to the exclusions below. Coverage extends to attached structures.
+
+DEFINITIONS
+
+&quot;Dwelling&quot; means the residence structure, including attached structures, used principally
+for residential purposes. &quot;Residence premises&quot; means the one-family dwelling shown in the
+Declarations. &quot;Other structures&quot; means structures separated from the dwelling by clear
+space.
+
+EXCLUSIONS
+
+Flood, earth movement, and war are excluded regardless of any other cause or event
+contributing concurrently or in any sequence to the loss. Losses caused by neglect are
+also excluded.
+
+ENDORSEMENT HO-321 -- WATER BACKUP COVERAGE
+
+This endorsement adds coverage for water that backs up through sewers or drains, subject
+to a $10,000 sublimit and a separate $500 deductible for this coverage only.&quot;&quot;&quot;
+
+sections = split_on_headings(policy)
+for heading, body in sections:
+    print(f&quot;[{heading}] ({len(body)} chars)&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a new section <code>CONDITIONS</code> after the <code>ENDORSEMENT</code> section, with a body of your
+choice (at least one sentence about claim-reporting duties), and confirm
+<code>split_on_headings</code> produces exactly 6 sections with <code>CONDITIONS</code> correctly separated from
+the endorsement above it.</p>
+<p><strong>Starting point:</strong> The <code>split_on_headings</code> function and <code>policy</code> string from this
+concept's Example, with a <code>CONDITIONS</code> section appended in the same ALL-CAPS-heading
+format the other sections use.</p>
+<p>Expected output: measured here, the original document splits into exactly 5 sections —
+<code>DECLARATIONS</code> (70 chars), <code>COVERAGE A -- DWELLING</code> (161 chars), <code>DEFINITIONS</code>
+(273 chars), <code>EXCLUSIONS</code> (184 chars), <code>ENDORSEMENT HO-321 -- WATER BACKUP COVERAGE</code>
+(165 chars). Adding a correctly-formatted <code>CONDITIONS</code> heading produces a 6th section in
+the same list, with the endorsement's body still ending exactly where the endorsement's
+text ends — the heading-matching regex draws the boundary regardless of how many sections
+come before it.</p>
+<hr />
+<h3>Concept 2 — A Table or Definitions List Stays in One Chunk, Even Past the Target Size</h3>
+<p>A rate table, a limits schedule, or a definitions list is only useful to a reader (or a
+retrieval system) as a whole — a chunk containing &quot;Coverage A Dwelling: $350,000&quot; without
+the rest of the limits table around it has lost the very thing that made the row
+meaningful. Structure-aware chunking treats a table or list as one atomic unit and lets it
+exceed the target chunk size rather than split it, on the reasoning that an oversized but
+coherent chunk beats an undersized but broken one.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+def split_on_headings(text, heading_pattern=r&quot;^[A-Z][A-Z0-9 /&amp;\-]{3,60}$&quot;):
+    lines = text.split(&quot;\n&quot;)
+    sections = []
+    current_heading = None
+    current_body = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and re.match(heading_pattern, stripped):
+            if current_heading is not None:
+                sections.append((current_heading, &quot;\n&quot;.join(current_body).strip()))
+            current_heading = stripped
+            current_body = []
+        else:
+            current_body.append(line)
+    if current_heading is not None:
+        sections.append((current_heading, &quot;\n&quot;.join(current_body).strip()))
+    return sections
+
+policy_with_table = &quot;&quot;&quot;LIMITS OF LIABILITY
+
+Coverage A Dwelling: $350,000
+Coverage B Other Structures: $35,000
+Coverage C Personal Property: $175,000
+Coverage D Loss of Use: $70,000
+Coverage E Personal Liability: $300,000
+Coverage F Medical Payments: $5,000
+
+DEDUCTIBLES
+
+Standard deductible: $1,000
+Wind/hail deductible: 2% of Coverage A limit
+Water backup deductible: $500&quot;&quot;&quot;
+
+sections = split_on_headings(policy_with_table)
+for heading, body in sections:
+    print(f&quot;[{heading}] {len(body)} chars, {body.count(chr(10)) + 1} lines&quot;)
+
+target_size = 120
+limits_body = sections[0][1]
+exceeds_target = len(limits_body) &gt; target_size
+print(f&quot;\nLIMITS table is {len(limits_body)} chars against a target of {target_size}&quot;)
+print(f&quot;kept as one chunk anyway, exceeding target: {exceeds_target}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Lower <code>target_size</code> to 50 in the printed comparison (the table itself doesn't change) and
+state whether that changes the decision to keep the table whole — then state, in one
+sentence, what target size <em>would</em> have to be for &quot;never exceed target&quot; to become a
+reasonable rule for this specific table instead of an exception you have to carve out.</p>
+<p><strong>Starting point:</strong> The <code>LIMITS OF LIABILITY</code> section body and <code>target_size</code> variable from
+this concept's Example, with <code>target_size</code> changed to <code>50</code>.</p>
+<p>Expected output: the <code>LIMITS OF LIABILITY</code> section is 213 characters across 6 lines
+regardless of <code>target_size</code> — lowering the target to 50 doesn't change the table itself,
+it only makes the &quot;exceeds target&quot; gap bigger (213 vs. 50, rather than 213 vs. 120). For
+&quot;never exceed target&quot; to stop requiring an exception, <code>target_size</code> would have to be at
+least 213 — i.e., sized to the <em>largest atomic unit in the corpus</em>, which for a document
+with many tables of varying size means the target is effectively set by whichever table is
+biggest, not by a general chunk-size preference.</p>
+<hr />
+<h3>Concept 3 — Endorsements and Exclusions Are Atomic Units, Never Split or Merged</h3>
+<p>An endorsement modifies the base policy as one indivisible unit — its sublimit, its
+deductible, and its scope only make sense read together. The same heading-based split from
+Concept 1 keeps an endorsement's full body in one section even when it is the single
+longest section in the document, and — just as importantly — never silently merges it with
+the section that follows.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+def split_on_headings(text, heading_pattern=r&quot;^[A-Z][A-Z0-9 /&amp;\-]{3,60}$&quot;):
+    lines = text.split(&quot;\n&quot;)
+    sections = []
+    current_heading = None
+    current_body = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and re.match(heading_pattern, stripped):
+            if current_heading is not None:
+                sections.append((current_heading, &quot;\n&quot;.join(current_body).strip()))
+            current_heading = stripped
+            current_body = []
+        else:
+            current_body.append(line)
+    if current_heading is not None:
+        sections.append((current_heading, &quot;\n&quot;.join(current_body).strip()))
+    return sections
+
+endorsement_doc = &quot;&quot;&quot;EXCLUSIONS
+
+Flood, earth movement, and war are excluded.
+
+ENDORSEMENT HO-321 -- WATER BACKUP COVERAGE
+
+This endorsement adds coverage for water that backs up through sewers or drains, subject
+to a $10,000 sublimit and a separate $500 deductible for this coverage only. This
+endorsement does not apply to backup caused by a sump pump failure unless the Sump Pump
+Failure Endorsement HO-322 is also attached to this policy, in which case both
+endorsements apply together subject to their own separate sublimits and deductibles.
+
+CONDITIONS
+
+The insured must give prompt notice of any loss.&quot;&quot;&quot;
+
+sections = split_on_headings(endorsement_doc)
+for heading, body in sections:
+    print(f&quot;[{heading}] {len(body)} chars&quot;)
+
+endorsement_body = [b for h, b in sections if &quot;HO-321&quot; in h][0]
+kept_atomic = &quot;CONDITIONS&quot; not in endorsement_body and &quot;EXCLUSIONS&quot; not in endorsement_body
+print(f&quot;\nendorsement kept as its own atomic section: {kept_atomic}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a second endorsement, <code>ENDORSEMENT HO-322 -- SUMP PUMP FAILURE COVERAGE</code>, right after
+HO-321, with its own one-sentence body. Confirm the split produces two separate
+endorsement sections (not one merged section covering both), and state why that separation
+matters if HO-322 is later cancelled but HO-321 is not.</p>
+<p><strong>Starting point:</strong> The <code>endorsement_doc</code> string from this concept's Example, with the new
+<code>ENDORSEMENT HO-322</code> section inserted (matching the ALL-CAPS heading format) between
+HO-321 and <code>CONDITIONS</code>.</p>
+<p>Expected output: the original document splits into exactly 3 sections, with the
+<code>ENDORSEMENT HO-321</code> section body containing neither <code>EXCLUSIONS</code>' nor <code>CONDITIONS</code>' text
+— <code>kept_atomic</code> prints <code>True</code>. Adding <code>ENDORSEMENT HO-322</code> produces a 4th, separate
+section rather than extending HO-321's body — separation matters because an endorsement
+can be individually added or cancelled on a policy at renewal; a chunk that silently merged
+two endorsements together could not tell a reader (or a retrieval system) that only one of
+them still applies after such a change.</p>
+<hr />
+<h3>Concept 4 — The Chunk-Size Variance This Deliberately Accepts</h3>
+<p>Fixed-size and recursive splitting both produce chunks clustered fairly close to the
+target size. Structure-aware splitting gives that up on purpose: a one-line
+<code>DECLARATIONS</code> section and a long <code>DEFINITIONS</code> section are both exactly one chunk each,
+regardless of how different their sizes are, because the document's own structure — not a
+size target — is what decides where a boundary goes.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+import statistics
+
+def split_on_headings(text, heading_pattern=r&quot;^[A-Z][A-Z0-9 /&amp;\-]{3,60}$&quot;):
+    lines = text.split(&quot;\n&quot;)
+    sections = []
+    current_heading = None
+    current_body = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and re.match(heading_pattern, stripped):
+            if current_heading is not None:
+                sections.append((current_heading, &quot;\n&quot;.join(current_body).strip()))
+            current_heading = stripped
+            current_body = []
+        else:
+            current_body.append(line)
+    if current_heading is not None:
+        sections.append((current_heading, &quot;\n&quot;.join(current_body).strip()))
+    return sections
+
+policy = &quot;&quot;&quot;DECLARATIONS
+
+Named insured: Jane Doe. Policy period: 12 months from inception date.
+
+COVERAGE A -- DWELLING
+
+This policy covers the dwelling on the residence premises against direct physical loss,
+subject to the exclusions below. Coverage extends to attached structures.
+
+DEFINITIONS
+
+&quot;Dwelling&quot; means the residence structure, including attached structures, used principally
+for residential purposes. &quot;Residence premises&quot; means the one-family dwelling shown in the
+Declarations. &quot;Other structures&quot; means structures separated from the dwelling by clear
+space. &quot;Insured&quot; means the named insured and residents of the same household related by
+blood, marriage, or adoption.
+
+EXCLUSIONS
+
+Flood, earth movement, and war are excluded regardless of any other cause or event
+contributing concurrently or in any sequence to the loss. Losses caused by neglect are
+also excluded.
+
+ENDORSEMENT HO-321 -- WATER BACKUP COVERAGE
+
+This endorsement adds coverage for water that backs up through sewers or drains, subject
+to a $10,000 sublimit and a separate $500 deductible for this coverage only.&quot;&quot;&quot;
+
+sections = split_on_headings(policy)
+chunk_sizes = [len(f&quot;{h}\n{b}&quot;) for h, b in sections]
+print(&quot;structure-aware chunk sizes:&quot;, chunk_sizes)
+print(&quot;mean:&quot;, round(statistics.mean(chunk_sizes), 1))
+print(&quot;stdev:&quot;, round(statistics.stdev(chunk_sizes), 1))
+print(&quot;min/max:&quot;, min(chunk_sizes), max(chunk_sizes))
+
+mean_size = round(statistics.mean(chunk_sizes))
+fixed_chunks_count = -(-len(policy) // mean_size)  # ceil division
+print(f&quot;\nfixed-size chunking at size={mean_size} would give {fixed_chunks_count} &quot;
+      f&quot;uniformly-sized chunks (stdev ~0) instead&quot;)
+
+defs_start = policy.find(&quot;DEFINITIONS&quot;)
+excl_start = policy.find(&quot;EXCLUSIONS&quot;)
+same_fixed_chunk = (defs_start // mean_size) == (excl_start // mean_size)
+print(f&quot;DEFINITIONS and EXCLUSIONS would land in the same fixed-size chunk: &quot;
+      f&quot;{same_fixed_chunk}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Using the same <code>chunk_sizes</code> list, compute the coefficient of variation
+(<code>stdev / mean</code>) for the structure-aware split, and state whether you would expect that
+number to go up or down if this document had ten sections of similar length instead of
+five sections of widely different length — you don't need to construct the ten-section
+document, just reason about what coefficient of variation measures.</p>
+<p><strong>Starting point:</strong> The <code>chunk_sizes</code> list from this concept's Example.</p>
+<p>Expected output: structure-aware chunk sizes measured here are <code>[83, 184, 396, 195, 209]</code>
+(mean 213.4, stdev 113.5, min/max 83/396) — a coefficient of variation of roughly 0.53.
+Ten sections of <em>similar</em> length would push this number down toward 0, since coefficient
+of variation measures relative spread around the mean, not absolute size — the whole point
+of accepting this variance is that a document's real section lengths are whatever they
+are, and forcing them toward uniform size is exactly the tradeoff structure-aware chunking
+declines to make.</p>
+<hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> Not every policy document arrives as clean markdown with real headers —
+a scanned form run through Week 08's OCR pipeline may render an ALL-CAPS section title as
+slightly misspelled or with stray characters, silently breaking a heading-pattern regex
+that worked perfectly on a born-digital document. Structure-aware chunking's reliability is
+only as good as the structure-detection step feeding it, which is exactly why Week 08's OCR
+confidence routing exists upstream of this week's work, not as an unrelated concern.</p>
+<p><strong>Compliance angle:</strong> Keeping an endorsement atomic (Concept 3) is not just a
+retrieval-quality choice — if a chatbot answers a coverage question by retrieving a chunk
+that contains only part of an endorsement's conditions, it can state a coverage exists
+without its actual sublimit or deductible, which is the same kind of materially incomplete
+answer Day 1's BFSI Reality Check flagged for exclusion clauses.</p>
+<p><strong>What breaks in production:</strong> A policy template changes its section-heading style (for
+example, switching from ALL-CAPS titles to Title Case, or introducing a new endorsement
+naming convention) during a routine document-template update, and the heading-detection
+regex silently stops matching some or all sections. The pipeline doesn't error — it falls
+through to treating the whole document as one section, or as unstructured text, and nobody
+notices until a specific document's chunks are checked by hand.</p>
+<hr />
+<h2 id="day-3">Day 3 — Embedding-Similarity Breakpoint Chunking</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="09-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=pIGRwMjhMaQ" target="_blank" rel="noopener"><b>Chunking Strategies in RAG: Optimising Data for Advanced AI Responses</b><small>Mervin Praison · 14:02</small></a></li><li><a href="https://www.youtube.com/watch?v=nMCII_xtUbw" target="_blank" rel="noopener"><b>Chunking Methods for RAG Explained: Overlapped vs Semantic vs Late Chunking (2026)</b><small>TecAdRise · 7:35</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=semantic%20chunking%20embeddings%20breakpoint%20percentile%20llamaindex" target="_blank" rel="noopener">Search YouTube: semantic chunking embeddings breakpoint percentile llamaindex</a></p></div>
+<hr />
+<h3>Concept 1 — Sentence Embeddings and Cosine-Distance Breakpoints</h3>
+<p>Neither Day 1's separator-based splitting nor Day 2's heading-based splitting can find a
+boundary that the document's own formatting doesn't mark — a call-transcript topic change
+mid-conversation, with no blank line, no heading, nothing but the words themselves
+changing subject. Embedding-similarity chunking finds this kind of boundary directly:
+embed each sentence, measure the cosine distance between consecutive sentences, and treat
+an unusually large jump in distance as a breakpoint — a real topic change, not a
+formatting artifact.</p>
+<p>This sandbox has no live embedding API, so the examples below use a <strong>deterministic
+stand-in embedder</strong> — a bag-of-words hash into a fixed-size vector, not a real
+transformer-based embedding model. It is accurate enough to demonstrate that distance
+jumps when <em>vocabulary</em> changes (which is what a topic change usually looks like at the
+word level), but it does not capture the semantic/contextual understanding a real
+embedding model provides — two sentences using entirely different words for the same
+concept would show high distance here despite meaning the same thing, which a real model
+would not do.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+import re
+import zlib
+
+def stand_in_embed(text, dim=64):
+    &quot;&quot;&quot;Deterministic stand-in embedder -- NOT a real model. Hashes each
+    lowercased word into a fixed-dim vector via a seeded random projection
+    (bag-of-words style), then L2-normalizes. Sentences sharing more
+    topical words land closer in cosine distance.&quot;&quot;&quot;
+    vec = np.zeros(dim)
+    words = re.findall(r&quot;[a-z]+&quot;, text.lower())
+    for w in words:
+        h = zlib.crc32(w.encode())
+        rng = np.random.default_rng(h)
+        vec += rng.normal(size=dim)
+    norm = np.linalg.norm(vec)
+    return vec / norm if norm &gt; 0 else vec
+
+def cosine_distance(a, b):
+    return 1 - float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+sentences = [
+    &quot;Hi, I&#x27;m calling about my homeowners policy renewal.&quot;,
+    &quot;I wanted to check if my dwelling coverage limit went up this year.&quot;,
+    &quot;The declarations page shows three hundred fifty thousand for coverage A.&quot;,
+    &quot;Okay that makes sense, thank you for confirming that.&quot;,
+    &quot;Actually I also had a question about my payment method on file.&quot;,
+    &quot;Can you tell me if my autopay is set up with the checking account ending in 4821.&quot;,
+    &quot;I want to switch my payment method to a different card before next month.&quot;,
+]
+
+embeddings = [stand_in_embed(s) for s in sentences]
+distances = [cosine_distance(embeddings[i], embeddings[i + 1])
+             for i in range(len(embeddings) - 1)]
+for i, d in enumerate(distances):
+    print(f&quot;sentence {i} -&gt; {i + 1}: cosine distance = {d:.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add an 8th sentence continuing the payment topic (&quot;Great, I've updated that for you, is
+there anything else?&quot;) and recompute the distance from sentence 6 to the new sentence 7.
+State whether it's closer to the &quot;same-topic&quot; distances (0-3, 4-6) or the
+&quot;topic-shift&quot; distance (3-4) measured in the Example.</p>
+<p><strong>Starting point:</strong> The <code>sentences</code> list and <code>stand_in_embed</code>/<code>cosine_distance</code> functions
+from this concept's Example, with an 8th sentence appended.</p>
+<p>Expected output: measured here, consecutive-sentence distances are 0.7423 (0→1), 0.6239
+(1→2), 0.7916 (2→3), <strong>1.1844 (3→4)</strong>, 1.0668 (4→5), 0.8296 (5→6) — the jump at 3→4 is
+visibly the largest, right where the conversation actually moves from the coverage
+question to the payment question. A same-topic 8th sentence should land its distance from
+sentence 6 closer to the 0.62-0.83 range the other same-topic pairs show, not near the
+1.18 topic-shift jump.</p>
+<hr />
+<h3>Concept 2 — <code>buffer_size</code> and <code>breakpoint_percentile_threshold</code></h3>
+<p>Two parameters control real semantic-breakpoint implementations (LlamaIndex's
+<code>SemanticSplitterNodeParser</code> among them). <code>buffer_size</code> combines each sentence with its
+immediate neighbors before embedding, smoothing out single-sentence noise so a breakpoint
+reflects a sustained topic change rather than one unusual sentence.
+<code>breakpoint_percentile_threshold</code> sets the cutoff as a percentile of the observed distance
+distribution (rather than a fixed number), so the same threshold logic adapts to how
+volatile a particular document's sentence-to-sentence distances happen to be.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+import re
+import zlib
+
+def stand_in_embed(text, dim=64):
+    vec = np.zeros(dim)
+    words = re.findall(r&quot;[a-z]+&quot;, text.lower())
+    for w in words:
+        h = zlib.crc32(w.encode())
+        rng = np.random.default_rng(h)
+        vec += rng.normal(size=dim)
+    norm = np.linalg.norm(vec)
+    return vec / norm if norm &gt; 0 else vec
+
+def cosine_distance(a, b):
+    return 1 - float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+sentences = [
+    &quot;Hi, I&#x27;m calling about my homeowners policy renewal.&quot;,
+    &quot;I wanted to check if my dwelling coverage limit went up this year.&quot;,
+    &quot;The declarations page shows three hundred fifty thousand for coverage A.&quot;,
+    &quot;Okay that makes sense, thank you for confirming that.&quot;,
+    &quot;Actually I also had a question about my payment method on file.&quot;,
+    &quot;Can you tell me if my autopay is set up with the checking account ending in 4821.&quot;,
+    &quot;I want to switch my payment method to a different card before next month.&quot;,
+]
+
+def buffered_embed(sentences, idx, buffer_size):
+    lo = max(0, idx - buffer_size)
+    hi = min(len(sentences), idx + buffer_size + 1)
+    return stand_in_embed(&quot; &quot;.join(sentences[lo:hi]))
+
+for buffer_size in (0, 1):
+    embeds = [buffered_embed(sentences, i, buffer_size) for i in range(len(sentences))]
+    distances = [cosine_distance(embeds[i], embeds[i + 1]) for i in range(len(embeds) - 1)]
+    threshold = np.percentile(distances, 75)
+    breakpoints = [i for i, d in enumerate(distances) if d &gt; threshold]
+    print(f&quot;buffer_size={buffer_size}  distances={[round(d, 3) for d in distances]}&quot;)
+    print(f&quot;  threshold(p75)={threshold:.4f}  breakpoints={breakpoints}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Re-run with <code>breakpoint_percentile_threshold</code> set to the 50th percentile instead of 75th,
+at <code>buffer_size=1</code>. State how many breakpoints result, and whether a lower percentile
+threshold makes the method more or less sensitive (more or fewer breakpoints for the same
+document).</p>
+<p><strong>Starting point:</strong> The buffered-distance sweep from this concept's Example, with
+<code>np.percentile(distances, 75)</code> changed to <code>np.percentile(distances, 50)</code>, at
+<code>buffer_size=1</code>.</p>
+<p>Expected output: at <code>buffer_size=0</code>, breakpoints measured here are <code>[3, 4]</code> (threshold
+1.0075); at <code>buffer_size=1</code>, also <code>[3, 4]</code> (threshold 0.2391, on a much smaller absolute
+distance scale since buffering averages neighboring sentences into each embedding) — both
+correctly bracket the real topic shift at index 3-4. A 50th-percentile threshold is lower
+than the 75th-percentile one, so it will flag more (or an equal number of) breakpoints,
+never fewer — a lower percentile is a more sensitive, more trigger-happy cutoff.</p>
+<hr />
+<h3>Concept 3 — The Embedding Calls This Adds at Ingest Time</h3>
+<p>Day 1 and Day 2's splitters find their boundaries for free — a separator or a heading
+match costs nothing but string comparison. Embedding-similarity chunking has to embed
+every sentence just to find its boundaries, before any of the resulting chunks are
+embedded again for retrieval — a real, per-document cost that scales with sentence count,
+not chunk count.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>sentences = [
+    &quot;Hi, I&#x27;m calling about my homeowners policy renewal.&quot;,
+    &quot;I wanted to check if my dwelling coverage limit went up this year.&quot;,
+    &quot;The declarations page shows three hundred fifty thousand for coverage A.&quot;,
+    &quot;Okay that makes sense, thank you for confirming that.&quot;,
+    &quot;Actually I also had a question about my payment method on file.&quot;,
+    &quot;Can you tell me if my autopay is set up with the checking account ending in 4821.&quot;,
+    &quot;I want to switch my payment method to a different card before next month.&quot;,
+]
+
+n_sentences = len(sentences)
+n_chunks_after_breakpoints = 3  # from Concept 1/2: breakpoints at [3, 4] -&gt; 3 groups
+
+embed_calls_semantic_chunking = n_sentences  # to find the breakpoints at all
+embed_calls_separator_chunking = 0            # separators/headings cost no embedding calls
+embed_calls_for_retrieval = n_chunks_after_breakpoints  # every strategy needs this part
+
+print(f&quot;sentences: {n_sentences}, resulting chunks: {n_chunks_after_breakpoints}&quot;)
+print(f&quot;embedding calls to FIND boundaries -- semantic: {embed_calls_semantic_chunking}, &quot;
+      f&quot;separator/heading-based: {embed_calls_separator_chunking}&quot;)
+print(f&quot;embedding calls to embed final chunks for retrieval (same for every strategy): &quot;
+      f&quot;{embed_calls_for_retrieval}&quot;)
+print(f&quot;semantic chunking&#x27;s total embed calls at ingest: &quot;
+      f&quot;{embed_calls_semantic_chunking + embed_calls_for_retrieval}&quot;)
+print(f&quot;separator/heading chunking&#x27;s total embed calls at ingest: &quot;
+      f&quot;{embed_calls_separator_chunking + embed_calls_for_retrieval}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+For a document with 500 sentences that ends up producing 40 chunks after breakpoint
+detection, compute the total embedding-call count for semantic chunking versus
+separator-based chunking, and state what fraction of semantic chunking's total calls are
+spent purely on finding boundaries rather than on the retrieval-ready embeddings every
+strategy needs anyway.</p>
+<p><strong>Starting point:</strong> The call-counting arithmetic from this concept's Example, with
+<code>n_sentences = 500</code> and <code>n_chunks_after_breakpoints = 40</code>.</p>
+<p>Expected output: on the 7-sentence transcript measured here, semantic chunking needs 10
+total embedding calls at ingest (7 to find boundaries + 3 for the final chunks) against
+separator-based chunking's 3 (0 + 3). At 500 sentences / 40 chunks, semantic chunking
+needs 540 total calls (500 + 40) against separator-based chunking's 40 — 500 of those 540
+calls (92.6%) are spent purely finding boundaries, not on anything retrieval will actually
+use directly.</p>
+<hr />
+<h3>Concept 4 — Where This Beats Recursive Splitting on Call Transcripts</h3>
+<p>A call transcript typically has no blank lines between speaker turns and no headings —
+just one line per turn. Recursive splitting's separator hierarchy has nothing structural
+to grab onto beyond individual lines, so where its boundaries land relative to a real topic
+change is governed entirely by the <code>size</code> parameter — a coincidence of where <code>size</code>
+happens to divide the text, not an actual read of the content.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def recursive_split(text, size, overlap, separators):
+    if len(text) &lt;= size:
+        return [text] if text else []
+    if not separators:
+        chunks = []
+        start = 0
+        step = size - overlap
+        while start &lt; len(text):
+            chunks.append(text[start:start + size])
+            start += step
+        return chunks
+    sep = separators[0]
+    pieces = list(text) if sep == &quot;&quot; else text.split(sep)
+    result, buf = [], &quot;&quot;
+    for piece in pieces:
+        candidate = buf + (sep if buf else &quot;&quot;) + piece
+        if len(candidate) &lt;= size:
+            buf = candidate
+        else:
+            if buf:
+                result.append(buf)
+            if len(piece) &gt; size:
+                result.extend(recursive_split(piece, size, overlap, separators[1:]))
+                buf = &quot;&quot;
+            else:
+                buf = piece
+    if buf:
+        result.append(buf)
+    return result
+
+sentences = [
+    &quot;Hi, I&#x27;m calling about my homeowners policy renewal.&quot;,
+    &quot;I wanted to check if my dwelling coverage limit went up this year.&quot;,
+    &quot;The declarations page shows three hundred fifty thousand for coverage A.&quot;,
+    &quot;Okay that makes sense, thank you for confirming that.&quot;,
+    &quot;Actually I also had a question about my payment method on file.&quot;,
+    &quot;Can you tell me if my autopay is set up with the checking account ending in 4821.&quot;,
+    &quot;I want to switch my payment method to a different card before next month.&quot;,
+]
+transcript = &quot;\n&quot;.join(sentences)
+topic_shift_char = transcript.find(sentences[4])
+
+for size in (100, 120, 150, 180, 200, 250):
+    chunks = recursive_split(transcript, size=size, overlap=0,
+                              separators=[&quot;\n\n&quot;, &quot;\n&quot;, &quot;. &quot;, &quot; &quot;, &quot;&quot;])
+    hits_shift = any(transcript.find(c) == topic_shift_char for c in chunks)
+    print(f&quot;size={size:&gt;4}  chunks={len(chunks)}  &quot;
+          f&quot;boundary lands exactly at the real topic shift: {hits_shift}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+State, in one sentence, why &quot;try several <code>size</code> values until one happens to land on the
+real topic boundary&quot; is not a viable production strategy, given that the real topic
+boundary's character position is not known in advance for a transcript nobody has read
+yet.</p>
+<p><strong>Starting point:</strong> No code — reason from the sweep's own printed results in this
+concept's Example.</p>
+<p>Expected output: measured here, a recursive-split boundary lands exactly at the real
+topic shift (character 246, the start of &quot;Actually I also had a question...&quot;) at
+<code>size=100, 150, 180, 250</code> but MISSES it at <code>size=120, 200</code> — whether recursive splitting
+finds this particular boundary depends entirely on which <code>size</code> was chosen, with no way to
+know in advance which sizes will hit and which will miss for a document not yet read. The
+production implication: since the real boundary position is unknown until the document is
+read, there is no way to pre-select a <code>size</code> that reliably lands on it — semantic
+breakpoint detection (Concepts 1-2) finds the same boundary at <em>every</em> size, because it
+isn't parameterized by size at all.</p>
+<hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> Call-transcript ingestion is one of the more common real-time DataPrep
+sources in a BFSI contact center, and it is exactly the document type recursive/fixed
+splitting handles worst (no structural markers, arbitrary turn lengths) — which is why this
+technique exists as a distinct strategy rather than a universal upgrade to Days 1-2's
+approaches: it costs real embedding calls specifically to buy back what those approaches
+lose on unstructured conversational text.</p>
+<p><strong>Compliance angle:</strong> A chunk boundary that separates a customer's stated intent (Concept
+1's &quot;I want to switch my payment method&quot;) from the confirmation or denial that follows in
+the next sentence can make a retrieval-backed system answer a compliance-relevant question
+(&quot;did the customer authorize this change&quot;) incorrectly — getting the semantic boundary
+right here has a real audit-trail consequence, not just a search-relevance one.</p>
+<p><strong>What breaks in production:</strong> <code>breakpoint_percentile_threshold</code> tuned against one call
+center's transcripts (short, terse turns) gets reused unchanged for a different line of
+business's transcripts (longer, more discursive turns) — the same percentile-based
+threshold logic adapts to <em>within-document</em> distance variance, but a percentile computed
+per-document does not generalize a specific numeric sensitivity across document
+populations with very different baseline verbosity, so breakpoint quality quietly
+degrades on the new population.</p>
+<hr />
+<h2 id="day-4">Day 4 — Chunk Metadata and Context Injection</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="09-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=7DWHb1wfDco" target="_blank" rel="noopener"><b>RAG Explained: Chunks, Embeddings, Retrieval &amp; Citations | AI System Design Lesson 5</b><small>kodblok · 4:16</small></a></li><li><a href="https://www.youtube.com/watch?v=4wHhEbzHz9o" target="_blank" rel="noopener"><b>RAG End to End: Hybrid Search, Reranker and Citations | Building Applications with AI Agents L41</b><small>The Modern SDE · 10:09</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=contextual%20retrieval%20chunk%20metadata%20headers%20RAG%20citations" target="_blank" rel="noopener">Search YouTube: contextual retrieval chunk metadata headers RAG citations</a></p></div>
+<hr />
+<h3>Concept 1 — Parent Document ID, Section Path, and Effective/Expiry Dates</h3>
+<p>A chunk's text is only half of what needs to be stored. <code>parent_doc_id</code> traces a chunk
+back to the document it came from, <code>section_path</code> records where inside that document, and
+<code>effective_date</code>/<code>expiry_date</code> record which policy version the chunk describes — a limits
+figure from last year's renewal and this year's renewal can both exist in the same index,
+and only the metadata tells them apart.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+
+def build_chunk_record(text, parent_doc_id, section_path, effective_date, expiry_date,
+                        page_anchor, chunk_index):
+    &quot;&quot;&quot;Real chunk metadata a production pipeline would attach -- every field
+    here is something a later retrieval filter or citation needs, not
+    decoration.&quot;&quot;&quot;
+    chunk_id = hashlib.sha256(
+        f&quot;{parent_doc_id}:{chunk_index}:{text}&quot;.encode()
+    ).hexdigest()[:16]
+    return {
+        &quot;chunk_id&quot;: chunk_id,
+        &quot;parent_doc_id&quot;: parent_doc_id,
+        &quot;section_path&quot;: section_path,
+        &quot;effective_date&quot;: effective_date,
+        &quot;expiry_date&quot;: expiry_date,
+        &quot;page_anchor&quot;: page_anchor,
+        &quot;chunk_index&quot;: chunk_index,
+        &quot;text&quot;: text,
+    }
+
+record = build_chunk_record(
+    text=&quot;Flood, earth movement, and war are excluded regardless of any other cause.&quot;,
+    parent_doc_id=&quot;POL-8842-C&quot;,
+    section_path=&quot;COVERAGE &gt; EXCLUSIONS&quot;,
+    effective_date=&quot;2026-01-01&quot;,
+    expiry_date=&quot;2026-12-31&quot;,
+    page_anchor=&quot;p.4&quot;,
+    chunk_index=3,
+)
+for k, v in record.items():
+    print(f&quot;{k}: {v}&quot;)
+
+record2 = build_chunk_record(
+    text=record[&quot;text&quot;], parent_doc_id=&quot;POL-8842-C&quot;, section_path=&quot;COVERAGE &gt; EXCLUSIONS&quot;,
+    effective_date=&quot;2026-01-01&quot;, expiry_date=&quot;2026-12-31&quot;, page_anchor=&quot;p.4&quot;, chunk_index=4,
+)
+print(f&quot;\nsame text, chunk_index 3 vs 4 -&gt; same chunk_id: &quot;
+      f&quot;{record[&#x27;chunk_id&#x27;] == record2[&#x27;chunk_id&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Build a chunk record for the same policy's renewal a year later (<code>effective_date</code>
+<code>&quot;2027-01-01&quot;</code>, <code>expiry_date</code> <code>&quot;2027-12-31&quot;</code>) with the same exclusion text, same
+<code>section_path</code>, but <code>chunk_index=3</code> (matching the original). State whether its <code>chunk_id</code>
+matches the original record's, and whether that's the right behavior for two chunks that
+represent the same clause in two different policy-year versions.</p>
+<p><strong>Starting point:</strong> The <code>build_chunk_record</code> function and <code>record</code> dict from this
+concept's Example, called again with the renewal's dates.</p>
+<p>Expected output: the renewal's chunk (same text, same <code>section_path</code>, same
+<code>chunk_index=3</code>, different dates) produces a <strong>different</strong> <code>chunk_id</code> from the original,
+because <code>build_chunk_record</code>'s hash input is <code>parent_doc_id:chunk_index:text</code>, and this
+example keeps <code>parent_doc_id</code> the same across both policy years — which means two
+genuinely different chunks (different policy years) would collide on <code>chunk_id</code> if their
+text and index also matched. That's the wrong behavior: <code>effective_date</code> should be part of
+what makes two chunks distinct, so a real implementation should include it (or a
+version-scoped <code>parent_doc_id</code> like <code>POL-8842-C:2027</code>) in the hash input, not just in the
+stored metadata.</p>
+<hr />
+<h3>Concept 2 — A Contextual Header Prepended Before Embedding</h3>
+<p>A chunk read in isolation often loses the context that made it unambiguous in the source
+document — &quot;coverage does not apply to loss caused by flood&quot; doesn't say which coverage.
+Prepending a short contextual header (document name, section path) to the text actually
+embedded — while keeping the original, unprefixed text as what's shown to a reader — lets
+the embedding capture context the bare chunk text alone doesn't carry.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+import re
+import zlib
+
+def stand_in_embed(text, dim=64):
+    vec = np.zeros(dim)
+    words = re.findall(r&quot;[a-z]+&quot;, text.lower())
+    for w in words:
+        h = zlib.crc32(w.encode())
+        rng = np.random.default_rng(h)
+        vec += rng.normal(size=dim)
+    norm = np.linalg.norm(vec)
+    return vec / norm if norm &gt; 0 else vec
+
+def cosine_sim(a, b):
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+bare_chunk = &quot;Coverage does not apply to loss caused by flood, earth movement, or war.&quot;
+context_header = (&quot;Document: Homeowners Policy POL-8842-C. &quot;
+                   &quot;Section: COVERAGE A -- DWELLING &gt; EXCLUSIONS. &quot;)
+contextual_chunk = context_header + bare_chunk
+
+query = &quot;does my dwelling coverage exclude flood damage&quot;
+
+sim_bare = cosine_sim(stand_in_embed(bare_chunk), stand_in_embed(query))
+sim_contextual = cosine_sim(stand_in_embed(contextual_chunk), stand_in_embed(query))
+print(f&quot;query: {query!r}&quot;)
+print(f&quot;cosine similarity, bare chunk    : {sim_bare:.4f}&quot;)
+print(f&quot;cosine similarity, w/ context hdr: {sim_contextual:.4f}&quot;)
+print(f&quot;context injection improves similarity to this query: &quot;
+      f&quot;{sim_contextual &gt; sim_bare}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Try a query about a <em>different</em> coverage the header doesn't mention — for example &quot;does my
+personal liability coverage exclude flood damage&quot; — against the same <code>bare_chunk</code> and
+<code>contextual_chunk</code>. State whether context injection still helps when the header's stated
+section (<code>COVERAGE A -- DWELLING</code>) doesn't match what the query is actually asking about.</p>
+<p><strong>Starting point:</strong> The <code>stand_in_embed</code>/<code>cosine_sim</code> functions and <code>bare_chunk</code>/
+<code>context_header</code> strings from this concept's Example, with <code>query</code> changed to ask about
+personal liability instead of dwelling coverage.</p>
+<p>Expected output: on the original query, measured here, <code>sim_bare=0.2319</code> and
+<code>sim_contextual=0.3381</code> — context injection helps. On a query naming a <em>different</em>
+coverage than the header states, context injection can just as easily hurt: the header's
+words (&quot;DWELLING&quot;) add vocabulary that has nothing to do with the mismatched query,
+diluting whatever bare-text similarity existed. Context injection is not a free win — it
+helps when the header's stated context matches what's actually being asked about, and can
+mislead a retrieval system into false confidence when it doesn't.</p>
+<hr />
+<h3>Concept 3 — Page Anchors, and Metadata Designed to Become a Retrieval Filter</h3>
+<p>A <code>page_anchor</code> lets a retrieval-backed answer cite exactly where its claim came from — not
+&quot;the policy says X&quot; but &quot;policy POL-8842-C, Exclusions, page 4.&quot; And a field like
+<code>expiry_date</code> isn't just descriptive: it's designed from the start to become a filter
+condition a retrieval query applies, deciding which chunks are even eligible to be ranked
+in the first place.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def format_citation(chunk_record):
+    return (f&quot;{chunk_record[&#x27;parent_doc_id&#x27;]}, &quot;
+            f&quot;{chunk_record[&#x27;section_path&#x27;]} ({chunk_record[&#x27;page_anchor&#x27;]})&quot;)
+
+record = {
+    &quot;parent_doc_id&quot;: &quot;POL-8842-C&quot;,
+    &quot;section_path&quot;: &quot;COVERAGE &gt; EXCLUSIONS&quot;,
+    &quot;page_anchor&quot;: &quot;p.4&quot;,
+    &quot;effective_date&quot;: &quot;2026-01-01&quot;,
+}
+print(&quot;citation:&quot;, format_citation(record))
+
+chunks = [
+    {&quot;chunk_id&quot;: &quot;a&quot;, &quot;text&quot;: &quot;limit is $350,000&quot;, &quot;expiry_date&quot;: &quot;2025-12-31&quot;, &quot;score&quot;: 0.91},
+    {&quot;chunk_id&quot;: &quot;b&quot;, &quot;text&quot;: &quot;limit is $400,000&quot;, &quot;expiry_date&quot;: &quot;2026-12-31&quot;, &quot;score&quot;: 0.77},
+    {&quot;chunk_id&quot;: &quot;c&quot;, &quot;text&quot;: &quot;limit is $420,000&quot;, &quot;expiry_date&quot;: &quot;2027-12-31&quot;, &quot;score&quot;: 0.62},
+]
+as_of = &quot;2026-06-15&quot;
+
+# WRONG: rank everything first, worry about validity of the winner after.
+ranked = sorted(chunks, key=lambda c: -c[&quot;score&quot;])
+top1 = ranked[0]
+print(f&quot;\nrank-first top-1: chunk {top1[&#x27;chunk_id&#x27;]!r} (score {top1[&#x27;score&#x27;]}), &quot;
+      f&quot;expired as of {as_of}: {top1[&#x27;expiry_date&#x27;] &lt; as_of}&quot;)
+
+# RIGHT: filter to eligible candidates first, then rank only among those.
+eligible = [c for c in chunks if c[&quot;expiry_date&quot;] &gt;= as_of]
+filter_first_top1 = max(eligible, key=lambda c: c[&quot;score&quot;])
+print(f&quot;filter-first top-1: chunk {filter_first_top1[&#x27;chunk_id&#x27;]!r} &quot;
+      f&quot;(score {filter_first_top1[&#x27;score&#x27;]}), guaranteed not expired&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a 4th chunk with <code>expiry_date=&quot;2024-12-31&quot;</code> (already expired well before <code>as_of</code>) and
+<code>score=0.95</code> (higher than every existing chunk). Confirm the rank-first approach would
+return this expired, highest-scored chunk as its &quot;top 1,&quot; while the filter-first approach
+correctly excludes it before ranking even happens.</p>
+<p><strong>Starting point:</strong> The <code>chunks</code> list from this concept's Example, with a 4th dict
+appended (<code>chunk_id=&quot;d&quot;</code>, <code>text</code> of your choice, <code>expiry_date=&quot;2024-12-31&quot;</code>,
+<code>score=0.95</code>).</p>
+<p>Expected output: measured here, rank-first top-1 is chunk <code>'a'</code> (score 0.91), which is in
+fact expired as of 2026-06-15 (<code>True</code>) — the highest-scoring chunk overall is not a valid
+answer, and a rank-first design would have to notice and recover from that after the fact.
+Filter-first top-1 is chunk <code>'b'</code> (score 0.77), the highest-scoring chunk <em>among the
+eligible ones</em> — guaranteed valid by construction. Adding a 4th chunk with an even higher
+score but an earlier expiry only sharpens the same problem: rank-first would surface it as
+the new top-1 despite being expired, while filter-first excludes it before the ranking
+step ever sees it as a candidate.</p>
+<hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> <code>parent_doc_id</code> and <code>section_path</code> are only as reliable as whatever
+system assigns them upstream — a legacy document-management system that recycles document
+IDs after a retention-policy purge, or that renumbers sections when a template updates, can
+silently break the traceability this metadata exists to provide, with no error raised
+anywhere in the pipeline.</p>
+<p><strong>Compliance angle:</strong> <code>effective_date</code>/<code>expiry_date</code> filtering (Concept 3) is not a
+performance optimization — it's the mechanism that keeps a retrieval-backed answer from
+citing last year's coverage limit as if it were current. A rank-first design that only
+filters expired chunks out of the <em>top few</em> results, rather than before ranking, can still
+surface a stale answer whenever an expired chunk outscores every valid one, which is
+exactly the failure mode Concept 3 measured.</p>
+<p><strong>What breaks in production:</strong> A new document type is onboarded into the same pipeline
+without its own <code>parent_doc_id</code>/<code>section_path</code>/date fields populated correctly (perhaps
+because the ingestion script for that document type was copied from another type and not
+fully adapted) — the chunk indexes and embeds successfully, so nothing fails loudly, but it
+cannot be cited, filtered by date, or traced back to its source, which only becomes visible
+when someone tries to use exactly those capabilities on it.</p>
+<hr />
+<h2 id="day-5">Day 5 — Measuring Chunking Against Retrieval</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="09-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=QPVUKZp1T-M" target="_blank" rel="noopener"><b>RAG in 30 Minutes | Retrieval-Augmented Generation Explained (Animated, 26 Quizzes)</b><small>Shriram Vasudevan · 30:02</small></a></li><li><a href="https://www.youtube.com/watch?v=EWYZhAZ1E9M" target="_blank" rel="noopener"><b>RAG Full Course: Retrieval-Augmented Generation from Basics to Evaluation</b><small>AI WITH ABAID · 25:18</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=chunk%20size%20experiment%20retrieval%20evaluation%20RAG%20benchmark" target="_blank" rel="noopener">Search YouTube: chunk size experiment retrieval evaluation RAG benchmark</a></p></div>
+<hr />
+<h3>Concept 1 — One Fixed Query Set, Run Across Every Chunking Strategy</h3>
+<p>Every strategy this week covered is a genuine engineering choice, not an obviously correct
+default — the only way to know which one actually wins for a given corpus is to run the
+same fixed set of test queries against each strategy's output and measure recall@k, the
+fraction of queries whose correct answer appears in the top-k retrieved chunks. &quot;Fixed&quot;
+matters: comparing strategies against different queries, or against queries added or
+tweaked between runs, measures the queries changing, not the strategies.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+import re
+import zlib
+
+def stand_in_embed(text, dim=64):
+    vec = np.zeros(dim)
+    words = re.findall(r&quot;[a-z]+&quot;, text.lower())
+    for w in words:
+        h = zlib.crc32(w.encode())
+        rng = np.random.default_rng(h)
+        vec += rng.normal(size=dim)
+    norm = np.linalg.norm(vec)
+    return vec / norm if norm &gt; 0 else vec
+
+def cosine_sim(a, b):
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+def fixed_size_chunks(text, size, overlap=0):
+    return [text[i:i + size] for i in range(0, len(text), size - overlap)]
+
+def recursive_split(text, size, overlap, separators):
+    if len(text) &lt;= size:
+        return [text] if text else []
+    if not separators:
+        return fixed_size_chunks(text, size, overlap)
+    sep = separators[0]
+    pieces = list(text) if sep == &quot;&quot; else text.split(sep)
+    result, buf = [], &quot;&quot;
+    for piece in pieces:
+        candidate = buf + (sep if buf else &quot;&quot;) + piece
+        if len(candidate) &lt;= size:
+            buf = candidate
+        else:
+            if buf:
+                result.append(buf)
+            if len(piece) &gt; size:
+                result.extend(recursive_split(piece, size, overlap, separators[1:]))
+                buf = &quot;&quot;
+            else:
+                buf = piece
+    if buf:
+        result.append(buf)
+    return result
+
+def split_on_headings(text, heading_pattern=r&quot;^[A-Z][A-Z0-9 /&amp;\-]{3,60}$&quot;):
+    lines = text.split(&quot;\n&quot;)
+    sections, current_heading, current_body = [], None, []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and re.match(heading_pattern, stripped):
+            if current_heading is not None:
+                sections.append(f&quot;{current_heading}\n{chr(10).join(current_body).strip()}&quot;)
+            current_heading = stripped
+            current_body = []
+        else:
+            current_body.append(line)
+    if current_heading is not None:
+        sections.append(f&quot;{current_heading}\n{chr(10).join(current_body).strip()}&quot;)
+    return sections
+
+policy = &quot;&quot;&quot;DECLARATIONS
+
+Named insured: Jane Doe. Policy period: 12 months from inception date.
+
+COVERAGE A -- DWELLING
+
+This policy covers the dwelling on the residence premises against direct physical loss,
+subject to the exclusions below. Coverage extends to attached structures. The dwelling
+limit of liability is three hundred fifty thousand dollars.
+
+DEFINITIONS
+
+&quot;Dwelling&quot; means the residence structure, including attached structures, used principally
+for residential purposes. &quot;Residence premises&quot; means the one-family dwelling shown in the
+Declarations. &quot;Other structures&quot; means structures separated from the dwelling by clear
+space.
+
+EXCLUSIONS
+
+Flood, earth movement, and war are excluded regardless of any other cause or event
+contributing concurrently or in any sequence to the loss. Losses caused by neglect are
+also excluded.
+
+ENDORSEMENT HO-321 -- WATER BACKUP COVERAGE
+
+This endorsement adds coverage for water that backs up through sewers or drains, subject
+to a ten thousand dollar sublimit and a separate five hundred dollar deductible for this
+coverage only.&quot;&quot;&quot;
+
+queries = [
+    (&quot;what is excluded from coverage&quot;, &quot;flood&quot;),
+    (&quot;what is the water backup sublimit&quot;, &quot;ten thousand&quot;),
+    (&quot;what does dwelling mean&quot;, &quot;residence structure&quot;),
+    (&quot;what is the dwelling limit of liability&quot;, &quot;three hundred fifty thousand&quot;),
+]
+
+def recall_at_k(chunks, queries, k=1):
+    chunk_embeds = [stand_in_embed(c) for c in chunks]
+    hits = 0
+    for q, answer_keyword in queries:
+        sims = [cosine_sim(stand_in_embed(q), ce) for ce in chunk_embeds]
+        top_k_idx = np.argsort(sims)[::-1][:k]
+        hits += any(answer_keyword in chunks[i] for i in top_k_idx)
+    return hits / len(queries)
+
+strategies = {
+    &quot;fixed(120)&quot;: fixed_size_chunks(policy, 120),
+    &quot;recursive(120)&quot;: recursive_split(policy, 120, 0, [&quot;\n\n&quot;, &quot;\n&quot;, &quot;. &quot;, &quot; &quot;, &quot;&quot;]),
+    &quot;structure-aware&quot;: split_on_headings(policy),
+}
+
+for name, chunks in strategies.items():
+    r1 = recall_at_k(chunks, queries, k=1)
+    r2 = recall_at_k(chunks, queries, k=2)
+    print(f&quot;{name:16} chunks={len(chunks):&gt;2}  recall@1={r1:.2f}  recall@2={r2:.2f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add a 5th query, <code>(&quot;what is the policy period&quot;, &quot;12 months&quot;)</code>, to the <code>queries</code> list and
+re-run <code>recall_at_k</code> for all three strategies at <code>k=1</code>. State which strategy (or
+strategies) correctly answer the new query and whether adding it changes which strategy
+looks best overall.</p>
+<p><strong>Starting point:</strong> The <code>queries</code> list, <code>strategies</code> dict, and <code>recall_at_k</code> function
+from this concept's Example, with the 5th query appended.</p>
+<p>Expected output: measured here on this small corpus, <code>fixed(120)</code> scores recall@1=0.25,
+recall@2=0.25; <code>recursive(120)</code> scores recall@1=0.50, recall@2=0.50; <code>structure-aware</code>
+scores recall@1=0.25, recall@2=0.50. On a corpus this small (one short policy, 4 queries),
+these numbers are illustrative of the <em>method</em>, not a general verdict on which strategy
+wins — a single added or changed query can visibly shift which strategy looks best, which
+is exactly why &quot;fixed query set&quot; and &quot;enough queries to not be dominated by any one of
+them&quot; both matter for a result to be trustworthy at real scale.</p>
+<hr />
+<h3>Concept 2 — Context-Sufficiency: A Recall Hit Isn't the Same as a Complete Answer</h3>
+<p>Recall@k asks whether a chunk containing the right <em>keyword</em> was retrieved — it says
+nothing about whether that chunk contains the <em>whole</em> answer. A chunk can score a hit while
+still truncating the very list or clause the query asked about, if the chunk boundary
+happened to fall in the middle of it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def fixed_size_chunks(text, size, overlap=0):
+    return [text[i:i + size] for i in range(0, len(text), size - overlap)]
+
+exclusions_section = (
+    &quot;EXCLUSIONS\n\nFlood, earth movement, and war are excluded regardless of any &quot;
+    &quot;other cause or event contributing concurrently or in any sequence to the &quot;
+    &quot;loss. Losses caused by neglect are also excluded.&quot;
+)
+
+for size in (40, 80, 200):
+    chunks = fixed_size_chunks(exclusions_section, size)
+    hit_chunk = next((c for c in chunks if &quot;flood&quot; in c.lower()), None)
+    full_list_present = hit_chunk is not None and all(
+        w in hit_chunk.lower() for w in (&quot;flood&quot;, &quot;earth movement&quot;, &quot;war&quot;)
+    )
+    print(f&quot;size={size:&gt;3}  chunk containing &#x27;flood&#x27;: {hit_chunk!r}&quot;)
+    print(f&quot;          full exclusion list present: {full_list_present}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Find the smallest <code>size</code> (checking every 5 characters from 40 upward) at which the full
+exclusion list (<code>flood</code>, <code>earth movement</code>, <code>war</code>) is present in the same chunk that
+contains <code>flood</code>. State whether that size is large enough to also contain the following
+sentence about neglect, and what that implies about picking a chunk size based on one
+clause's length rather than the whole section's.</p>
+<p><strong>Starting point:</strong> The <code>fixed_size_chunks</code> function and <code>exclusions_section</code> string from
+this concept's Example, with <code>size</code> swept from 40 to 200 in steps of 5.</p>
+<p>Expected output: at <code>size=40</code>, the chunk containing <code>&quot;flood&quot;</code> is <code>'EXCLUSIONS\n\nFlood, earth movement, and w'</code> — a recall hit (it contains &quot;flood&quot;), but the full exclusion list
+is NOT present (<code>False</code>) because the chunk is cut off mid-word at &quot;w&quot;. At <code>size=80</code>, the
+chunk grows to include the complete &quot;...war are excluded regardless of any other &quot; and the
+full list check passes (<code>True</code>) — but the sweep will find this crossover size is still
+short of including the following &quot;Losses caused by neglect&quot; sentence, which needs the full
+<code>size=200</code> chunk to appear alongside the exclusion list. Sizing a chunk to fit one clause
+does not mean it fits the section's other, equally query-relevant clauses.</p>
+<hr />
+<h3>Concept 3 — A Chunk-Size Sweep Curve, Not a Single Guess</h3>
+<p>Concepts 1-2 both used one hand-picked size per strategy. The only way to know whether a
+chosen size is actually good, rather than merely not-obviously-bad, is to sweep a range of
+sizes and look at the resulting recall curve — a single size, chosen once and never
+revisited, is a guess wearing a specific number.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def recursive_split(text, size, overlap, separators):
+    if len(text) &lt;= size:
+        return [text] if text else []
+    if not separators:
+        return [text[i:i + size] for i in range(0, len(text), size - overlap)]
+    sep = separators[0]
+    pieces = list(text) if sep == &quot;&quot; else text.split(sep)
+    result, buf = [], &quot;&quot;
+    for piece in pieces:
+        candidate = buf + (sep if buf else &quot;&quot;) + piece
+        if len(candidate) &lt;= size:
+            buf = candidate
+        else:
+            if buf:
+                result.append(buf)
+            if len(piece) &gt; size:
+                result.extend(recursive_split(piece, size, overlap, separators[1:]))
+                buf = &quot;&quot;
+            else:
+                buf = piece
+    if buf:
+        result.append(buf)
+    return result
+
+# (policy, queries, recall_at_k, stand_in_embed, cosine_sim as defined in Concept 1)
+for size in (60, 100, 150, 200, 300):
+    chunks = recursive_split(policy, size, 0, [&quot;\n\n&quot;, &quot;\n&quot;, &quot;. &quot;, &quot; &quot;, &quot;&quot;])
+    r1 = recall_at_k(chunks, queries, k=1)
+    print(f&quot;size={size:&gt;4}  chunks={len(chunks):&gt;2}  recall@1={r1:.2f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+Add <code>size=400</code> and <code>size=500</code> to the sweep. State whether recall keeps improving as size
+grows without bound, or whether it plateaus or degrades once chunks start spanning
+multiple sections — and connect your answer to Day 2's structure-aware chunking, which
+never lets a chunk span sections regardless of size.</p>
+<p><strong>Starting point:</strong> The sweep loop from this concept's Example, with <code>size</code> extended to
+include <code>400</code> and <code>500</code>.</p>
+<p>Expected output: measured here, recall@1 across <code>size = 60, 100, 150, 200, 300</code> is
+<code>0.25, 0.25, 0.50, 0.25, 0.25</code> — non-monotonic, peaking at <code>size=150</code> rather than rising
+steadily, on this small corpus and stand-in embedder. A curve shaped like this (a
+non-obvious peak, not a smooth improvement) is exactly why a sweep beats a guess: whichever
+size happens to be chosen without sweeping has real odds of landing on a local dip rather
+than the peak. Sizes large enough to span multiple sections trade structural precision for
+raw context, which is the tradeoff Day 2's structure-aware chunking sidesteps entirely by
+tying its boundary to section content instead of a size parameter.</p>
+<hr />
+<h3>Concept 4 — Tokens-Per-Answer as the Tiebreaker</h3>
+<p>When two strategies score the same recall, they are not necessarily equally good — one may
+retrieve much larger chunks to get there, which costs more in embedding compute at ingest
+and more in prompt tokens at answer time. Token cost per correctly-answered query is the
+tiebreaker recall@k alone can't provide.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def approx_bpe_tokens(text):
+    import re
+    return re.findall(r&quot;[A-Za-z]+|[0-9]+|[^\sA-Za-z0-9]&quot;, text)
+
+# (strategies, queries, stand_in_embed, cosine_sim as defined in Concept 1)
+for name, chunks in strategies.items():
+    chunk_embeds = [stand_in_embed(c) for c in chunks]
+    tokens_per_hit = []
+    for q, answer_keyword in queries:
+        sims = [cosine_sim(stand_in_embed(q), ce) for ce in chunk_embeds]
+        top1_idx = int(np.argmax(sims))
+        top1_chunk = chunks[top1_idx]
+        if answer_keyword in top1_chunk:
+            tokens_per_hit.append(len(approx_bpe_tokens(top1_chunk)))
+    avg_tokens = sum(tokens_per_hit) / len(tokens_per_hit) if tokens_per_hit else float(&quot;nan&quot;)
+    print(f&quot;{name:16} correct={len(tokens_per_hit)}/{len(queries)}  &quot;
+          f&quot;avg tokens per correct top-1 chunk={avg_tokens:.1f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Exercise:</strong>
+<code>recursive(120)</code> and <code>structure-aware</code> tied on recall@2 in Concept 1 (both 0.50). Using
+their respective average-tokens-per-correct-answer figures from this concept's Example,
+state which of the two is the better choice when recall is tied, and what that implies
+about defaulting to whichever strategy sounds more sophisticated (semantic-aware,
+structure-aware) without checking its actual token cost.</p>
+<p><strong>Starting point:</strong> The printed <code>avg tokens per correct top-1 chunk</code> figures from this
+concept's Example, for <code>recursive(120)</code> and <code>structure-aware</code>.</p>
+<p>Expected output: measured here, <code>fixed(120)</code> gets 1/4 correct at 19.0 tokens/hit,
+<code>recursive(120)</code> gets 2/4 correct at 12.0 tokens/hit, and <code>structure-aware</code> gets 1/4
+correct at 43.0 tokens/hit. Between the two strategies tied on recall@2 in Concept 1
+(<code>recursive(120)</code> and <code>structure-aware</code>), <code>recursive(120)</code> is the better choice here on
+both counts — more correct top-1 answers <em>and</em> far fewer tokens per correct answer
+(12.0 vs. 43.0) — a reminder that a structurally-motivated strategy costing more per
+correct answer, on a small formal document where sections are naturally short and
+self-contained, isn't automatically the right default just because it sounds like the more
+principled choice.</p>
+<hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> A chunking-strategy evaluation run once at launch, on the document types
+available at launch, does not automatically transfer when a new document type (a different
+line of business's policy template, a new call-center vendor's transcript format) is
+onboarded later — the same discipline Day 1's warm-up caveat and Week 01's benchmarking
+practice both established: re-measure on the actual corpus in front of you, not the one you
+validated against originally.</p>
+<p><strong>Compliance angle:</strong> A documented recall@k, context-sufficiency, and token-cost comparison
+across chunking strategies is exactly the kind of evidence an internal model-risk review
+or an EU AI Act Article 15 accuracy claim wants for a retrieval-backed system — a chunking
+strategy picked &quot;because it seemed more sophisticated&quot; with no measurement behind it is not
+defensible evidence, whatever intuition motivated the choice.</p>
+<p><strong>What breaks in production:</strong> A chunking strategy's evaluation numbers from the design
+phase get treated as a permanent property of the strategy rather than a snapshot of one
+corpus, one query set, one embedding model at one point in time — exactly the same failure
+mode Week 01 and Week 04 both closed on for vector-index benchmarks, now recurring one
+layer up the pipeline at the chunking-strategy level.</p>
+<hr />
+<h2>Architecture Decision — Week 09</h2>
+<p><strong>Choosing between:</strong> fixed-size, recursive, structure-aware, and embedding-similarity
+breakpoint chunking, per document type rather than one strategy for the whole pipeline.</p>
+<p><strong>Rule of thumb:</strong> default to recursive splitting (Day 1) for anything without more
+specific structure to exploit — it costs nothing extra over fixed-size splitting and never
+does worse. Move to structure-aware chunking (Day 2) for documents with real, detectable
+structure (policy wording, contracts, anything with section headings or clause
+boundaries) — it costs the effort of writing a structure detector, and Concept 4's own
+measurement shows that cost is not automatically repaid by better recall or lower token
+cost on every corpus, so validate it against the fixed query set (Day 5 Concept 1) rather
+than assuming semantic sophistication implies retrieval quality. Reach for
+embedding-similarity breakpoint chunking (Day 3) specifically for unstructured
+conversational text (call transcripts, chat logs) where no separator or heading exists to
+detect a topic boundary at all — and budget for its real, per-sentence embedding cost at
+ingest time (Day 3 Concept 3), which the other three strategies don't pay. Layer chunk
+metadata and context injection (Day 4) on top of whichever splitting strategy is chosen;
+it is not a competing strategy, it is a requirement for citation, staleness detection
+(feeding directly into Week 11's incremental-embedding economics), and safe retrieval
+filtering regardless of how the chunk boundaries themselves were decided. Whatever
+combination is chosen, re-run Day 5's evaluation whenever the document population changes
+meaningfully — a chunking strategy's measured recall is a property of the corpus and query
+set it was measured against, not a permanent property of the strategy itself.</p>
+<div class="pager"><a class="btn ghost" href="week-08.html">&larr; Week 08</a><a class="btn ghost" href="week-10.html">Week 10 &rarr;</a></div>
+</main></body></html>

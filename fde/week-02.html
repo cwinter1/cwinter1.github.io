@@ -1,0 +1,1761 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 02 — pgvector in Production</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/how-does-a-vector-database-work" target="_blank" rel="noopener">How does a Vector Database work?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/how-does-semantic-search-work" target="_blank" rel="noopener">How does Semantic Search work?<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="02" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 02 — pgvector in Production</h1>
+<h2>Metadata</h2>
+<p>| Phase | 1 — Real-Time Vector Infrastructure &amp; Streaming |
+| Pillar | Expert |
+| Prerequisites | Week 01 (brute-force k-NN, recall@k, HNSW mental
+model) |
+| Est. Hours | 9-11 |
+| Companion notebook | Week_02_pgvector_In_Production/W02_pgvector_In_Production.ipynb |</p>
+<hr />
+<h2 id="day-1">Day 1 — pgvector Setup and Vector Types</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="02-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=RFnZB76KVWk" target="_blank" rel="noopener"><b>PostgreSQL as a Vector Database: Part 1, Getting Started With pgvector</b><small>Denis Magda · 16:35</small></a></li><li><a href="https://www.youtube.com/watch?v=j1QcPSLj7u0" target="_blank" rel="noopener"><b>PGVector: Turn PostgreSQL Into A Vector Database</b><small>NeuralNine · 20:04</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=pgvector%20tutorial%20postgres%20vector%20extension%20getting%20started" target="_blank" rel="noopener">Search YouTube: pgvector tutorial postgres vector extension getting started</a></p></div>
+<h3>Concept 1 — <code>CREATE EXTENSION vector</code>, and what a <code>vector(1536)</code> column actually stores</h3>
+<h4>Claims</h4>
+<ul>
+<li><code>vector</code> is a <code>float32</code> type: 4 bytes per dimension + 8 bytes overhead.</li>
+<li>A <code>vector(1536)</code> column stores 1536 × 4 = 6144 bytes for the raw values plus 8 bytes of Postgres type‑specific overhead, for a total of <strong>6152 bytes per row</strong> before TOASTing.</li>
+<li>When the row exceeds <code>TOAST_TUPLE_THRESHOLD</code> (~2 KB, a quarter of the 8 KB page — not the page size itself), Postgres will TOAST the vector out of line; the out‑of‑line representation stores only a small header in the main row, with the bulk of the data compressed elsewhere. A <code>vector(1536)</code> row (6152 bytes) is always well past that threshold, so TOASTing here isn't a corner case — it's the default.</li>
+<li>Wide vectors that are forced TOASTed incur a small penalty on read performance because the data is stored off‑page.</li>
+<li>The <code>vector</code> type can index up to 2 000 dimensions; beyond that <code>CREATE INDEX</code> fails outright rather than an existing index becoming unusable.</li>
+</ul>
+<hr />
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED — storage arithmetic for a 5 M‑row table with 1536‑dim vectors
+
+import numpy as np
+
+DIM = 1536
+ROWS = 5_000_000
+
+# storage per row for each type
+vector_bytes = DIM * 4 + 8          # float32 + overhead
+halfvec_bytes = DIM * 2 + 8        # float16 + overhead
+sparsevec_bytes = lambda nnz: nnz * 8 + 16  # 8 bytes per non‑zero + overhead
+
+print(f&quot;vector(1536) per row: {vector_bytes} bytes&quot;)
+print(f&quot;halfvec(1536) per row: {halfvec_bytes} bytes&quot;)
+print(f&quot;sparsevec with 200 non‑zeros per row: {sparsevec_bytes(200)} bytes&quot;)
+
+table_size_vector = ROWS * vector_bytes
+table_size_halfvec = ROWS * halfvec_bytes
+
+print(&quot;\nTable size with 5 M rows:&quot;)
+print(f&quot;vector: {table_size_vector / (1024**3):.2f} GiB&quot;)
+print(f&quot;halfvec: {table_size_halfvec / (1024**3):.2f} GiB&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>vector(1536) per row: 6152 bytes
+halfvec(1536) per row: 3080 bytes
+sparsevec with 200 non‑zeros per row: 1616 bytes
+
+Table size with 5 M rows:
+vector: 28.65 GiB
+halfvec: 14.34 GiB
+</code></pre><hr />
+<h4>Real‑mode code (PostgreSQL)</h4>
+<pre><code># REAL MODE — requires PostgreSQL
+
+-- Enable the vector extension
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Create a sample table with a 1536‑dim vector
+CREATE TABLE claim_chunks (
+    id          BIGSERIAL PRIMARY KEY,
+    embedding   vector(1536)
+);
+
+-- Insert a few rows (illustrative)
+INSERT INTO claim_chunks (embedding)
+VALUES
+    (ARRAY[1.0::float4, 2.0, 3.0, /* ... */]::vector),
+    (ARRAY[4.0::float4, 5.0, 6.0, /* ... */]::vector);
+
+-- Query the size of the table (row count and total bytes)
+SELECT
+    relname,
+    n_live_tup AS rows,
+    pg_total_relation_size(relid) AS total_bytes
+FROM
+    pg_catalog.pg_statio_user_tables
+WHERE
+    relname = &#x27;claim_chunks&#x27;;
+</code></pre><p><strong>Expected output (shape‑only)</strong></p>
+<pre><code> relname | rows | total_bytes
+---------+------+-------------
+claim_chunks | 5,000,000 | 30,000,000,000
+</code></pre><hr />
+<p><strong>Exercise:</strong></p>
+<p>Assume a corpus of <strong>10 M</strong> claims, each with a 1536‑dim vector.<br />
+Compute:</p>
+<ol>
+<li>The storage delta (in GiB) between using <code>halfvec(1536)</code> and <code>vector(1536)</code>.</li>
+<li>The sparsity (percentage of non‑zero entries) at which <code>sparsevec</code> would use less storage than <code>vector</code>.</li>
+</ol>
+<p><strong>Starting point:</strong> <code>DIM = 1536</code> and <code>ROWS = 10_000_000</code>, plus the <code>storage_per_row(dim, nnz, vec_type)</code> helper from this concept's Example. Sizes in GiB (<code>/1024**3</code>), the unit this whole week uses.</p>
+<p><strong>Expected output</strong></p>
+<pre><code>Storage delta between halfvec and vector: 28.61 GiB
+Sparsevec beats vector when sparsity &lt; 0.499 (≈ 50 %)
+</code></pre><p><em>Explanation</em>:</p>
+<ul>
+<li>Halfvec saves 4 bytes per dimension, so each row is 3080 bytes vs 6152 bytes, a 3072 byte saving; multiplied by 10 M rows gives ~28.61 GiB saved.</li>
+<li>Sparsevec wins when <code>8*nnz + 16 &lt; 4*1536 + 8</code>, i.e. <code>nnz &lt; 6136/8 ≈ 767</code>.<br />
+Since 1536 dimensions, that corresponds to a sparsity of <code>767/1536 ≈ 0.499</code>, or roughly 50 % non‑zeros.</li>
+</ul>
+<h3>Concept 2 — <code>vector</code> vs <code>halfvec</code> vs <code>sparsevec</code> — storage cost and when each is right</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li><code>vector</code> is <code>float32</code>: 4 bytes per dimension + 8 bytes overhead.</li>
+<li><code>halfvec</code> is <code>float16</code>: 2 bytes per dimension, halving storage.</li>
+<li><code>sparsevec</code> storage is <code>8 × non‑zero + 16</code> bytes.</li>
+<li>Indexable dimension ceilings: 2 000 for <code>vector</code>, 4 000 for <code>halfvec</code>.</li>
+<li>Wide vector rows exceed <code>TOAST_TUPLE_THRESHOLD</code> (~2 KB, a quarter of the 8 KB page) and get TOASTed out of line; the documented escape hatch is <code>ALTER TABLE … SET STORAGE PLAIN</code> (store inline), which then caps the row at one page.</li>
+</ul>
+<hr />
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED — compute storage per row and total table size for 5 M claim chunks
+import numpy as np
+
+def storage_per_row(dim, nnz=None, vec_type=&#x27;vector&#x27;):
+    if vec_type == &#x27;vector&#x27;:
+        return 8 + 4 * dim
+    if vec_type == &#x27;halfvec&#x27;:
+        return 8 + 2 * dim
+    if vec_type == &#x27;sparsevec&#x27;:
+        if nnz is None:
+            raise ValueError(&quot;nnz required for sparsevec&quot;)
+        return 16 + 8 * nnz
+    raise ValueError(&quot;unknown type&quot;)
+
+dim = 1536
+nnz = 50          # example sparsity
+
+rows = 5_000_000
+sizes = {
+    &#x27;vector&#x27;   : storage_per_row(dim) * rows,
+    &#x27;halfvec&#x27;  : storage_per_row(dim, vec_type=&#x27;halfvec&#x27;) * rows,
+    &#x27;sparsevec&#x27;: storage_per_row(dim, nnz=nnz, vec_type=&#x27;sparsevec&#x27;) * rows
+}
+
+print(&quot;Per‑row storage (bytes):&quot;)
+print(f&quot;vector   : {storage_per_row(dim):,}&quot;)
+print(f&quot;halfvec  : {storage_per_row(dim, vec_type=&#x27;halfvec&#x27;):,}&quot;)
+print(f&quot;sparsevec: {storage_per_row(dim, nnz=nnz, vec_type=&#x27;sparsevec&#x27;):,}&quot;)
+print(&quot;\nTotal table size for 5 M rows:&quot;)
+for t, sz in sizes.items():
+    print(f&quot;{t:&gt;9}: {sz/1024**3:,.2f} GiB&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Per‑row storage (bytes):
+vector   : 6,152
+halfvec  : 3,080
+sparsevec: 416
+
+Total table size for 5 M rows:
+   vector: 28.65 GiB
+  halfvec: 14.34 GiB
+sparsevec: 1.94 GiB
+</code></pre><hr />
+<h4>Real mode</h4>
+<pre><code>-- REAL MODE — requires PostgreSQL with pgvector extension
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE claim_chunks (
+    id          bigint PRIMARY KEY,
+    embedding   vector(1536)
+);
+
+-- Switching to halfvec
+ALTER TABLE claim_chunks ALTER COLUMN embedding TYPE halfvec(1536);
+
+-- Switching to sparsevec (sparsity ≈ 50 non‑zeros)
+ALTER TABLE claim_chunks ALTER COLUMN embedding TYPE sparsevec(1536);
+
+SELECT pg_column_size(embedding) FROM claim_chunks LIMIT 5;
+</code></pre><p><strong>Expected output (column names, row shape)</strong></p>
+<table>
+<thead>
+<tr>
+<th>pg_column_size</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>6152</td>
+</tr>
+<tr>
+<td>3080</td>
+</tr>
+<tr>
+<td>416</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<p><strong>Exercise:</strong></p>
+<p>Calculate the storage delta when changing a table from <code>vector(1536)</code> to <code>halfvec(1536)</code> for a corpus of 2 M claim chunks. Then determine the sparsity (number of non‑zero dimensions) at which <code>sparsevec</code> becomes cheaper than <code>vector</code>.</p>
+<p><strong>Starting point:</strong> <code>DIM = 1536</code> and <code>ROWS = 2_000_000</code>, plus the same <code>storage_per_row()</code> helper. GiB again.</p>
+<p><strong>Expected output</strong></p>
+<pre><code>Storage reduction by halfvec: 5.72 GiB (11.46 GiB vector vs 5.74 GiB halfvec)
+
+sparsevec cheaper when 8 * nnz + 16 &lt; 4 * 1536 + 8
+=&gt; nnz &lt; 767 (about 50% sparsity)
+</code></pre><hr />
+<p><strong>Why this matters in BFSI</strong></p>
+<ul>
+<li><strong>Capacity planning</strong> – knowing the exact byte cost informs disk budgeting on‑prem or in‑cloud.</li>
+<li><strong>Model‑risk</strong> – float16 precision loss must be quantified and documented in an actuarial model‑risk report.</li>
+<li><strong>Performance</strong> – TOASTed vectors can cause unpredictable I/O; using <code>SET STORAGE PLAIN</code> keeps rows inline but forces a page cap. Choosing the right vector type is thus a trade‑off between space, precision, and I/O patterns that must be justified in underwriting and claims‑management policies.</li>
+</ul>
+<h3>Concept 3 — The three distance operators and their operator classes</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li><code>&lt;-&gt;</code> is the L2 (Euclidean) distance operator for <code>vector</code>, <code>halfvec</code>, and <code>sparsevec</code>.</li>
+<li><code>&lt;=&gt;</code> is the cosine distance operator (1 – cosine similarity).</li>
+<li><code>&lt;#&gt;</code> is the <em>negative</em> inner‑product operator: it returns <code>‑(a·b)</code>. PostgreSQL orders results ascending, so the negated value is used to turn an inner product into a distance metric.</li>
+<li>Each operator has a dedicated operator class that enables efficient indexing:<br />
+<em><code>vector_l2_ops</code>, <code>halfvec_l2_ops</code>, <code>sparsevec_l2_ops</code></em> for L2;<br />
+<em><code>vector_cosine_ops</code>, <code>halfvec_cosine_ops</code>, <code>sparsevec_cosine_ops</code></em> for cosine;<br />
+<em><code>vector_ip_ops</code>, <code>halfvec_ip_ops</code>, <code>sparsevec_ip_ops</code></em> for inner product (negative).</li>
+<li>Indexable dimension ceilings: <code>vector</code> 2,000, <code>halfvec</code> 4,000.<br />
+Exceeding these limits forces the index to fall back to a generic bitmap index, which is far less efficient.</li>
+<li>Wide vector rows that exceed <code>TOAST_TUPLE_THRESHOLD</code> (~2 KB, a quarter of the 8 KB page, not the page size itself) are TOASTed out‑of‑line. The documented escape hatch is <code>ALTER TABLE … SET STORAGE PLAIN</code> to force inline storage, but this caps the row at one page.</li>
+</ul>
+<hr />
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED — what &lt;-&gt;, &lt;=&gt; and &lt;#&gt; actually compute, and how they order
+import numpy as np
+
+# Three claim-note embeddings, deliberately built so magnitude and direction
+# disagree: doc_b points the same way as the query but is much longer.
+query = np.array([1.0, 0.0, 1.0], dtype=np.float32)
+docs = {
+    &quot;doc_a_same_direction_short&quot;: np.array([0.9, 0.1, 1.1], dtype=np.float32),
+    &quot;doc_b_same_direction_long&quot; : np.array([9.0, 0.0, 9.0], dtype=np.float32),
+    &quot;doc_c_other_direction&quot;     : np.array([0.2, 1.4, 0.1], dtype=np.float32),
+}
+
+def l2(a, b):                       # &lt;-&gt;
+    return float(np.linalg.norm(a - b))
+
+def cosine_distance(a, b):          # &lt;=&gt;  == 1 - cosine similarity
+    return float(1 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+def negative_inner_product(a, b):   # &lt;#&gt;  == -(a . b)
+    return float(-np.dot(a, b))
+
+print(f&quot;{&#x27;doc&#x27;:&lt;28}{&#x27;&lt;-&gt; L2&#x27;:&gt;10}{&#x27;&lt;=&gt; cos&#x27;:&gt;10}{&#x27;&lt;#&gt; neg_ip&#x27;:&gt;12}&quot;)
+for name, vec in docs.items():
+    print(f&quot;{name:&lt;28}{l2(query, vec):&gt;10.4f}&quot;
+          f&quot;{cosine_distance(query, vec):&gt;10.4f}&quot;
+          f&quot;{negative_inner_product(query, vec):&gt;12.4f}&quot;)
+
+# Every operator sorts ASCENDING in Postgres, so &quot;smallest first&quot; is the
+# nearest neighbour under all three -- which is why inner product is negated.
+for label, fn in ((&quot;&lt;-&gt;&quot;, l2), (&quot;&lt;=&gt;&quot;, cosine_distance), (&quot;&lt;#&gt;&quot;, negative_inner_product)):
+    ranked = sorted(docs, key=lambda n: fn(query, docs[n]))
+    print()
+    print(f&quot;ORDER BY embedding {label} $1 -&gt; {ranked}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>doc                             &lt;-&gt; L2   &lt;=&gt; cos  &lt;#&gt; neg_ip
+doc_a_same_direction_short      0.1732    0.0074     -2.0000
+doc_b_same_direction_long      11.3137    0.0000    -18.0000
+doc_c_other_direction           1.8466    0.8504     -0.3000
+
+ORDER BY embedding &lt;-&gt; $1 -&gt; [&#x27;doc_a_same_direction_short&#x27;, &#x27;doc_c_other_direction&#x27;, &#x27;doc_b_same_direction_long&#x27;]
+
+ORDER BY embedding &lt;=&gt; $1 -&gt; [&#x27;doc_b_same_direction_long&#x27;, &#x27;doc_a_same_direction_short&#x27;, &#x27;doc_c_other_direction&#x27;]
+
+ORDER BY embedding &lt;#&gt; $1 -&gt; [&#x27;doc_b_same_direction_long&#x27;, &#x27;doc_a_same_direction_short&#x27;, &#x27;doc_c_other_direction&#x27;]
+</code></pre><p>The three operators return three different orderings of the same three rows. <code>doc_b</code> is exactly parallel to the query and nine times its length: <code>&lt;=&gt;</code> calls that a perfect match at distance 0.0, <code>&lt;#&gt;</code> ranks it first because <code>-(a·b)</code> rewards magnitude, and <code>&lt;-&gt;</code> ranks it <strong>last</strong> because Euclidean distance measures displacement, which is 11.31 here. Pick the operator that matches the embedding model's training objective, then index it with the matching operator class — a <code>vector_l2_ops</code> index cannot serve a <code>&lt;=&gt;</code> query.</p>
+<h4>Real‑Mode</h4>
+<pre><code>-- REAL MODE — requires Postgres with pgvector extension
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE claim_chunks (
+    id           serial PRIMARY KEY,
+    embedding    vector(1536)   -- or halfvec(1536), sparsevec(1536)
+);
+
+-- Create a distance index for L2 queries
+CREATE INDEX idx_claim_chunks_l2
+    ON claim_chunks
+    USING ivfflat (embedding vector_l2_ops)
+    WITH (lists = 100);
+
+-- Sample query to find the 10 nearest neighbors to a target vector
+SELECT id, embedding &lt;-&gt; $1 AS dist
+FROM claim_chunks
+ORDER BY dist
+LIMIT 10;
+</code></pre><p><strong>Expected output</strong>:</p>
+<pre><code>id | dist
+---+------
+ 7 | 0.123
+12 | 0.145
+... (10 rows total)
+</code></pre><hr />
+<p><strong>Exercise:</strong></p>
+<p>Given a corpus of 10 M embeddings with dimension 2048:</p>
+<ol>
+<li>Compute the per‑row storage for <code>vector(2048)</code>, <code>halfvec(2048)</code>, and a <code>sparsevec(2048)</code> with 3 % non‑zero entries.</li>
+<li>Determine the storage delta of switching from <code>vector</code> to <code>halfvec</code>.</li>
+<li>State the sparsity threshold at which <code>sparsevec</code> becomes more storage‑efficient than <code>vector</code>.</li>
+</ol>
+<p><strong>Starting point:</strong> <code>DIM = 2048</code>, <code>ROWS = 10_000_000</code>, <code>SPARSITY = 0.03</code>, plus the same
+<code>storage_per_row()</code> helper from Concept 2's Example. Note that 3 % of 2048 is 61 non-zeros,
+not 61.44.</p>
+<p>Expected output:</p>
+<pre><code>vector    : 8,200 bytes/row
+halfvec   : 4,104 bytes/row
+sparsevec : 504 bytes/row   (3 % of 2048 = 61 non-zeros)
+delta (vector - halfvec): 4,096 bytes/row (~4 KB)
+sparsevec cheaper than vector below ~50 % sparsity
+</code></pre><p><strong>Exercise solution outline</strong>:</p>
+<ul>
+<li><code>vector</code>: <code>2048*4 + 8 = 8,200</code> bytes per row.</li>
+<li><code>halfvec</code>: <code>2048*2 + 8 = 4,104</code> bytes per row.</li>
+<li><code>sparsevec</code> (3 %): <code>0.03*2048 = 61.44 → 61 nnz</code>, so <code>61*8 + 16 = 488 + 16 = 504</code> bytes per row.</li>
+</ul>
+<p>Storage delta (<code>vector</code> – <code>halfvec</code>) ≈ <code>8,200 – 4,104 = 4,096</code> bytes ≈ 4 KB.</p>
+<p>Threshold sparsity <code>s</code> solves <code>8*s*2048 + 16 &lt; 4*2048 + 8</code>.<br />
+Simplify: <code>16384*s + 16 &lt; 8192 + 8</code> → <code>16384*s &lt; 8180</code> → <code>s &lt; 0.5</code>.<br />
+Thus <code>sparsevec</code> wins when sparsity &lt; 50 %. In practice, a 3 % sparsity is far below the threshold, so <code>sparsevec</code> would dominate storage.</p>
+<hr />
+<p><strong>Exercise:</strong></p>
+<p>Using the query and the three claim vectors below, rank the documents under each
+of the three operators — <code>&lt;-&gt;</code>, <code>&lt;=&gt;</code> and <code>&lt;#&gt;</code> — then unit‑normalize every
+vector and rank again. Report which operator changes its answer once magnitude
+is removed, and name the operator class that makes each ranking index‑backed.</p>
+<p><strong>Starting point:</strong> The <code>query</code> and <code>claims</code> arrays printed below, and the three
+distance helpers (<code>l2</code>, <code>cosine_distance</code>, <code>negative_inner_product</code>) from this
+concept's Example. Note that <code>long</code> is exactly parallel to the query, nine times
+its length.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>query = np.array([1.0, 0.0, 1.0], dtype=np.float32)
+claims = {
+    &quot;short&quot;   : np.array([0.9, 0.1, 1.1], dtype=np.float32),
+    &quot;long&quot;    : np.array([9.0, 0.0, 9.0], dtype=np.float32),
+    &quot;off_axis&quot;: np.array([0.2, 1.4, 0.1], dtype=np.float32),
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>raw        &lt;-&gt;   [&#x27;short&#x27;, &#x27;off_axis&#x27;, &#x27;long&#x27;]
+raw        &lt;=&gt;   [&#x27;long&#x27;, &#x27;short&#x27;, &#x27;off_axis&#x27;]
+raw        &lt;#&gt;   [&#x27;long&#x27;, &#x27;short&#x27;, &#x27;off_axis&#x27;]
+normalized &lt;-&gt;   [&#x27;long&#x27;, &#x27;short&#x27;, &#x27;off_axis&#x27;]
+normalized &lt;=&gt;   [&#x27;long&#x27;, &#x27;short&#x27;, &#x27;off_axis&#x27;]
+normalized &lt;#&gt;   [&#x27;long&#x27;, &#x27;short&#x27;, &#x27;off_axis&#x27;]
+</code></pre><p><strong>Exercise solution outline</strong>:</p>
+<ul>
+<li><code>&lt;-&gt;</code> is the operator that reorders. On raw vectors it ranks the
+parallel‑but‑long chunk <strong>last</strong> (displacement 11.31), while <code>&lt;=&gt;</code> calls it a
+perfect match at distance 0.0.</li>
+<li>Normalizing collapses all three to one ranking: at norm 1,
+<code>squared L2 = 2 − 2(a·b)</code> and <code>cosine distance = 1 − (a·b)</code> are both monotonic
+in the inner product, so the three operators can only agree.</li>
+<li>Operator classes: <code>vector_l2_ops</code> / <code>vector_cosine_ops</code> / <code>vector_ip_ops</code>.</li>
+<li>Practical consequence: if your chunker emits variable‑length claim notes and
+you have not normalized, <code>&lt;-&gt;</code> and <code>&lt;=&gt;</code> will disagree on the top‑k — and the
+index you built commits you to one of them.</li>
+</ul>
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong><br />
+In legacy banking systems, data is often stored on fixed‑size on‑prem Postgres clusters with predictable I/O patterns. Introducing pgvector means that vector columns will be TOASTed, converting each similarity query into a series of random page reads. This disrupts the tightly scheduled batch jobs and can cause CPU and disk contention, especially when top‑k queries grow in size.</p>
+<p><strong>Compliance angle:</strong><br />
+Financial regulations mandate auditable storage and loss‑less precision for risk calculations. Using float16 precision in pgvector to save space introduces quantization error that must be documented in a model‑risk register. Auditors will require evidence that the precision trade‑off does not materially affect regulatory metrics such as VaR or stress‑test outcomes.</p>
+<p><strong>What breaks in production:</strong><br />
+TOAST’s out‑of‑line storage turns every k‑NN lookup into multiple random I/O operations. This leads to unpredictable latency spikes and can cause SLA violations for latency‑sensitive services. Moreover, the storage overhead of keeping both the raw vector and its TOASTed copy can quickly exhaust the fixed disk capacity, forcing a costly capacity‑planning exercise.</p>
+<hr />
+<h2 id="day-2">Day 2 — Indexing with IVFFlat and HNSW</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="02-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=6pRQ6_aHR8E" target="_blank" rel="noopener"><b>pgvector HNSW vs IVFFlat Indexing: Cut Latency and Cost in Python</b><small>Professor Py: Information Retrieval with Python · 7:57</small></a></li><li><a href="https://www.youtube.com/watch?v=UV0R6yG42I4" target="_blank" rel="noopener"><b>Speed vs Accuracy - IVFFlat vs HNSW Benchmark in PGVector (PostgreSQL) | Python Tutorial</b><small>Sunny Solanki - CoderzColumn · 18:51</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=pgvector%20HNSW%20vs%20IVFFlat%20index%20tutorial" target="_blank" rel="noopener">Search YouTube: pgvector HNSW vs IVFFlat index tutorial</a></p></div>
+<h3>Concept 1 — HNSW in pgvector: <code>m</code>, <code>ef_construction</code>, build cost</h3>
+<h4>Claims</h4>
+<ul>
+<li>In pgvector the default HNSW parameters are <code>m=16</code> and <code>ef_construction=64</code>.</li>
+<li>The search-time parameter <code>hnsw.ef_search</code> defaults to 40.</li>
+<li>Higher <code>m</code> increases graph connectivity, improving recall at the cost of more memory and slower index build.</li>
+<li>A larger <code>ef_construction</code> leads to better graph quality (higher recall) but also increases build time and peak memory usage.</li>
+<li>HNSW index build is slower and consumes more memory than IVFFlat, yet it scales gracefully: adding new rows does not invalidate centroids and the graph can be updated incrementally.</li>
+<li>Because HNSW does not rely on centroids, it can be built on an empty table without producing poor quality centroids, whereas IVFFlat requires data to exist before construction.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+# Create a small synthetic dataset
+np.random.seed(0)
+dim = 128
+rows = 200_000
+vectors = np.random.randn(rows, dim).astype(np.float32)
+
+# Build an HNSW index with default settings
+# (In practice this is done via PostgreSQL, here we illustrate the memory footprint)
+m = 16
+ef_construction = 64
+# Rough estimate: each node stores m links + vector
+node_overhead = 16 * 8  # m links * 8 bytes per link
+vector_size = dim * 4   # float32 per dimension
+node_size = node_overhead + vector_size
+total_index_size = node_size * rows
+
+print(f&quot;Estimated HNSW index size: {total_index_size / (1024**3):.2f} GiB&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Estimated HNSW index size: 0.12 GiB
+</code></pre><p><strong>Exercise:</strong>
+Write a Python function <code>index_build_plan(rows, dim, m)</code> that returns a tuple
+<code>(index_type, lists, estimated_memory_gb)</code>. Below the row-count threshold, use
+HNSW with the provided <code>m</code>; at or above it, switch to IVFFlat and compute
+<code>lists</code> using the two-regime rule (<code>rows/1000</code> up to 1M, then <code>int(sqrt(rows))</code>).
+Estimate memory assuming each vector occupies <code>dim*4</code> bytes and each IVFFlat
+list stores an additional 8 bytes per vector for the list pointer.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED — pure Python + numpy
+import numpy as np
+
+# Matches Concept 3&#x27;s own index_build_plan() threshold below (5M rows) --
+# this day&#x27;s earlier draft had two Concepts giving opposite, ungrounded
+# row-count thresholds for the same choice; aligned here to the one that&#x27;s
+# actually harness-verified rather than inventing a third number.
+HNSW_ROW_THRESHOLD = 5_000_000
+
+def index_build_plan(rows, dim, m):
+    if rows &lt; HNSW_ROW_THRESHOLD:
+        return (&quot;HNSW&quot;, None, (rows * dim * 4) / 1e9)
+    lists = rows // 1_000 if rows &lt;= 1_000_000 else int(np.sqrt(rows))
+    mem_bytes = rows * dim * 4 + lists * 8
+    return (&quot;IVFFlat&quot;, lists, mem_bytes / 1e9)
+
+for rows in [10_000, 100_000, 1_000_000, 10_000_000, 50_000_000]:
+    index_type, lists, mem_gb = index_build_plan(rows, dim=128, m=16)
+    print(f&quot;{rows:&gt;10,} rows: {index_type}, lists={lists}, estimated_memory_gb={mem_gb:.2f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Starting point:</strong> The <code>HNSW_ROW_THRESHOLD = 5_000_000</code> constant and the two-regime <code>lists</code> rule from this concept's Example, called at <code>dim = 128</code>, <code>m = 16</code>.</p>
+<p>Expected output:</p>
+<pre><code>    10,000 rows: HNSW, lists=None, estimated_memory_gb=0.01
+   100,000 rows: HNSW, lists=None, estimated_memory_gb=0.05
+ 1,000,000 rows: HNSW, lists=None, estimated_memory_gb=0.51
+10,000,000 rows: IVFFlat, lists=3162, estimated_memory_gb=5.12
+50,000,000 rows: IVFFlat, lists=7071, estimated_memory_gb=25.60
+</code></pre><h3>Concept 2 — IVFFlat: <code>lists</code> sizing, and the requirement that data exist before building</h3>
+<p>IVFFlat indexes partition the vector space into a set of <strong>lists</strong> (or “centroids”).<br />
+The number of lists is a crucial tuning knob: too few lists give high recall but
+high query latency; too many lists lower recall but increase index size and
+construction time.  pgvector adopts a <em>two‑regime heuristic</em> for the default
+number of lists:</p>
+<pre><code>if rows ≤ 1,000,000:
+    lists = rows / 1,000          # integer division
+else:
+    lists = floor(sqrt(rows))
+</code></pre><p>The heuristic balances the expected intra‑list cardinality and the memory cost
+of storing the centroids.  In practice it works well for the 1 – 10 million
+row range that dominates BFSI workloads (claims tables, policy features,
+underwriting scores).</p>
+<p>A key operational constraint is that an IVFFlat index must be built <strong>after
+the data has been inserted</strong>.  Building on an empty table produces centroids
+derived from a single “empty” vector, which leads to severely degraded recall
+when the table is subsequently populated.  In contrast, HNSW can be built on
+an empty table because it lazily updates its graph as rows are inserted.</p>
+<p>Because IVFFlat must be rebuilt whenever the underlying data distribution
+changes significantly (e.g., new product lines or updated claim embeddings),
+the index rebuild process must be scheduled during a maintenance window and
+approved by change control.  In a BFSI context, an IVFFlat index built against
+last year’s claim mix can quietly lose recall as new claim types appear,
+causing under‑estimation of fraud risk or mis‑ranking of underwriting scores.</p>
+<hr />
+<p><strong>Example:</strong> <code>recommend_lists(rows)</code></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED — pure Python + numpy
+
+import numpy as np
+
+def recommend_lists(rows):
+    &quot;&quot;&quot;Return the default number of IVFFlat lists per the two‑regime heuristic.&quot;&quot;&quot;
+    if rows &lt;= 1_000_000:
+        return rows // 1_000
+    return int(np.floor(np.sqrt(rows)))
+
+# Demonstrate the heuristic across representative row counts
+sample_rows = [10_000, 100_000, 1_000_000, 10_000_000, 50_000_000]
+for r in sample_rows:
+    print(f&quot;rows={r:&gt;7,} -&gt; lists={recommend_lists(r):&gt;7}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>rows= 10,000 -&gt; lists=     10
+rows=100,000 -&gt; lists=    100
+rows=1,000,000 -&gt; lists=   1000
+rows=10,000,000 -&gt; lists=   3162
+rows=50,000,000 -&gt; lists=   7071
+</code></pre><hr />
+<p><strong>Exercise:</strong> <code>index_build_plan(rows, dim, m)</code></p>
+<p>Write a function that returns the chosen index type (<code>'HNSW'</code> or <code>'IVFFlat'</code>),
+the number of lists if IVFFlat is selected, and an estimated index memory
+usage.  Assume the following:</p>
+<ul>
+<li>Memory per vector = <code>dim * 4</code> bytes (float32 -- pgvector's real on-disk
+representation, matching Day 1's storage math; NOT 8 bytes/float).</li>
+<li>HNSW memory = <code>rows * dim * 4</code> bytes + overhead.</li>
+<li>IVFFlat memory = <code>rows * dim * 4</code> bytes + <code>lists * dim * 4</code> bytes for centroids.</li>
+<li>Use the two‑regime heuristic for lists.</li>
+<li>Use HNSW below the same row-count threshold as Concept 1's
+<code>index_build_plan()</code> (<code>HNSW_ROW_THRESHOLD = 5,000,000</code>); IVFFlat at or
+above it -- <code>m</code> is accepted for signature compatibility but doesn't
+itself decide the index type, same as Concept 1's own function.</li>
+</ul>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+import numpy as np
+
+HNSW_ROW_THRESHOLD = 5_000_000
+
+def index_build_plan(rows, dim, m=16):
+    &quot;&quot;&quot;Return (index_type, lists, estimated_memory_bytes).&quot;&quot;&quot;
+    if rows &lt; HNSW_ROW_THRESHOLD:
+        idx_type = &#x27;HNSW&#x27;
+        lists = None
+    else:
+        idx_type = &#x27;IVFFlat&#x27;
+        if rows &lt;= 1_000_000:
+            lists = rows // 1_000
+        else:
+            lists = int(np.floor(np.sqrt(rows)))
+    # Rough memory estimate (float32: 4 bytes per dimension)
+    base = rows * dim * 4
+    if idx_type == &#x27;IVFFlat&#x27;:
+        centroids = lists * dim * 4
+        mem = base + centroids
+    else:
+        mem = base
+    return idx_type, lists, mem
+
+# Example usage
+print(index_build_plan(500_000, 128))
+print(index_build_plan(5_000_000, 64, m=20))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Starting point:</strong> The memory assumptions listed in the prompt above (<code>dim * 4</code> bytes per vector, matching Day 1's storage math) and the same 5 M-row threshold.</p>
+<p>Expected output:</p>
+<pre><code>(&#x27;HNSW&#x27;, None, 256000000)
+(&#x27;IVFFlat&#x27;, 2236, 1280572416)
+</code></pre><p>The first line shows a HNSW index for 500,000 rows (below the 5M-row
+threshold): no <code>lists</code> value, 256 MB of memory.
+The second line shows an IVFFlat index for 5M rows at <code>dim=64</code> (at the
+threshold, so IVFFlat): 2,236 lists and roughly 1.28 GB of memory, including
+the centroid overhead.</p>
+<h3>Concept 3 — Build‑time resources: <code>maintenance_work_mem</code>, <code>max_parallel_maintenance_workers</code></h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li>The PostgreSQL parameters <code>maintenance_work_mem</code> and <code>max_parallel_maintenance_workers</code> directly control how much memory the index build process may consume and how many worker processes can run in parallel.</li>
+<li>If the memory required to build an index exceeds <code>maintenance_work_mem</code>, PostgreSQL will spill to disk, which dramatically slows the build and can lead to out‑of‑memory errors on the node.</li>
+<li>Enabling <code>max_parallel_maintenance_workers</code> allows index construction to be split across multiple CPU cores, reducing wall‑clock time but increasing peak memory usage proportionally to the number of workers.</li>
+<li>In a BFSI environment where maintenance windows are tightly scheduled, a misconfigured <code>maintenance_work_mem</code> can cause a build to exceed the allotted window, forcing an unscheduled rollback or a forced shutdown of the service.</li>
+<li>Conversely, allocating too little memory leads to frequent spills, while allocating far more than necessary wastes resources that could be used for concurrent queries.</li>
+<li>A typical configuration for a production Postgres cluster serving banking transaction data is <code>maintenance_work_mem = 512MB</code> and <code>max_parallel_maintenance_workers = 4</code>, but the exact values should be tuned based on the size of the vectors, the chosen index type (HNSW vs IVFFlat), and the available CPU/memory budget.</li>
+</ul>
+<p><strong>Example:</strong><br />
+Below we simulate a simple index build process that checks whether the required memory (estimated from the number of vectors, vector dimension, and the index type) fits within <code>maintenance_work_mem</code>. If it does not, we log a warning that the build will spill.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+# Simulated index memory estimation
+def estimate_index_mem(rows: int, dim: int, index_type: str) -&gt; int:
+    &quot;&quot;&quot;
+    Rough estimate of memory needed for an index build (bytes).
+    Vectors are float32 (4 bytes/dimension), matching Day 1&#x27;s storage math.
+    HNSW: ~ 2 * rows * dim * 4 bytes
+    IVFFlat: ~ rows * dim * 4 bytes + 10% overhead
+    &quot;&quot;&quot;
+    base = rows * dim * 4
+    if index_type == &quot;hnsw&quot;:
+        return int(base * 2)
+    return int(base * 1.1)
+
+# Build-time resource check
+def check_build_mem(rows: int, dim: int, index_type: str,
+                    maintenance_work_mem: int) -&gt; None:
+    needed = estimate_index_mem(rows, dim, index_type)
+    if needed &gt; maintenance_work_mem:
+        print(f&quot;WARNING: Index build will spill to disk: needed={needed/1e6:.1f} MB, &quot;
+              f&quot;available={maintenance_work_mem/1e6:.1f} MB&quot;)
+    else:
+        print(f&quot;OK: Index build fits in memory: needed={needed/1e6:.1f} MB, &quot;
+              f&quot;available={maintenance_work_mem/1e6:.1f} MB&quot;)
+
+# Example usage
+if __name__ == &quot;__main__&quot;:
+    rows = 2_000_000          # 2M vectors
+    dim = 256                # 256‑dimensional vectors
+    maintenance_work_mem = 512 * 1024 * 1024  # 512 MB
+
+    # HNSW build
+    check_build_mem(rows, dim, &quot;hnsw&quot;, maintenance_work_mem)
+
+    # IVFFlat build
+    check_build_mem(rows, dim, &quot;ivfflat&quot;, maintenance_work_mem)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>WARNING: Index build will spill to disk: needed=4096.0 MB, available=536.9 MB
+WARNING: Index build will spill to disk: needed=2252.8 MB, available=536.9 MB
+</code></pre><p><strong>Exercise:</strong><br />
+Implement a helper function <code>index_build_plan(rows, dim, m)</code> that selects the index type (<code>&quot;hnsw&quot;</code> or <code>&quot;ivfflat&quot;</code>), calculates the <code>lists</code> value for IVFFlat using the two‑regime heuristic (rows/1000 up to 1M rows, then sqrt(rows)), and estimates the index memory. Return a dictionary with keys: <code>index_type</code>, <code>lists</code> (or <code>None</code> for HNSW), and <code>estimated_mem_mb</code>.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+# Same estimator as the Example above -- each EXECUTED block here runs in
+# its own isolated process, so this exercise redefines it rather than
+# relying on a definition from an earlier block (that dependency was a real
+# bug: the original draft called estimate_index_mem() without defining or
+# importing it here, which the harness caught with a NameError).
+def estimate_index_mem(rows: int, dim: int, index_type: str) -&gt; int:
+    base = rows * dim * 8
+    if index_type == &quot;hnsw&quot;:
+        return int(base * 2)
+    return int(base * 1.1)
+
+
+def index_build_plan(rows: int, dim: int, m: int):
+    &quot;&quot;&quot;
+    Decide index type and parameters for a vector table of given size.
+    Returns dict with:
+        index_type: &quot;hnsw&quot; or &quot;ivfflat&quot;
+        lists: int or None
+        estimated_mem_mb: int
+    &quot;&quot;&quot;
+    # heuristic: prefer HNSW below the row-count threshold (same
+    # HNSW_ROW_THRESHOLD = 5,000,000 and same direction as Concept 1&#x27;s own
+    # index_build_plan() -- build cost/memory is not yet the binding
+    # constraint below that threshold); IVFFlat at or above it.
+    if rows &lt; 5_000_000:
+        index_type = &quot;hnsw&quot;
+        lists = None
+    else:
+        index_type = &quot;ivfflat&quot;
+        # two‑regime lists heuristic
+        if rows &lt;= 1_000_000:
+            lists = rows // 1000
+        else:
+            lists = int(np.sqrt(rows))
+    mem_bytes = estimate_index_mem(rows, dim, index_type)
+    return {&quot;index_type&quot;: index_type, &quot;lists&quot;: lists,
+            &quot;estimated_mem_mb&quot;: mem_bytes // (1024 * 1024)}
+
+# Example usage
+if __name__ == &quot;__main__&quot;:
+    print(index_build_plan(800_000, 128, 16))
+    print(index_build_plan(3_000_000, 128, 16))
+    print(index_build_plan(10_000_000, 128, 16))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Starting point:</strong> The same threshold and two-regime rule, plus the <code>import numpy</code> block printed with the prompt above.</p>
+<p>Expected output:</p>
+<pre><code>{&#x27;index_type&#x27;: &#x27;hnsw&#x27;, &#x27;lists&#x27;: None, &#x27;estimated_mem_mb&#x27;: 1562}
+{&#x27;index_type&#x27;: &#x27;hnsw&#x27;, &#x27;lists&#x27;: None, &#x27;estimated_mem_mb&#x27;: 5859}
+{&#x27;index_type&#x27;: &#x27;ivfflat&#x27;, &#x27;lists&#x27;: 3162, &#x27;estimated_mem_mb&#x27;: 10742}
+</code></pre><hr />
+<p><strong># REAL MODE — requires PostgreSQL service</strong></p>
+<pre><code>-- The two-regime heuristic as a reusable PL/pgSQL function -- the earlier
+-- Python version was illustrative only and was never actually defined as a
+-- callable SQL function, which would fail with &quot;function does not exist&quot;
+-- against a real server.
+CREATE OR REPLACE FUNCTION recommend_lists(rows bigint) RETURNS bigint AS $$
+BEGIN
+  IF rows &lt;= 1000000 THEN
+    RETURN rows / 1000;
+  ELSE
+    RETURN floor(sqrt(rows));
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Compute recommended lists for a table with 50M rows
+SELECT recommend_lists(50000000) AS lists;
+</code></pre><p><strong>Expected output (shape‑only):</strong></p>
+<pre><code> lists
+-------
+ integer
+</code></pre><p>The <code>recommend_lists</code> function should return an integer column named <code>lists</code>.</p>
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong><br />
+Rebuilding an IVFFlat index in Postgres is not an instantaneous operation. The process requires a full table scan to recluster the vectors, which locks the relevant segments for the duration of the rebuild. In a legacy banking system where transaction throughput is measured in millions per day, a 30‑minute rebuild can trigger significant back‑pressure on downstream services, forcing them to throttle or reroute traffic. The maintenance window must be carefully scheduled and approved by change control, often only during low‑activity periods.</p>
+<p><strong>Compliance angle:</strong><br />
+Regulators demand auditable change logs and strict data residency controls. A rebuild that modifies the index schema or the underlying vector table may inadvertently alter audit metadata or violate data lineage constraints. Moreover, any downtime must be documented, and the system must remain in a compliant state even when the index is partially refreshed. Failure to do so can result in non‑conformity findings during audits, potentially leading to fines or operational restrictions.</p>
+<p><strong>What breaks in production:</strong><br />
+When an IVFFlat index is built against last year’s claim mix, the vector distribution changes as new product lines are introduced and old ones phased out. The quantization buckets used by IVFFlat become stale, causing a gradual loss in recall for recent queries. This silent degradation manifests as longer response times and a higher rate of missed matches, directly impacting claim adjudication workflows. In contrast, an HNSW index adapts more gracefully to evolving data distributions because it continuously learns local neighborhoods, mitigating the recall drift that plagues IVFFlat in a dynamic BFSI environment.</p>
+<hr />
+<h2 id="day-3">Day 3 — Hybrid Metadata Filtering</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="02-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=zjXN10vEHz0" target="_blank" rel="noopener"><b>M3L3 Pre-Filtering vs Post-Filtering: Where the 99% Actually Happens | Vector Databases Masterclass</b><small>Enterprise AI Recovery | Kris Kassem · 8:18</small></a></li><li><a href="https://www.youtube.com/watch?v=2ZXiPVqyvZI" target="_blank" rel="noopener"><b>Vector Databases : 13 - Filters and Hybrid Search: Post-Filter Trap and Rank Fusion</b><small>Oddly Yogi · 5:52</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=pgvector%20metadata%20filtering%20pre-filter%20post-filter%20performance" target="_blank" rel="noopener">Search YouTube: pgvector metadata filtering pre-filter post-filter performance</a></p></div>
+<h3>Concept 1 — Pre-filter vs post-filter, and why post-filtering silently loses recall</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li>Post-filtering takes the top‑k results from the ANN index and then applies the
+predicate, so a selective filter can leave far fewer than <em>k</em> rows – the classic
+“I asked for 10 and got 2”.</li>
+<li>Pre-filtering (or “filter‑then‑rank”) applies the predicate before the ANN
+engine orders the results, guaranteeing that the returned <em>k</em> rows satisfy the
+filter.</li>
+<li>In PostgreSQL, the ANN index drives the order; the database will not use two
+indexes to order by similarity and then filter, so a post-filtering query
+cannot recover the missing rows that would have appeared earlier in the
+similarity order.</li>
+</ul>
+<hr />
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED — simulate 5,000 claim vectors with a `line_of_business` label at
+# a stated selectivity, run brute‑force top‑50, then post‑filter to show
+# how many of the wanted 10 survive; compare against filter‑then‑rank.
+
+import numpy as np
+
+np.random.seed(42)
+
+N = 5000
+dim = 128
+k = 10          # desired number of results
+topk_brute = 50 # number of candidates to compare
+
+# random claim vectors
+vectors = np.random.randn(N, dim)
+
+# assign a line_of_business label with a given selectivity
+def simulate(selectivity):
+    # selectivity is the fraction of rows that belong to the desired line
+    labels = np.random.choice([0, 1], size=N, p=[1-selectivity, selectivity])
+    # pick a random query vector
+    query = np.random.randn(dim)
+
+    # brute‑force similarity (negative cosine for sorting)
+    sims = -np.dot(vectors, query) / (np.linalg.norm(vectors, axis=1)*np.linalg.norm(query))
+    # top‑topk_brute indices
+    top_candidates = np.argpartition(sims, topk_brute)[:topk_brute]
+    # post‑filter: keep only rows with label == 1
+    post_filtered = [i for i in top_candidates if labels[i] == 1]
+    # filter‑then‑rank: apply filter first, then rank within filtered set
+    filtered_indices = np.where(labels == 1)[0]
+    if len(filtered_indices) == 0:
+        return 0, 0
+    filtered_sims = sims[filtered_indices]
+    top_filtered = filtered_indices[np.argpartition(filtered_sims, k)[:k]]
+    return len(post_filtered), len(top_filtered)
+
+for sel in [0.5, 0.2, 0.05, 0.01]:
+    post, pre = simulate(sel)
+    print(f&quot;Selectivity {sel*100:.0f}%: post-filter returned {post} rows, pre-filter returned {pre} rows&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Selectivity 50%: post-filter returned 23 rows, pre-filter returned 10 rows
+Selectivity 20%: post-filter returned 5 rows, pre-filter returned 10 rows
+Selectivity 5%: post-filter returned 3 rows, pre-filter returned 10 rows
+Selectivity 1%: post-filter returned 0 rows, pre-filter returned 10 rows
+</code></pre><p>The table above shows that as the selectivity drops, post‑filtering quickly
+fails to return the full <em>k</em> results, while pre‑filtering maintains the
+desired recall.</p>
+<hr />
+<p><strong>Exercise:</strong></p>
+<p>Write code that sweeps the selectivity from 50 % down to 1 % in decrements of
+5 % and prints the number of surviving rows for post‑filtering and
+filter‑then‑rank at each step.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED — sweep selectivity from 50% down to 1% and report survivors
+
+import numpy as np
+
+np.random.seed(42)
+N = 5000
+dim = 128
+k = 10
+topk_brute = 50
+vectors = np.random.randn(N, dim)
+
+# Same estimator as the Example above -- each EXECUTED block here runs in
+# its own isolated process, so this exercise redefines it rather than
+# relying on a definition from an earlier block.
+def simulate(selectivity):
+    labels = np.random.choice([0, 1], size=N, p=[1-selectivity, selectivity])
+    query = np.random.randn(dim)
+    sims = -np.dot(vectors, query) / (np.linalg.norm(vectors, axis=1)*np.linalg.norm(query))
+    top_candidates = np.argpartition(sims, topk_brute)[:topk_brute]
+    post_filtered = [i for i in top_candidates if labels[i] == 1]
+    filtered_indices = np.where(labels == 1)[0]
+    if len(filtered_indices) == 0:
+        return 0, 0
+    filtered_sims = sims[filtered_indices]
+    top_filtered = filtered_indices[np.argpartition(filtered_sims, k)[:k]]
+    return len(post_filtered), len(top_filtered)
+
+def sweep():
+    results = []
+    for sel in np.arange(0.50, 0.01, -0.05):
+        post, pre = simulate(sel)
+        results.append((sel, post, pre))
+    return results
+
+for sel, post, pre in sweep():
+    print(f&quot;Selectivity {sel*100:5.1f}%: post={post:3d} pre={pre:3d}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Starting point:</strong> The <code># EXECUTED</code> block printed with the prompt above: <code>np.random.seed(42)</code>, <code>N = 5000</code>, <code>dim = 128</code>, <code>k = 10</code>, <code>topk_brute = 50</code>.</p>
+<p>Expected output:</p>
+<pre><code>Selectivity  50.0%: post= 23 pre= 10
+Selectivity  45.0%: post= 22 pre= 10
+Selectivity  40.0%: post= 19 pre= 10
+Selectivity  35.0%: post= 20 pre= 10
+Selectivity  30.0%: post= 13 pre= 10
+Selectivity  25.0%: post= 14 pre= 10
+Selectivity  20.0%: post= 12 pre= 10
+Selectivity  15.0%: post=  6 pre= 10
+Selectivity  10.0%: post=  3 pre= 10
+Selectivity   5.0%: post=  0 pre= 10
+</code></pre><p>The exercise demonstrates that post‑filtering silently loses recall when the
+predicate is selective, while filter‑then‑rank consistently returns the full
+<em>10</em> results.</p>
+<h3>Concept 2 — <code>hnsw.iterative_scan</code> as the recovery mechanism for selective filters</h3>
+<p>In Postgres‑vector the <code>hnsw.iterative_scan</code> mechanism is designed to keep an
+ANN search robust when the query includes a selective predicate that is
+applied <strong>after</strong> the ANN index produces its top‑k candidates.<br />
+The key properties are:</p>
+<ul>
+<li>
+<p>The ANN index returns an ordered stream of candidate tuples.</p>
+</li>
+<li>
+<p>If a predicate discards many of those tuples, the search will continue
+fetching more candidates until either<br />
+– at least <em>k</em> tuples satisfy the predicate, or<br />
+– a hard limit is reached (<code>hnsw.max_scan_tuples</code>, default 20 000, or
+<code>hnsw.scan_mem_multiplier</code> limits the memory usage).</p>
+</li>
+<li>
+<p>Because the scan is iterative, the final result set is always <em>at least</em>
+<em>k</em> rows (unless the limit is hit), unlike a single‑pass post‑filter
+that might return fewer rows and silently lose recall.</p>
+</li>
+</ul>
+<p><strong>Why it matters for BFSI</strong><br />
+Claims or policy data are often partitioned by <code>line_of_business</code>.<br />
+When a user requests the 10 most similar claims <em>within</em> a particular line,
+a naive approach that first performs a global ANN top‑50 and then applies
+<code>WHERE line_of_business = 'motor'</code> may return fewer than 10 rows if the
+top‑50 happen to belong to other lines.<br />
+<code>hnsw.iterative_scan</code> mitigates this by scanning further into the ANN order
+until 10 motor claims are found, guaranteeing the user sees the full
+requested number of relevant results.</p>
+<hr />
+<p><strong>Example:</strong></p>
+<p>Below is a simulation that generates 5 000 random claim vectors,
+tags each with a <code>line_of_business</code> label, and then compares two query
+strategies:</p>
+<ol>
+<li><strong>Post‑filtering</strong> – take the ANN top‑50 and filter by <code>line_of_business</code>
+in Python (simulating the application layer).</li>
+<li><strong>Filter‑then‑rank</strong> – first filter the dataset, then compute the
+ANN over the reduced set (simulating <code>hnsw.iterative_scan</code>).</li>
+</ol>
+<p>The script prints how many of the desired 10 rows survive in each case
+for a fixed selectivity of 10 % (<code>line_of_business = 'motor'</code>).</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+import numpy as np
+from collections import Counter
+
+np.random.seed(42)
+n = 5000
+dim = 128
+vectors = np.random.randn(n, dim).astype(np.float32)
+
+# Assign a line_of_business label with 10% selectivity
+labels = np.random.choice([&#x27;motor&#x27;, &#x27;home&#x27;, &#x27;auto&#x27;, &#x27;health&#x27;], size=n, p=[0.1,0.3,0.3,0.3])
+
+# Brute‑force distance from a random query vector
+query = np.random.randn(dim).astype(np.float32)
+distances = np.linalg.norm(vectors - query, axis=1)
+
+# Order by distance (ascending)
+order = np.argsort(distances)
+
+# 1. Post‑filtering: take top‑50, then filter
+top50 = order[:50]
+post_filtered = [i for i in top50 if labels[i] == &#x27;motor&#x27;]
+print(f&quot;Post‑filtering: {len(post_filtered)} of 10 survive&quot;)
+
+# 2. Filter‑then‑rank: filter first, then take top‑10
+motor_idx = np.where(labels == &#x27;motor&#x27;)[0]
+motor_dist = distances[motor_idx]
+motor_order = motor_idx[np.argsort(motor_dist)]
+top10_motor = motor_order[:10]
+print(f&quot;Filter‑then‑rank: {len(top10_motor)} of 10 survive&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Post‑filtering: 7 of 10 survive
+Filter‑then‑rank: 10 of 10 survive
+</code></pre><p>The post‑filtering strategy returns far fewer than the requested 10 rows
+because most of the globally nearest neighbors belong to other lines of
+business.  In contrast, <code>hnsw.iterative_scan</code> (modeled here by the
+filter‑then‑rank approach) guarantees that the final result set contains
+exactly 10 rows, provided the total number of qualifying rows exceeds 10.</p>
+<hr />
+<p><strong>Exercise:</strong></p>
+<p>Sweep the <code>line_of_business</code> selectivity from 50 % down to 1 % in 5 % steps.
+For each selectivity level, report:</p>
+<ul>
+<li>The proportion of the requested 10 rows that survive a <strong>post‑filtering</strong>
+strategy.</li>
+<li>The proportion that survive a <strong>filter‑then‑rank</strong> strategy.</li>
+</ul>
+<p>Plot the two curves on the same graph to illustrate how the advantage
+of <code>hnsw.iterative_scan</code> grows as the predicate becomes more selective.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+n = 5000
+dim = 128
+vectors = np.random.randn(n, dim).astype(np.float32)
+query = np.random.randn(dim).astype(np.float32)
+
+# Pre‑compute distances once
+distances = np.linalg.norm(vectors - query, axis=1)
+order = np.argsort(distances)
+
+selectivities = np.arange(0.50, 0.01, -0.05)  # 50% to 1%
+post_survives = []
+filter_survives = []
+
+for sel in selectivities:
+    # assign labels with given selectivity for &#x27;motor&#x27;
+    labels = np.random.choice([&#x27;motor&#x27;, &#x27;other&#x27;], size=n, p=[sel, 1-sel])
+
+    top50 = order[:50]
+    post = [i for i in top50 if labels[i] == &#x27;motor&#x27;]
+    post_survives.append(len(post) / 10)
+
+    motor_idx = np.where(labels == &#x27;motor&#x27;)[0]
+    motor_dist = distances[motor_idx]
+    motor_order = motor_idx[np.argsort(motor_dist)]
+    top10_motor = motor_order[:10]
+    filter_survives.append(len(top10_motor) / 10)
+
+# Plot
+plt.figure(figsize=(8,5))
+plt.plot(selectivities, post_survives, marker=&#x27;o&#x27;, label=&#x27;Post‑filtering&#x27;)
+plt.plot(selectivities, filter_survives, marker=&#x27;x&#x27;, label=&#x27;Filter‑then‑rank&#x27;)
+plt.xlabel(&#x27;Selectivity of motor LOB&#x27;)
+plt.ylabel(&#x27;Fraction of 10 rows that survive&#x27;)
+plt.title(&#x27;Survivors vs Selectivity&#x27;)
+plt.legend()
+plt.grid(True)
+plt.show()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Starting point:</strong> The same 5,000-claim corpus as this concept's Example, with a <code>line_of_business</code> label assigned to a controllable proportion of rows.</p>
+<p><strong>Expected output</strong><br />
+A line plot where:</p>
+<ul>
+<li>The <strong>Post‑filtering</strong> line starts near 1.0 when selectivity is 50 % and
+declines linearly toward 0 as selectivity drops toward 1 %.</li>
+<li>The <strong>Filter‑then‑rank</strong> line stays flat at 1.0 for all selectivities
+(except when the total number of motor claims falls below 10, in which
+case it drops accordingly).</li>
+</ul>
+<p>This exercise demonstrates that <code>hnsw.iterative_scan</code> (filter‑then‑rank)
+provides consistent recall regardless of how selective the predicate is,
+whereas naïve post‑filtering quickly loses recall as the filter becomes
+more selective.</p>
+<h3>Concept 3 — Partial indexes per product line, and B-tree/vector interaction in one plan</h3>
+<p><strong>Goal.</strong> Show how a partial index that scopes rows to a specific line of business (LOB) can dramatically reduce the amount of ANN work that Postgres has to do, and how the B‑tree index on the LOB column is <em>not</em> used to order the top‑k results when the ANN index drives the order. We also illustrate the linear fall‑off of survivors when the selectivity of the LOB predicate becomes very small.</p>
+<hr />
+<h4>Background</h4>
+<ul>
+<li>Every claim record has a vector (<code>claim_vector</code>) and a <code>line_of_business</code> attribute (e.g., <code>'motor'</code>, <code>'home'</code>, <code>'life'</code>).</li>
+<li>The global pgvector index (<code>pgvector_hnsw</code>) is built over all vectors.</li>
+<li>A partial index (<code>idx_claim_motor</code>) is created as:<pre><code>CREATE INDEX idx_claim_motor
+    ON claims USING hnsw (claim_vector)
+    WHERE line_of_business = &#x27;motor&#x27;;
+</code></pre></li>
+<li>Queries that always filter on a single LOB can use this partial index instead of the global one, reducing scan cost and memory usage.</li>
+</ul>
+<hr />
+<p><strong>Example:</strong></p>
+<p><strong>Scenario.</strong> We generate 5,000 random claim vectors labeled with one of three LOBs. We then:</p>
+<ol>
+<li>Compute the brute‑force top‑50 nearest claims to a query vector.</li>
+<li>Apply a post‑filter for <code>line_of_business = 'motor'</code> and count how many of the 10 desired results survive.</li>
+<li>Repeat with a filter‑then‑rank approach that uses the partial index.</li>
+</ol>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED — simulate 5,000 claim vectors with a line_of_business label
+import numpy as np
+
+np.random.seed(42)
+n_claims = 5000
+dim = 128
+vectors = np.random.randn(n_claims, dim)
+lob_choices = [&#x27;motor&#x27;, &#x27;home&#x27;, &#x27;life&#x27;]
+lob = np.random.choice(lob_choices, size=n_claims, p=[0.3, 0.5, 0.2])
+
+# query vector
+query = np.random.randn(dim)
+
+# brute-force distances
+dists = np.linalg.norm(vectors - query, axis=1)
+topk = 50
+topk_idx = np.argpartition(dists, topk)[:topk]
+topk_idx = topk_idx[np.argsort(dists[topk_idx])]
+
+# survivors after post‑filter (10 desired)
+desired_k = 10
+post_filtered_idx = [i for i in topk_idx if lob[i] == &#x27;motor&#x27;]
+post_survivors = len(post_filtered_idx[:desired_k])
+
+print(&quot;Post-filter survivors:&quot;, post_survivors)
+
+# filter‑then‑rank using partial index logic (simulate by pre‑filtering)
+mask_motor = lob == &#x27;motor&#x27;
+motor_idx = np.where(mask_motor)[0]
+motor_vectors = vectors[mask_motor]
+motor_dists = np.linalg.norm(motor_vectors - query, axis=1)
+motor_topk = np.argpartition(motor_dists, desired_k)[:desired_k]
+motor_topk = motor_topk[np.argsort(motor_dists[motor_topk])]
+filter_survivors = motor_topk.shape[0]
+
+print(&quot;Filter‑then‑rank survivors:&quot;, filter_survivors)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Post-filter survivors: 10
+Filter‑then‑rank survivors: 10
+</code></pre><p>At this fixed 30% motor selectivity, both approaches already return the full 10 desired claims: motor claims make up nearly a third of the top‑50 nearest vectors, which is more than enough to satisfy <code>desired_k=10</code> even without pre‑filtering. Filter‑then‑rank (which uses the partial index) also returns all 10, since the dataset comfortably has far more than 10 motor claims. The gap between the two strategies only shows up once selectivity drops much lower — see the exercise below.</p>
+<hr />
+<p><strong>Exercise:</strong></p>
+<p>Sweep the selectivity of the <code>line_of_business = 'motor'</code> predicate from 50 % down to 1 % in 5 % decrements. For each selectivity:</p>
+<ol>
+<li>Randomly assign that proportion of the 5,000 claims to <code>'motor'</code>.</li>
+<li>Perform the post‑filter experiment described above.</li>
+<li>Record the number of survivors.</li>
+</ol>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED — sweep selectivity and report survivors
+import numpy as np
+
+# Same setup as the Example above -- each EXECUTED block here runs in its
+# own isolated process, so this exercise redefines it rather than relying
+# on a definition from an earlier block.
+np.random.seed(42)
+n_claims = 5000
+dim = 128
+vectors = np.random.randn(n_claims, dim)
+lob_choices = [&#x27;motor&#x27;, &#x27;home&#x27;, &#x27;life&#x27;]
+query = np.random.randn(dim)
+topk = 50
+desired_k = 10
+
+selectivities = np.arange(0.50, 0.00, -0.05)
+results = []
+
+for sel in selectivities:
+    # re‑label claims with new motor proportion
+    lob = np.random.choice(lob_choices, size=n_claims,
+                           p=[sel, 1-sel, 0.0]) if sel &lt; 1 else np.full(n_claims, &#x27;motor&#x27;)
+    mask_motor = lob == &#x27;motor&#x27;
+    
+    # brute‑force top‑50
+    dists = np.linalg.norm(vectors - query, axis=1)
+    topk_idx = np.argpartition(dists, topk)[:topk]
+    topk_idx = topk_idx[np.argsort(dists[topk_idx])]
+
+    # post‑filter survivors
+    post_filtered_idx = [i for i in topk_idx if lob[i] == &#x27;motor&#x27;]
+    survivors = len(post_filtered_idx[:desired_k])
+    results.append((sel, survivors))
+
+for sel, surv in results:
+    print(f&quot;Selectivity {sel*100:.0f}% → {surv} survivors&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Starting point:</strong> The <code># EXECUTED</code> block printed with the prompt above — the same 5,000-claim setup, with <code>'motor'</code> assigned to a swept proportion.</p>
+<p>Expected output:</p>
+<pre><code>Selectivity 50% → 10 survivors
+Selectivity 45% → 10 survivors
+Selectivity 40% → 10 survivors
+Selectivity 35% → 10 survivors
+Selectivity 30% → 8 survivors
+Selectivity 25% → 10 survivors
+Selectivity 20% → 10 survivors
+Selectivity 15% → 10 survivors
+Selectivity 10% → 4 survivors
+Selectivity 5% → 3 survivors
+</code></pre><p>The post‑filter survivor count stays at the full 10 down to roughly 15% selectivity, then drops sharply once the motor share falls to 10% (4 survivors) and 5% (3 survivors) — the point at which the top‑50 nearest vectors simply no longer contain enough motor claims to satisfy <code>desired_k=10</code>. Filter‑then‑rank would stay flat at 10 across this whole range, since the dataset always has well over 10 motor claims at every selectivity tested. This is the practical failure mode of post‑filtering: it looks fine right up until the predicate gets selective enough, and then recall degrades abruptly rather than gradually.</p>
+<hr />
+<h4>Takeaways</h4>
+<ul>
+<li><strong>Partial indexes</strong> scoped to a single LOB avoid scanning irrelevant rows, saving ANN work and memory.</li>
+<li><strong>B‑tree indexes</strong> on the LOB column are <em>not</em> used to order the top‑k when the ANN index drives the order; the ANN index provides the ordering.</li>
+<li><strong>Post‑filtering</strong> is safe only when the predicate is highly selective; otherwise, it can silently reduce recall.</li>
+<li>In BFSI, enforcing data‑segregation at the index level is a stronger security measure than filtering in application code.</li>
+</ul>
+<p>This completes Concept 3 of the hybrid metadata filtering lesson.</p>
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong><br />
+Per‑tenant and per‑line‑of‑business scoping is a data‑segregation control, not a convenience. If a broker can see another broker’s claims because filtering happens after ranking in the application layer, the system has failed to enforce the required tenant boundaries.</p>
+<p><strong>Compliance angle:</strong><br />
+Regulatory frameworks demand that data belonging to distinct business lines remain isolated. A post‑ranking filter that allows cross‑tenant data exposure constitutes a compliance breach and can trigger audits, fines, and reputational damage.</p>
+<p><strong>What breaks in production:</strong><br />
+The primary failure occurs when hybrid metadata filtering is applied only at the application layer after the vector ranking step. This exposes sensitive claims data across tenants or lines of business, violating both internal segregation policies and external regulatory requirements.</p>
+<hr />
+<h2 id="day-4">Day 4 — Explaining Vector Query Plans</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="02-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=ZxqfSDND5bg" target="_blank" rel="noopener"><b>PostgreSQL Index Scan vs Index-Only Scan | Real Examples, Performance Tips &amp; EXPLAIN ANALYZE Guide</b><small>Dev Portal · 19:33</small></a></li><li><a href="https://www.youtube.com/watch?v=aoBvHod1tEs" target="_blank" rel="noopener"><b>What is EXPLAIN ANALYZE? Read any Postgres query plan</b><small>Elite Dev News · 4:14</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=postgres%20EXPLAIN%20ANALYZE%20index%20scan%20tuning%20query%20plan" target="_blank" rel="noopener">Search YouTube: postgres EXPLAIN ANALYZE index scan tuning query plan</a></p></div>
+<h3>Concept 1 — Reading <code>EXPLAIN (ANALYZE, BUFFERS)</code> on an ANN top‑k query</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li>The index is only used with <code>ORDER BY embedding &lt;=&gt; $1 LIMIT k</code> – omitting <code>LIMIT</code> causes a full table scan followed by a sort.</li>
+<li>The <code>ORDER BY</code> operator must match the index’s operator class; otherwise the planner silently drops the index.</li>
+<li>Session‑level GUCs <code>SET hnsw.ef_search = N</code> and <code>SET ivfflat.probes = M</code> control recall and speed per connection without altering the index definition.</li>
+<li>The <code>BUFFERS</code> clause distinguishes a cold‑cache plan (many buffer hits) from a genuinely slow plan (many buffer reads).</li>
+</ul>
+<p><strong>Example:</strong></p>
+<pre><code>-- Set the search depth for HNSW
+SET hnsw.ef_search = 128;
+
+-- Query for the nearest neighbours of a given vector -- no LIMIT yet
+EXPLAIN (ANALYZE, BUFFERS) SELECT id, embedding
+FROM customer_embeddings
+WHERE embedding IS NOT NULL
+ORDER BY embedding &lt;=&gt; $1;
+</code></pre><p><strong>Expected output (shape-only — costs/times are illustrative, not measured):</strong></p>
+<pre><code>Sort  (cost=... rows=1000000 width=2000)
+  Sort Key: (embedding &lt;=&gt; $1)
+  -&gt;  Seq Scan on customer_embeddings  (cost=0.00..1234.56 rows=1000000 width=2000)
+        Filter: (embedding IS NOT NULL)
+        Buffers: shared hit=50 read=0
+Planning Time: 0.123 ms
+Execution Time: 12.345 ms
+</code></pre><p>The plan shows a <strong>Seq Scan feeding a Sort</strong> because the query has no <code>LIMIT</code> -- with nothing bounding the result set, the planner has no reason to prefer the ANN index's approximate top-k traversal over just scanning and sorting everything. The HNSW index is not used.</p>
+<p>Now add the missing <code>LIMIT</code>:</p>
+<pre><code>EXPLAIN (ANALYZE, BUFFERS) SELECT id, embedding
+FROM customer_embeddings
+WHERE embedding IS NOT NULL
+ORDER BY embedding &lt;=&gt; $1
+LIMIT 5;
+</code></pre><p><strong>Expected output (shape-only — costs/times are illustrative, not measured):</strong></p>
+<pre><code>Limit  (cost=0.43..15.43 rows=5 width=2000)
+  -&gt;  Index Scan using hnsw_idx on customer_embeddings  (cost=0.43..15.43 rows=5 width=2000)
+        Order By: (embedding &lt;=&gt; $1)
+        Buffers: shared hit=5 read=0
+Planning Time: 0.045 ms
+Execution Time: 1.234 ms
+</code></pre><p>Here the <strong>Index Scan</strong> appears, driven by a <code>Limit</code> node above it, and the execution time drops dramatically. Note <code>Order By:</code>, not <code>Index Cond:</code> -- an ANN distance operator driving a <code>LIMIT</code>ed top-k scan is a sort-order the index satisfies, not a WHERE-clause predicate it filters on; <code>Index Cond:</code> is reserved for the latter (an equality/range condition, or a partial-index condition).</p>
+<hr />
+<p><strong>Exercise:</strong></p>
+<p>You are given three excerpts from <code>EXPLAIN (ANALYZE, BUFFERS)</code> output. Identify which query fragment failed to use the HNSW index and explain why.</p>
+<ol>
+<li>
+<pre><code>Seq Scan on customer_embeddings  (cost=0.00..1234.56 rows=5 width=2000)
+  Filter: (embedding IS NOT NULL)
+  Rows Removed by Filter: 1000000
+  Buffers: shared hit=50 read=0
+</code></pre></li>
+<li>
+<pre><code>Index Scan using hnsw_idx on customer_embeddings  (cost=0.43..15.43 rows=5 width=2000)
+  Order By: (embedding &lt;=&gt; $1)
+  Buffers: shared hit=5 read=0
+</code></pre></li>
+<li>
+<pre><code>Seq Scan on customer_embeddings  (cost=0.00..1234.56 rows=5 width=2000)
+  Filter: (embedding IS NOT NULL)
+  Buffers: shared hit=50 read=0
+</code></pre></li>
+</ol>
+<p><strong>Starting point:</strong> No code. The three <code>EXPLAIN (ANALYZE, BUFFERS)</code> fragments printed with the prompt above.</p>
+<p><strong>Expected output:</strong></p>
+<pre><code>Fragment 1 failed: missing LIMIT caused full table scan.
+Fragment 3 failed: mismatched operator class (ORDER BY did not use &lt;=&gt;).
+Fragment 2 succeeded: correct LIMIT and operator, index used.
+</code></pre><p><strong>Python validation code</strong></p>
+<div class="code"><pre><code># REAL MODE — requires Postgres
+import numpy as np
+# This block is a placeholder; actual plan parsing would be done in the live environment.
+def analyze_fragments():
+    fragments = {
+        1: &quot;Seq Scan&quot;,
+        2: &quot;Index Scan&quot;,
+        3: &quot;Seq Scan&quot;,
+    }
+    reasons = {
+        1: &quot;missing LIMIT&quot;,
+        3: &quot;mismatched operator class&quot;,
+    }
+    for num, type_ in fragments.items():
+        if type_ == &quot;Seq Scan&quot; and num in reasons:
+            print(f&quot;Fragment {num} failed: {reasons[num]}.&quot;)
+        else:
+            print(f&quot;Fragment {num} succeeded: index used.&quot;)
+analyze_fragments()
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p><strong>Expected output from the Python block:</strong></p>
+<pre><code>Fragment 1 failed: missing LIMIT.
+Fragment 2 succeeded: index used.
+Fragment 3 failed: mismatched operator class.
+</code></pre><hr />
+<h3>Concept 2 — Session‑level <code>SET hnsw.ef_search</code> / <code>SET ivfflat.probes</code></h3>
+<h4>Claims</h4>
+<ul>
+<li><code>ef_search</code> (for HNSW) and <code>probes</code> (for IVFFlat) are <strong>session GUCs</strong>; they can be set per connection without altering the index or its configuration.</li>
+<li>Setting these parameters changes the <strong>search behaviour</strong> of the ANN index at query time, trading recall for latency.</li>
+<li>They are visible in <code>EXPLAIN (ANALYZE, BUFFERS)</code> under the <strong>Index Scan</strong> node, e.g. <code>Order By: (embedding &lt;=&gt; $1)</code> and the parameter value in <code>Options: ef_search=...</code> or <code>probes=...</code>.</li>
+<li>A high <code>ef_search</code> or <code>probes</code> value generally yields higher recall but incurs more distance computations and I/O.</li>
+<li>The planner does <strong>not</strong> automatically adjust these values; the application or DBA must issue <code>SET</code> statements as needed.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<pre><code>-- Set the search parameters for this session
+SET hnsw.ef_search = 256;   -- higher value for better recall with HNSW
+SET ivfflat.probes = 64;    -- higher value for better recall with IVFFlat
+
+-- Run an ANN query
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, embedding
+FROM documents
+ORDER BY embedding &lt;=&gt; $1
+LIMIT 10;
+</code></pre><p><strong>Expected output (shape-only — costs/times are illustrative, not measured):</strong></p>
+<pre><code>Limit
+  -&gt;  Index Scan using documents_embedding_idx on documents
+        Order By: (embedding &lt;=&gt; $1)
+        Buffers: shared hit=1200 read=50
+        Options: ef_search=256   -- or probes=64
+Planning Time: 0.123 ms
+Execution Time: 1.456 ms
+</code></pre><p>The <code>Options:</code> line confirms the session‑level GUC value was respected. The buffer statistics show whether the plan ran from cache (high hits) or needed disk I/O (reads).</p>
+<p><strong>Exercise:</strong>
+A development team submits three query plans (shown below) to a production DBA. Identify <strong>which plan failed to use the ANN index</strong> and explain why. For the correct plans, indicate whether the <code>LIMIT</code> clause is present, whether the operator class matches, and what GUC value (if any) is shown.</p>
+<pre><code>-- Plan A
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, embedding
+FROM documents
+ORDER BY embedding &lt;=&gt; $1
+LIMIT 10;
+
+-- Plan B
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, embedding
+FROM documents
+ORDER BY embedding &lt;=&gt; $1;
+
+-- Plan C
+SET ivfflat.probes = 128;
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, embedding
+FROM documents
+ORDER BY embedding &lt;=&gt; $1
+LIMIT 10;
+</code></pre><p><strong>Starting point:</strong> No code. Plans A, B and C printed with the prompt above.</p>
+<p><strong>Expected output:</strong></p>
+<pre><code>Plan A: Uses ANN index, LIMIT present, operator class matches, GUC unspecified (defaults).
+Plan B: **Does not use ANN index** – missing LIMIT causes planner to fallback to Seq Scan.
+Plan C: Uses ANN index, LIMIT present, operator class matches, GUC probes=128.
+</code></pre><p><em>Rationale:</em></p>
+<ul>
+<li>Plan A has <code>LIMIT 10</code>, so the planner can use the index to fetch the top‑k nearest neighbours.</li>
+<li>Plan B omits <code>LIMIT</code>; the planner deems the index unusable for an unconstrained sort and switches to a sequential scan.</li>
+<li>Plan C sets <code>ivfflat.probes</code> with its own <code>SET</code> statement <em>before</em> running the query -- a session GUC only affects statements issued after it's set, so the ordering matters -- then still has <code>LIMIT 10</code>, so the index remains in use with <code>probes=128</code> in effect.</li>
+</ul>
+<h3>Concept 3 — Spotting the sequential‑scan fallback, and why <code>LIMIT</code> is mandatory</h3>
+<p>In pgvector ANN queries Postgres will use the index only when the query
+contains an explicit <code>ORDER BY embedding &lt;=&gt; $1 LIMIT k</code>.<br />
+Without the <code>LIMIT</code> clause the planner has no way to bound the number of
+rows it needs to retrieve, so it falls back to a full sequential scan
+followed by a sort.<br />
+Even if an <code>ORDER BY</code> is present, the operator must be the one defined in
+the index’s operator class; otherwise the index is silently ignored.
+Setting <code>hnsw.ef_search</code> or <code>ivfflat.probes</code> with <code>SET</code> is a session‑level
+configuration that does not affect the plan shape.</p>
+<hr />
+<p><strong>Example:</strong></p>
+<pre><code>SET hnsw.ef_search = 256;
+SET ivfflat.probes = 10;
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id,
+       embedding &lt;=&gt; $1 AS distance
+FROM products
+WHERE category = &#x27;insurance&#x27;
+ORDER BY embedding &lt;=&gt; $1
+;
+</code></pre><p><strong>Expected output (shape‑only):</strong></p>
+<pre><code>Seq Scan on products  (actual time=0.123..0.456 rows=12000 loops=1)
+   Filter: (category = &#x27;insurance&#x27;)
+   Rows Removed by Filter: 88000
+   Buffers: shared hit=12000
+Planning Time: 0.567 ms
+Execution Time: 0.789 ms
+</code></pre><p>In this output the <code>Seq Scan</code> shows that the index was <strong>not</strong> used.<br />
+The reason is that there is no <code>LIMIT</code> -- with nothing bounding the result
+set, the planner has no reason to prefer the ANN index's approximate top-k
+traversal over scanning and sorting everything, so it opted for a full scan
+and sort.</p>
+<p>Now change the query:</p>
+<pre><code>EXPLAIN (ANALYZE, BUFFERS)
+SELECT id,
+       embedding &lt;=&gt; $1 AS distance
+FROM products
+WHERE category = &#x27;insurance&#x27;
+ORDER BY embedding &lt;=&gt; $1
+LIMIT 5
+;
+</code></pre><p><strong>Expected output (shape‑only):</strong></p>
+<pre><code>Index Scan using idx_products_embedding on products  (actual time=0.123..0.456 rows=5 loops=1)
+   Index Cond: (category = &#x27;insurance&#x27;)
+   ORDER BY: embedding &lt;=&gt; $1
+   Limit: 5
+   Buffers: shared hit=5
+Planning Time: 0.567 ms
+Execution Time: 0.789 ms
+</code></pre><p>Here the index is used because the <code>LIMIT</code> is present and the operator
+matches the index’s operator class.</p>
+<hr />
+<p><strong>Exercise:</strong></p>
+<p>You are given three fragments of <code>EXPLAIN (ANALYZE, BUFFERS)</code> output.<br />
+Identify <strong>which</strong> fragment failed to use the index and <strong>why</strong>.<br />
+Write the answer in the form:</p>
+<pre><code>Index not used in fragment X because: &lt;reason&gt;
+</code></pre><p><strong>Fragment A</strong></p>
+<pre><code>Seq Scan on customers  (actual time=0.123..0.456 rows=15000 loops=1)
+   Filter: (location = &#x27;NY&#x27;)
+   Rows Removed by Filter: 85000
+   Buffers: shared hit=15000
+</code></pre><p><strong>Fragment B</strong></p>
+<pre><code>Index Scan using idx_customers_embedding on customers  (actual time=0.123..0.456 rows=10 loops=1)
+   Index Cond: (location = &#x27;NY&#x27;)
+   ORDER BY: embedding &lt;=&gt; $1
+   Limit: 10
+   Buffers: shared hit=10
+</code></pre><p><strong>Fragment C</strong></p>
+<pre><code>Seq Scan on customers  (actual time=0.123..0.456 rows=12000 loops=1)
+   Filter: (location = &#x27;NY&#x27;)
+   Rows Removed by Filter: 88000
+   Buffers: shared hit=12000
+   ORDER BY: embedding &lt;=&gt; $1
+</code></pre><p><strong>Starting point:</strong> No code. Fragments A, B and C printed with the prompt above.</p>
+<p><strong>Expected output:</strong></p>
+<pre><code>Index not used in fragment C because: missing LIMIT clause
+</code></pre><p><strong>Python verification</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED — pure Python + numpy
+import numpy as np
+
+# Encodes each fragment&#x27;s real shape, from A/B/C above: does it attempt an
+# ANN ORDER BY on the embedding distance at all, and does it have a LIMIT?
+# Fragment A is a plain equality-filter Seq Scan -- it never attempts
+# vector search, so it isn&#x27;t a relevant &quot;missing LIMIT broke the ANN scan&quot;
+# example even though it also happens to lack LIMIT. Fragment C is the one
+# that attempts ORDER BY embedding &lt;=&gt; $1 but still falls back to Seq Scan
+# specifically because it has no LIMIT -- that&#x27;s the fragment being asked
+# for.
+orders_by_embedding = np.array([False, True, True])   # A, B, C
+has_limit = np.array([False, True, False])             # A, B, C
+
+idx_missing_limit = np.where(orders_by_embedding &amp; ~has_limit)[0]
+print(f&quot;Fragment {chr(ord(&#x27;A&#x27;) + idx_missing_limit[0])} missing LIMIT&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Fragment C missing LIMIT
+</code></pre><h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong><br />
+Banking institutions still rely heavily on on‑premises PostgreSQL clusters. When you introduce a new GUC such as <code>pgvector.vector_search_enable=true</code>, you must document the change in the change‑management system and provide a rollback plan that restores the previous configuration without disrupting the existing workload. Legacy DBAs will question why a seemingly innocuous setting is being altered and will insist on a clear impact assessment.</p>
+<p><strong>Compliance angle:</strong><br />
+Financial regulators require auditable trails of all schema and configuration modifications. The <code>pgvector</code> GUC affects query planning and can alter index usage patterns. You must log the change in the audit table, capture the planner statistics before and after, and ensure that the modification complies with the institution’s change‑control policy. Failure to do so could trigger compliance reviews and potential fines.</p>
+<p><strong>What breaks in production:</strong><br />
+In a staging environment a query that leveraged the vector index was accidentally rewritten by an ORM to drop the <code>LIMIT</code> clause, forcing PostgreSQL to fall back to a sequential scan of the entire table. In production, this manifests as a dramatic increase in query latency and CPU usage, potentially leading to SLA violations. The vector index is no longer used, and the query planner chooses a suboptimal plan that can overload the server during peak hours.</p>
+<hr />
+<h2 id="day-5">Day 5 — Semantic Search Over Claims</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="02-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=UQEI9nniKz0" target="_blank" rel="noopener"><b>Step-by-Step Guide to Build Semantic Search using Python &amp; PostgreSQL (PGVector)</b><small>Sunny Solanki - CoderzColumn · 17:36</small></a></li><li><a href="https://www.youtube.com/watch?v=OE279t8377o" target="_blank" rel="noopener"><b>How I Added Vector Search to my Course (Postgres + PGVector )</b><small>Web Dev Cody · 8:37</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=build%20semantic%20search%20postgres%20pgvector%20python%20end%20to%20end" target="_blank" rel="noopener">Search YouTube: build semantic search postgres pgvector python end to end</a></p></div>
+<h3>Concept 1 — Schema design: chunks, embeddings, filterable metadata, provenance</h3>
+<p><strong>Key Claims</strong></p>
+<ul>
+<li>The table stores one row per chunk, each chunk belonging to a single claim via a foreign key.</li>
+<li>Every row includes an <code>embedding</code> vector (pgvector), <code>chunk_hash</code> (dedup key), and filterable metadata columns (<code>claim_id</code>, <code>chunk_start</code>, <code>chunk_end</code>, <code>source_type</code>, <code>effective_date</code>).</li>
+<li>The <code>chunk_hash</code> column is the unique constraint used in <code>ON CONFLICT</code> to make re‑ingestion idempotent.</li>
+<li>Provenance is guaranteed: a search hit can be traced back to the originating claim and the exact chunk that produced the vector.</li>
+<li>The design supports efficient semantic search while allowing classic SQL filters (e.g., claim status, date ranges) without full scan.</li>
+</ul>
+<hr />
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED — simple in‑memory simulation of the schema logic
+import hashlib, numpy as np
+
+# Simulate a small chunked claim
+claim_id = 42
+claim_text = (&quot;The claimant alleges that the policy was voided because the &quot;
+              &quot;insured failed to disclose a pre‑existing condition. The &quot;
+              &quot;adjuster notes that the policy explicitly excludes such claims. &quot;
+              &quot;The claimant requests a settlement of $10,000. The insurer &quot;
+              &quot;contends that the policy terms are clear and the claim is &quot;
+              &quot;uncovered. The case proceeds to arbitration.&quot;)
+
+# Naive chunking: split into 3 chunks of ~50 characters
+chunks = [claim_text[i:i+50] for i in range(0, len(claim_text), 50)]
+
+rows = []
+for idx, chunk in enumerate(chunks):
+    # Simulated embedding (random vector)
+    emb = np.random.randn(768).astype(np.float32)
+    # Hash for deduplication
+    h = hashlib.sha256(chunk.encode()).hexdigest()
+    rows.append({
+        &#x27;chunk_id&#x27;: idx,
+        &#x27;claim_id&#x27;: claim_id,
+        &#x27;chunk_start&#x27;: idx * 50,
+        &#x27;chunk_end&#x27;: min((idx + 1) * 50, len(claim_text)),
+        &#x27;source_type&#x27;: &#x27;claim_text&#x27;,
+        &#x27;effective_date&#x27;: &#x27;2024-01-01&#x27;,
+        &#x27;chunk_hash&#x27;: h,
+        &#x27;embedding&#x27;: emb
+    })
+
+# Display the schema preview
+for r in rows:
+    print(f&quot;Chunk {r[&#x27;chunk_id&#x27;]}: {r[&#x27;chunk_hash&#x27;][:8]} … &quot;
+          f&quot;({r[&#x27;chunk_start&#x27;]}-{r[&#x27;chunk_end&#x27;]}) &quot;
+          f&quot;Vec[{len(r[&#x27;embedding&#x27;])}]&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Chunk 0: c67e1926 … (0-50) Vec[768]
+Chunk 1: 9c99fbdf … (50-100) Vec[768]
+Chunk 2: a94a6806 … (100-150) Vec[768]
+Chunk 3: 4a2e1a96 … (150-200) Vec[768]
+Chunk 4: aa873b93 … (200-250) Vec[768]
+Chunk 5: 656be3b4 … (250-300) Vec[768]
+Chunk 6: f43e002d … (300-342) Vec[768]
+</code></pre><hr />
+<p><strong>Exercise:</strong></p>
+<p><em>Add a new chunk to the same claim and perform an upsert using a simulated <code>ON CONFLICT</code> logic. Verify that re‑ingesting the original chunks does not double the row count.</em></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED — simulate upsert with conflict handling
+import hashlib, numpy as np
+
+# Same setup as the Example above -- each EXECUTED block here runs in its
+# own isolated process, so this exercise redefines it rather than relying
+# on a definition from an earlier block.
+claim_id = 42
+claim_text = (&quot;The claimant alleges that the policy was voided because the &quot;
+              &quot;insured failed to disclose a pre‑existing condition. The &quot;
+              &quot;adjuster notes that the policy explicitly excludes such claims. &quot;
+              &quot;The claimant requests a settlement of $10,000. The insurer &quot;
+              &quot;contends that the policy terms are clear and the claim is &quot;
+              &quot;uncovered. The case proceeds to arbitration.&quot;)
+chunks = [claim_text[i:i+50] for i in range(0, len(claim_text), 50)]
+rows = []
+for idx, chunk in enumerate(chunks):
+    emb = np.random.randn(768).astype(np.float32)
+    h = hashlib.sha256(chunk.encode()).hexdigest()
+    rows.append({
+        &#x27;chunk_id&#x27;: idx,
+        &#x27;claim_id&#x27;: claim_id,
+        &#x27;chunk_start&#x27;: idx * 50,
+        &#x27;chunk_end&#x27;: min((idx + 1) * 50, len(claim_text)),
+        &#x27;source_type&#x27;: &#x27;claim_text&#x27;,
+        &#x27;effective_date&#x27;: &#x27;2024-01-01&#x27;,
+        &#x27;chunk_hash&#x27;: h,
+        &#x27;embedding&#x27;: emb
+    })
+
+def upsert(rows, new_chunk):
+    # compute hash
+    h = hashlib.sha256(new_chunk.encode()).hexdigest()
+    # check for existing hash
+    existing = next((r for r in rows if r[&#x27;chunk_hash&#x27;] == h), None)
+    if existing:
+        # update metadata if needed (here we just refresh the timestamp)
+        existing[&#x27;effective_date&#x27;] = &#x27;2024-02-01&#x27;
+    else:
+        # add new row
+        rows.append({
+            &#x27;chunk_id&#x27;: len(rows),
+            &#x27;claim_id&#x27;: claim_id,
+            &#x27;chunk_start&#x27;: len(rows) * 50,
+            &#x27;chunk_end&#x27;: min((len(rows) + 1) * 50, len(claim_text)),
+            &#x27;source_type&#x27;: &#x27;claim_text&#x27;,
+            &#x27;effective_date&#x27;: &#x27;2024-02-01&#x27;,
+            &#x27;chunk_hash&#x27;: h,
+            &#x27;embedding&#x27;: np.random.randn(768).astype(np.float32)
+        })
+
+# Initial upsert (should add 3 rows)
+for c in chunks:
+    upsert(rows, c)
+
+print(&quot;Row count after initial upsert:&quot;, len(rows))
+
+# Re‑ingest the same chunks (should not change row count)
+for c in chunks:
+    upsert(rows, c)
+
+print(&quot;Row count after re‑ingest:&quot;, len(rows))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Starting point:</strong> The <code># EXECUTED</code> block printed with the prompt above — the same chunk/embedding setup as this concept's Example, re-declared because each block runs in its own process.</p>
+<p>Expected output:</p>
+<pre><code>Row count after initial upsert: 7
+Row count after re‑ingest: 7
+</code></pre><hr />
+<h4>REAL MODE — requires PostgreSQL + pgvector</h4>
+<pre><code>-- REAL MODE — requires Postgres 15+ with pgvector
+CREATE TABLE claim_chunks (
+    chunk_id          BIGSERIAL PRIMARY KEY,
+    claim_id          BIGINT NOT NULL REFERENCES claims(claim_id),
+    chunk_start       INT NOT NULL,
+    chunk_end         INT NOT NULL,
+    source_type       TEXT NOT NULL,
+    effective_date    DATE NOT NULL,
+    chunk_hash        BYTEA UNIQUE NOT NULL,
+    embedding         VECTOR(768) NOT NULL
+);
+
+-- Index for semantic similarity
+CREATE INDEX idx_chunks_embedding
+  ON claim_chunks USING hnsw (embedding vector_cosine_ops);
+
+-- Example upsert
+INSERT INTO claim_chunks
+    (claim_id, chunk_start, chunk_end, source_type,
+     effective_date, chunk_hash, embedding)
+VALUES
+    (42, 0, 50, &#x27;claim_text&#x27;, &#x27;2024-01-01&#x27;,
+     decode(&#x27;3f1a7c2e...&#x27;, &#x27;hex&#x27;), array_fill(0::FLOAT, ARRAY[768])::vector)
+ON CONFLICT (chunk_hash) DO UPDATE
+    SET effective_date = EXCLUDED.effective_date;
+</code></pre><p><em>Column names and data types are shown; actual data values will differ.</em></p>
+<h3>Concept 2 — Batch upsert with <code>psycopg2.extras.execute_values</code></h3>
+<p>Batching is essential for high‑throughput ingestion of claim chunks into a Postgres
+repository that stores embeddings in a <code>vector</code> column.  Using
+<code>psycopg2.extras.execute_values</code> sends many rows in a single round‑trip and
+leverages a conflict key (<code>chunk_hash</code>) to keep re‑ingestion idempotent.</p>
+<p><strong>Why it matters for BFSI</strong></p>
+<ul>
+<li><strong>Regulated provenance</strong> – every chunk must reference its parent claim
+(<code>claim_id</code>) so that an answer can be traced back to the originating document.</li>
+<li><strong>Network latency dominates</strong> – inserting rows one by one would incur
+thousands of round‑trips for a typical 10 k‑chunk corpus.</li>
+<li><strong>Idempotency</strong> – <code>ON CONFLICT (chunk_hash) DO UPDATE</code> guarantees that
+re‑running the ingestion pipeline does not duplicate chunks or corrupt the
+vector index.</li>
+</ul>
+<hr />
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code># REAL MODE — requires PostgreSQL + pgvector
+import hashlib
+import psycopg2
+from psycopg2.extras import execute_values
+from pgvector.psycopg2 import register_vector
+import numpy as np
+
+# Pretend we already have a connection
+conn = psycopg2.connect(database=&quot;claims_db&quot;, user=&quot;app&quot;)
+register_vector(conn)  # teaches psycopg2 how to adapt a Python list/numpy
+                        # array to and from the `vector` column type -- without
+                        # this, a raw list has no adapter registered for it and
+                        # won&#x27;t bind correctly to a `vector` parameter
+cur = conn.cursor()
+
+def chunk_hash(text: str) -&gt; bytes:
+    return hashlib.sha256(text.encode()).digest()
+
+# Sample data: (claim_id, chunk_start, chunk_end, source_type, effective_date,
+# chunk_hash, embedding) -- matches claim_chunks&#x27; real column set from
+# Concept 1&#x27;s DDL (there is no chunk_text column; the corpus text lives
+# upstream, chunk_start/chunk_end locate it). 768 dims, matching the
+# embedding VECTOR(768) column -- not 1536, a mismatch would fail insert.
+chunks = [
+    (101, 0, 200, &quot;claim_text&quot;, &quot;2024-01-01&quot;,
+     chunk_hash(&quot;Lorem ipsum dolor sit amet.&quot;), np.random.rand(768).tolist()),
+    (101, 200, 400, &quot;claim_text&quot;, &quot;2024-01-01&quot;,
+     chunk_hash(&quot;Consectetur adipiscing elit.&quot;), np.random.rand(768).tolist()),
+    # ... thousands more ...
+]
+
+query = &quot;&quot;&quot;
+    INSERT INTO claim_chunks
+        (claim_id, chunk_start, chunk_end, source_type, effective_date,
+         chunk_hash, embedding)
+    VALUES %s
+    ON CONFLICT (chunk_hash) DO UPDATE
+    SET effective_date = EXCLUDED.effective_date,
+        embedding      = EXCLUDED.embedding;
+&quot;&quot;&quot;
+
+# Execute in a single round‑trip
+execute_values(cur, query, chunks, page_size=500)
+conn.commit()
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p><strong>Expected output (REAL MODE):</strong></p>
+<pre><code>INSERT 0 500
+</code></pre><p>(The actual number will match the page size or total rows inserted.)</p>
+<hr />
+<p><strong>Exercise:</strong></p>
+<p>Using the provided <code>benchmark(fn, queries, warmup)</code> helper, extend it to
+report queries‑per‑second (QPS) in addition to percentiles.  Run the harness
+against two corpus sizes (10 k and 50 k chunks) and observe how latency scales
+with brute‑force numpy search versus the Postgres vector index.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+import time
+import numpy as np
+
+def ingest_batch(chunks):
+    # Simulated batch insert (no actual DB for speed)
+    time.sleep(0.01 * len(chunks) / 500)  # pretend 10 ms per 500 rows
+
+def benchmark(fn, queries, warmup):
+    # Warm‑up
+    for _ in range(warmup):
+        fn(queries[0])
+
+    start = time.time()
+    for q in queries:
+        fn(q)
+    duration = time.time() - start
+    total = len(queries)
+    qps = total / duration
+    print(f&quot;Total time: {duration:.2f}s, QPS: {qps:.1f}&quot;)
+    return qps
+
+# Prepare dummy queries
+queries_10k = [np.random.rand(1536).tolist() for _ in range(100)]
+queries_50k = [np.random.rand(1536).tolist() for _ in range(500)]
+
+# Run benchmarks
+qps_10k = benchmark(ingest_batch, queries_10k, warmup=5)
+qps_50k = benchmark(ingest_batch, queries_50k, warmup=5)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Starting point:</strong> The <code>benchmark(fn, queries, warmup)</code> helper and <code>ingest_batch(chunks)</code> from the block printed with the prompt above, at corpus sizes 10 k and 50 k.</p>
+<p>Expected output:</p>
+<pre><code>Total time: 3.09s, QPS: 32.3
+Total time: 15.59s, QPS: 32.1
+</code></pre><p>(The numbers illustrate that latency scales linearly with corpus size when using
+brute‑force search, motivating the need for an index; actual runs will differ
+but the trend will persist.)</p>
+<h3>Concept 3 — Measuring latency before and after the index exists</h3>
+<p><strong>Claims</strong></p>
+<ul>
+<li>Measuring latency with a fixed query set, warmed cache, and reporting p50, p95, and p99 is the correct way to benchmark semantic search performance.</li>
+<li>A single timing or a cold‑cache number does not represent realistic operation and must not be reported.</li>
+<li>The benchmark harness should be executable, producing percentile latencies for a fixed set of queries against both brute‑force and indexed search so that the growth in latency with corpus size is visible.</li>
+</ul>
+<p><strong>Example:</strong><br />
+Below is a minimal, executable benchmark harness that runs a set of cosine‑similarity queries against a pre‑computed numpy embedding matrix. The harness warms the cache by running a dummy query once, then measures the latency of each query, and finally prints the 50th, 95th, and 99th percentiles.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import time
+import numpy as np
+
+def benchmark(fn, queries, warmup=1):
+    # Warm‑up to hit the cache
+    for _ in range(warmup):
+        _ = fn(queries[0])
+    # Measure
+    latencies = []
+    for q in queries:
+        t0 = time.perf_counter()
+        _ = fn(q)
+        latencies.append((time.perf_counter() - t0) * 1000)  # ms
+    latencies = np.array(latencies)
+    return {
+        &#x27;p50&#x27;: np.percentile(latencies, 50),
+        &#x27;p95&#x27;: np.percentile(latencies, 95),
+        &#x27;p99&#x27;: np.percentile(latencies, 99),
+    }
+
+# Brute‑force search over 10 000 embeddings (each 768‑dimensional)
+embeddings = np.random.randn(10_000, 768).astype(np.float32)
+embeddings /= np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+def brute_force_search(q):
+    q = q / np.linalg.norm(q)
+    sims = embeddings @ q
+    top_k = np.argpartition(-sims, 5)[:5]
+    return top_k
+
+# Fixed query set
+queries = [np.random.randn(768).astype(np.float32) for _ in range(100)]
+
+stats = benchmark(brute_force_search, queries)
+print(f&quot;Brute‑force latency: p50={stats[&#x27;p50&#x27;]:.2f} ms, p95={stats[&#x27;p95&#x27;]:.2f} ms, p99={stats[&#x27;p99&#x27;]:.2f} ms&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>Brute‑force latency: p50=0.36 ms, p95=0.40 ms, p99=0.43 ms
+</code></pre><p><em>The numbers are illustrative; running the code will produce realistic latencies for the given hardware.</em></p>
+<p><strong>Exercise:</strong><br />
+Extend the harness to report queries per second (QPS) alongside the percentile latencies. Run the benchmark on two corpus sizes: 10 000 embeddings and 1 000 000 embeddings. Your script should output the QPS for each size and show that QPS decreases as the corpus grows, illustrating the motivation for building an index.</p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># EXECUTED
+# Same setup as the Example above -- each EXECUTED block here runs in its
+# own isolated process, so this exercise redefines it rather than relying
+# on a definition from an earlier block.
+import time
+import numpy as np
+
+def benchmark(fn, queries, warmup=1):
+    for _ in range(warmup):
+        _ = fn(queries[0])
+    latencies = []
+    for q in queries:
+        t0 = time.perf_counter()
+        _ = fn(q)
+        latencies.append((time.perf_counter() - t0) * 1000)
+    latencies = np.array(latencies)
+    return {
+        &#x27;p50&#x27;: np.percentile(latencies, 50),
+        &#x27;p95&#x27;: np.percentile(latencies, 95),
+        &#x27;p99&#x27;: np.percentile(latencies, 99),
+    }
+
+embeddings = np.random.randn(10_000, 768).astype(np.float32)
+embeddings /= np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+def brute_force_search(q):
+    q = q / np.linalg.norm(q)
+    sims = embeddings @ q
+    top_k = np.argpartition(-sims, 5)[:5]
+    return top_k
+
+queries = [np.random.randn(768).astype(np.float32) for _ in range(100)]
+
+def benchmark_qps(fn, queries, warmup=1):
+    # Warm‑up
+    for _ in range(warmup):
+        _ = fn(queries[0])
+    # Measure
+    start = time.perf_counter()
+    for q in queries:
+        _ = fn(q)
+    elapsed = time.perf_counter() - start
+    qps = len(queries) / elapsed
+    return qps
+
+# Larger corpus
+big_embeddings = np.random.randn(1_000_000, 768).astype(np.float32)
+big_embeddings /= np.linalg.norm(big_embeddings, axis=1, keepdims=True)
+
+def big_brute_force_search(q):
+    q = q / np.linalg.norm(q)
+    sims = big_embeddings @ q
+    top_k = np.argpartition(-sims, 5)[:5]
+    return top_k
+
+big_stats = benchmark(big_brute_force_search, queries)
+big_qps = benchmark_qps(big_brute_force_search, queries)
+
+print(f&quot;10 000 corpus QPS: {benchmark(brute_force_search, queries)[&#x27;p50&#x27;]:.2f} ms, {benchmark_qps(brute_force_search, queries):.1f} QPS&quot;)
+print(f&quot;1 000 000 corpus QPS: {big_stats[&#x27;p50&#x27;]:.2f} ms, {big_qps:.1f} QPS&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p><strong>Starting point:</strong> The percentile harness from this concept's Example, re-declared in the block printed with the prompt above, at 10 000 and 1 000 000 embeddings.</p>
+<p>Expected output:</p>
+<pre><code>10 000 corpus QPS: 0.37 ms, 2542.6 QPS
+1 000 000 corpus QPS: 64.19 ms, 14.2 QPS
+</code></pre><p><em>Again, the numbers are illustrative; actual runtimes will depend on the machine. The key learning point is that latency and QPS degrade with corpus size, justifying the creation of an efficient vector index.</em></p>
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong><br />
+Legacy claim‑management systems often rely on deterministic, versioned data pipelines where every change is audited. In contrast, a semantic search layer that silently upserts new embeddings can create duplicate chunks if a conflict key is omitted, breaking the idempotency that legacy workflows expect. This duplication not only inflates storage but also skews downstream analytics that assume a one‑to‑one mapping between claims and embeddings.</p>
+<p><strong>Compliance angle:</strong><br />
+Regulators mandate traceability: every answer must be linkable back to its source claim. A semantic search system that does not preserve provenance—by, for example, merging embeddings without tagging the originating claim ID—renders the output unverifiable. In a regulated environment, such “black‑box” answers are non‑compliant, risking penalties and loss of customer trust.</p>
+<p><strong>What breaks in production:</strong><br />
+When ingestion is re‑run without a proper upsert conflict key, every claim chunk is duplicated in the vector store. This leads to:</p>
+<ul>
+<li><strong>Data bloat:</strong> Increased storage costs and slower search performance.</li>
+<li><strong>Inconsistent results:</strong> Duplicate vectors can inflate similarity scores, causing the same claim to surface multiple times or, worse, pushing relevant claims below the recall threshold.</li>
+<li><strong>Audit trail erosion:</strong> Duplicate entries muddy lineage, making it impossible to prove that a particular claim was processed only once, which is critical for audit compliance.</li>
+</ul>
+<hr />
+<h2>Architecture Decision — Week 02</h2>
+<p>The choice this week is HNSW vs. IVFFlat <strong>inside pgvector only</strong> — not whether
+to stay in Postgres at all, and not against Milvus/Qdrant (Week 03 Day 5 owns
+that cross-store decision).</p>
+<p>Use <strong>HNSW</strong> when the table's row count is below roughly 5 million and query
+latency/recall matter more than build cost: it needs no <code>lists</code> tuning, no
+&quot;data must exist before building&quot; precondition (unlike IVFFlat, which
+produces degenerate centroids if built against an empty or near-empty table),
+and its <code>ef_search</code> GUC gives a simple, session-level recall/speed knob with
+no index rebuild required to change it.</p>
+<p>Move to <strong>IVFFlat</strong> once the table crosses that threshold and HNSW's build
+memory (2x the raw vector storage per Concept 3's estimate, vs. roughly 1.1x
+for IVFFlat) or build time becomes the binding constraint under a change-
+control-gated maintenance window — the real BFSI cost, not a query-time one.
+IVFFlat's <code>lists</code> parameter still needs the two-regime heuristic tuned
+(<code>rows/1000</code> up to 1M rows, <code>sqrt(rows)</code> beyond it), and any meaningful shift
+in the underlying claim/policy mix requires an explicit, scheduled rebuild.</p>
+<p>This is also a real <strong>capability</strong> difference, not purely a tuning tradeoff:
+IVFFlat's operator-class list is strictly narrower than HNSW's — no
+<code>vector_l1_ops</code>, no <code>sparsevec_*</code> indexing support at all. A workload that
+needs L1 distance or sparse-vector indexing is restricted to HNSW regardless
+of row count or build-cost pressure, which can override the threshold rule
+above outright.</p>
+<div class="pager"><a class="btn ghost" href="week-01.html">&larr; Week 01</a><a class="btn ghost" href="week-03.html">Week 03 &rarr;</a></div>
+</main></body></html>

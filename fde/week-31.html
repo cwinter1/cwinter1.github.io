@@ -1,0 +1,1398 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 31 — Capstone C (stretch): Real-Time Fraud/AML Streaming Detection</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="31" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 31 — Capstone C (stretch): Real-Time Fraud/AML Streaming Detection</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>6 — Capstones (closes the track: Weeks 28-31)</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Expert / Capstone</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 07's streaming-vector-infra staleness/watermark machinery; Week 13's COBOL copybook and COMP-3/zoned-overpunch decoding; Week 06's Kafka micro-batching, bounded-concurrency, and backpressure patterns; Week 05's trigram embedding stand-in; Week 04's brute-force k-NN; Curriculum Week 17's SLO/error-budget/burn-rate pattern.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>10–12 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. This week genuinely executes more of its own mechanics than most: COMP-3/signed-overpunch decoding, replay pacing, watermarking, the trigram embedding stand-in, and — the standout finding — a real embedded Qdrant instance (<code>QdrantClient(location=&quot;:memory:&quot;)</code>, confirmed to run a genuine collection with real <code>upsert</code>/<code>query_points</code> payload-filtered calls, no server process needed at all). The only genuine external-service gap is Kafka itself: <code>confluent-kafka</code> installs cleanly in this sandbox, same as Week 06 found, but there is still no reachable broker, so <code>Producer</code>/<code>Consumer</code> connection calls stay REAL MODE with API-correct syntax; every genuinely executable piece of Kafka-adjacent <em>logic</em> (replay scheduling, watermarking, micro-batching, backpressure) is EXECUTED with real captured output, exactly Week 06's own precedent.</td>
+</tr>
+</tbody>
+</table>
+<p>This is the last week of the entire 31-week track, and it closes the thread Week 07 opened
+at the end of Phase 1: <strong>one vector index carrying per-record provenance</strong>, fed by whichever
+mechanism a source actually supports, with query-time logic that treats staleness as data
+rather than pretending the index is uniformly fresh. Week 07's own closing Architecture
+Decision named the risk directly — a beautifully engineered streaming pipeline built against
+a source that structurally cannot feed it. This week builds the concrete case that risk was
+written for: a nightly mainframe transaction extract, COBOL copybook and all, streamed into a
+real fraud-detection pipeline that has to be honest, end to end, about exactly how fresh its
+answers are.</p>
+<hr />
+<h2 id="day-1">Day 1 — COBOL-Sourced Transaction Feed</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="31-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=EUCO9HoOXWo" target="_blank" rel="noopener"><b>COMP-3 do COBOL: Entenda de uma vez o Packed-Decimal</b><small>gotoCobol · 9:11</small></a></li><li><a href="https://www.youtube.com/watch?v=juKGZDQ51CI" target="_blank" rel="noopener"><b>COBOL LESSON 120 - COMP-3 PACKED DECIMAL NUMERICS</b><small>MS / Access · 8:39</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=COMP-3%20packed%20decimal%20signed%20overpunch%20decode%20python%20mainframe" target="_blank" rel="noopener">Search YouTube: COMP-3 packed decimal signed overpunch decode python mainframe</a></p></div>
+<hr />
+<h3>Concept 1 — TXN-RECORD: COMP-3 Amount, Zoned-Overpunch Balance</h3>
+<p>The nightly extract this week decodes is a <code>TXN-RECORD</code> copybook — a fixed-width,
+<code>RECFM=FB</code> mainframe transaction record with no line terminators, exactly Week 13's
+format:</p>
+<pre><code>01 TXN-RECORD.
+   05 TXN-ID           PIC X(10).
+   05 ACCOUNT-ID        PIC X(10).
+   05 TXN-AMOUNT        PIC S9(9)V99 COMP-3.   -- 6 bytes packed decimal
+   05 BALANCE-AFTER     PIC S9(9)V99.          -- 11 bytes zoned, sign overpunch
+   05 CHANNEL           PIC X(4).
+   05 TXN-TIMESTAMP     PIC X(14).             -- YYYYMMDDHHMMSS
+</code></pre><p><code>TXN-AMOUNT</code> reuses Week 13 Day 3 Concept 2's <code>unpack_comp3</code>/<code>pack_comp3</code> — two decimal
+digits per byte in nibbles, the last nibble the sign. <code>BALANCE-AFTER</code> reuses Week 13 Day 3
+Concept 3's <code>unpack_zoned</code>/<code>pack_zoned</code> — one digit per byte, the sign folded into the zone
+nibble of only the last byte (the &quot;overpunch&quot; this concept's YouTube search names directly).
+Both decoders are copied unchanged from Week 13; only the record layout around them is new.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from decimal import Decimal
+
+# Reusing Week 13 Day 3 Concepts 2-3&#x27;s unpack_comp3/pack_comp3/unpack_zoned/pack_zoned
+# unchanged -- only the TXN-RECORD layout around them is new this week.
+def unpack_comp3(raw, scale):
+    nibbles = []
+    for byte in raw:
+        nibbles.append((byte &gt;&gt; 4) &amp; 0xF)
+        nibbles.append(byte &amp; 0xF)
+    sign_nibble = nibbles[-1]
+    digit_str = &quot;&quot;.join(str(n) for n in nibbles[:-1])
+    magnitude = Decimal(digit_str)
+    if scale:
+        magnitude = magnitude / (Decimal(10) ** scale)
+    sign = -1 if sign_nibble in (0xD, 0xB) else 1
+    return sign * magnitude
+
+def pack_comp3(value, total_digits, scale, negative_nibble=0xD, positive_nibble=0xC):
+    scaled = int((abs(value) * (Decimal(10) ** scale)).to_integral_value())
+    digit_str = str(scaled).zfill(total_digits)
+    sign_nibble = negative_nibble if value &lt; 0 else positive_nibble
+    nibbles = [int(c) for c in digit_str] + [sign_nibble]
+    if len(nibbles) % 2 != 0:
+        nibbles.insert(0, 0)
+    raw = bytearray()
+    for i in range(0, len(nibbles), 2):
+        raw.append((nibbles[i] &lt;&lt; 4) | nibbles[i + 1])
+    return bytes(raw)
+
+def unpack_zoned(raw):
+    digits = []
+    sign = 1
+    for i, byte in enumerate(raw):
+        zone = (byte &gt;&gt; 4) &amp; 0xF
+        digit = byte &amp; 0xF
+        digits.append(str(digit))
+        if i == len(raw) - 1 and zone in (0xD, 0xB):
+            sign = -1
+    return sign * int(&quot;&quot;.join(digits))
+
+def pack_zoned(value, digits):
+    scaled = abs(value)
+    digit_str = str(scaled).zfill(digits)
+    raw = bytearray()
+    for i, ch in enumerate(digit_str):
+        d = int(ch)
+        is_last = (i == len(digit_str) - 1)
+        zone = (0xD if value &lt; 0 else 0xC) if is_last else 0xF
+        raw.append((zone &lt;&lt; 4) | d)
+    return bytes(raw)
+
+TXN_LRECL = 55
+
+def make_txn_record(txn_id, account_id, amount, balance_after, channel, ts):
+    amount_bytes = pack_comp3(amount, total_digits=11, scale=2)
+    balance_scaled_signed = int((balance_after * 100).to_integral_value())
+    balance_bytes = pack_zoned(balance_scaled_signed, digits=11)
+    row = (txn_id.ljust(10).encode() + account_id.ljust(10).encode()
+           + amount_bytes + balance_bytes + channel.ljust(4).encode()
+           + ts.ljust(14).encode())
+    assert len(row) == TXN_LRECL, f&quot;record is {len(row)} bytes, expected {TXN_LRECL}&quot;
+    return row
+
+def decode_txn_record(raw):
+    txn_id = raw[0:10].decode().rstrip()
+    account_id = raw[10:20].decode().rstrip()
+    amount = unpack_comp3(raw[20:26], scale=2)
+    balance = Decimal(unpack_zoned(raw[26:37])) / Decimal(100)
+    channel = raw[37:41].decode().rstrip()
+    ts = raw[41:55].decode()
+    return dict(txn_id=txn_id, account_id=account_id, amount=amount, balance_after=balance,
+                channel=channel, ts=ts)
+
+raw = make_txn_record(&quot;TXN0000001&quot;, &quot;ACC0000001&quot;, Decimal(&quot;1234.56&quot;), Decimal(&quot;-500.25&quot;),
+                       &quot;POS &quot;, &quot;20260301083012&quot;)
+print(f&quot;encoded record: {len(raw)} bytes&quot;)
+decoded = decode_txn_record(raw)
+for k, v in decoded.items():
+    print(f&quot;  {k:&lt;14} {v}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>encoded record: 55 bytes
+  txn_id         TXN0000001
+  account_id     ACC0000001
+  amount         1234.56
+  balance_after  -500.25
+  channel        POS
+  ts             20260301083012
+</code></pre><p><strong>Exercise:</strong>
+Build and decode a 3-record batch: an ATM withdrawal (negative amount, positive balance), a
+large wire (positive amount, negative balance), and a zero-value record.</p>
+<p><strong>Starting point:</strong> The <code>make_txn_record</code>/<code>decode_txn_record</code>/<code>unpack_comp3</code>/<code>pack_comp3</code>/
+<code>unpack_zoned</code>/<code>pack_zoned</code> functions from this concept's Example, and three new calls:
+<code>(&quot;TXN0000002&quot;, &quot;ACC0000002&quot;, Decimal(&quot;-89.10&quot;), Decimal(&quot;1500.00&quot;), &quot;ATM &quot;, &quot;20260301083500&quot;)</code>, <code>(&quot;TXN0000003&quot;, &quot;ACC0000001&quot;, Decimal(&quot;7500.00&quot;), Decimal(&quot;-42.75&quot;), &quot;WIRE&quot;, &quot;20260301091200&quot;)</code>, <code>(&quot;TXN0000004&quot;, &quot;ACC0000003&quot;, Decimal(&quot;15.00&quot;), Decimal(&quot;0.00&quot;), &quot;POS &quot;, &quot;20260301093301&quot;)</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>TXN0000002  amount=    -89.1  balance_after=     1500  channel=ATM  ts=20260301083500
+TXN0000003  amount=     7500  balance_after=   -42.75  channel=WIRE ts=20260301091200
+TXN0000004  amount=       15  balance_after=        0  channel=POS  ts=20260301093301
+</code></pre><p>The negative amount and the negative balance decode correctly from opposite ends of the same
+record — COMP-3's sign nibble and zoned overpunch's sign-in-the-zone are two different
+encodings, applied to two adjacent fields, and neither one's sign bleeds into the other's.</p>
+<hr />
+<h3>Concept 2 — Replaying a Batch Extract Into Kafka at Controlled Wall-Clock Speed</h3>
+<p>The nightly extract lands as one flat file with no timing information of its own beyond each
+record's <code>TXN-TIMESTAMP</code>. Replaying it into Kafka &quot;as if streaming&quot; means preserving each
+record's <em>relative</em> event-time gaps, compressed by a fixed <code>speed_factor</code> — a 24-hour batch
+replayed at <code>speed_factor=3600</code> finishes in about 24 seconds of wall clock, with every
+record's relative spacing intact. This is what lets Day 5's demo run the whole nightly file
+through the pipeline in seconds instead of a real day, without inventing timing that never
+happened.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import datetime as dt
+
+def parse_ts(ts):
+    return dt.datetime.strptime(ts, &quot;%Y%m%d%H%M%S&quot;)
+
+def build_replay_schedule(records, speed_factor):
+    &quot;&quot;&quot;records: dicts with a &#x27;ts&#x27; field (TXN-TIMESTAMP, YYYYMMDDHHMMSS). Returns
+    [(record, scheduled_offset_seconds)] preserving relative event-time gaps,
+    compressed by speed_factor.&quot;&quot;&quot;
+    times = [parse_ts(r[&quot;ts&quot;]) for r in records]
+    t0 = min(times)
+    schedule = [(r, (t - t0).total_seconds() / speed_factor) for r, t in zip(records, times)]
+    return sorted(schedule, key=lambda pair: pair[1])
+
+records = [
+    {&quot;txn_id&quot;: &quot;TXN0000001&quot;, &quot;ts&quot;: &quot;20260301000512&quot;},
+    {&quot;txn_id&quot;: &quot;TXN0000002&quot;, &quot;ts&quot;: &quot;20260301000045&quot;},
+    {&quot;txn_id&quot;: &quot;TXN0000003&quot;, &quot;ts&quot;: &quot;20260301013000&quot;},
+]
+sched = build_replay_schedule(records, speed_factor=3600)
+for rec, offset in sched:
+    print(f&quot;{rec[&#x27;txn_id&#x27;]}  event_time={rec[&#x27;ts&#x27;]}  scheduled_offset={offset:.2f}s&quot;)
+print(f&quot;total wall-clock replay time at 3600x speed: {sched[-1][1]:.2f}s&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>TXN0000002  event_time=20260301000045  scheduled_offset=0.00s
+TXN0000001  event_time=20260301000512  scheduled_offset=0.07s
+TXN0000003  event_time=20260301013000  scheduled_offset=1.49s
+total wall-clock replay time at 3600x speed: 1.49s
+</code></pre><p>The schedule is sorted by scheduled offset, not by the file's original row order — Kafka
+replay pacing is driven by event time, and a nightly extract's row order has no guaranteed
+relationship to it.</p>
+<p><strong>Exercise:</strong>
+Add two more records and compute the replay schedule at two speed factors, 3600x and 7200x.</p>
+<p><strong>Starting point:</strong> The <code>build_replay_schedule</code> function and <code>records</code> list from this
+concept's Example, plus <code>{&quot;txn_id&quot;: &quot;TXN0000004&quot;, &quot;ts&quot;: &quot;20260301002200&quot;}</code> and
+<code>{&quot;txn_id&quot;: &quot;TXN0000005&quot;, &quot;ts&quot;: &quot;20260301021500&quot;}</code> appended to <code>records</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>speed_factor=3600:
+  TXN0000002  event_time=20260301000045  scheduled_offset=0.00s
+  TXN0000001  event_time=20260301000512  scheduled_offset=0.07s
+  TXN0000004  event_time=20260301002200  scheduled_offset=0.35s
+  TXN0000003  event_time=20260301013000  scheduled_offset=1.49s
+  TXN0000005  event_time=20260301021500  scheduled_offset=2.24s
+  total wall-clock replay time: 2.24s
+speed_factor=7200:
+  TXN0000002  event_time=20260301000045  scheduled_offset=0.00s
+  TXN0000001  event_time=20260301000512  scheduled_offset=0.04s
+  TXN0000004  event_time=20260301002200  scheduled_offset=0.18s
+  TXN0000003  event_time=20260301013000  scheduled_offset=0.74s
+  TXN0000005  event_time=20260301021500  scheduled_offset=1.12s
+  total wall-clock replay time: 1.12s
+</code></pre><p>Doubling the speed factor exactly halves every scheduled offset — the relative spacing
+between records is unchanged, only the wall-clock scale shrinks.</p>
+<hr />
+<h3>Concept 3 — Event-Time vs. Ingestion-Time Skew From a Batch-Only Source</h3>
+<p>Every record in the nightly file shares the <strong>same</strong> ingestion time — the moment the batch
+job dropped the extract — while their event times are scattered across the previous 24
+hours. That means the skew (<code>ingestion_time - event_time</code>) for a single batch spans nearly a
+full day: a record from the first minute after the previous drop carries the largest skew,
+one from moments before this drop carries almost none. This is exactly Week 07 Day 4's
+point, measured directly on this week's own data: the batch window sets a <em>floor</em>, not a
+single number, and the floor moves with where a given record fell inside the batch.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import datetime as dt
+
+def ingestion_skew_seconds(event_time, batch_drop_time):
+    return (batch_drop_time - event_time).total_seconds()
+
+BATCH_DROP_TIME = dt.datetime(2026, 3, 2, 4, 40, 0)
+event_times = [
+    dt.datetime(2026, 3, 1, 0, 5, 12),
+    dt.datetime(2026, 3, 1, 12, 30, 0),
+    dt.datetime(2026, 3, 1, 23, 58, 40),
+]
+skews = [ingestion_skew_seconds(t, BATCH_DROP_TIME) for t in event_times]
+for t, s in zip(event_times, skews):
+    print(f&quot;event_time={t}  ingestion_time={BATCH_DROP_TIME}  skew={s/3600:.2f}h&quot;)
+print(f&quot;min skew={min(skews)/3600:.2f}h  max skew={max(skews)/3600:.2f}h  &quot;
+      f&quot;mean skew={sum(skews)/len(skews)/3600:.2f}h&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>event_time=2026-03-01 00:05:12  ingestion_time=2026-03-02 04:40:00  skew=28.58h
+event_time=2026-03-01 12:30:00  ingestion_time=2026-03-02 04:40:00  skew=16.17h
+event_time=2026-03-01 23:58:40  ingestion_time=2026-03-02 04:40:00  skew=4.69h
+min skew=4.69h  max skew=28.58h  mean skew=16.48h
+</code></pre><p><strong>Exercise:</strong>
+Add two more event times — one from moments before the batch dropped, one from mid-morning —
+and recompute the skew spread.</p>
+<p><strong>Starting point:</strong> The <code>ingestion_skew_seconds</code> function, <code>BATCH_DROP_TIME</code>, and
+<code>event_times</code> list from this concept's Example, plus <code>dt.datetime(2026, 3, 2, 4, 39, 0)</code> and
+<code>dt.datetime(2026, 3, 1, 6, 0, 0)</code> appended to <code>event_times</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>event_time=2026-03-01 00:05:12  skew=28.58h
+event_time=2026-03-01 12:30:00  skew=16.17h
+event_time=2026-03-01 23:58:40  skew=4.69h
+event_time=2026-03-02 04:39:00  skew=0.02h
+event_time=2026-03-01 06:00:00  skew=22.67h
+min skew=0.02h  max skew=28.58h  mean skew=14.42h  range spanned: 28.56h
+</code></pre><p>The minimum skew (a record from one minute before the drop) and the maximum (a record from
+nearly 24 hours before it) sit almost a full day apart, inside the exact same batch —
+&quot;freshness&quot; for this source is a distribution, not a single figure.</p>
+<hr />
+<h3>Concept 4 — Watermark Policy for Late and Out-of-Order Records</h3>
+<p>A nightly batch, replayed into Kafka in whatever row order the extract used, is — from a
+streaming watermark's point of view — one enormous burst of records that arrive out of event
+order. Reusing Week 07 Day 4 Concept 3's allowed-lateness pattern: the watermark advances to
+<code>max(event_time seen so far) - allowed_lateness</code>, and any record whose event time falls
+behind the current watermark routes to a side output instead of silently corrupting an
+already-advanced state.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+import datetime as dt
+
+@dataclasses.dataclass
+class TxnEvent:
+    txn_id: str
+    event_time: dt.datetime
+    ingestion_time: dt.datetime
+
+def apply_watermark(events, allowed_lateness):
+    &quot;&quot;&quot;events consumed in ARRIVAL order -- exactly what a batch replay looks
+    like. watermark = max event_time seen so far - allowed_lateness.&quot;&quot;&quot;
+    watermark = None
+    on_time, late = [], []
+    for ev in events:
+        candidate_watermark = ev.event_time - allowed_lateness
+        watermark = candidate_watermark if watermark is None else max(watermark, candidate_watermark)
+        if ev.event_time &gt;= watermark:
+            on_time.append(ev)
+        else:
+            late.append(ev)
+    return on_time, late, watermark
+
+base = dt.datetime(2026, 3, 1, 0, 0, 0)
+events = [
+    TxnEvent(&quot;TXN0000002&quot;, base + dt.timedelta(seconds=45), base + dt.timedelta(seconds=45)),
+    TxnEvent(&quot;TXN0000001&quot;, base + dt.timedelta(seconds=312), base + dt.timedelta(seconds=312)),
+    TxnEvent(&quot;TXN0000003&quot;, base + dt.timedelta(seconds=5400), base + dt.timedelta(seconds=5400)),
+    # a nightly batch dump delivers this LAST in arrival order even though its
+    # event_time is far behind everything already ingested
+    TxnEvent(&quot;TXN0000004&quot;, base + dt.timedelta(seconds=100), base + dt.timedelta(seconds=5410)),
+]
+on_time, late, wm = apply_watermark(events, allowed_lateness=dt.timedelta(minutes=2))
+print(&quot;on_time:&quot;, [e.txn_id for e in on_time])
+print(&quot;late (side output):&quot;, [e.txn_id for e in late])
+print(&quot;final watermark:&quot;, wm)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>on_time: [&#x27;TXN0000002&#x27;, &#x27;TXN0000001&#x27;, &#x27;TXN0000003&#x27;]
+late (side output): [&#x27;TXN0000004&#x27;]
+final watermark: 2026-03-01 01:28:00
+</code></pre><p><strong>Exercise:</strong>
+Add two more events — one that just barely stays inside the lateness window and one that
+lands even further behind — and re-run the watermark policy over all six events.</p>
+<p><strong>Starting point:</strong> The <code>TxnEvent</code> dataclass and <code>apply_watermark</code> function from this
+concept's Example, the four existing <code>events</code>, plus
+<code>TxnEvent(&quot;TXN0000005&quot;, base + dt.timedelta(seconds=5395), base + dt.timedelta(seconds=5411))</code>
+and <code>TxnEvent(&quot;TXN0000006&quot;, base + dt.timedelta(seconds=90), base + dt.timedelta(seconds=5412))</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>on_time: [&#x27;TXN0000002&#x27;, &#x27;TXN0000001&#x27;, &#x27;TXN0000003&#x27;, &#x27;TXN0000005&#x27;]
+late (side output): [&#x27;TXN0000004&#x27;, &#x27;TXN0000006&#x27;]
+final watermark: 2026-03-01 01:28:00
+total events=6  on_time=4  late=2
+</code></pre><p><code>TXN0000005</code> (event_time at 5395s, 5 seconds before the watermark-setting <code>TXN0000003</code>) stays
+on-time because it is still inside the 2-minute lateness window; <code>TXN0000006</code> (event_time at
+90s, deep behind the watermark) routes to the side output exactly like <code>TXN0000004</code> did.</p>
+<hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> The copybook and the nightly batch schedule both belong to the mainframe
+application and scheduler teams, not to this pipeline. A COMP-3 field's digit count or the
+batch drop time changing is a change-control item on their side, not a parameter this
+pipeline can tune on its own.</p>
+<p><strong>Compliance angle:</strong> <code>TXN-AMOUNT</code> and <code>BALANCE-AFTER</code> are regulated financial data the
+instant they are decoded, in exactly the same way whether they live in a COMP-3 byte range or
+a modern Postgres row — an AML case file built from a misdecoded amount is a real,
+reportable-quality defect, not a display glitch.</p>
+<p><strong>What breaks in production:</strong> Someone tunes the watermark's allowed-lateness window down &quot;to
+alert faster&quot; without checking how spread out a real nightly batch's event times actually are
+against its single ingestion time (Concept 3's own measurement). Records from early in the
+batch window silently route to the side output every single night, and nobody notices until a
+reconciliation job finds transactions that never reached an alert.</p>
+<hr />
+<h2 id="day-2">Day 2 — Streaming Embedding and Upsert</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="31-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=vF5y17Pypds" target="_blank" rel="noopener"><b>Stream Processing | Apache Kafka 101 (2025 Edition)</b><small>Confluent Developer · 8:51</small></a></li><li><a href="https://www.youtube.com/watch?v=mK_fcOBuVzc" target="_blank" rel="noopener"><b>Embeddings &amp; Vector Databases for RAG (Ollama + Qdrant, Python) | EP 03</b><small>CyberScripters · 7:21</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=Kafka%20consumer%20streaming%20embedding%20pipeline%20Qdrant%20upsert%20payload%20filter" target="_blank" rel="noopener">Search YouTube: Kafka consumer streaming embedding pipeline Qdrant upsert payload filter</a></p></div>
+<hr />
+<h3>Concept 1 — Composing a Text Representation and Embedding It</h3>
+<p>Reusing Week 05 Day 1 Concept 1's <code>trigrams</code>/<code>embed</code> trigram-hash stand-in unchanged (no real
+embedding model is available offline in this sandbox, exactly Week 05's own note) —
+retargeted from insurance-claim text to a transaction's memo, counterparty, and channel
+composed into one string.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import zlib
+import numpy as np
+
+DIM = 32
+def trigrams(text):
+    t = &quot;  &quot; + text.lower() + &quot;  &quot;
+    return [t[i:i+3] for i in range(len(t) - 2)]
+
+def embed(text, dim=DIM):
+    vec = np.zeros(dim)
+    for gram in trigrams(text):
+        seed = zlib.crc32(gram.encode(&quot;utf-8&quot;))
+        rng = np.random.default_rng(seed)
+        vec += rng.normal(size=dim)
+    norm = np.linalg.norm(vec)
+    return vec / norm if norm &gt; 0 else vec
+
+def compose_txn_text(txn):
+    return f&quot;{txn[&#x27;memo&#x27;]} | counterparty={txn[&#x27;counterparty&#x27;]} | channel={txn[&#x27;channel&#x27;]}&quot;
+
+def cosine(a, b):
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+grocery_a = dict(memo=&quot;POS purchase groceries&quot;, counterparty=&quot;FRESHMART 04821&quot;, channel=&quot;POS&quot;)
+grocery_b = dict(memo=&quot;POS purchase groceries&quot;, counterparty=&quot;FRESHMART 04821&quot;, channel=&quot;POS&quot;)
+wire_out = dict(memo=&quot;wire transfer outbound to offshore holding company&quot;,
+                counterparty=&quot;OFFSHORE HOLD CO LTD&quot;, channel=&quot;WIRE&quot;)
+va, vb, vw = embed(compose_txn_text(grocery_a)), embed(compose_txn_text(grocery_b)), embed(compose_txn_text(wire_out))
+print(f&quot;composed text (grocery A): {compose_txn_text(grocery_a)!r}&quot;)
+print(f&quot;cosine(grocery_a, grocery_b) = {cosine(va, vb):.4f}&quot;)
+print(f&quot;cosine(grocery_a, wire_out)  = {cosine(va, vw):.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>composed text (grocery A): &#x27;POS purchase groceries | counterparty=FRESHMART 04821 | channel=POS&#x27;
+cosine(grocery_a, grocery_b) = 1.0000
+cosine(grocery_a, wire_out)  = 0.4360
+</code></pre><p><strong>Exercise:</strong>
+Compose and embed an ATM withdrawal and a repeat gas-station purchase, and compare all three
+pairwise cosines against <code>grocery_a</code>.</p>
+<p><strong>Starting point:</strong> The <code>embed</code>/<code>compose_txn_text</code>/<code>cosine</code> functions and <code>va</code> vector from
+this concept's Example, plus <code>atm = dict(memo=&quot;ATM cash withdrawal&quot;, counterparty=&quot;ATM BRANCH 12&quot;, channel=&quot;ATM&quot;)</code> and <code>gas = dict(memo=&quot;POS purchase gas station&quot;, counterparty=&quot;SHELL 00931&quot;, channel=&quot;POS&quot;)</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>cosine(grocery_a vs atm) = 0.3419
+cosine(grocery_a vs gas) = 0.8008
+</code></pre><p><code>grocery_a</code> sits much closer to another POS purchase at a different merchant (0.80) than to
+an ATM withdrawal at a different channel entirely (0.34) — the composed text's <code>channel=</code>
+field genuinely pulls the embedding toward other same-channel transactions, exactly the
+signal Day 3 needs peer-history distance to carry.</p>
+<hr />
+<h3>Concept 2 — Micro-Batched Embedding Inside the Consumer</h3>
+<p>Reusing Week 06 Day 4 Concept 1's <code>MicroBatcher</code> unchanged — flushing on whichever of
+<code>max_size</code> or <code>max_age_ms</code> fires first, the same two-trigger pattern applied here to batching
+transaction records before an embedding call instead of insurance claims.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class MicroBatcher:
+    def __init__(self, max_size, max_age_ms):
+        self.max_size = max_size
+        self.max_age_ms = max_age_ms
+        self.buffer = []
+        self.buffer_started_at = None
+
+    def add(self, record, now):
+        if not self.buffer:
+            self.buffer_started_at = now
+        self.buffer.append(record)
+        if len(self.buffer) &gt;= self.max_size:
+            return &quot;size&quot;
+        if (now - self.buffer_started_at) * 1000 &gt;= self.max_age_ms:
+            return &quot;age&quot;
+        return None
+
+    def flush(self):
+        batch, self.buffer, self.buffer_started_at = self.buffer, [], None
+        return batch
+
+arrivals = (
+    [(f&quot;TXN{i:04d}&quot;, t * 0.01) for i, t in enumerate(range(15))] +
+    [(f&quot;TXN{i:04d}&quot;, 0.15 + (i - 15) * 0.08) for i in range(15, 20)] +
+    [(f&quot;TXN{i:04d}&quot;, 0.55 + (i - 20) * 0.01) for i in range(20, 40)]
+)
+batcher = MicroBatcher(max_size=10, max_age_ms=150)
+for txn_id, t in arrivals:
+    trigger = batcher.add(txn_id, now=t)
+    if trigger:
+        batch = batcher.flush()
+        print(f&quot;t={t:5.2f}s  flush trigger={trigger:&lt;5}  batch_size={len(batch):&gt;2}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>t= 0.09s  flush trigger=size   batch_size=10
+t= 0.31s  flush trigger=age    batch_size= 8
+t= 0.55s  flush trigger=age    batch_size= 3
+t= 0.65s  flush trigger=size   batch_size=10
+</code></pre><p><strong>Exercise:</strong>
+Add an explicit end-of-stream flush and report how many records were left unflushed, then
+lower <code>max_age_ms</code> from 150 to 60 and report how the flush-trigger counts change.</p>
+<p><strong>Starting point:</strong> The <code>MicroBatcher</code> class and <code>arrivals</code> list from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>records left unflushed at end of stream: 9
+max_age_ms=60 flush counts: {&#x27;size&#x27;: 0, &#x27;age&#x27;: 7}
+</code></pre><p>At the tighter 60ms age budget every flush fires on the age trigger and none on size — the
+buffer never has time to accumulate 10 records before its age limit forces a (smaller) flush.</p>
+<hr />
+<h3>Concept 3 — Qdrant Upsert With Payload Filters, Genuinely Executed</h3>
+<p><code>QdrantClient(location=&quot;:memory:&quot;)</code> runs a <strong>real, embedded</strong> Qdrant instance — confirmed by
+direct execution in this sandbox, no server process, Docker container, or network call
+needed. That means this concept, unlike Week 03's REAL MODE Qdrant content, genuinely
+executes real <code>create_collection</code>/<code>upsert</code>/<code>query_points</code> calls, including payload filters on
+<code>account_id</code> and <code>booking_date</code> — exactly the mechanism Week 07's closing Architecture
+Decision named as Phase 1's actual deliverable: one vector index carrying per-record
+provenance, queried with filters that respect it. The point id reuses Week 06 Day 4 Concept
+4's <code>point_id(...)</code> content-hash pattern for idempotent upsert.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+from qdrant_client import QdrantClient, models
+
+def point_id(txn_id, text, model_id):
+    payload = f&quot;{txn_id}|{text}|{model_id}&quot;.encode(&quot;utf-8&quot;)
+    return hashlib.sha256(payload).hexdigest()[:32]
+
+txns = [
+    dict(txn_id=&quot;TXN0000001&quot;, account_id=&quot;ACC0000001&quot;, booking_date=&quot;2026-03-01&quot;,
+         memo=&quot;POS purchase groceries&quot;, counterparty=&quot;FRESHMART 04821&quot;, channel=&quot;POS&quot;),
+    dict(txn_id=&quot;TXN0000002&quot;, account_id=&quot;ACC0000001&quot;, booking_date=&quot;2026-03-01&quot;,
+         memo=&quot;ATM cash withdrawal&quot;, counterparty=&quot;ATM BRANCH 12&quot;, channel=&quot;ATM&quot;),
+    dict(txn_id=&quot;TXN0000003&quot;, account_id=&quot;ACC0000002&quot;, booking_date=&quot;2026-03-01&quot;,
+         memo=&quot;wire transfer outbound&quot;, counterparty=&quot;OFFSHORE HOLD CO LTD&quot;, channel=&quot;WIRE&quot;),
+    dict(txn_id=&quot;TXN0000004&quot;, account_id=&quot;ACC0000001&quot;, booking_date=&quot;2026-03-02&quot;,
+         memo=&quot;POS purchase groceries&quot;, counterparty=&quot;FRESHMART 04821&quot;, channel=&quot;POS&quot;),
+]
+MODEL_ID = &quot;trigram-crc32-v1&quot;
+client = QdrantClient(location=&quot;:memory:&quot;)
+client.create_collection(
+    collection_name=&quot;fraud_txn_vectors&quot;,
+    vectors_config=models.VectorParams(size=DIM, distance=models.Distance.COSINE),
+)
+points = []
+for t in txns:
+    text = compose_txn_text(t)
+    vec = embed(text)
+    pid_hex = point_id(t[&quot;txn_id&quot;], text, MODEL_ID)
+    pid_int = int(pid_hex, 16) % (2**63)
+    points.append(models.PointStruct(
+        id=pid_int, vector=vec.tolist(),
+        payload={&quot;txn_id&quot;: t[&quot;txn_id&quot;], &quot;account_id&quot;: t[&quot;account_id&quot;],
+                  &quot;booking_date&quot;: t[&quot;booking_date&quot;], &quot;text&quot;: text},
+    ))
+client.upsert(collection_name=&quot;fraud_txn_vectors&quot;, points=points)
+info = client.get_collection(&quot;fraud_txn_vectors&quot;)
+print(f&quot;upserted {len(points)} points, collection reports points_count={info.points_count}&quot;)
+
+query_vec = embed(compose_txn_text(txns[3]))
+hits = client.query_points(
+    collection_name=&quot;fraud_txn_vectors&quot;, query=query_vec.tolist(),
+    query_filter=models.Filter(must=[models.FieldCondition(
+        key=&quot;account_id&quot;, match=models.MatchValue(value=&quot;ACC0000001&quot;))]),
+    limit=5,
+).points
+for h in hits:
+    print(f&quot;  score={h.score:.4f}  txn_id={h.payload[&#x27;txn_id&#x27;]}  booking_date={h.payload[&#x27;booking_date&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>upserted 4 points, collection reports points_count=4
+  score=1.0000  txn_id=TXN0000004  booking_date=2026-03-02
+  score=1.0000  txn_id=TXN0000001  booking_date=2026-03-01
+  score=0.3419  txn_id=TXN0000002  booking_date=2026-03-01
+</code></pre><p>The <code>account_id</code> payload filter correctly excludes <code>TXN0000003</code> (a different account's
+offshore wire) from the results entirely, even though nothing about a raw cosine search would
+have known to exclude it.</p>
+<p><strong>Exercise:</strong>
+Query with a combined filter on both <code>account_id</code> AND <code>booking_date</code>, and confirm it further
+narrows the result set from Concept 3's Example.</p>
+<p><strong>Starting point:</strong> The populated <code>fraud_txn_vectors</code> collection and <code>query_vec</code> from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>  score=1.0000  txn_id=TXN0000001  booking_date=2026-03-01
+  score=0.3419  txn_id=TXN0000002  booking_date=2026-03-01
+combined account_id+booking_date filter returns 2 points (excludes TXN0000004, whose own booking_date is 2026-03-02)
+</code></pre><p>Adding the <code>booking_date</code> clause drops <code>TXN0000004</code> from its own query's results — a real,
+slightly counterintuitive consequence of querying with the exact identity of the record that
+generated the query vector, worth noticing before it surprises someone in production.</p>
+<hr />
+<h3>Concept 4 — Consumer Lag and Backpressure as the Real Health Signal</h3>
+<p>Reusing Week 06 Day 4 Concept 3's <code>BackpressureController</code> (pause/resume on two watermarks,
+preventing flapping at one boundary) and Day 3 Concept 4's <code>burn_rate</code> (lag's derivative,
+not its absolute value) unchanged — together, the two answer &quot;is the embed-and-upsert
+consumer keeping up&quot; without either flapping on noise or hiding a slow, steady decline behind
+a currently-survivable absolute lag number.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class BackpressureController:
+    def __init__(self, high_watermark, low_watermark):
+        self.high = high_watermark
+        self.low = low_watermark
+        self.paused = False
+
+    def on_queue_depth_change(self, depth):
+        if not self.paused and depth &gt;= self.high:
+            self.paused = True
+            return &quot;pause&quot;
+        if self.paused and depth &lt;= self.low:
+            self.paused = False
+            return &quot;resume&quot;
+        return None
+
+def burn_rate(lag_samples, interval_seconds):
+    return [(lag_samples[i] - lag_samples[i - 1]) / interval_seconds
+            for i in range(1, len(lag_samples))]
+
+controller = BackpressureController(high_watermark=500, low_watermark=100)
+depths = [50, 300, 520, 480, 300, 90, 40, 200, 600, 550, 80]
+for depth in depths:
+    action = controller.on_queue_depth_change(depth)
+    if action:
+        print(f&quot;depth={depth:&gt;4}  action={action}&quot;)
+
+sample_interval_s = 30
+recovering_samples = [4200, 3600, 3000, 2500, 2100]
+degrading_samples = [800, 1400, 2000, 2700, 3400]
+for label, samples in ((&quot;recovering&quot;, recovering_samples), (&quot;degrading&quot;, degrading_samples)):
+    rates = burn_rate(samples, sample_interval_s)
+    print(f&quot;{label}: current lag={samples[-1]}  latest burn rate={rates[-1]:+.1f} rec/s&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>depth= 520  action=pause
+depth=  90  action=resume
+depth= 600  action=pause
+depth=  80  action=resume
+recovering: current lag=2100  latest burn rate=-13.3 rec/s
+degrading: current lag=3400  latest burn rate=+23.3 rec/s
+</code></pre><p><strong>Exercise:</strong>
+Confirm the controller does not flap when the queue depth oscillates just above and below a
+single threshold rather than crossing both watermarks.</p>
+<p><strong>Starting point:</strong> The <code>BackpressureController</code> class from this concept's Example, freshly
+instantiated, fed the depth sequence <code>[520, 490, 510, 495, 505]</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>actions fired: [(520, &#x27;pause&#x27;)]
+total actions: 1
+</code></pre><p>Only the first value (crossing the high watermark) fires an action — every later oscillation
+stays between the two watermarks and the controller stays silently paused, exactly the
+flap-prevention the two-watermark design exists for.</p>
+<hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> The embedding model version (<code>model_id</code> inside <code>point_id</code>'s hash) is a
+decision the pipeline team owns, but the <em>source</em> transaction feed's own schema — which
+fields exist to compose into text at all — is owned by the mainframe application team, same
+as every other week. A schema change there silently changes what &quot;the same transaction&quot;
+embeds to.</p>
+<p><strong>Compliance angle:</strong> A vector store carrying <code>account_id</code> in its payload is carrying
+regulated customer data in a second location, in scope for the same access controls and
+erasure obligations as the source system — exactly Week 07 Day 1's compliance note, now
+applied to an actually-running Qdrant collection instead of a hypothetical one.</p>
+<p><strong>What breaks in production:</strong> The backpressure controller pauses consumption correctly, but
+nobody wires an alert to the pause event itself — only to the lag number, which looks
+<em>better</em> while paused because nothing new is being counted. A paused consumer can sit quietly
+falling behind for hours before the lag metric (which stopped updating) tells anyone anything
+is wrong.</p>
+<hr />
+<h2 id="day-3">Day 3 — Peer-History Anomaly Scoring</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="31-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=3N-ApbkoMO0" target="_blank" rel="noopener"><b>Nearest Neighbor Guidance for Out-of-Distribution Detection</b><small>ComputerVisionFoundation Videos · 4:41</small></a></li><li><a href="https://www.youtube.com/watch?v=RwmttGrJs08" target="_blank" rel="noopener"><b>Anomaly detection with KNN</b><small>AI with Dr. Mo · 18:24</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=anomaly%20detection%20nearest%20neighbor%20embedding%20distance%20transaction%20monitoring" target="_blank" rel="noopener">Search YouTube: anomaly detection nearest neighbor embedding distance transaction monitoring</a></p></div>
+<hr />
+<h3>Concept 1 — k-NN Distance to an Account's Own Peer History</h3>
+<p>Reusing Week 04 Day 2 Concept 2's <code>brute_force_topk</code> unchanged — retargeted here from
+&quot;nearest corpus vectors for a benchmark&quot; to &quot;nearest historical transactions for THIS
+account&quot;. The anomaly signal is distance to the account's <em>own</em> past, never to some global
+population — a transaction pattern that is completely ordinary for one account can be exactly
+what makes it anomalous for another.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+def brute_force_topk(points, query, k=10):
+    return np.argsort(np.linalg.norm(points - query, axis=1))[:k]
+
+def peer_distance_score(new_vec, history_vecs, k=3):
+    &quot;&quot;&quot;Mean distance to the k nearest historical transactions for this same
+    account -- large mean k-NN distance means &#x27;looks like nothing in this
+    account&#x27;s own past&#x27;, not &#x27;looks unusual in general&#x27;.&quot;&quot;&quot;
+    if len(history_vecs) == 0:
+        return None
+    k = min(k, len(history_vecs))
+    idx = brute_force_topk(history_vecs, new_vec, k=k)
+    dists = np.linalg.norm(history_vecs[idx] - new_vec, axis=1)
+    return float(dists.mean())
+
+# Account ACC0000001&#x27;s ordinary pattern: small recurring grocery/gas/pharmacy POS purchases.
+history_txns = [
+    dict(memo=&quot;POS purchase groceries&quot;, counterparty=&quot;FRESHMART 04821&quot;, channel=&quot;POS&quot;),
+    dict(memo=&quot;POS purchase groceries&quot;, counterparty=&quot;FRESHMART 04821&quot;, channel=&quot;POS&quot;),
+    dict(memo=&quot;POS purchase gas station&quot;, counterparty=&quot;SHELL 00931&quot;, channel=&quot;POS&quot;),
+    dict(memo=&quot;POS purchase pharmacy&quot;, counterparty=&quot;CVS 01822&quot;, channel=&quot;POS&quot;),
+    dict(memo=&quot;POS purchase groceries&quot;, counterparty=&quot;FRESHMART 04821&quot;, channel=&quot;POS&quot;),
+]
+history_vecs = np.array([embed(compose_txn_text(t)) for t in history_txns])
+
+candidate_ordinary = dict(memo=&quot;POS purchase groceries&quot;, counterparty=&quot;FRESHMART 04821&quot;, channel=&quot;POS&quot;)
+candidate_anomalous = dict(memo=&quot;wire transfer outbound to offshore holding company&quot;,
+                            counterparty=&quot;OFFSHORE HOLD CO LTD&quot;, channel=&quot;WIRE&quot;)
+for label, cand in ((&quot;ordinary&quot;, candidate_ordinary), (&quot;anomalous&quot;, candidate_anomalous)):
+    vec = embed(compose_txn_text(cand))
+    score = peer_distance_score(vec, history_vecs, k=3)
+    print(f&quot;{label:&lt;10} peer_distance_score={score:.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>ordinary   peer_distance_score=0.0000
+anomalous  peer_distance_score=1.0425
+</code></pre><p><strong>Exercise:</strong>
+Score an ATM withdrawal and a repeat gas-station purchase against the same peer history.</p>
+<p><strong>Starting point:</strong> The <code>peer_distance_score</code> function and <code>history_vecs</code> array from this
+concept's Example, plus <code>candidate_atm = dict(memo=&quot;ATM cash withdrawal&quot;, counterparty=&quot;ATM BRANCH 12&quot;, channel=&quot;ATM&quot;)</code> and <code>candidate_gas = dict(memo=&quot;POS purchase gas station&quot;, counterparty=&quot;SHELL 00931&quot;, channel=&quot;POS&quot;)</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>atm_withdrawal   peer_distance_score=1.0286
+gas_repeat       peer_distance_score=0.3984
+</code></pre><p>The ATM withdrawal scores almost as far from this account's history as the offshore wire did
+— a real, disclosed limitation of a channel-sensitive embedding stand-in: a legitimate
+<em>channel</em> change alone raises peer distance meaningfully, which is exactly why Concept 3
+combines this score with rule signals rather than trusting distance alone.</p>
+<hr />
+<h3>Concept 2 — Rule-Based Signals: Structuring, Velocity, Sanctions</h3>
+<p>Three independent rule signals, each answering a different question a distance score cannot:
+<strong>structuring</strong> (multiple transactions each sitting just under the $10,000 CTR reporting
+threshold, whose sum crosses it), <strong>velocity</strong> (more transactions in a short window than is
+plausible), and <strong>sanctions</strong> (a counterparty name matching a watchlist). <code>structuring_signal</code>
+flags the transaction that <em>completes</em> a structuring cluster looking backward — a design
+choice worth stating plainly, not the whole cluster including transactions before it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+import datetime as dt
+
+SANCTIONS_LIST = {&quot;OFFSHORE HOLD CO LTD&quot;, &quot;NORTHSTAR SHELL TRADING&quot;, &quot;VELOCITY CASH EXCHANGE&quot;}
+CTR_THRESHOLD = 10_000.00
+STRUCTURING_MARGIN = 0.10
+
+@dataclasses.dataclass
+class Txn:
+    txn_id: str
+    account_id: str
+    amount: float
+    counterparty: str
+    ts: dt.datetime
+
+def structuring_signal(account_txns, window_hours=24):
+    &quot;&quot;&quot;Flags the SPECIFIC near-threshold transactions whose look-back window
+    (also near-threshold) sums past CTR_THRESHOLD -- looking backward only, so
+    the transaction that completes a cluster is flagged, not every transaction
+    whose own window happens to contain one.&quot;&quot;&quot;
+    txns = sorted(account_txns, key=lambda t: t.ts)
+    near_threshold_all = [t for t in txns
+                           if CTR_THRESHOLD * (1 - STRUCTURING_MARGIN) &lt;= t.amount &lt; CTR_THRESHOLD]
+    hits = []
+    for t in near_threshold_all:
+        window = [u for u in near_threshold_all
+                  if 0 &lt;= (t.ts - u.ts).total_seconds() &lt;= window_hours * 3600]
+        if len(window) &gt;= 2 and sum(u.amount for u in window) &gt;= CTR_THRESHOLD:
+            hits.append(t.txn_id)
+    return sorted(set(hits))
+
+def velocity_signal(account_txns, window_minutes=60, max_count=3):
+    txns = sorted(account_txns, key=lambda t: t.ts)
+    hits = []
+    for t in txns:
+        window = [u for u in txns if 0 &lt;= (t.ts - u.ts).total_seconds() &lt;= window_minutes * 60]
+        if len(window) &gt; max_count:
+            hits.append(t.txn_id)
+    return sorted(set(hits))
+
+def sanctions_signal(txns):
+    return sorted(t.txn_id for t in txns if t.counterparty.upper() in SANCTIONS_LIST)
+
+base = dt.datetime(2026, 3, 1, 9, 0, 0)
+acct_txns = [
+    Txn(&quot;TXN1001&quot;, &quot;ACC0000009&quot;, 9200.00, &quot;FRESHMART 04821&quot;, base),
+    Txn(&quot;TXN1002&quot;, &quot;ACC0000009&quot;, 9400.00, &quot;FRESHMART 04821&quot;, base + dt.timedelta(hours=2)),
+    Txn(&quot;TXN1003&quot;, &quot;ACC0000009&quot;, 45.00, &quot;SHELL 00931&quot;, base + dt.timedelta(hours=5)),
+    Txn(&quot;TXN1004&quot;, &quot;ACC0000009&quot;, 9100.00, &quot;FRESHMART 04821&quot;, base + dt.timedelta(hours=20)),
+]
+velocity_txns = [
+    Txn(f&quot;TXN200{i}&quot;, &quot;ACC0000010&quot;, 500.00, &quot;ATM BRANCH 12&quot;, base + dt.timedelta(minutes=10*i))
+    for i in range(5)
+]
+sanctions_txns = [Txn(&quot;TXN3001&quot;, &quot;ACC0000011&quot;, 2500.00, &quot;OFFSHORE HOLD CO LTD&quot;, base)]
+print(&quot;structuring hits:&quot;, structuring_signal(acct_txns))
+print(&quot;velocity hits:&quot;, velocity_signal(velocity_txns))
+print(&quot;sanctions hits:&quot;, sanctions_signal(sanctions_txns))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>structuring hits: [&#x27;TXN1002&#x27;, &#x27;TXN1004&#x27;]
+velocity hits: [&#x27;TXN2003&#x27;, &#x27;TXN2004&#x27;]
+sanctions hits: [&#x27;TXN3001&#x27;]
+</code></pre><p><code>TXN1001</code> (the first near-threshold transaction, with no near-threshold predecessor in its
+own look-back window) is not flagged even though it is part of the same structuring
+cluster — the look-back design flags the transaction whose window shows the completed
+pattern, <code>TXN1002</code> onward, not the transaction that starts it.</p>
+<p><strong>Exercise:</strong>
+Add one more transaction to each rule's scenario and recompute all three signals.</p>
+<p><strong>Starting point:</strong> The three signal functions and three scenario lists from this concept's
+Example, plus <code>Txn(&quot;TXN1005&quot;, &quot;ACC0000009&quot;, 9300.00, &quot;FRESHMART 04821&quot;, base + dt.timedelta(hours=1))</code> appended to <code>acct_txns</code>, <code>Txn(&quot;TXN2005&quot;, &quot;ACC0000010&quot;, 500.00, &quot;ATM BRANCH 12&quot;, base + dt.timedelta(minutes=200))</code> appended to <code>velocity_txns</code>, and
+<code>Txn(&quot;TXN3002&quot;, &quot;ACC0000012&quot;, 900.00, &quot;NORTHSTAR SHELL TRADING&quot;, base)</code> appended to
+<code>sanctions_txns</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>structuring hits (5 txns): [&#x27;TXN1002&#x27;, &#x27;TXN1004&#x27;, &#x27;TXN1005&#x27;]
+velocity hits (6th txn outside window): [&#x27;TXN2003&#x27;, &#x27;TXN2004&#x27;]
+sanctions hits (2 counterparties): [&#x27;TXN3001&#x27;, &#x27;TXN3002&#x27;]
+</code></pre><p>The new <code>TXN2005</code> (200 minutes after the window start) falls well outside the 60-minute
+velocity window and does not add a new hit — velocity hits stay exactly the same two
+transactions as before.</p>
+<hr />
+<h3>Concept 3 — Normalizing and Combining Distance and Rule Signals</h3>
+<p><code>peer_distance</code> has no natural 0-1 ceiling (Concept 1's cosine-normalized-vector distances
+can exceed 1.4); the three rule signals are already booleans. Clipping distance against an
+empirically observed maximum before combining is what makes the two comparable at all —
+combining a raw distance number with a 0/1 flag with no normalization would let the units
+themselves, not the actual risk, decide which signal dominates.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def normalize_distance(d, max_expected=1.5):
+    return min(d / max_expected, 1.0)
+
+DISTANCE_WEIGHT = 0.30
+
+def combined_risk_score(c):
+    distance_component = normalize_distance(c[&quot;peer_distance&quot;]) * DISTANCE_WEIGHT
+    rule_component = (int(c[&quot;structuring_hit&quot;]) + int(c[&quot;velocity_hit&quot;]) + int(c[&quot;sanctions_hit&quot;])) / 3 * (1 - DISTANCE_WEIGHT)
+    return round(distance_component + rule_component, 4)
+
+candidates = [
+    dict(txn_id=&quot;TXN4001&quot;, peer_distance=0.02, structuring_hit=False, velocity_hit=False, sanctions_hit=False),
+    dict(txn_id=&quot;TXN4002&quot;, peer_distance=1.04, structuring_hit=False, velocity_hit=False, sanctions_hit=False),
+    dict(txn_id=&quot;TXN4003&quot;, peer_distance=0.15, structuring_hit=True, velocity_hit=False, sanctions_hit=False),
+    dict(txn_id=&quot;TXN4004&quot;, peer_distance=0.08, structuring_hit=False, velocity_hit=True, sanctions_hit=False),
+    dict(txn_id=&quot;TXN4005&quot;, peer_distance=1.30, structuring_hit=False, velocity_hit=False, sanctions_hit=True),
+]
+for c in candidates:
+    score = combined_risk_score(c)
+    c[&quot;risk_score&quot;] = score
+    print(f&quot;{c[&#x27;txn_id&#x27;]}  peer_distance={c[&#x27;peer_distance&#x27;]:.2f}  rules=&quot;
+          f&quot;[S={int(c[&#x27;structuring_hit&#x27;])} V={int(c[&#x27;velocity_hit&#x27;])} X={int(c[&#x27;sanctions_hit&#x27;])}]  &quot;
+          f&quot;risk_score={score:.4f}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>TXN4001  peer_distance=0.02  rules=[S=0 V=0 X=0]  risk_score=0.0040
+TXN4002  peer_distance=1.04  rules=[S=0 V=0 X=0]  risk_score=0.2080
+TXN4003  peer_distance=0.15  rules=[S=1 V=0 X=0]  risk_score=0.2633
+TXN4004  peer_distance=0.08  rules=[S=0 V=1 X=0]  risk_score=0.2493
+TXN4005  peer_distance=1.30  rules=[S=0 V=0 X=1]  risk_score=0.4933
+</code></pre><p><strong>Exercise:</strong>
+Score two more candidates: one with high distance AND two rule hits, one with tiny distance
+but a single sanctions hit.</p>
+<p><strong>Starting point:</strong> The <code>combined_risk_score</code>/<code>normalize_distance</code> functions and <code>candidates</code>
+list (with <code>risk_score</code> already attached) from this concept's Example, plus
+<code>candidate6 = dict(txn_id=&quot;TXN4006&quot;, peer_distance=0.90, structuring_hit=True, velocity_hit=True, sanctions_hit=False)</code> and <code>candidate7 = dict(txn_id=&quot;TXN4007&quot;, peer_distance=0.05, structuring_hit=False, velocity_hit=False, sanctions_hit=True)</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>TXN4006  peer_distance=0.90  rules=[S=1 V=1 X=0]  risk_score=0.6467
+TXN4007  peer_distance=0.05  rules=[S=0 V=0 X=1]  risk_score=0.2433
+TXN4007 (sanctions-only, tiny distance) vs TXN4001 (clean): risk_score 0.2433 vs 0.0040
+</code></pre><p><code>TXN4007</code> scores over 60x higher than the completely clean <code>TXN4001</code> on the strength of one
+sanctions hit alone, even with almost no peer-distance signal at all — a single hard rule hit
+still moves the combined score meaningfully, which is exactly the point of combining rather
+than picking one signal or the other.</p>
+<hr />
+<h3>Concept 4 — Tuning for Alert Precision at a Fixed Daily Review Volume</h3>
+<p>An analyst team can review a fixed number of alerts per day, no matter how many candidates
+score above zero. Ranking candidates by <code>combined_risk_score</code> and taking the top-N (N = daily
+review capacity) trades precision against recall exactly the way Week 26/27's evaluation
+harnesses traded metric floors against coverage — a real, measured tradeoff to report, not a
+single &quot;best&quot; number.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import random
+random.seed(31)
+
+def make_candidate(txn_id, is_fraud):
+    peer_distance = random.gauss(0.9, 0.35) if is_fraud else random.gauss(0.25, 0.25)
+    peer_distance = max(0.0, peer_distance)
+    p_rule = 0.55 if is_fraud else 0.08
+    structuring_hit = random.random() &lt; p_rule
+    velocity_hit = random.random() &lt; p_rule * 0.6
+    sanctions_hit = random.random() &lt; (0.15 if is_fraud else 0.01)
+    return dict(txn_id=txn_id, peer_distance=peer_distance, structuring_hit=structuring_hit,
+                velocity_hit=velocity_hit, sanctions_hit=sanctions_hit, is_fraud=is_fraud)
+
+FRAUD_RATE = 0.06
+N_CANDIDATES = 500
+labels = [random.random() &lt; FRAUD_RATE for _ in range(N_CANDIDATES)]
+pop_candidates = [make_candidate(f&quot;TXN{5000+i}&quot;, labels[i]) for i in range(N_CANDIDATES)]
+for c in pop_candidates:
+    c[&quot;risk_score&quot;] = combined_risk_score(c)
+ranked = sorted(pop_candidates, key=lambda c: c[&quot;risk_score&quot;], reverse=True)
+total_fraud = sum(1 for c in pop_candidates if c[&quot;is_fraud&quot;])
+print(f&quot;population: {N_CANDIDATES} candidates, {total_fraud} genuine fraud ({total_fraud/N_CANDIDATES*100:.1f}%)&quot;)
+for review_capacity in (10, 25, 50, 100):
+    top_n = ranked[:review_capacity]
+    hits = sum(1 for c in top_n if c[&quot;is_fraud&quot;])
+    precision = hits / review_capacity
+    recall = hits / total_fraud
+    print(f&quot;review_capacity={review_capacity:&gt;4}  precision={precision:.3f}  recall={recall:.3f}  &quot;
+          f&quot;fraud_caught={hits}/{total_fraud}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>population: 500 candidates, 26 genuine fraud (5.2%)
+review_capacity=  10  precision=0.700  recall=0.269  fraud_caught=7/26
+review_capacity=  25  precision=0.600  recall=0.577  fraud_caught=15/26
+review_capacity=  50  precision=0.380  recall=0.731  fraud_caught=19/26
+review_capacity= 100  precision=0.230  recall=0.885  fraud_caught=23/26
+</code></pre><p><strong>Exercise:</strong>
+Find the largest review capacity that still keeps precision at or above 0.5, sweeping every
+multiple of 5 from 5 through 200.</p>
+<p><strong>Starting point:</strong> The <code>ranked</code> list (with <code>risk_score</code> and <code>is_fraud</code> already attached)
+from this concept's Example, and a <code>precision_at(ranked_candidates, n)</code> helper.</p>
+<p>Expected output (actually run):</p>
+<pre><code>largest review_capacity with precision &gt;= 0.5: 30
+  n=   5  precision=0.800
+  n=  15  precision=0.733
+  n=  30  precision=0.500
+  n=  60  precision=0.317
+  n= 120  precision=0.200
+  n= 200  precision=0.125
+</code></pre><p>Precision falls off steeply and fairly steadily as review capacity grows — there is no
+capacity above 30 on this population that still clears a 0.5 precision floor, a genuine,
+measured constraint Day 4's re-tuning has to work within, not around.</p>
+<hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> &quot;This account's own peer history&quot; only exists as far back as the vector
+index has been fed — Week 07's staleness thread again, now mattering for a brand-new account
+with almost no history: <code>peer_distance_score</code> against 0-2 historical transactions is a much
+noisier signal than against 50, and the scoring pipeline has to know the difference rather
+than treating every account's history as equally trustworthy.</p>
+<p><strong>Compliance angle:</strong> A sanctions-list hit is not just a risk signal, it is a regulatory
+screening obligation with its own separate reporting requirements (OFAC and equivalent) —
+folding it into one blended <code>risk_score</code> alongside a soft distance signal must never obscure
+that a sanctions match needs its own dedicated, auditable trail regardless of what the
+combined score says.</p>
+<p><strong>What breaks in production:</strong> Review capacity gets cut (a headcount reduction, a hiring
+freeze) without anyone re-running Concept 4's precision sweep against the new, smaller N. The
+team keeps reviewing the same top-N alerts as before the cut, silently reviewing well past the
+point where those alerts are still mostly real fraud.</p>
+<hr />
+<h2 id="day-4">Day 4 — Human Review and Case Management</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="31-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=k9c1PBynVpA" target="_blank" rel="noopener"><b>SOC Alert Triage Explained: What Most Beginners Get Wrong</b><small>MyDFIR · 4:43</small></a></li><li><a href="https://www.youtube.com/watch?v=Go2hNDqoYHk" target="_blank" rel="noopener"><b>Transaction Monitoring: AML Alert Investigation Process with Realistic Examples</b><small>CandiMentor  · 8:28</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=AML%20alert%20triage%20case%20management%20analyst%20workflow%20investigation" target="_blank" rel="noopener">Search YouTube: AML alert triage case management analyst workflow investigation</a></p></div>
+<hr />
+<h3>Concept 1 — Alert Queue With an Evidence Bundle</h3>
+<p>An alert opened with only a risk score forces an analyst to re-derive why it fired from
+scratch. <code>EvidenceBundle</code> carries the specific triggered rules and the nearest historical
+transactions Day 3 Concept 1 already found — the exact evidence an analyst needs to make a
+disposition, generated once at alert-open time rather than re-queried during review.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+import datetime as dt
+
+@dataclasses.dataclass
+class EvidenceBundle:
+    triggered_rules: list
+    nearest_history: list
+    peer_distance: float
+    risk_score: float
+
+@dataclasses.dataclass
+class Alert:
+    alert_id: str
+    txn_id: str
+    account_id: str
+    opened_at: dt.datetime
+    evidence: EvidenceBundle
+    disposition: object = None
+
+def build_evidence_bundle(candidate, nearest_history):
+    rules = [name for name, hit in ((&quot;structuring&quot;, candidate[&quot;structuring_hit&quot;]),
+                                     (&quot;velocity&quot;, candidate[&quot;velocity_hit&quot;]),
+                                     (&quot;sanctions&quot;, candidate[&quot;sanctions_hit&quot;])) if hit]
+    return EvidenceBundle(triggered_rules=rules, nearest_history=nearest_history,
+                          peer_distance=candidate[&quot;peer_distance&quot;], risk_score=candidate[&quot;risk_score&quot;])
+
+def open_alert(alert_id, candidate, account_id, opened_at, nearest_history):
+    bundle = build_evidence_bundle(candidate, nearest_history)
+    return Alert(alert_id, candidate[&quot;txn_id&quot;], account_id, opened_at, bundle)
+
+cand = dict(txn_id=&quot;TXN9001&quot;, peer_distance=1.12, structuring_hit=False, velocity_hit=True,
+            sanctions_hit=False, risk_score=0.4)
+alert = open_alert(&quot;ALT-0001&quot;, cand, &quot;ACC0000042&quot;, dt.datetime(2026, 3, 1, 6, 5, 0),
+                    nearest_history=[(&quot;TXN8991&quot;, 1.05), (&quot;TXN8987&quot;, 1.20), (&quot;TXN8980&quot;, 1.31)])
+print(f&quot;alert={alert.alert_id}  txn={alert.txn_id}  rules={alert.evidence.triggered_rules}&quot;)
+print(f&quot;  nearest historical: {alert.evidence.nearest_history}&quot;)
+print(f&quot;  risk_score={alert.evidence.risk_score}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>alert=ALT-0001  txn=TXN9001  rules=[&#x27;velocity&#x27;]
+  nearest historical: [(&#x27;TXN8991&#x27;, 1.05), (&#x27;TXN8987&#x27;, 1.2), (&#x27;TXN8980&#x27;, 1.31)]
+  risk_score=0.4
+</code></pre><p><strong>Exercise:</strong>
+Open a second alert with two triggered rules and a shorter nearest-history list.</p>
+<p><strong>Starting point:</strong> The <code>open_alert</code>/<code>build_evidence_bundle</code> functions from this concept's
+Example, plus <code>cand2 = dict(txn_id=&quot;TXN9010&quot;, peer_distance=1.35, structuring_hit=True, velocity_hit=False, sanctions_hit=True, risk_score=0.68)</code>, <code>account_id=&quot;ACC0000055&quot;</code>,
+<code>opened_at=dt.datetime(2026, 3, 1, 7, 15, 0)</code>, <code>nearest_history=[(&quot;TXN8801&quot;, 1.29), (&quot;TXN8790&quot;, 1.40)]</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>alert=ALT-0010  txn=TXN9010  rules=[&#x27;structuring&#x27;, &#x27;sanctions&#x27;]
+  nearest historical: [(&#x27;TXN8801&#x27;, 1.29), (&#x27;TXN8790&#x27;, 1.4)]
+  risk_score=0.68
+</code></pre><hr />
+<h3>Concept 2 — Analyst Disposition Written Back as a Label</h3>
+<p>An analyst's disposition is not just a closed/open flag — <code>Verdict</code> distinguishes
+<code>CONFIRMED_FRAUD</code> (a genuine hit), <code>FALSE_POSITIVE</code> (the system was wrong), and
+<code>NEEDS_MORE_INFO</code> (escalated, not yet resolved), and the <code>Disposition</code> record carries the
+analyst's own notes. This is the label Concept 4 later feeds back into re-tuning — without
+capturing <em>who</em> decided <em>what</em>, with <em>what reasoning</em>, there is nothing to re-tune from.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from enum import Enum
+
+class Verdict(Enum):
+    CONFIRMED_FRAUD = &quot;confirmed_fraud&quot;
+    FALSE_POSITIVE = &quot;false_positive&quot;
+    NEEDS_MORE_INFO = &quot;needs_more_info&quot;
+
+@dataclasses.dataclass
+class Disposition:
+    analyst: str
+    verdict: Verdict
+    notes: str
+    dispositioned_at: dt.datetime
+
+def apply_disposition(alert, analyst, verdict, notes, at):
+    alert.disposition = Disposition(analyst, verdict, notes, at)
+    return alert
+
+apply_disposition(alert, &quot;j.alvarez&quot;, Verdict.CONFIRMED_FRAUD,
+                   &quot;velocity spike matches known mule-account pattern&quot;, dt.datetime(2026, 3, 1, 6, 40, 0))
+print(f&quot;disposition: {alert.disposition.verdict.value} by {alert.disposition.analyst}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>disposition: confirmed_fraud by j.alvarez
+</code></pre><p><strong>Exercise:</strong>
+Disposition the second alert from Concept 1's exercise as <code>NEEDS_MORE_INFO</code>, with notes
+explaining why.</p>
+<p><strong>Starting point:</strong> The <code>apply_disposition</code> function and <code>alert2</code> (<code>ALT-0010</code>) from this
+concept's Exercise starting point, dispositioned by <code>&quot;r.chen&quot;</code> at
+<code>dt.datetime(2026, 3, 1, 7, 50, 0)</code> with notes <code>&quot;sanctions hit is a common-name false match; escalating to compliance for manual OFAC check&quot;</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>disposition: needs_more_info by r.chen
+notes: sanctions hit is a common-name false match; escalating to compliance for manual OFAC check
+</code></pre><hr />
+<h3>Concept 3 — SLA Timers and Escalation for Aging Alerts</h3>
+<p>An alert's tier (derived from its own risk score) sets how long it may sit undispositioned
+before escalating — a high-risk alert gets 2 hours, medium gets 8, low gets 24. <code>sla_status</code>
+checks age against the tier's SLA only for alerts still open; a dispositioned alert is simply
+<code>&quot;closed&quot;</code>, regardless of how long it took.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>SLA_HOURS_BY_RISK = {&quot;high&quot;: 2, &quot;medium&quot;: 8, &quot;low&quot;: 24}
+
+def risk_tier(risk_score):
+    if risk_score &gt;= 0.4:
+        return &quot;high&quot;
+    if risk_score &gt;= 0.2:
+        return &quot;medium&quot;
+    return &quot;low&quot;
+
+def sla_status(alert, now):
+    if alert.disposition is not None:
+        return &quot;closed&quot;
+    tier = risk_tier(alert.evidence.risk_score)
+    sla_hours = SLA_HOURS_BY_RISK[tier]
+    age_hours = (now - alert.opened_at).total_seconds() / 3600
+    if age_hours &gt; sla_hours:
+        return f&quot;ESCALATE (tier={tier}, sla={sla_hours}h, age={age_hours:.1f}h)&quot;
+    return f&quot;within SLA (tier={tier}, sla={sla_hours}h, age={age_hours:.1f}h)&quot;
+
+open_alert_c3 = open_alert(&quot;ALT-0002&quot;, dict(txn_id=&quot;TXN9002&quot;, peer_distance=1.4, structuring_hit=True,
+                                             velocity_hit=False, sanctions_hit=True, risk_score=0.55),
+                            &quot;ACC0000043&quot;, dt.datetime(2026, 3, 1, 3, 0, 0), [])
+print(sla_status(open_alert_c3, now=dt.datetime(2026, 3, 1, 6, 30, 0)))
+print(sla_status(alert, now=dt.datetime(2026, 3, 1, 9, 0, 0)))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>ESCALATE (tier=high, sla=2h, age=3.5h)
+closed
+</code></pre><p><code>alert</code> (<code>ALT-0001</code>) reports <code>closed</code> because Concept 2 already dispositioned it — its age no
+longer matters once a verdict exists.</p>
+<p><strong>Exercise:</strong>
+Track a fresh low-tier alert across three time checkpoints: within SLA, still within SLA, and
+past it.</p>
+<p><strong>Starting point:</strong> The <code>sla_status</code>/<code>risk_tier</code> functions from this concept's Example, a new
+<code>open_alert_c3b = open_alert(&quot;ALT-0003&quot;, dict(txn_id=&quot;TXN9003&quot;, peer_distance=0.3, structuring_hit=False, velocity_hit=False, sanctions_hit=False, risk_score=0.15), &quot;ACC0000044&quot;, dt.datetime(2026, 3, 1, 1, 0, 0), [])</code>, checked at <code>+5h</code>, <code>+12h</code>, and <code>+26h</code>
+from its <code>opened_at</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>+ 5h: within SLA (tier=low, sla=24h, age=5.0h)
++12h: within SLA (tier=low, sla=24h, age=12.0h)
++26h: ESCALATE (tier=low, sla=24h, age=26.0h)
+</code></pre><hr />
+<h3>Concept 4 — Closing the Loop: Re-Tuning Thresholds From Dispositions</h3>
+<p>Once a batch of alerts carries real analyst dispositions, <code>precision_by_signal</code> measures each
+rule's actual confirmed-fraud rate directly from those labels — the number that should drive
+whether a signal's weight goes up or down next cycle, replacing Day 3's synthetic ground
+truth with genuine review outcomes. <code>recommend_threshold</code> sweeps the batch's own risk scores
+and returns the lowest threshold that still meets a target precision, closing the loop Day 3
+Concept 4 opened.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import random
+random.seed(72)
+
+@dataclasses.dataclass
+class DispositionedAlert:
+    alert_id: str
+    triggered_rules: list
+    risk_score: float
+    verdict: Verdict
+
+def make_review_batch(n):
+    batch = []
+    for i in range(n):
+        is_fraud = random.random() &lt; 0.35
+        rules = []
+        if random.random() &lt; (0.7 if is_fraud else 0.25):
+            rules.append(&quot;structuring&quot;)
+        if random.random() &lt; (0.5 if is_fraud else 0.10):
+            rules.append(&quot;velocity&quot;)
+        if random.random() &lt; (0.2 if is_fraud else 0.02):
+            rules.append(&quot;sanctions&quot;)
+        risk_score = round(random.uniform(0.55, 0.95) if is_fraud else random.uniform(0.15, 0.6), 3)
+        verdict = Verdict.CONFIRMED_FRAUD if is_fraud else Verdict.FALSE_POSITIVE
+        batch.append(DispositionedAlert(f&quot;ALT-{2000+i}&quot;, rules, risk_score, verdict))
+    return batch
+
+def precision_by_signal(dispositioned):
+    result = {}
+    for signal in (&quot;structuring&quot;, &quot;velocity&quot;, &quot;sanctions&quot;):
+        fired = [a for a in dispositioned if signal in a.triggered_rules]
+        if not fired:
+            result[signal] = None
+            continue
+        hits = sum(1 for a in fired if a.verdict == Verdict.CONFIRMED_FRAUD)
+        result[signal] = hits / len(fired)
+    return result
+
+def recommend_threshold(dispositioned, target_precision):
+    thresholds = sorted({a.risk_score for a in dispositioned})
+    best = None
+    for t in thresholds:
+        above = [a for a in dispositioned if a.risk_score &gt;= t]
+        if not above:
+            continue
+        hits = sum(1 for a in above if a.verdict == Verdict.CONFIRMED_FRAUD)
+        precision = hits / len(above)
+        if precision &gt;= target_precision:
+            if best is None or t &lt; best:
+                best = t
+    return best
+
+batch = make_review_batch(200)
+sigs = precision_by_signal(batch)
+for signal, prec in sigs.items():
+    print(f&quot;signal={signal:&lt;12} precision-when-fired={prec:.3f}&quot; if prec is not None
+          else f&quot;signal={signal:&lt;12} never fired in this batch&quot;)
+for target in (0.5, 0.6, 0.7):
+    t = recommend_threshold(batch, target)
+    print(f&quot;target_precision={target}  recommended_threshold={t}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>signal=structuring  precision-when-fired=0.526
+signal=velocity     precision-when-fired=0.676
+signal=sanctions    precision-when-fired=0.846
+target_precision=0.5  recommended_threshold=0.418
+target_precision=0.6  recommended_threshold=0.491
+target_precision=0.7  recommended_threshold=0.528
+</code></pre><p>Sanctions hits carry the highest confirmed-fraud precision by a wide margin — exactly what
+Concept 3's Day 3 combining logic already weighted correctly by treating a sanctions hit as a
+hard, high-value signal.</p>
+<p><strong>Exercise:</strong>
+Build a smaller, 80-alert review batch and re-measure both signal precision and the
+recommended threshold at a 0.55 target.</p>
+<p><strong>Starting point:</strong> The <code>make_review_batch</code>/<code>precision_by_signal</code>/<code>recommend_threshold</code>
+functions from this concept's Example, called as <code>make_review_batch(80)</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>signal=structuring  precision-when-fired=0.657
+signal=velocity     precision-when-fired=0.810
+signal=sanctions    precision-when-fired=0.750
+target_precision=0.55  recommended_threshold (80-alert batch)=0.423
+</code></pre><p>The signal precision ranking shifts (velocity edges out sanctions on this smaller batch) — a
+genuine, disclosed reminder that a re-tuning batch's own size affects how stable its measured
+precision numbers are, not a contradiction of Concept 4's Example.</p>
+<hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> An analyst's disposition workflow usually already exists as a separate
+case-management system the compliance team owns and audits independently — this pipeline's
+job is to feed it a well-evidenced alert queue, not to replace it, and the SLA timers here
+have to match whatever SLA the compliance team has already committed to regulators.</p>
+<p><strong>Compliance angle:</strong> <code>Disposition.notes</code> is the auditable record of <em>why</em> a human closed an
+alert a certain way — for a regulator reviewing a sample of closed alerts after the fact, a
+disposition with no notes is functionally indistinguishable from a disposition nobody actually
+reviewed.</p>
+<p><strong>What breaks in production:</strong> Re-tuning (Concept 4) runs against a review batch that is
+itself risk-skewed — analysts only ever see the alerts that already cleared a threshold, never
+the ones that didn't. A rule's true precision across the WHOLE population can differ
+substantially from its precision-when-fired inside an already-filtered review batch, and
+nothing in Concept 4's own numbers warns about that selection bias on its own.</p>
+<hr />
+<h2 id="day-5">Day 5 — Latency SLOs and Legacy Close-Out</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="31-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=Yy3xruHn2G0" target="_blank" rel="noopener"><b>SLOs, Error Budgets &amp; Burn Rate Alerts Explained | Observability from Scratch, Lesson 6 (Final)</b><small>Phani Thaticharla · 9:57</small></a></li><li><a href="https://www.youtube.com/watch?v=a1o2oFhfbkU" target="_blank" rel="noopener"><b>SLOs in OpenObserve: Track Error Budgets &amp; Burn Rate (Reliability Made Simple)</b><small>OpenObserve · 4:13</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=SLO%20error%20budget%20burn%20rate%20multi%20window%20alerting%20streaming%20pipeline" target="_blank" rel="noopener">Search YouTube: SLO error budget burn rate multi window alerting streaming pipeline</a></p></div>
+<hr />
+<h3>Concept 1 — End-to-End p95 Budget, Stage by Stage</h3>
+<p>The pipeline's honest end-to-end latency is the sum of each stage's own p95, from the moment
+a record is replayed off the nightly extract to the moment an alert opens — never a single
+guessed number. Reusing Week 07 Day 5 Concept 1's <code>achievable_freshness</code>-style per-stage
+budgeting, applied to this week's own four streaming stages plus Day 4's human-review stage.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import dataclasses
+
+@dataclasses.dataclass
+class PipelineStage:
+    name: str
+    p50_ms: float
+    p95_ms: float
+
+STAGES = [
+    PipelineStage(&quot;mainframe extract to Kafka replay (Day 1)&quot;, 50, 120),
+    PipelineStage(&quot;streaming embed + Qdrant upsert (Day 2)&quot;, 18, 45),
+    PipelineStage(&quot;peer-history k-NN + rule scoring (Day 3)&quot;, 6, 22),
+    PipelineStage(&quot;alert opened with evidence bundle (Day 4)&quot;, 3, 10),
+]
+
+def end_to_end_budget(stages):
+    return sum(s.p50_ms for s in stages), sum(s.p95_ms for s in stages)
+
+p50_total, p95_total = end_to_end_budget(STAGES)
+print(f&quot;end-to-end p50: {p50_total:.0f} ms   end-to-end p95 (sum of stage p95s): {p95_total:.0f} ms&quot;)
+for s in STAGES:
+    print(f&quot;  {s.name:&lt;48} p50={s.p50_ms:&gt;5.0f}ms  p95={s.p95_ms:&gt;5.0f}ms&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>end-to-end p50: 77 ms   end-to-end p95 (sum of stage p95s): 197 ms
+  mainframe extract to Kafka replay (Day 1)        p50=   50ms  p95=  120ms
+  streaming embed + Qdrant upsert (Day 2)          p50=   18ms  p95=   45ms
+  peer-history k-NN + rule scoring (Day 3)         p50=    6ms  p95=   22ms
+  alert opened with evidence bundle (Day 4)        p50=    3ms  p95=   10ms
+</code></pre><p><strong>Exercise:</strong>
+Add Day 4's human-review stage (a genuinely different order of magnitude — hours, not
+milliseconds) and compare the streaming-only p95 against the full end-to-end p95 including
+review.</p>
+<p><strong>Starting point:</strong> The <code>PipelineStage</code>/<code>end_to_end_budget</code>/<code>STAGES</code> from this concept's
+Example, plus <code>review_stage = PipelineStage(&quot;SLA-timed human review to disposition (Day 4)&quot;, 2 * 3600, 8 * 3600)</code> (its p50/p95 are Day 4's own high-tier and low-tier SLA hours, in
+seconds).</p>
+<p>Expected output (actually run):</p>
+<pre><code>end-to-end p50 including human review: 2.02h   p95: 8.05h
+streaming-only p95 (excludes human review): 197 ms = 0.197s
+human review dominates the total: review p95 alone is 146x the whole streaming path&#x27;s p95
+</code></pre><p>The entire streaming path — Days 1 through 4's alert-opening machinery — adds well under a
+second at p95; the pipeline's real end-to-end latency floor is set almost entirely by how long
+a human takes to disposition an alert, not by anything this week engineered.</p>
+<hr />
+<h3>Concept 2 — SLO, Error Budget, and Multi-Window Burn-Rate Alerting</h3>
+<p>Reusing <code>Curriculum/Week_17_Capstone_Scale/W17_D3_Pipeline_Monitoring.ipynb</code> CONCEPT 4's
+<code>SLO</code> dataclass unchanged (error budget as <code>1 - target</code>, burn rate as the error rate divided
+by that budget fraction, and a two-window PAGE/TICKET/None alert rule) — the SLI here is
+&quot;fraction of streaming-sourced alerts delivered within their p95 latency budget&quot;, not
+pipeline-run success, but the dataclass itself needs no change at all to carry a different
+SLI.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from typing import Optional
+
+@dataclasses.dataclass
+class SLO:
+    name: str
+    sli_description: str
+    target: float
+    window_days: int = 30
+
+    @property
+    def error_budget_fraction(self) -&gt; float:
+        return 1.0 - self.target
+
+    def error_budget_minutes(self) -&gt; float:
+        return self.window_days * 24 * 60 * self.error_budget_fraction
+
+    def burn_rate(self, current_error_rate: float) -&gt; float:
+        if self.error_budget_fraction == 0:
+            return float(&quot;inf&quot;)
+        return current_error_rate / self.error_budget_fraction
+
+    def budget_remaining(self, errors_so_far: int, total_events: int) -&gt; float:
+        if total_events == 0:
+            return 1.0
+        actual_error_rate = errors_so_far / total_events
+        consumed = actual_error_rate / self.error_budget_fraction
+        return max(0.0, 1.0 - consumed)
+
+    def alert(self, burn_rate_1h: float, burn_rate_6h: float) -&gt; Optional[str]:
+        if burn_rate_1h &gt; 14 and burn_rate_6h &gt; 14:
+            return &quot;PAGE -- fast burn: budget exhausted in ~2 days&quot;
+        if burn_rate_1h &gt; 5 and burn_rate_6h &gt; 5:
+            return &quot;TICKET -- slow burn: budget exhausted in ~6 days&quot;
+        return None
+
+streaming_slo = SLO(name=&quot;fraud-alert-streaming-latency&quot;,
+                     sli_description=&quot;fraction of streaming-sourced alerts delivered within the 200ms p95 budget&quot;,
+                     target=0.98, window_days=30)
+print(f&quot;SLO target: {streaming_slo.target*100:.1f}%  error budget: {streaming_slo.error_budget_fraction*100:.2f}%  &quot;
+      f&quot;= {streaming_slo.error_budget_minutes():.0f} min over {streaming_slo.window_days} days&quot;)
+late_events, total_events = 340, 10_000
+br = streaming_slo.burn_rate(late_events / total_events)
+remaining = streaming_slo.budget_remaining(late_events, total_events)
+print(f&quot;current state: {late_events}/{total_events} alerts missed the budget&quot;)
+print(f&quot;burn rate: {br:.2f}x   budget remaining: {remaining*100:.1f}%&quot;)
+print(f&quot;alert: {streaming_slo.alert(burn_rate_1h=br, burn_rate_6h=br*0.7)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>SLO target: 98.0%  error budget: 2.00%  = 864 min over 30 days
+current state: 340/10000 alerts missed the budget
+burn rate: 1.70x   budget remaining: 0.0%
+alert: None
+</code></pre><p>Budget remaining floors at 0.0% (clamped, per the dataclass's own <code>max(0.0, ...)</code>) — this
+30-day window has already exhausted its error budget on the streaming SLI alone, even though
+the burn rate itself (1.70x) is nowhere near either alert threshold.</p>
+<p><strong>Exercise:</strong>
+Build a second SLO for Day 4's human-review SLA adherence (95% of high-tier alerts
+dispositioned within their 2-hour SLA) and evaluate it against a real breach count.</p>
+<p><strong>Starting point:</strong> The <code>SLO</code> dataclass from this concept's Example, plus
+<code>review_sla_slo = SLO(name=&quot;human-review-sla-adherence&quot;, sli_description=&quot;fraction of high-tier alerts dispositioned within their 2h SLA&quot;, target=0.95, window_days=30)</code> and a
+state of <code>breached, total = 41, 500</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>SLO target: 95.0%  error budget: 5.00%  = 2160 min over 30 days
+current state: 41/500 high-tier alerts breached their SLA
+burn rate: 1.64x   budget remaining: 0.0%
+alert: None
+</code></pre><p>Both this week's SLOs land in the same shape — budget already exhausted, burn rate still
+below either alert threshold — a genuine, disclosed finding: a burn-rate alert catches a
+<em>worsening</em> trend, not a budget that is already spent but stable. A pipeline that has been
+quietly over budget for its whole 30-day window at a flat rate never pages on burn rate alone;
+<code>budget_remaining</code> hitting zero is its own separate signal worth alerting on directly.</p>
+<hr />
+<h3>Concept 3 — Full Demo Run: Fixed-Width Bytes to Dispositioned Alert</h3>
+<p>One raw <code>TXN-RECORD</code> byte string, decoded, embedded, scored against peer history, combined
+with rule signals, opened as an alert, and dispositioned — every function reused from Days
+1 through 4 unchanged, run here in the same continuous namespace this whole file already
+executes in.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code># Reusing Day 1 Concept 1&#x27;s unpack_comp3/unpack_zoned/pack_comp3/pack_zoned/
+# make_txn_record/decode_txn_record, Day 2 Concept 1&#x27;s embed()/compose_txn_text,
+# Day 3 Concepts 1 and 3&#x27;s brute_force_topk/peer_distance_score/normalize_distance/
+# combined_risk_score, and Day 4 Concept 1&#x27;s open_alert/build_evidence_bundle --
+# all already defined earlier in this same file, in document order.
+
+raw_record = make_txn_record(&quot;TXN0099001&quot;, &quot;ACC0000077&quot;, Decimal(&quot;2500.00&quot;), Decimal(&quot;100.00&quot;),
+                              &quot;WIRE&quot;, &quot;20260301220000&quot;)
+txn = decode_txn_record(raw_record)
+print(f&quot;1. decoded from raw bytes: {txn}&quot;)
+
+history_txns_demo = [
+    dict(memo=&quot;POS purchase groceries&quot;, counterparty=&quot;FRESHMART 04821&quot;, channel=&quot;POS&quot;),
+    dict(memo=&quot;POS purchase gas station&quot;, counterparty=&quot;SHELL 00931&quot;, channel=&quot;POS&quot;),
+]
+history_vecs_demo = np.array([embed(compose_txn_text(t)) for t in history_txns_demo])
+txn_text = f&quot;wire transfer outbound | counterparty=OFFSHORE HOLD CO LTD | channel={txn[&#x27;channel&#x27;]}&quot;
+txn_vec = embed(txn_text)
+distance = peer_distance_score(txn_vec, history_vecs_demo, k=2)
+print(f&quot;2. composed text: {txn_text!r}\n   peer_distance_score={distance:.4f}&quot;)
+
+sanctions_hit = &quot;OFFSHORE HOLD CO LTD&quot; in SANCTIONS_LIST
+demo_candidate = dict(txn_id=txn[&quot;txn_id&quot;], peer_distance=distance, structuring_hit=False,
+                       velocity_hit=False, sanctions_hit=sanctions_hit)
+risk_score = combined_risk_score(demo_candidate)
+demo_candidate[&quot;risk_score&quot;] = risk_score
+print(f&quot;3. rule signals: sanctions_hit={sanctions_hit}  risk_score={risk_score}&quot;)
+
+demo_alert = open_alert(&quot;ALT-DEMO-01&quot;, demo_candidate, txn[&quot;account_id&quot;],
+                         dt.datetime(2026, 3, 2, 4, 41, 0), nearest_history=[])
+demo_alert.disposition = &quot;confirmed_fraud (analyst: m.osei, OFAC-listed counterparty confirmed)&quot;
+print(f&quot;4. {demo_alert.alert_id}  rules={demo_alert.evidence.triggered_rules}  &quot;
+      f&quot;risk_score={demo_alert.evidence.risk_score}  disposition={demo_alert.disposition}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>1. decoded from raw bytes: {&#x27;txn_id&#x27;: &#x27;TXN0099001&#x27;, &#x27;account_id&#x27;: &#x27;ACC0000077&#x27;, &#x27;amount&#x27;: Decimal(&#x27;2500&#x27;), &#x27;balance_after&#x27;: Decimal(&#x27;100&#x27;), &#x27;channel&#x27;: &#x27;WIRE&#x27;, &#x27;ts&#x27;: &#x27;20260301220000&#x27;}
+2. composed text: &#x27;wire transfer outbound | counterparty=OFFSHORE HOLD CO LTD | channel=WIRE&#x27;
+   peer_distance_score=0.9989
+3. rule signals: sanctions_hit=True  risk_score=0.4331
+4. ALT-DEMO-01  rules=[&#x27;sanctions&#x27;]  risk_score=0.4331  disposition=confirmed_fraud (analyst: m.osei, OFAC-listed counterparty confirmed)
+</code></pre><p>A byte string sliced at offset 20-26 for <code>TXN-AMOUNT</code> traces, unbroken, all the way to a
+dispositioned fraud alert — every intermediate step genuinely executed, not asserted.</p>
+<p><strong>Exercise:</strong>
+Run an ordinary grocery purchase through the same end-to-end pipeline and confirm it scores
+far below the offshore-wire demo.</p>
+<p><strong>Starting point:</strong> Every function and <code>history_vecs_demo</code> from this concept's Example, plus
+<code>raw_record2 = make_txn_record(&quot;TXN0099002&quot;, &quot;ACC0000077&quot;, Decimal(&quot;45.50&quot;), Decimal(&quot;54.50&quot;), &quot;POS &quot;, &quot;20260301083000&quot;)</code>.</p>
+<p>Expected output (actually run):</p>
+<pre><code>decoded: {&#x27;txn_id&#x27;: &#x27;TXN0099002&#x27;, &#x27;account_id&#x27;: &#x27;ACC0000077&#x27;, &#x27;amount&#x27;: Decimal(&#x27;45.5&#x27;), &#x27;balance_after&#x27;: Decimal(&#x27;54.5&#x27;), &#x27;channel&#x27;: &#x27;POS&#x27;, &#x27;ts&#x27;: &#x27;20260301083000&#x27;}
+composed text: &#x27;POS purchase groceries | counterparty=FRESHMART 04821 | channel=POS&#x27;
+peer_distance_score=0.3156  risk_score=0.0631
+ordinary grocery purchase against the same peer history scores far below the offshore-wire example (0.0631 vs 0.4331) -- the pipeline correctly tells the two apart end to end
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> Every latency number in Concept 1's stage table is honest only up to the
+point the nightly extract lands — exactly Week 07's own closing lesson, now measured against
+this week's specific pipeline instead of stated abstractly. No amount of tuning Days 2-4's
+streaming stages moves the batch drop time itself.</p>
+<p><strong>Compliance angle:</strong> A written, versioned SLO for &quot;time from batch drop to dispositioned
+alert&quot; is the evidence artifact a regulator or auditor actually wants when asking how quickly
+this institution detects and reports suspicious activity — a defensible number beats a vague
+assurance every time.</p>
+<p><strong>What breaks in production:</strong> Someone reports &quot;the pipeline is fast&quot; citing Concept 1's
+197ms streaming p95, in a conversation about how quickly the institution can detect fraud from
+the nightly file. The honest answer is bounded below by the batch window (Week 07 Day 4's
+floor, this week roughly 4:40 AM plus a few hundred milliseconds), not by anything this week's
+streaming engineering controls — the 197ms number is real and worth reporting, but reporting
+it without the batch-window floor beside it is exactly the failure mode Week 07's Architecture
+Decision named.</p>
+<hr />
+<h2>Architecture Decision — Week 31</h2>
+<p><strong>Choosing between:</strong> near-real-time streaming fraud/AML detection (this week's pipeline:
+replay, embed, score, alert, all within a couple hundred milliseconds of a record reaching
+Kafka) and true real-time detection (scoring a transaction before it settles, in the
+authorization path itself) — decided against what Day 1 established as this system's actual
+source of truth: a nightly mainframe batch cycle.</p>
+<p><strong>Rule of thumb:</strong> Build near-real-time streaming detection, exactly this week's pipeline, when
+the source itself is periodic — a nightly extract, an end-of-day settlement file, any batch
+cycle this pipeline does not control — because true real-time detection promises a guarantee
+the source cannot back up. Day 5 Concept 1's own numbers make the case directly: the streaming
+path adds under 200ms end to end, but the <em>earliest</em> any of that streaming engineering can
+possibly start is gated by Day 1's batch drop time, itself many hours behind the transactions
+it describes. Promising &quot;real-time fraud detection&quot; against data that is, by construction,
+already hours old at the moment it first becomes visible is exactly the failure mode Week 07's
+own closing Architecture Decision named for CDC sources — a written promise the source was
+never going to keep — now demonstrated end to end against a working pipeline instead of argued
+in the abstract.</p>
+<p>True real-time detection is the right target only when the transaction itself streams live —
+a card-authorization system with a synchronous, sub-100ms decision in the actual payment path,
+where the source of truth is the authorization request itself, not a downstream extract of it.
+That is a genuinely different system, with a genuinely different latency budget (the p95
+figures in this week's own Day 5 Concept 1 would be an order of magnitude too generous for an
+authorization decision), a different failure mode (a slow score blocks a real transaction
+instead of merely delaying an alert), and a different acceptable false-positive cost (declining
+a legitimate purchase in real time costs a customer relationship in a way a same-day analyst
+review does not). Migrating this week's pipeline toward that target is not a matter of tuning
+Day 2's micro-batcher down to batch size 1 — it requires a genuinely different source
+integration, one this week's mainframe-sourced system does not have and, per Week 07's own
+capability matrix, cannot be made to have without a different source system entirely.</p>
+<p>The professional deliverable this capstone — and this entire 31-week track — has been
+building toward is not &quot;the fastest possible pipeline.&quot; It is a pipeline that is honest, in
+writing, about exactly how fresh its answers are: Week 07's per-record provenance and
+staleness budget, now closed by this week's own working demonstration that near-real-time
+streaming detection against a nightly-batch source of truth is not a compromise to apologize
+for. It is the correct engineering answer to the source's own real constraints, stated
+plainly rather than disguised as something faster than it is — the same discipline every
+capstone in Phase 6, and every Royal Road Standard since Week 01, has asked for: know exactly
+what your system actually guarantees, and never claim more than that in front of a regulator,
+an analyst, or a customer whose transaction it just flagged.</p>
+<div class="pager"><a class="btn ghost" href="week-30.html">&larr; Week 30</a><span></span></div>
+</main></body></html>

@@ -1,0 +1,1060 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 10 — Synthetic Data Curation for FinServ</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="10" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 10 — Synthetic Data Curation for FinServ</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>2 — Advanced AI Data Pipelines / DataPrep for LLMs</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Expert</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Comfort with Python dicts/functions, basic regex, and Week 01's normalization/generalization ideas. No prior Faker experience assumed.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>6–8 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>None yet. This week is markdown-only — every EXECUTED example below was actually run in this sandbox to produce its <code>Expected output:</code>, but no <code>.ipynb</code> has been built for it yet. One block (Day 4, Concept 1) needs a live LLM API and is marked REAL MODE with API-correct shape and hand-written illustrative text, clearly labelled as not model-generated.</td>
+</tr>
+</tbody>
+</table>
+<p>This is the track's second <strong>[legacy/PII thread]</strong> week (after Week 07's CDC-from-legacy
+week). The problem here is different: Weeks 08-09 assumed you already have documents to
+parse and chunk. This week is about what you feed a dev/test environment <em>before</em> any of
+that — because a half-migrated AWS estate with real claims and transactions sitting in an
+on-prem MSSQL box is exactly the setup where &quot;just copy prod to a dev database&quot; is both the
+easiest thing to do and the thing that gets a bank fined. Faker builds the structured skeleton
+(names, IBANs, policy numbers) with real reproducibility guarantees; an LLM API — not
+executable in this sandbox, so shown as REAL MODE — is where the free-text narrative layer
+that templates alone can't produce would come from; and the back half of the week is the
+discipline that makes either one defensible: measuring how well synthetic data matches real
+aggregate statistics without ever touching a real record, and proving no real PII pattern
+survived the generation process.</p>
+<hr />
+<h2 id="day-1">Day 1 — Data Residency and PII Rules</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="10-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=HIusawrGBN4" target="_blank" rel="noopener"><b>What is Synthetic Data? No, It&#x27;s Not &quot;Fake&quot; Data</b><small>IBM Technology · 6:49</small></a></li><li><a href="https://www.youtube.com/watch?v=IkgOZC826YU" target="_blank" rel="noopener"><b>Synthetic Data in Orthopaedic AI: Ethics and Implementation</b><small>The Arm Doc · 35:01</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=synthetic%20data%20vs%20production%20data%20privacy%20GDPR%20data%20residency" target="_blank" rel="noopener">Search YouTube: synthetic data vs production data privacy GDPR data residency</a></p></div>
+<hr />
+<h3>Concept 1 — A Masked Production Copy Is Still In Scope</h3>
+<p>&quot;We masked it&quot; is not the same claim as &quot;it is out of regulatory scope.&quot; Masking hides a
+column at display time; it does nothing about the <em>other</em> columns sitting next to it. If a
+record still carries a 5-digit ZIP code, an exact birth date, and a sex flag, those three
+fields alone are often enough to re-identify a specific person even after the account
+number and name are gone — a fact from the re-identification literature (Sweeney's 1997
+finding on U.S. voter records, using the same three quasi-identifiers), not a hypothetical.</p>
+<p>The fix is not &quot;mask more columns,&quot; it is generalizing the columns you keep until no
+combination of them singles out one person. That is a different operation from masking,
+and it is the one that actually moves data out of scope.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from faker import Faker
+from collections import Counter
+
+Faker.seed(11)
+f = Faker()
+
+n = 2000
+records = []
+for _ in range(n):
+    zipcode = f.zipcode()
+    dob = f.date_of_birth(minimum_age=18, maximum_age=90)
+    sex = f.random_element([&#x27;M&#x27;, &#x27;F&#x27;])
+    records.append({
+        &#x27;zip5&#x27;: zipcode,
+        &#x27;zip1&#x27;: zipcode[0],
+        &#x27;birth_date&#x27;: dob,
+        &#x27;birth_decade&#x27;: (dob.year // 10) * 10,
+        &#x27;sex&#x27;: sex,
+    })
+
+def unique_fraction(recs, keys):
+    combos = Counter(tuple(r[k] for k in keys) for r in recs)
+    singleton = sum(1 for c in combos.values() if c == 1)
+    return singleton / len(recs), len(combos)
+
+fine_frac, fine_combos = unique_fraction(records, [&#x27;zip5&#x27;, &#x27;birth_date&#x27;, &#x27;sex&#x27;])
+coarse_frac, coarse_combos = unique_fraction(records, [&#x27;zip1&#x27;, &#x27;birth_decade&#x27;, &#x27;sex&#x27;])
+print(f&#x27;n = {n}&#x27;)
+print(f&#x27;fine   (zip5 + exact birth date + sex)    : {fine_combos} distinct combos, {fine_frac:.3f} of records uniquely identified&#x27;)
+print(f&#x27;coarse (zip 1st digit + birth decade + sex): {coarse_combos} distinct combos, {coarse_frac:.3f} of records uniquely identified&#x27;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>n = 2000
+fine   (zip5 + exact birth date + sex)    : 2000 distinct combos, 1.000 of records uniquely identified
+coarse (zip 1st digit + birth decade + sex): 160 distinct combos, 0.001 of records uniquely identified
+</code></pre><p><strong>Exercise:</strong>
+Re-run the same comparison at <code>n = 5000</code> with a different seed, and confirm the pattern
+holds: the fine combination re-identifies essentially everyone, the coarse one almost no
+one.</p>
+<p><strong>Starting point:</strong> The <code>unique_fraction(recs, keys)</code> helper and the record-building loop
+from this concept's Example, re-run with <code>Faker.seed(15)</code> and <code>n = 5000</code>.</p>
+<p>Expected output: fine combo still at 1.000 (5000/5000 distinct), coarse combo at 0.000
+(160 distinct combos covering all 5000 records, none a singleton) — the conclusion doesn't
+depend on the particular seed or sample size.</p>
+<hr />
+<h3>Concept 2 — PCI-DSS Scope Reduction Is a Practical Driver, Not a Slogan</h3>
+<p>PCI-DSS Requirement 3.4.1 (v4.0; numbered 3.3 under the earlier v3.2.1 standard) sets a
+<em>display</em> rule: when a primary account number (PAN) is shown, no more than the first six
+and last four digits may appear. That is the rule behind
+every receipt printed as <code>4716 20** **** 0028</code>. It is easy to mistake that display rule for
+a scope-reduction technique, and they are not the same thing: the full PAN still exists in
+storage behind the mask, so the system storing it is still in PCI-DSS scope. Actual scope
+reduction means the real PAN is never present at all — tokenized at the point of capture, or
+in this case, never generated as a real number in the first place because the environment
+is fully synthetic.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from faker import Faker
+
+Faker.seed(31)
+f = Faker()
+
+def pci_display_mask(pan):
+    return pan[:6] + (&#x27;*&#x27; * (len(pan) - 10)) + pan[-4:]
+
+pans = [f.credit_card_number(card_type=&#x27;visa16&#x27;) for _ in range(3)]
+for pan in pans:
+    print(f&#x27;{pan}  -&gt;  display-masked: {pci_display_mask(pan)}&#x27;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>4716202183220028  -&gt;  display-masked: 471620******0028
+4878639110653355  -&gt;  display-masked: 487863******3355
+4593336980025236  -&gt;  display-masked: 459333******5236
+</code></pre><p><strong>Exercise:</strong>
+Apply <code>pci_display_mask</code> to card numbers of two different lengths (16-digit Visa and
+15-digit Amex) and confirm the masked output always shows exactly 6 leading and 4 trailing
+digits regardless of total length — the middle simply grows or shrinks.</p>
+<p><strong>Starting point:</strong> The <code>pci_display_mask(pan)</code> function from this concept's Example, and
+<code>f.credit_card_number(card_type='visa16')</code> plus <code>f.credit_card_number(card_type='amex')</code>
+with <code>Faker.seed(31)</code>.</p>
+<p>Expected output:</p>
+<pre><code>4716202183220028 (len=16) -&gt; 471620******0028  hidden_digits=6
+348786391106536 (len=15) -&gt; 348786*****6536  hidden_digits=5
+</code></pre><p>6 hidden digits on the 16-digit card, 5 on the 15-digit card — the visible 10 digits
+(6 + 4) never change, only the masked middle does.</p>
+<hr />
+<h3>Concept 3 — Synthetic, Anonymized and Pseudonymized Are Three Different Things</h3>
+<p>These three words get used interchangeably in casual conversation and mean genuinely
+different things under GDPR and in practice:</p>
+<ul>
+<li><strong>Pseudonymized</strong> data replaces an identifier with a token generated from it — typically
+a keyed hash — so the same input always produces the same token (joins across tables
+still work) but the mapping requires a key to reverse. GDPR still treats this as personal
+data, because it <em>is</em> reversible given the key.</li>
+<li><strong>Anonymized</strong> data has identifiers generalized or removed until no reasonable means of
+re-identification remains — no key exists that undoes it, because the specific values
+were never kept.</li>
+<li><strong>Synthetic</strong> data has no per-record link to any real individual at all — it was
+generated fresh, and there is nothing to re-identify because nothing behind it ever
+existed.</li>
+</ul>
+<p>Only the third is genuinely outside GDPR's scope from the start. The first still requires
+protecting a key; the second requires a real generalization/suppression process applied
+correctly (Concept 1's failure mode is exactly what happens when it's applied poorly).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib, hmac
+from faker import Faker
+
+Faker.seed(21)
+f = Faker()
+
+# Stand-in for a real-shaped source record -- a hand-built example dict used
+# only to demonstrate the three transforms, never real customer data.
+real_like_record = {
+    &#x27;customer_id&#x27;: &#x27;CUST-00458231&#x27;,
+    &#x27;zip5&#x27;: &#x27;30301&#x27;,
+    &#x27;birth_date&#x27;: &#x27;1982-04-17&#x27;,
+}
+
+SECRET_KEY = b&#x27;dev-only-demo-key-never-a-real-secret&#x27;
+
+def pseudonymize(customer_id, key=SECRET_KEY):
+    return hmac.new(key, customer_id.encode(), hashlib.sha256).hexdigest()[:16]
+
+def anonymize(record):
+    return {
+        &#x27;zip_prefix&#x27;: record[&#x27;zip5&#x27;][:1],
+        &#x27;birth_decade&#x27;: int(record[&#x27;birth_date&#x27;][:4]) // 10 * 10,
+    }
+
+def synthesize():
+    return {
+        &#x27;customer_id&#x27;: f.bothify(&#x27;CUST-########&#x27;),
+        &#x27;zip5&#x27;: f.zipcode(),
+        &#x27;birth_date&#x27;: f.date_of_birth(minimum_age=18, maximum_age=90).isoformat(),
+    }
+
+pseudo_id = pseudonymize(real_like_record[&#x27;customer_id&#x27;])
+pseudo_id_again = pseudonymize(real_like_record[&#x27;customer_id&#x27;])
+anon = anonymize(real_like_record)
+synth = synthesize()
+
+print(&#x27;pseudonymized id (stable across calls):&#x27;, pseudo_id, pseudo_id == pseudo_id_again)
+print(&#x27;anonymized       :&#x27;, anon)
+print(&#x27;synthetic        :&#x27;, synth)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>pseudonymized id (stable across calls): 673a0add007180fa True
+anonymized       : {&#x27;zip_prefix&#x27;: &#x27;3&#x27;, &#x27;birth_decade&#x27;: 1980}
+synthetic        : {&#x27;customer_id&#x27;: &#x27;CUST-26647378&#x27;, &#x27;zip5&#x27;: &#x27;02351&#x27;, &#x27;birth_date&#x27;: &#x27;1962-10-06&#x27;}
+</code></pre><p><strong>Exercise:</strong>
+Pseudonymize the same <code>customer_id</code> with a second, different key and confirm the token
+changes — that is the concrete reason a pseudonym is only as protected as its key: anyone
+without the key cannot link records, but anyone who compromises the key can re-derive every
+pseudonym in the dataset.</p>
+<p><strong>Starting point:</strong> The <code>pseudonymize(customer_id, key)</code> function from this concept's
+Example, <code>cid = 'CUST-00458231'</code>, <code>key_a = b'dev-only-demo-key-never-a-real-secret'</code> (the
+Example's key) and a second key <code>key_b = b'a-different-key-same-purpose'</code>.</p>
+<p>Expected output:</p>
+<pre><code>same key, two calls match: True 673a0add007180fa 673a0add007180fa
+different key, same id, differs: True 673a0add007180fa e08cfa70ecf2534c
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> A half-migrated AWS estate usually means the on-prem system is the
+system of record and the cloud side is read replicas or a data lake fed by nightly batch —
+so &quot;just point dev at a copy&quot; often means copying an on-prem extract into a cloud dev
+account, which can itself be a cross-border data movement question depending on where that
+dev account's region actually is.</p>
+<p><strong>Compliance angle:</strong> GDPR's territorial scope and most local data-residency rules care
+about where personal data physically sits and who can access it, not about the labels a
+team uses internally. &quot;It's just a dev environment&quot; is not a legal argument; a masked
+column next to unmasked quasi-identifiers is not anonymization; and the burden of proving
+data is genuinely out of scope sits with the team that moved it, not with the regulator.</p>
+<p><strong>What breaks in production:</strong> A &quot;temporary&quot; masked-prod-copy dev database that was
+supposed to be deleted after one migration project outlives the project by years, because
+nobody owned turning it off. Synthetic data sidesteps this entirely — there is no
+production copy to forget about, because one was never made.</p>
+<hr />
+<h2 id="day-2">Day 2 — Faker Providers for Banking</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="10-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=614E5z8WZbE" target="_blank" rel="noopener"><b>Faker 101:  Generate Realistic Bulk Data in Python</b><small>The Code Guy · 5:12</small></a></li><li><a href="https://www.youtube.com/watch?v=7M2Q5wrqC7I" target="_blank" rel="noopener"><b>Generating Professional Sample Data with Faker in Python</b><small>NeuralNine · 19:22</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=python%20Faker%20library%20custom%20provider%20seed%20tutorial" target="_blank" rel="noopener">Search YouTube: python Faker library custom provider seed tutorial</a></p></div>
+<hr />
+<h3>Concept 1 — <code>Faker.seed()</code> for a Reproducible Corpus</h3>
+<p><code>Faker.seed()</code> is a classmethod that seeds the shared random generator every <code>Faker()</code>
+instance draws from. Call it once before generating anything, and the exact same sequence
+of fake values comes out every time the script runs — on this machine, on a teammate's
+machine, in CI next month. That reproducibility is what makes a synthetic dataset a
+genuine test fixture rather than a moving target: a regression test that asserts against
+specific synthetic values only works if those values are stable across runs.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from faker import Faker
+
+Faker.seed(42)
+f1 = Faker()
+run1 = [f1.name() for _ in range(3)]
+
+Faker.seed(42)
+f2 = Faker()
+run2 = [f2.name() for _ in range(3)]
+
+print(&#x27;run1:&#x27;, run1)
+print(&#x27;run2:&#x27;, run2)
+print(&#x27;identical:&#x27;, run1 == run2)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>run1: [&#x27;Allison Hill&#x27;, &#x27;Noah Rhodes&#x27;, &#x27;Angie Henderson&#x27;]
+run2: [&#x27;Allison Hill&#x27;, &#x27;Noah Rhodes&#x27;, &#x27;Angie Henderson&#x27;]
+identical: True
+</code></pre><p><strong>Exercise:</strong>
+Generate 20 <em>unique</em> customer IDs with <code>f.unique.bothify('CUST-########')</code> under a fixed
+seed, do it twice from a fresh <code>Faker()</code> each time, and confirm both runs match exactly and
+that all 20 IDs within a run are distinct.</p>
+<p><strong>Starting point:</strong> <code>Faker.seed(9)</code> before each of the two runs, and
+<code>f.unique.bothify('CUST-########')</code> called 20 times per run (call <code>f.unique.clear()</code> first
+so a stale uniqueness pool from earlier code in the same process doesn't affect the count).</p>
+<p>Expected output:</p>
+<pre><code>run1[:3]: [&#x27;CUST-79542205&#x27;, &#x27;CUST-87915890&#x27;, &#x27;CUST-62762230&#x27;]
+run2[:3]: [&#x27;CUST-79542205&#x27;, &#x27;CUST-87915890&#x27;, &#x27;CUST-62762230&#x27;]
+identical: True
+all unique within run1: True
+</code></pre><hr />
+<h3>Concept 2 — Built-in Banking Providers</h3>
+<p>Faker ships banking-shaped providers out of the box: <code>iban()</code> and <code>bban()</code> for account
+numbers (IBAN format varies by the active locale — the default locale here produces a
+GB-shaped IBAN), <code>swift()</code> for a bank identifier code, and <code>credit_card_number()</code> /
+<code>credit_card_expire()</code> for card data that passes Luhn validation without being a real
+issued number. These cover the account-identifier layer of a claims or transactions
+dataset; Concept 3 covers the fields Faker has no opinion about because they're
+industry-specific.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from faker import Faker
+
+Faker.seed(7)
+f = Faker()
+print(&#x27;IBAN (UK)      :&#x27;, f.iban())
+print(&#x27;BBAN           :&#x27;, f.bban())
+print(&#x27;SWIFT/BIC      :&#x27;, f.swift())
+print(&#x27;SWIFT/BIC (8)  :&#x27;, f.swift(length=8))
+print(&#x27;credit card #  :&#x27;, f.credit_card_number(card_type=&#x27;visa16&#x27;))
+print(&#x27;expiry date    :&#x27;, f.credit_card_expire())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>IBAN (UK)      : GB17KEMU01815908301661
+BBAN           : HCRN09139099603082
+SWIFT/BIC      : NERDGBT9LGM
+SWIFT/BIC (8)  : LDRWGBED
+credit card #  : 4786579754323199
+expiry date    : 09/29
+</code></pre><p><strong>Exercise:</strong>
+Build a small &quot;account record&quot; dict combining <code>iban</code>, <code>bban</code>, <code>swift</code> and a PCI-masked card
+number (reusing <code>pci_display_mask</code> from Day 1 Concept 2), and generate 3 of them.</p>
+<p><strong>Starting point:</strong> <code>pci_display_mask(pan)</code> from Day 1 Concept 2, <code>Faker.seed(12)</code>, and a
+<code>build_account_record()</code> function that calls <code>f.iban()</code>, <code>f.bban()</code>, <code>f.swift()</code> and
+<code>f.credit_card_number(card_type='visa16')</code> once each.</p>
+<p>Expected output:</p>
+<pre><code>{&#x27;iban&#x27;: &#x27;GB80VTEO52530931856100&#x27;, &#x27;bban&#x27;: &#x27;VQHC67162859820828&#x27;, &#x27;swift&#x27;: &#x27;MTNVGB44&#x27;, &#x27;card_masked&#x27;: &#x27;448526******3804&#x27;}
+{&#x27;iban&#x27;: &#x27;GB65LQSZ82066080360639&#x27;, &#x27;bban&#x27;: &#x27;DYRH21406475908753&#x27;, &#x27;swift&#x27;: &#x27;JOPWGB4PK39&#x27;, &#x27;card_masked&#x27;: &#x27;480134******3552&#x27;}
+{&#x27;iban&#x27;: &#x27;GB88DLRQ20541388775472&#x27;, &#x27;bban&#x27;: &#x27;OJTB45873484000284&#x27;, &#x27;swift&#x27;: &#x27;EHGNGB4D9QC&#x27;, &#x27;card_masked&#x27;: &#x27;423390******0392&#x27;}
+</code></pre><hr />
+<h3>Concept 3 — A Custom <code>BaseProvider</code> for Policy and Claim Numbers</h3>
+<p>Faker has no idea what a policy number looks like at your company, because there's no
+universal standard — each insurer invents its own scheme. That's what <code>BaseProvider</code> is
+for: subclass it, add methods, register it with <code>add_provider</code>, and the new methods behave
+exactly like Faker's built-in ones (same <code>self.random_element</code> / <code>self.numerify</code> helpers,
+same seeding behavior).</p>
+<p>This provider gives policy and claim numbers a real check-digit shape using the Luhn
+algorithm — the same checksum credit card numbers use — computed by hand here since it's a
+handful of lines of arithmetic, not a library call.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from faker import Faker
+from faker.providers import BaseProvider
+
+def luhn_check_digit(digits_str):
+    digits = [int(d) for d in digits_str]
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        if i % 2 == 0:
+            d = d * 2
+            if d &gt; 9:
+                d -= 9
+        total += d
+    return (10 - (total % 10)) % 10
+
+class BFSIProvider(BaseProvider):
+    _product_codes = [&#x27;AUT&#x27;, &#x27;HOM&#x27;, &#x27;LIF&#x27;, &#x27;PCM&#x27;]
+
+    def policy_number(self):
+        product = self.random_element(self._product_codes)
+        seq = self.numerify(&#x27;#######&#x27;)
+        check = luhn_check_digit(seq)
+        return f&#x27;POL-{product}-{seq}{check}&#x27;
+
+    def claim_id(self, policy_year=None):
+        year = policy_year or self.random_int(min=2019, max=2026)
+        seq = self.numerify(&#x27;########&#x27;)
+        check = luhn_check_digit(seq)
+        return f&#x27;CLM-{year}-{seq}{check}&#x27;
+
+Faker.seed(100)
+f = Faker()
+f.add_provider(BFSIProvider)
+for _ in range(4):
+    print(f.policy_number(), &#x27;|&#x27;, f.claim_id())
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>POL-HOM-77265684 | CLM-2020-811740356
+POL-HOM-43223551 | CLM-2025-367846219
+POL-HOM-09629239 | CLM-2021-037629805
+POL-HOM-98495856 | CLM-2024-760146431
+</code></pre><p><strong>Exercise:</strong>
+Write <code>is_valid_policy_number(policy_number)</code>, which recomputes the Luhn check digit over
+the numeric sequence and compares it to the trailing digit. Confirm it accepts a freshly
+generated policy number and rejects the same number with its final digit tampered.</p>
+<p><strong>Starting point:</strong> <code>luhn_check_digit</code> and <code>BFSIProvider</code> from this concept's Example,
+<code>Faker.seed(100)</code>, and one generated <code>pol = f.policy_number()</code>.</p>
+<p>Expected output:</p>
+<pre><code>generated: POL-HOM-77265684 -&gt; valid: True
+tampered : POL-HOM-77265685 -&gt; valid: False
+</code></pre><hr />
+<h3>Concept 4 — <code>fake.unique</code> and Its Exhaustion Failure</h3>
+<p><code>fake.unique.&lt;method&gt;()</code> wraps any provider method so it retries until it gets a value it
+hasn't returned before in this run, then remembers it. That's exactly what a primary key
+column needs. It is not infinite, though: it tracks every value it has already handed out
+for that method, and once the underlying value space is exhausted, it raises
+<code>UniquenessException</code> rather than looping forever or silently returning a duplicate.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from faker import Faker
+from faker.exceptions import UniquenessException
+
+f = Faker()
+Faker.seed(5)
+seen = []
+try:
+    for i in range(5):
+        seen.append(f.unique.random_int(min=1, max=3))
+except UniquenessException as e:
+    print(&#x27;generated before failure:&#x27;, seen)
+    print(&#x27;raised:&#x27;, type(e).__name__, &#x27;-&#x27;, e)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>generated before failure: [3, 2, 1]
+raised: UniquenessException - Got duplicated values after 1,000 iterations.
+</code></pre><p><strong>Exercise:</strong>
+Request unique integers from a range of exactly 1000 possible values (<code>min=1, max=1000</code>)
+and try to draw 1002 of them. Confirm it successfully produces all 1000 possible values
+before failing on the 1001st request.</p>
+<p><strong>Starting point:</strong> <code>f.unique.random_int(min=1, max=1000)</code> in a loop of up to 1002
+iterations wrapped in a <code>try</code>/<code>except UniquenessException</code>, with <code>Faker.seed(3)</code> and
+<code>f.unique.clear()</code> called first.</p>
+<p>Expected output:</p>
+<pre><code>failed after generating 1000 values (pool size = 1000)
+all generated so far unique: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> A real core banking export rarely has one IBAN format — a bank with
+UK, German and Israeli operations has three different national account-number shapes in
+the same &quot;account_number&quot; column, historically, because each entity onboarded onto the
+core platform separately. A synthetic generator that only ever produces one locale's shape
+is easier to build and a worse test fixture; it won't catch a parser that only handles
+22-character IBANs when a real extract also has 34-character ones from another country.</p>
+<p><strong>Compliance angle:</strong> A policy or claim number with a real check-digit shape is not
+decorative. Downstream validation code — a form that rejects a mistyped policy number
+before it reaches a human — is part of the actual data-quality control chain a regulator
+expects, and synthetic test data that skips the check digit means that validation code path
+never gets exercised in dev or CI.</p>
+<p><strong>What breaks in production:</strong> A synthetic ID generator with no <code>unique</code> wrapper produces a
+collision once in a while, silently, because the collision odds look tiny for any one
+insert but a batch load of a million rows makes tiny odds routine. The failure surfaces
+much later as a primary-key constraint violation deep in a load job, not at generation time
+where the actual bug is.</p>
+<hr />
+<h2 id="day-3">Day 3 — Shaping Data Like Legacy Exports</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="10-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=BIQJz_IzpXg" target="_blank" rel="noopener"><b>Convert XML To Mainframe Flat File Using Python</b><small>Craig Kaercher · 14:23</small></a></li><li><a href="https://www.youtube.com/watch?v=UwP8xMKq1Xs" target="_blank" rel="noopener"><b>Configuring Flat File/Fixed width files in PowerCenter</b><small>pd memes · 50:45</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=generate%20fixed%20width%20flat%20file%20legacy%20mainframe%20extract%20python" target="_blank" rel="noopener">Search YouTube: generate fixed width flat file legacy mainframe extract python</a></p></div>
+<hr />
+<h3>Concept 1 — Fixed-Width Fields, Padded and Positional</h3>
+<p>A mainframe batch extract usually has no delimiters at all — no commas, no pipes. Every
+field lives at a fixed byte offset, defined by a copybook the receiving system has to know
+in advance. Text fields are padded with trailing spaces to reach their width; numeric
+fields are padded with leading zeros. Get the offsets wrong and you don't get an error, you
+get a value silently sliced from the wrong field.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from faker import Faker
+
+Faker.seed(50)
+f = Faker()
+
+def fixed_width_record(customer_id, surname, amount_cents):
+    return (
+        customer_id.ljust(12)
+        + surname.ljust(20)
+        + str(amount_cents).rjust(10, &#x27;0&#x27;)
+    )
+
+names = [f.last_name() for _ in range(3)]
+for i, surname in enumerate(names):
+    rec = fixed_width_record(f&#x27;CUST{i:08d}&#x27;, surname, 12550 + i)
+    print(repr(rec), len(rec))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>&#x27;CUST00000000Jimenez             0000012550&#x27; 42
+&#x27;CUST00000001Adams               0000012551&#x27; 42
+&#x27;CUST00000002Walsh               0000012552&#x27; 42
+</code></pre><p><strong>Exercise:</strong>
+Write <code>parse_fixed_width(record)</code> that slices the record back into <code>customer_id</code>,
+<code>surname</code> and <code>amount_cents</code>, stripping the padding correctly on each field, and confirm it
+round-trips the three records from the Example.</p>
+<p><strong>Starting point:</strong> The three fixed-width <code>records</code> produced by this concept's Example
+(offsets: <code>customer_id</code> at <code>[0:12]</code>, <code>surname</code> at <code>[12:32]</code>, <code>amount_cents</code> at <code>[32:42]</code>).</p>
+<p>Expected output:</p>
+<pre><code>{&#x27;customer_id&#x27;: &#x27;CUST00000000&#x27;, &#x27;surname&#x27;: &#x27;Jimenez&#x27;, &#x27;amount_cents&#x27;: 12550}
+{&#x27;customer_id&#x27;: &#x27;CUST00000001&#x27;, &#x27;surname&#x27;: &#x27;Adams&#x27;, &#x27;amount_cents&#x27;: 12551}
+{&#x27;customer_id&#x27;: &#x27;CUST00000002&#x27;, &#x27;surname&#x27;: &#x27;Walsh&#x27;, &#x27;amount_cents&#x27;: 12552}
+</code></pre><hr />
+<h3>Concept 2 — Uppercase-Only, Truncated Text Fields</h3>
+<p>Legacy mainframe text fields are frequently uppercase-only — a convention carried forward
+from the EBCDIC era long after the hardware reason for it stopped mattering — and hard
+-truncated at a fixed width with no warning and no ellipsis. A synthetic surname generator
+that always produces short, cleanly-cased names never exercises the code path that handles
+a truncated, all-caps <code>MONTGOMERY</code> where the real surname was <code>Montgomery-Blake</code>.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def legacy_surname(surname, width=10):
+    return surname.upper()[:width]
+
+surnames = [&#x27;Nightingale&#x27;, &#x27;Fitzgerald-Owusu&#x27;, &#x27;Li&#x27;, &quot;O&#x27;Sullivan&quot;]
+for s in surnames:
+    print(f&#x27;{s!r:25} -&gt; {legacy_surname(s)!r}&#x27;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>&#x27;Nightingale&#x27;             -&gt; &#x27;NIGHTINGAL&#x27;
+&#x27;Fitzgerald-Owusu&#x27;        -&gt; &#x27;FITZGERALD&#x27;
+&#x27;Li&#x27;                      -&gt; &#x27;LI&#x27;
+&quot;O&#x27;Sullivan&quot;              -&gt; &quot;O&#x27;SULLIVAN&quot;
+</code></pre><p><strong>Exercise:</strong>
+Apply <code>legacy_surname</code> to a batch of 6 surnames (including hyphenated and apostrophe
+cases) and count how many were actually truncated (original length over 10 characters).</p>
+<p><strong>Starting point:</strong> <code>legacy_surname(surname, width=10)</code> from this concept's Example, and
+<code>surnames = ['Nightingale', 'Fitzgerald-Owusu', 'Li', &quot;O'Sullivan&quot;, 'Montgomery-Blake', 'Osei']</code>.</p>
+<p>Expected output:</p>
+<pre><code>&#x27;Nightingale&#x27;        -&gt; &#x27;NIGHTINGAL&#x27; truncated=True
+&#x27;Fitzgerald-Owusu&#x27;   -&gt; &#x27;FITZGERALD&#x27; truncated=True
+&#x27;Li&#x27;                 -&gt; &#x27;LI&#x27;         truncated=False
+&quot;O&#x27;Sullivan&quot;         -&gt; &quot;O&#x27;SULLIVAN&quot; truncated=False
+&#x27;Montgomery-Blake&#x27;   -&gt; &#x27;MONTGOMERY&#x27; truncated=True
+&#x27;Osei&#x27;               -&gt; &#x27;OSEI&#x27;       truncated=False
+total truncated: 3 of 6
+</code></pre><hr />
+<h3>Concept 3 — Julian Dates and All-9s Sentinels</h3>
+<p>Many COBOL copybooks store dates as <code>YYYYDDD</code> — a 4-digit year plus a zero-padded
+day-of-year, not month/day — a compact format that predates the storage being cheap enough
+to bother with a more readable one. Open dates (a claim with no close date yet) are commonly
+represented with an all-9s sentinel value rather than a null, because the field's storage
+format has no concept of null — it's a fixed-width numeric slot that must always hold
+something.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import datetime
+from faker import Faker
+
+Faker.seed(70)
+f = Faker()
+
+def to_julian(d):
+    return f&#x27;{d.year}{d.timetuple().tm_yday:03d}&#x27;
+
+SENTINEL_OPEN_CLAIM = &#x27;9999999&#x27;
+
+dates = [f.date_between(start_date=datetime.date(2023, 1, 1), end_date=datetime.date(2025, 12, 31)) for _ in range(3)]
+for d in dates:
+    print(d.isoformat(), &#x27;-&gt;&#x27;, to_julian(d))
+print(&#x27;open claim close_date field:&#x27;, SENTINEL_OPEN_CLAIM)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>2025-09-23 -&gt; 2025266
+2023-11-19 -&gt; 2023323
+2024-05-18 -&gt; 2024139
+open claim close_date field: 9999999
+</code></pre><p><strong>Exercise:</strong>
+Write <code>from_julian(julian_str)</code> that converts a <code>YYYYDDD</code> string back to a real
+<code>datetime.date</code>, and returns <code>None</code> for the all-9s sentinel instead of trying to parse it
+as a date.</p>
+<p><strong>Starting point:</strong> <code>to_julian(d)</code> and <code>SENTINEL_OPEN_CLAIM</code> from this concept's Example,
+and the sample list <code>['2025266', '2023323', SENTINEL_OPEN_CLAIM]</code>.</p>
+<p>Expected output:</p>
+<pre><code>2025266 -&gt; 2025-09-23
+2023323 -&gt; 2023-11-19
+9999999 -&gt; None
+</code></pre><hr />
+<h3>Concept 4 — Header and Trailer Records with a Control Count</h3>
+<p>A legacy batch extract is rarely just the detail rows. It's bracketed by a header record
+(run date, record count) and a trailer record (the same count again, sometimes with a
+checksum). The count exists so the receiving system can detect a truncated transfer without
+opening the file's business content at all — if the trailer's count doesn't match the
+number of detail rows actually present, something failed in transit and the whole file is
+rejected before any row is loaded.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import datetime
+
+def build_extract(detail_records, run_date):
+    header = &#x27;HDR&#x27; + run_date.strftime(&#x27;%Y%m%d&#x27;) + str(len(detail_records)).rjust(8, &#x27;0&#x27;)
+    trailer = &#x27;TRL&#x27; + str(len(detail_records)).rjust(8, &#x27;0&#x27;)
+    return [header] + detail_records + [trailer]
+
+details = [&#x27;DET0000000112550&#x27;, &#x27;DET0000000212551&#x27;, &#x27;DET0000000312552&#x27;]
+extract = build_extract(details, datetime.date(2026, 9, 5))
+for line in extract:
+    print(line)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>HDR2026090500000003
+DET0000000112550
+DET0000000212551
+DET0000000312552
+TRL00000003
+</code></pre><p><strong>Exercise:</strong>
+Write <code>validate_extract(extract)</code>, which checks the header's count and the trailer's count
+both match the actual number of detail rows between them. Confirm it passes on the
+Example's <code>extract</code> and fails when the trailer is corrupted to claim a different count.</p>
+<p><strong>Starting point:</strong> <code>build_extract</code> from this concept's Example, and the <code>extract</code> it
+produced (header count field at offset <code>[11:19]</code>, trailer count field at offset <code>[3:11]</code>).</p>
+<p>Expected output:</p>
+<pre><code>good extract valid: True
+bad extract valid: False
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> These formats are not a historical curiosity you can skip past — a
+core-banking replacement project is measured in years specifically because the extract
+format on one end has been stable and undocumented for two decades, and every downstream
+consumer has quietly hard-coded assumptions about it that only surface when something
+finally changes.</p>
+<p><strong>Compliance angle:</strong> The header/trailer control count is itself an audit control —
+&quot;how do you know you processed a complete file&quot; is a real question in an operational
+resilience review, and &quot;the trailer count matched&quot; is a concrete, checkable answer. A
+synthetic test fixture that never produces a mismatched trailer never actually tests that
+the downstream system rejects one.</p>
+<p><strong>What breaks in production:</strong> A parser hard-codes a byte offset that matched last year's
+copybook version. The mainframe team adds one field for an unrelated reason, and every
+offset after it shifts by exactly that field's width. Nothing throws an exception — every
+downstream field just quietly contains the wrong data, sliced from the wrong position.</p>
+<hr />
+<h2 id="day-4">Day 4 — LLM-Assisted Free-Text Generation</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="10-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=jEBTL2kqCyw" target="_blank" rel="noopener"><b>SDG_Hub: An Open-Source Toolkit for Synthetic Data Generation &amp; LLM Customization - DevConf.US 2025</b><small>DevConf · 36:16</small></a></li><li><a href="https://www.youtube.com/watch?v=Nbty3Su4XJ4" target="_blank" rel="noopener"><b>High-Quality Text Data Curation for Fine-Tuning LLMs Using Synthetic Data Generation Pipelines</b><small>NVIDIA Developer · 5:27</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=LLM%20synthetic%20text%20data%20generation%20diversity%20deduplication" target="_blank" rel="noopener">Search YouTube: LLM synthetic text data generation diversity deduplication</a></p></div>
+<hr />
+<h3>Concept 1 — Prompt-Constrained Narrative Generation</h3>
+<p><strong>Example:</strong></p>
+<p><strong>REAL MODE — not executed (requires a live LLM API):</strong> Faker is good at structured fields
+and terrible at realistic free text — an adjuster's claim note or a customer complaint
+narrative has a register, a level of specificity, and an internal logic that a template
+can only approximate before it becomes obviously repetitive (Concept 2 measures exactly
+this). The natural tool for that layer is an LLM call, constrained by a prompt that pins
+down the seed facts (peril type, room, cause — the same kind of facts Concept 2's templates
+use) so the model elaborates around a controlled skeleton instead of inventing its own
+plot. This sandbox has no live model endpoint to call, so the block below shows the
+API-correct request/response shape for an Anthropic Messages API call rather than an
+executed one.</p>
+<div class="code"><pre><code># REAL MODE -- requires the Anthropic API (no live endpoint available in this sandbox).
+import anthropic
+
+client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+
+SEED_FACTS = {
+    &#x27;peril&#x27;: &#x27;water damage&#x27;,
+    &#x27;room&#x27;: &#x27;kitchen&#x27;,
+    &#x27;cause&#x27;: &#x27;a burst supply pipe&#x27;,
+}
+
+PROMPT = f&quot;&quot;&quot;Write a two-sentence property claim adjuster note using exactly these facts
+and no others: peril={SEED_FACTS[&#x27;peril&#x27;]}, room={SEED_FACTS[&#x27;room&#x27;]},
+cause={SEED_FACTS[&#x27;cause&#x27;]}. Do not invent a claimant name, address, or policy number.
+Do not reference any real company, person, or specific real-world event.&quot;&quot;&quot;
+
+response = client.messages.create(
+    model=&quot;claude-sonnet-4-5&quot;,
+    max_tokens=200,
+    messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: PROMPT}],
+)
+narrative = response.content[0].text
+print(narrative)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>The following is <strong>not LLM output</strong> — no model call happened in this sandbox. It is a
+hand-written illustration of the <em>shape</em> a real response might take, included only so the
+prompt's constraints are legible against a concrete example, and it must never be read as
+evidence the call above was actually run:</p>
+<pre><code>Illustrative sample only, hand-written, not model-generated:
+&quot;Insured reported water damage to the kitchen ceiling and cabinetry after a supply pipe
+serving the sink burst overnight. Adjuster confirmed active leak had been isolated at the
+main shutoff prior to inspection.&quot;
+</code></pre><p><strong>Exercise:</strong>
+Without calling any API, write out the specific constraints you would add to <code>PROMPT</code>
+above to stop the model from silently drifting into a different peril than the one in
+<code>SEED_FACTS</code> over a large batch (a known LLM failure mode called template/content drift),
+and a second constraint that stops it from ever emitting a real-sounding full name for a
+claimant, since <code>SEED_FACTS</code> deliberately has no name field.</p>
+<p><strong>Starting point:</strong> The <code>PROMPT</code> template and <code>SEED_FACTS</code> dict from this block above — no
+code execution, a written-constraints answer.</p>
+<p>Expected output: a short list of concrete constraints — at minimum, something equivalent
+to &quot;restate the exact peril value back in your first sentence&quot; (forces the model to
+anchor on the given fact rather than drift) and &quot;never include a proper name; use
+'the insured' or 'the claimant' only&quot; (closes the exact gap <code>SEED_FACTS</code> leaves open).
+There is no single correct wording; the finding is whether the constraint actually closes
+the specific gap named, not whether it matches this phrasing.</p>
+<hr />
+<h3>Concept 2 — Varying Seed Facts to Avoid Template Collapse</h3>
+<p>A template with fixed seed facts produces the same output every time — obviously useless as
+a dataset of more than one row. The fix does not require an LLM at all: pull each seed fact
+independently from a pool of plausible values, and the combinatorics alone produce enough
+distinct narratives that a downstream model training or testing against them won't overfit
+to one sentence shape.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import random
+
+rng = random.Random(200)
+
+PERILS = [&#x27;water damage&#x27;, &#x27;wind damage&#x27;, &#x27;fire&#x27;, &#x27;theft&#x27;, &#x27;vandalism&#x27;]
+ROOMS = [&#x27;kitchen&#x27;, &#x27;master bedroom&#x27;, &#x27;garage&#x27;, &#x27;basement&#x27;, &#x27;living room&#x27;]
+CAUSES = [&#x27;a burst supply pipe&#x27;, &#x27;a fallen tree limb&#x27;, &#x27;a faulty space heater&#x27;,
+          &#x27;a forced rear door&#x27;, &#x27;an unattended candle&#x27;]
+
+TEMPLATE = &#x27;Insured reported {peril} in the {room}, caused by {cause}. Claimant was on-site at the time.&#x27;
+
+def generate_narrative(seed_facts):
+    return TEMPLATE.format(**seed_facts)
+
+def fixed_facts_narrative():
+    return generate_narrative({&#x27;peril&#x27;: PERILS[0], &#x27;room&#x27;: ROOMS[0], &#x27;cause&#x27;: CAUSES[0]})
+
+def varied_facts_narrative():
+    return generate_narrative({
+        &#x27;peril&#x27;: rng.choice(PERILS),
+        &#x27;room&#x27;: rng.choice(ROOMS),
+        &#x27;cause&#x27;: rng.choice(CAUSES),
+    })
+
+fixed_batch = [fixed_facts_narrative() for _ in range(8)]
+varied_batch = [varied_facts_narrative() for _ in range(8)]
+
+print(&#x27;fixed seed facts  -- distinct narratives:&#x27;, len(set(fixed_batch)), &#x27;/&#x27;, len(fixed_batch))
+print(&#x27;varied seed facts -- distinct narratives:&#x27;, len(set(varied_batch)), &#x27;/&#x27;, len(varied_batch))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>fixed seed facts  -- distinct narratives: 1 / 8
+varied seed facts -- distinct narratives: 7 / 8
+</code></pre><p><strong>Exercise:</strong>
+Add a fourth varying seed fact, <code>severity</code> (<code>'minor'</code>, <code>'moderate'</code>, <code>'severe'</code>), to the
+template, generate 20 varied narratives, and report the distinct count.</p>
+<p><strong>Starting point:</strong> <code>PERILS</code>, <code>ROOMS</code>, <code>CAUSES</code> and <code>generate_narrative</code> from this
+concept's Example, a new <code>SEVERITIES = ['minor', 'moderate', 'severe']</code>, and a template
+string that includes <code>{severity}</code>.</p>
+<p>Expected output:</p>
+<pre><code>distinct narratives: 20 / 20
+</code></pre><hr />
+<h3>Concept 3 — Near-Duplicate Detection with MinHash</h3>
+<p>Varying seed facts reduces exact duplicates but does not catch <em>near</em>-duplicates — two
+narratives that differ by one word yet describe the same underlying content. Comparing
+every pair of documents' exact word-shingle sets (Jaccard similarity) is the precise answer
+but gets expensive at scale; MinHash approximates the same Jaccard similarity from a small
+fixed-size signature per document, so comparing two documents costs comparing two short
+vectors instead of two large sets. Built from scratch here with <code>hashlib</code>, no external
+library needed for the size of corpus this week deals with.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+
+def shingles(text, k=3):
+    words = text.lower().split()
+    return set(tuple(words[i:i+k]) for i in range(len(words) - k + 1))
+
+def minhash_signature(shingle_set, num_hashes=64):
+    sig = []
+    for i in range(num_hashes):
+        best = None
+        for sh in shingle_set:
+            h = int(hashlib.sha256((str(i) + &#x27;|&#x27; + &#x27; &#x27;.join(sh)).encode()).hexdigest(), 16)
+            if best is None or h &lt; best:
+                best = h
+        sig.append(best)
+    return sig
+
+def signature_similarity(sig_a, sig_b):
+    matches = sum(1 for a, b in zip(sig_a, sig_b) if a == b)
+    return matches / len(sig_a)
+
+texts = [
+    &#x27;Insured reported water damage in the kitchen, caused by a burst supply pipe.&#x27;,
+    &#x27;Insured reported water damage in the kitchen caused by a burst supply pipe.&#x27;,
+    &#x27;Insured reported fire in the garage, caused by a faulty space heater.&#x27;,
+]
+sigs = [minhash_signature(shingles(t), num_hashes=64) for t in texts]
+for i in range(len(texts)):
+    for j in range(i + 1, len(texts)):
+        est = signature_similarity(sigs[i], sigs[j])
+        print(f&#x27;({i},{j}) minhash-estimated jaccard={est:.3f}&#x27;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>(0,1) minhash-estimated jaccard=0.547
+(0,2) minhash-estimated jaccard=0.031
+(1,2) minhash-estimated jaccard=0.031
+</code></pre><p><strong>Exercise:</strong>
+Build a 5-narrative batch containing two near-duplicate pairs (one pair differing by a
+couple of words, one pair differing by an inserted word) plus one unrelated narrative,
+compute all pairwise MinHash similarities, and flag any pair at or above 0.5 as a
+near-duplicate.</p>
+<p><strong>Starting point:</strong> <code>shingles</code>, <code>minhash_signature</code> and <code>signature_similarity</code> from this
+concept's Example, and a 5-item <code>texts</code> list you write with two near-duplicate pairs and
+one unrelated entry.</p>
+<p>Expected output: on the batch below, only the tightly-worded pair (0,1) clears a 0.5
+threshold — the pair with a word <em>inserted</em> in the middle (2,3) scores lower (0.375 true
+Jaccard) because inserting a word shifts every 3-word shingle after it, which is a real
+limitation of shingle-based near-duplicate detection worth knowing rather than glossing
+over:</p>
+<pre><code>near-duplicate pairs (sim &gt;= 0.5): [(0, 1, 0.688)]
+</code></pre><hr />
+<h3>Concept 4 — Injecting Realistic Typos, Abbreviations and Jargon</h3>
+<p>Real free-text fields typed by claims adjusters and call-center agents under time pressure
+are not clean prose — they're full of abbreviations (<code>cust</code>, <code>bc</code>, <code>approx</code>) and the
+occasional transposed-letter typo. A downstream NLP pipeline (a parser, a classifier, an
+LLM prompt template) that only ever sees grammatically clean synthetic text will not have
+been exercised against the noise it will actually face in production.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import random
+
+ABBREVIATIONS = {
+    &#x27;because&#x27;: &#x27;bc&#x27;, &#x27;approximately&#x27;: &#x27;approx&#x27;, &#x27;customer&#x27;: &#x27;cust&#x27;,
+    &#x27;policy&#x27;: &#x27;pol&#x27;, &#x27;immediately&#x27;: &#x27;immed&#x27;,
+}
+
+def inject_typo(word, rng):
+    if len(word) &lt; 4:
+        return word
+    i = rng.randrange(1, len(word) - 1)
+    return word[:i] + word[i + 1] + word[i] + word[i + 2:]
+
+def roughen_text(text, rng, typo_rate=0.15, abbrev_rate=0.5):
+    words = text.split()
+    out = []
+    for w in words:
+        bare = w.strip(&#x27;.,&#x27;).lower()
+        if bare in ABBREVIATIONS and rng.random() &lt; abbrev_rate:
+            out.append(ABBREVIATIONS[bare] + w[len(bare):])
+        elif rng.random() &lt; typo_rate:
+            out.append(inject_typo(w, rng))
+        else:
+            out.append(w)
+    return &#x27; &#x27;.join(out)
+
+clean = &#x27;The customer contacted us immediately because approximately half the roof was damaged, per policy terms.&#x27;
+rough = roughen_text(clean, random.Random(300))
+print(&#x27;clean:&#x27;, clean)
+print(&#x27;rough:&#x27;, rough)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>clean: The customer contacted us immediately because approximately half the roof was damaged, per policy terms.
+rough: The cust conatcted us immediately bc approx half the roof was damaged, per policy trems.
+</code></pre><p><strong>Exercise:</strong>
+Confirm <code>roughen_text</code> is deterministic given the same seed: call it on the same input
+text twice, each time with a fresh <code>random.Random(301)</code>, and check the two outputs match
+exactly.</p>
+<p><strong>Starting point:</strong> <code>roughen_text</code>, <code>inject_typo</code> and <code>ABBREVIATIONS</code> from this concept's
+Example, and the text <code>'The customer contacted us immediately because the roof was damaged.'</code> run with <code>random.Random(301)</code> twice.</p>
+<p>Expected output:</p>
+<pre><code>run1: The customer contacted us immediately because the rofo was damaged.
+run2: The customer contacted us immediately because the rofo was damaged.
+deterministic given same seed: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> A legacy call-center system's free-text notes field is frequently a
+40- or 80-character truncated <code>VARCHAR</code> inherited from a terminal-based UI, so real
+adjuster notes are themselves already abbreviated and truncated before anyone gets to them
+— synthetic free text this week should be shaped by that constraint too, not generated as
+if it will always live in an unbounded modern text column.</p>
+<p><strong>Compliance angle:</strong> An LLM used to generate synthetic narrative text is still an AI
+system in scope for governance purposes even though its output never touches a real
+customer — the EU AI Act framing this track returns to in Phase 3 cares about what a
+system is used for, and &quot;generates synthetic training data used to build another AI
+system&quot; is a real use case to document, not an exemption.</p>
+<p><strong>What breaks in production:</strong> Synthetic narratives generated from one template family
+train a downstream classifier that then fails on real narratives with a different sentence
+structure the template never covered — the near-duplicate check in Concept 3 catches
+redundancy <em>within</em> a synthetic batch, but nothing here catches the batch being
+insufficiently diverse in structure compared to the real population it stands in for. That
+gap is exactly what Day 5 spends its whole time on.</p>
+<hr />
+<h2 id="day-5">Day 5 — Fidelity and Re-Identification Checks</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="10-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=aIielBe1gYM" target="_blank" rel="noopener"><b>Privacy and Synthetic Data: The Good, The Bad, and The Ugly</b><small>Nokia Bell Labs · 30:37</small></a></li><li><a href="https://www.youtube.com/watch?v=SE7G3Y-6enQ" target="_blank" rel="noopener"><b>How to generate privacy-preserving synthetic data?</b><small>YData · 5:22</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=synthetic%20data%20quality%20evaluation%20fidelity%20privacy%20re-identification%20risk" target="_blank" rel="noopener">Search YouTube: synthetic data quality evaluation fidelity privacy re-identification risk</a></p></div>
+<hr />
+<h3>Concept 1 — Matching Marginal Statistics Against Real Aggregates Only</h3>
+<p>Data residency rules mean a synthetic-data team is often handed <em>aggregate</em> statistics from
+a real portfolio — mean, median, a few percentiles — and never the underlying records
+themselves. That's actually enough to calibrate a generator and check its fidelity, as long
+as the check is honest about what it's comparing: the generator's own summary statistics
+against the target summary statistics, never claiming to validate against individual real
+records it was never allowed to see.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import numpy as np
+
+rng = np.random.default_rng(400)
+
+# Real aggregate targets a compliance team is allowed to hand over -- summary
+# statistics only, never individual records. Illustrative published-style
+# figures for a property-claims portfolio.
+REAL_TARGETS = {&#x27;mean&#x27;: 8500.0, &#x27;median&#x27;: 6200.0, &#x27;p95&#x27;: 32000.0}
+FIDELITY_THRESHOLD = 0.15
+
+def synthetic_claim_amounts(n, mu=8.6, sigma=1.0):
+    return rng.lognormal(mean=mu, sigma=sigma, size=n)
+
+def pct_error(synth, real):
+    return abs(synth - real) / real
+
+amounts = synthetic_claim_amounts(20_000)
+synthetic_stats = {
+    &#x27;mean&#x27;: float(np.mean(amounts)),
+    &#x27;median&#x27;: float(np.median(amounts)),
+    &#x27;p95&#x27;: float(np.percentile(amounts, 95)),
+}
+
+for stat, target in REAL_TARGETS.items():
+    synth_val = synthetic_stats[stat]
+    err = pct_error(synth_val, target)
+    status = &#x27;PASS&#x27; if err &lt; FIDELITY_THRESHOLD else &#x27;FAIL&#x27;
+    print(f&#x27;{stat:&gt;7}: synthetic={synth_val:10.2f}  real target={target:10.2f}  pct_error={err:.3f}  {status}&#x27;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>   mean: synthetic=  8933.27  real target=   8500.00  pct_error=0.051  PASS
+ median: synthetic=  5435.98  real target=   6200.00  pct_error=0.123  PASS
+    p95: synthetic= 27899.28  real target=  32000.00  pct_error=0.128  PASS
+</code></pre><p><strong>Exercise:</strong>
+Re-run the same check with a deliberately poorly-calibrated generator (<code>mu=9.2, sigma=1.3</code>) and confirm every one of the three statistics now fails the same 0.15
+threshold — a concrete demonstration of what the fidelity check is actually for.</p>
+<p><strong>Starting point:</strong> <code>pct_error</code>, <code>REAL_TARGETS</code> and <code>FIDELITY_THRESHOLD</code> from this
+concept's Example, with <code>rng = np.random.default_rng(401)</code> and
+<code>amounts = rng.lognormal(mean=9.2, sigma=1.3, size=20_000)</code>.</p>
+<p>Expected output:</p>
+<pre><code>   mean: synthetic= 23386.67 target=   8500.00 pct_error=1.751 FAIL
+ median: synthetic= 10022.27 target=   6200.00 pct_error=0.616 FAIL
+    p95: synthetic= 85303.52 target=  32000.00 pct_error=1.666 FAIL
+failed stats: [&#x27;mean&#x27;, &#x27;median&#x27;, &#x27;p95&#x27;]
+</code></pre><hr />
+<h3>Concept 2 — Uniqueness Checks on Quasi-Identifier Combinations</h3>
+<p>Day 1 Concept 1 showed this technique on a customer-record shape; the same check belongs on
+the claims dataset itself before it ships anywhere, because claims data carries its own
+quasi-identifiers (location, claim type, loss year) that can combine into a re-identifying
+fingerprint even with no name or account number in sight.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from faker import Faker
+from collections import Counter
+
+Faker.seed(500)
+f = Faker()
+
+n = 3000
+claims = []
+for _ in range(n):
+    zipcode = f.zipcode()
+    claims.append({
+        &#x27;zip3&#x27;: zipcode[:3],
+        &#x27;claim_type&#x27;: f.random_element([&#x27;auto&#x27;, &#x27;home&#x27;, &#x27;life&#x27;, &#x27;pcm&#x27;]),
+        &#x27;loss_year&#x27;: f.random_int(min=2021, max=2026),
+    })
+
+def uniqueness_rate(records, keys):
+    combos = Counter(tuple(r[k] for k in keys) for r in records)
+    singleton = sum(1 for c in combos.values() if c == 1)
+    return singleton / len(records)
+
+rate = uniqueness_rate(claims, [&#x27;zip3&#x27;, &#x27;claim_type&#x27;, &#x27;loss_year&#x27;])
+print(f&#x27;n={n}  unique-combo rate on (zip3, claim_type, loss_year): {rate:.3f}&#x27;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>n=3000  unique-combo rate on (zip3, claim_type, loss_year): 0.892
+</code></pre><p><strong>Exercise:</strong>
+Recompute the uniqueness rate on the same <code>claims</code> data but generalizing the ZIP field
+further, to just its first digit (<code>zip1</code>) instead of the first three (<code>zip3</code>), and confirm
+the rate drops sharply.</p>
+<p><strong>Starting point:</strong> The <code>claims</code> list and <code>uniqueness_rate</code> function from this concept's
+Example, with each record additionally carrying <code>'zip1': zipcode[0]</code>.</p>
+<p>Expected output:</p>
+<pre><code>n=3000
+(zip3, claim_type, loss_year) unique-combo rate: 0.892
+(zip1, claim_type, loss_year) unique-combo rate: 0.000
+</code></pre><hr />
+<h3>Concept 3 — An Automated Test That No Real PII Pattern Survives</h3>
+<p>Every generation step in this week was designed to avoid real PII by construction, but
+&quot;designed to&quot; is not &quot;verified to.&quot; The last line of defense is a pattern-based scanner run
+over the finished dataset as an actual automated test, checking for the <em>shapes</em> real PII
+takes (an SSN-formatted string, an email address, a handful of card-network BIN prefixes
+that must never appear on a supposedly-synthetic PAN) regardless of how it got there —
+whether from a copy-pasted example, a template that accidentally embedded a placeholder, or
+a bug elsewhere in the pipeline.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+
+SSN_PATTERN = re.compile(r&#x27;\b\d{3}-\d{2}-\d{4}\b&#x27;)
+EMAIL_PATTERN = re.compile(r&#x27;\b[\w.+-]+@[\w-]+\.[\w.-]+\b&#x27;)
+# Illustrative reserved/well-known test BIN prefixes that must never appear on
+# a synthetic PAN -- in a real check this list comes from the card networks&#x27;
+# actual published test ranges, not invented digits.
+FORBIDDEN_BIN_PREFIXES = (&#x27;400000&#x27;, &#x27;424242&#x27;)
+
+def scan_for_pii_leaks(records):
+    findings = []
+    for i, rec in enumerate(records):
+        text = &#x27; &#x27;.join(str(v) for v in rec.values())
+        if SSN_PATTERN.search(text):
+            findings.append((i, &#x27;ssn_pattern&#x27;))
+        if EMAIL_PATTERN.search(text):
+            findings.append((i, &#x27;email_pattern&#x27;))
+        for prefix in FORBIDDEN_BIN_PREFIXES:
+            if any(str(v).startswith(prefix) for v in rec.values()):
+                findings.append((i, f&#x27;forbidden_bin:{prefix}&#x27;))
+    return findings
+
+clean_batch = [
+    {&#x27;pan&#x27;: &#x27;4716202183220028&#x27;, &#x27;note&#x27;: &#x27;auto claim, no injury&#x27;},
+    {&#x27;pan&#x27;: &#x27;5432109876543210&#x27;, &#x27;note&#x27;: &#x27;home claim, water damage&#x27;},
+]
+dirty_batch = [
+    {&#x27;pan&#x27;: &#x27;4716202183220028&#x27;, &#x27;note&#x27;: &#x27;ssn on file 512-33-8890&#x27;},
+    {&#x27;pan&#x27;: &#x27;4242424242424242&#x27;, &#x27;note&#x27;: &#x27;clean note&#x27;},
+]
+
+print(&#x27;clean batch findings:&#x27;, scan_for_pii_leaks(clean_batch))
+print(&#x27;dirty batch findings:&#x27;, scan_for_pii_leaks(dirty_batch))
+assert scan_for_pii_leaks(clean_batch) == []
+print(&#x27;assertion passed: clean batch has zero PII-pattern findings&#x27;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>clean batch findings: []
+dirty batch findings: [(0, &#x27;ssn_pattern&#x27;), (1, &#x27;forbidden_bin:424242&#x27;)]
+assertion passed: clean batch has zero PII-pattern findings
+</code></pre><p><strong>Exercise:</strong>
+Run <code>scan_for_pii_leaks</code> against a 3-record batch where one record's <code>note</code> field contains
+a real-shaped email address, and confirm the scanner flags it via <code>EMAIL_PATTERN</code> alongside
+any BIN-prefix finding on the same batch.</p>
+<p><strong>Starting point:</strong> <code>scan_for_pii_leaks</code>, <code>SSN_PATTERN</code>, <code>EMAIL_PATTERN</code> and
+<code>FORBIDDEN_BIN_PREFIXES</code> from this concept's Example, and a 3-record batch you write with
+one email leaked into a <code>note</code> field and one PAN starting with <code>'424242'</code>.</p>
+<p>Expected output:</p>
+<pre><code>[(1, &#x27;email_pattern&#x27;), (2, &#x27;forbidden_bin:424242&#x27;)]
+</code></pre><hr />
+<h3>Concept 4 — Documenting the Fidelity Gaps You Knowingly Accept</h3>
+<p>No synthetic generator matches every real correlation, and pretending otherwise is worse
+than admitting it plainly. A short, structured &quot;known gaps&quot; report shipped alongside the
+generator — what correlations it doesn't model, what patterns it can't produce — turns an
+implicit limitation into something a downstream consumer can actually plan around, instead
+of discovering the gap the hard way when a model trained on the synthetic data fails to
+generalize to real seasonal or geographic patterns.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def fidelity_gap_report(known_gaps):
+    for g in known_gaps:
+        if &#x27;field&#x27; not in g or &#x27;gap&#x27; not in g:
+            raise ValueError(f&#x27;incomplete gap entry, missing field/gap key: {g}&#x27;)
+    return {&#x27;known_gaps&#x27;: known_gaps, &#x27;gap_count&#x27;: len(known_gaps)}
+
+gaps = [
+    {&#x27;field&#x27;: &#x27;claim_amount x geography&#x27;, &#x27;gap&#x27;: &#x27;no correlation modeled; real coastal ZIPs see higher wind-peril severity, synthetic data does not&#x27;},
+    {&#x27;field&#x27;: &#x27;claim_amount x season&#x27;, &#x27;gap&#x27;: &#x27;no seasonality modeled; real Q1 sees more freeze-related water claims&#x27;},
+    {&#x27;field&#x27;: &#x27;fraud_flag&#x27;, &#x27;gap&#x27;: &#x27;not modeled at all; synthetic data has no adversarial fraud patterns to detect against&#x27;},
+]
+report = fidelity_gap_report(gaps)
+print(report)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>{&#x27;known_gaps&#x27;: [{&#x27;field&#x27;: &#x27;claim_amount x geography&#x27;, &#x27;gap&#x27;: &#x27;no correlation modeled; real coastal ZIPs see higher wind-peril severity, synthetic data does not&#x27;}, {&#x27;field&#x27;: &#x27;claim_amount x season&#x27;, &#x27;gap&#x27;: &#x27;no seasonality modeled; real Q1 sees more freeze-related water claims&#x27;}, {&#x27;field&#x27;: &#x27;fraud_flag&#x27;, &#x27;gap&#x27;: &#x27;not modeled at all; synthetic data has no adversarial fraud patterns to detect against&#x27;}], &#x27;gap_count&#x27;: 3}
+</code></pre><p><strong>Exercise:</strong>
+Confirm <code>fidelity_gap_report</code> rejects a malformed gap entry that is missing its <code>gap</code> key,
+raising <code>ValueError</code> rather than silently accepting an incomplete report.</p>
+<p><strong>Starting point:</strong> <code>fidelity_gap_report</code> from this concept's Example, and
+<code>bad_gaps = [{'field': 'fraud_flag'}]</code>.</p>
+<p>Expected output:</p>
+<pre><code>raised: incomplete gap entry, missing field/gap key: {&#x27;field&#x27;: &#x27;fraud_flag&#x27;}
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> The &quot;real aggregate statistics&quot; a synthetic-data team gets handed often
+come from a report a data-warehouse team runs by hand once a quarter off the legacy
+platform, not a live query — so the fidelity target itself can be months stale, and a
+generator calibrated against it is calibrated against a snapshot, not the current
+portfolio.</p>
+<p><strong>Compliance angle:</strong> A fidelity check and a re-identification check answer two different
+questions, and a real review needs both answered, not one standing in for the other: &quot;does
+this synthetic data look statistically realistic&quot; (Concept 1) is not the same claim as
+&quot;can this synthetic data be reverse-engineered to a real individual&quot; (Concept 2) — the
+second question is the one a privacy impact assessment actually asks, and passing the
+first says nothing about the second.</p>
+<p><strong>What breaks in production:</strong> A model trained entirely on synthetic data quietly encodes
+that data's own fidelity gaps as if they were true facts about the real world — a fraud
+classifier trained on synthetic data with no fraud patterns modeled (Concept 4's third gap)
+learns nothing useful about fraud at all, and the failure is invisible until it's deployed
+against real fraud it was never shown anything resembling.</p>
+<hr />
+<h2>Architecture Decision — Week 10</h2>
+<p><strong>Choosing between:</strong> Faker-only structured generation vs. LLM-assisted free-text
+generation vs. using a masked copy of real production data.</p>
+<p><strong>Rule of thumb:</strong> use Faker (plus a custom <code>BaseProvider</code> for domain-specific fields) for
+every structured column — it's fast, free, fully reproducible under a seed, and there is
+categorically no real individual behind any value it produces. Reach for an LLM only for
+the free-text layer templates can't cover — narrative variety and register that a
+finite template set collapses into repetition on (Day 4) — and always pair it with
+near-duplicate detection, since an LLM given the same constrained prompt repeatedly will
+itself collapse toward similar phrasing without an explicit diversity check. Never reach
+for a masked copy of real production data as the default path: masking reduces what's
+<em>displayed</em>, not what's in scope (Day 1), and the one property a masked-prod-copy has that
+synthetic data doesn't — genuine correlational realism — has to be earned back
+deliberately by calibrating the generator against real aggregate statistics (Day 5,
+Concept 1) and admitting in writing what correlations it still doesn't capture (Day 5,
+Concept 4). A masked production copy is the right call only when a specific validated
+fidelity requirement cannot be met any other way, and even then it stays subject to every
+data-residency and access control that applied to the original data, because scope
+reduction never actually happened.</p>
+<div class="pager"><a class="btn ghost" href="week-09.html">&larr; Week 09</a><a class="btn ghost" href="week-11.html">Week 11 &rarr;</a></div>
+</main></body></html>

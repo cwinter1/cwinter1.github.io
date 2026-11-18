@@ -1,0 +1,1899 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 27 — Evaluation in CI/CD</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><div class="reading"><h4>Read first (background articles, shorter than the lesson)</h4><ul><li><a href="https://outcomeschool.com/blog/llm-evaluation" target="_blank" rel="noopener">What is LLM Evaluation?<small>outcomeschool.com</small></a></li><li><a href="https://outcomeschool.com/blog/ai-agent-observability" target="_blank" rel="noopener">AI Agent Observability<small>outcomeschool.com</small></a></li></ul></div><p class="note">Done this week: <span data-week-count="27" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 27 — Evaluation in CI/CD</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>5 — Compound AI Systems &amp; Evaluation / RAG (24-27) — closes Phase 5</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Turning Week 26's eval harness from something a person runs by hand into a gate the codebase enforces automatically, on every change and every night.</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Week 26's <code>retrieve()</code>/<code>CORPUS</code>/<code>doc_lookup</code>, <code>GoldenRecord</code>, <code>build_scorecard</code>, <code>evaluate_gate</code>/<code>EvalGateError</code>/<code>EVAL_CONFIG</code>, and the <code>pytest</code>-parameterized golden-set runner are the exact artifacts this week wires into CI. They are reused, not reinvented — each is redefined in the concept that first needs it (this file has no installable package of its own to import from, the same constraint Week 26 Day 5 disclosed), tagged with a <code># Reusing X from Week 26 Day N Concept M</code> comment at first use.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8-10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. Package availability checked before writing: <code>pyyaml</code> (6.0.3) is already installed and used throughout Days 2 and 4 to <code>yaml.safe_load()</code> every workflow file this week writes, proving each one is syntactically valid YAML — this sandbox has no GitHub Actions runner, so that parse check is the honest ceiling of what &quot;validated&quot; means here, never &quot;executed by a runner.&quot; <code>pytest</code> (already a track dependency since Week 26) is used directly again in Day 3/5. No new third-party package beyond <code>pyyaml</code> is genuinely imported this week; <code>pyyaml</code> was already present as a transitive dependency (<code>docker-compose</code>-style tooling elsewhere in the repo) but never declared as a directly-imported top-level dependency here, so it is added to <code>requirements.txt</code> this week.</td>
+</tr>
+</tbody>
+</table>
+<p>No prior week's Architecture Decision is reused here; this week's is new, and closes Phase 5.</p>
+<p>Week 26 built four real ways to score a RAG pipeline and one real, version-controlled gate
+config to decide pass/fail from those scores. None of it protects anything yet — a harness
+that only runs when a person remembers to run it is a spot-check with extra steps, not a
+regression gate. This week wires Week 26's own artifacts into the place every other
+regression check in this repo already lives: <code>.github/workflows/</code>, following the exact
+<code>on:</code>/<code>jobs:</code>/<code>steps:</code> conventions this repo's own <code>regression.yml</code> and <code>ai.yml</code> already use
+for Weeks 8 and 10.</p>
+<hr />
+<h2 id="day-1">Day 1 — Golden Dataset Version Control</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="27-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=kLKBcPonMYw" target="_blank" rel="noopener"><b>Versioning Data with DVC (Hands-On Tutorial!)</b><small>DVCorg · 13:04</small></a></li><li><a href="https://www.youtube.com/watch?v=efnw2QvlhZM" target="_blank" rel="noopener"><b>Hands-on with DVC | Data Versioning in MLOps</b><small>Jayesh Sharma · 17:13</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=DVC%20data%20versioning%20machine%20learning%20dataset%20git" target="_blank" rel="noopener">Search YouTube: DVC data versioning machine learning dataset git</a></p></div>
+<hr />
+<h3>Concept 1 — A DVC-Style Pointer File Instead of Committing a Large Dataset Directly</h3>
+<p>Git tracks every version of every file it is given forever, which is fine for a golden set
+of a few dozen questions but stops scaling once a dataset grows into the tens of thousands of
+rows real production golden sets reach — every revision bloats the repository's history
+permanently, even after the data itself is deleted. DVC's actual answer is to commit a small
+pointer file (a content hash plus a size, checked into git normally) instead of the dataset
+itself, and store the real bytes in a separate artifact store keyed by that hash. The pointer
+below is a genuine, hand-built version of exactly that shape — <code>dvc add</code> produces a <code>.dvc</code>
+YAML file with the same three fields (path, hash, size) checked into git in the real tool;
+this is that same contract, executed directly rather than through the DVC CLI, which this
+sandbox does not have installed.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib, json, os, tempfile
+
+def hash_file(path):
+    h = hashlib.sha256()
+    with open(path, &quot;rb&quot;) as f:
+        h.update(f.read())
+    return h.hexdigest()
+
+def write_pointer(dataset_path, pointer_path):
+    size = os.path.getsize(dataset_path)
+    digest = hash_file(dataset_path)
+    pointer = {
+        &quot;path&quot;: os.path.basename(dataset_path),
+        &quot;sha256&quot;: digest,
+        &quot;size_bytes&quot;: size,
+        &quot;storage&quot;: &quot;artifact-store://fde-golden-sets/&quot;,
+    }
+    with open(pointer_path, &quot;w&quot;) as f:
+        json.dump(pointer, f, indent=2, sort_keys=True)
+    return pointer
+
+def verify_pointer(dataset_path, pointer_path):
+    with open(pointer_path) as f:
+        pointer = json.load(f)
+    actual_digest = hash_file(dataset_path)
+    actual_size = os.path.getsize(dataset_path)
+    return (actual_digest == pointer[&quot;sha256&quot;]) and (actual_size == pointer[&quot;size_bytes&quot;])
+
+tmp_dir = tempfile.mkdtemp()
+dataset_path = os.path.join(tmp_dir, &quot;golden_v1.jsonl&quot;)
+with open(dataset_path, &quot;w&quot;) as f:
+    f.write(&#x27;{&quot;question&quot;: &quot;How many days to reinstate?&quot;, &quot;answer&quot;: &quot;90 days&quot;}\n&#x27;)
+    f.write(&#x27;{&quot;question&quot;: &quot;What is the grace period?&quot;, &quot;answer&quot;: &quot;31 days&quot;}\n&#x27;)
+
+pointer_path = dataset_path + &quot;.pointer.json&quot;
+pointer = write_pointer(dataset_path, pointer_path)
+print(f&quot;pointer written: sha256={pointer[&#x27;sha256&#x27;][:12]}...  size_bytes={pointer[&#x27;size_bytes&#x27;]}&quot;)
+print(f&quot;pointer verifies against real file: {verify_pointer(dataset_path, pointer_path)}&quot;)
+
+with open(dataset_path, &quot;a&quot;) as f:
+    f.write(&#x27;{&quot;question&quot;: &quot;Is mold covered?&quot;, &quot;answer&quot;: &quot;only from water damage&quot;}\n&#x27;)
+print(f&quot;pointer verifies after untracked edit: {verify_pointer(dataset_path, pointer_path)}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>pointer written: sha256=4e0d346439a8...  size_bytes=128
+pointer verifies against real file: True
+pointer verifies after untracked edit: False
+</code></pre><p>The pointer file committed to git is tiny and diffable no matter how large the real dataset
+grows — reviewing a pull request that changes the golden set means reviewing a one-line hash
+change, plus the real diff a later concept's changelog entry describes in prose, not scrolling
+through thousands of JSON rows. The third print line is the actual point: the pointer catches
+an edit nobody re-hashed, which is exactly the failure mode a large dataset silently drifting
+out of sync with what CI thinks it is testing looks like.</p>
+<p><strong>Exercise:</strong>
+Using <code>write_pointer</code> and <code>verify_pointer</code> from this concept's Example, write a pointer for
+the dataset below, confirm it verifies, then confirm it stops verifying after an untracked
+append — in the same three-line format as the Example.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>tmp_dir2 = tempfile.mkdtemp()
+v2_dataset_path = os.path.join(tmp_dir2, &quot;golden_v2.jsonl&quot;)
+with open(v2_dataset_path, &quot;w&quot;) as f:
+    f.write(&#x27;{&quot;question&quot;: &quot;Is umbrella liability automatic?&quot;, &quot;answer&quot;: &quot;no, opt-in rider&quot;}\n&#x27;)
+v2_pointer_path = v2_dataset_path + &quot;.pointer.json&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>pointer written: sha256=b181683ad539...  size_bytes=79
+pointer verifies against real file: True
+pointer verifies after untracked edit: False
+</code></pre><hr />
+<h3>Concept 2 — Synthetic-Only Golden Queries: Keeping the Repo PII-Free by Construction</h3>
+<p>A golden set that is committed to git, and later copied into every CI runner's checkout on
+every pull request, is a genuinely bad place for a real customer's name, SSN, or account
+number to end up — git history does not forget, and a CI log can outlive the PR that
+triggered it. Week 26 Day 1's <code>build_seed_set</code> already generated questions from a fixed
+template x topic grid specifically so nothing real could enter the set in the first place;
+this concept adds the audit that should run on ANY golden-set addition regardless of how it
+was authored, since a synthetic-generation process protects against nothing once someone
+pastes in a real support ticket as a &quot;realistic&quot; example question.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import re
+from dataclasses import dataclass
+from typing import List
+
+# Reusing GoldenRecord from Week 26 Day 1 Concept 2
+@dataclass
+class GoldenRecord:
+    question: str
+    ground_truth_answer: str
+    reference_context_ids: List[str]
+    category: str
+
+PII_PATTERNS = [
+    re.compile(r&quot;\b\d{3}-\d{2}-\d{4}\b&quot;),        # SSN-shaped
+    re.compile(r&quot;\b\d{9,16}\b&quot;),                  # account/card-number-shaped
+    re.compile(r&quot;\b[\w.+-]+@[\w-]+\.[\w.-]+\b&quot;),  # email
+    re.compile(r&quot;\b\d{5}(?:-\d{4})?\b&quot;),          # zip-code-shaped
+]
+REAL_NAME_MARKERS = {&quot;mr.&quot;, &quot;mrs.&quot;, &quot;ms.&quot;, &quot;dr.&quot;, &quot;policyholder name&quot;, &quot;ssn&quot;, &quot;account number&quot;}
+
+def contains_pii(text):
+    lowered = text.lower()
+    if any(m in lowered for m in REAL_NAME_MARKERS):
+        return True
+    return any(p.search(text) for p in PII_PATTERNS)
+
+def audit_golden_set(records):
+    flagged = []
+    for rec in records:
+        if contains_pii(rec.question) or contains_pii(rec.ground_truth_answer):
+            flagged.append(rec.question)
+    return flagged
+
+synthetic_set = [
+    GoldenRecord(&quot;How many days do I have to reinstate a lapsed policy?&quot;,
+                 &quot;90 days from the date of lapse.&quot;, [&quot;DOC-2&quot;], &quot;timing&quot;),
+    GoldenRecord(&quot;Is mold damage covered under my property policy?&quot;,
+                 &quot;Only mold caused by a covered water damage event.&quot;, [&quot;DOC-8&quot;], &quot;exclusion&quot;),
+]
+leaked_set = [
+    GoldenRecord(&quot;What is the claim status for policyholder John Smith, SSN 512-33-9981?&quot;,
+                 &quot;Claim CLM-2291045 is pending review.&quot;, [&quot;DOC-2&quot;], &quot;timing&quot;),
+]
+
+flagged_synthetic = audit_golden_set(synthetic_set)
+flagged_leaked = audit_golden_set(leaked_set)
+print(f&quot;synthetic set flagged: {len(flagged_synthetic)}/{len(synthetic_set)}&quot;)
+print(f&quot;leaked-shaped set flagged: {len(flagged_leaked)}/{len(leaked_set)}&quot;)
+for q in flagged_leaked:
+    print(f&quot;  BLOCKED: {q[:60]}...&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>synthetic set flagged: 0/2
+leaked-shaped set flagged: 1/1
+  BLOCKED: What is the claim status for policyholder John Smith, SSN 51...
+</code></pre><p>The synthetic set is clean not because it was checked, but because its own generation process
+(Week 26 Day 1's template x topic grid) never had access to anything real to leak — this audit
+exists for the moment someone bypasses that generator, which <code>leaked_set</code> stands in for.</p>
+<p><strong>Exercise:</strong>
+Using <code>contains_pii</code> and <code>audit_golden_set</code> from this concept's Example, audit the candidate
+set below and print in the same format.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>candidate_set = [
+    GoldenRecord(&quot;Does the roadside assistance rider cover a lockout service call?&quot;,
+                 &quot;Yes, lockout service is included at no extra premium.&quot;, [&quot;DOC-B&quot;], &quot;coverage_scope&quot;),
+    GoldenRecord(&quot;Can you email the adjuster at claims.review@carrier-example.com about my file?&quot;,
+                 &quot;Requests are routed through the standard claims portal.&quot;, [&quot;DOC-9&quot;], &quot;procedural&quot;),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>candidate set flagged: 1/2
+  BLOCKED: Can you email the adjuster at claims.review@carrier-example....
+</code></pre><hr />
+<h3>Concept 3 — A Changelog Entry Required Per Dataset Revision</h3>
+<p>A golden set's <code>.pointer.json</code> (Concept 1) proves a revision's bytes are exactly what CI
+thinks they are, but it says nothing about WHY the bytes changed — that has to be a human
+decision, recorded before the revision is trusted, not reconstructed later from git blame.
+<code>validate_revision</code> below treats a changelog as a required gate: a dataset hash with no
+matching entry is rejected outright, and an entry whose claimed add/retire counts do not
+match the real diff is rejected too, so the changelog cannot silently drift out of sync with
+what actually changed the way the dataset itself could without Concept 1's pointer check.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import hashlib
+
+# Reusing dataset_hash-style content hashing from Concept 1
+from dataclasses import dataclass
+
+@dataclass
+class ChangelogEntry:
+    revision: str
+    dataset_hash: str
+    summary: str
+    questions_added: int
+    questions_retired: int
+
+class ChangelogError(ValueError):
+    pass
+
+def dataset_hash_of(questions):
+    key = &quot;|&quot;.join(sorted(questions))
+    return hashlib.sha256(key.encode()).hexdigest()[:12]
+
+def validate_revision(prev_questions, new_questions, changelog):
+    new_hash = dataset_hash_of(new_questions)
+    entry = next((e for e in changelog if e.dataset_hash == new_hash), None)
+    if entry is None:
+        raise ChangelogError(
+            f&quot;dataset content hash {new_hash} has no matching changelog entry -- &quot;
+            f&quot;every revision must be logged before it can be used&quot;
+        )
+    added = len(set(new_questions) - set(prev_questions))
+    retired = len(set(prev_questions) - set(new_questions))
+    if entry.questions_added != added or entry.questions_retired != retired:
+        raise ChangelogError(
+            f&quot;changelog entry {entry.revision} claims +{entry.questions_added}/-{entry.questions_retired} &quot;
+            f&quot;but the real diff is +{added}/-{retired}&quot;
+        )
+    return entry
+
+v1_questions = [&quot;grace period days&quot;, &quot;reinstatement window&quot;]
+v2_questions = [&quot;grace period days&quot;, &quot;reinstatement window&quot;, &quot;mold exclusion scope&quot;]
+
+changelog = [
+    ChangelogEntry(
+        revision=&quot;v2&quot;,
+        dataset_hash=dataset_hash_of(v2_questions),
+        summary=&quot;Added mold exclusion scope question after Q3 policy language update.&quot;,
+        questions_added=1,
+        questions_retired=0,
+    ),
+]
+
+entry = validate_revision(v1_questions, v2_questions, changelog)
+print(f&quot;v2 validated against changelog: revision={entry.revision}  summary={entry.summary!r}&quot;)
+
+v3_questions = [&quot;grace period days&quot;, &quot;mold exclusion scope&quot;]  # retired reinstatement, no changelog entry
+try:
+    validate_revision(v2_questions, v3_questions, changelog)
+    print(&quot;unexpectedly validated v3&quot;)
+except ChangelogError as e:
+    print(f&quot;rejected: {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>v2 validated against changelog: revision=v2  summary=&#x27;Added mold exclusion scope question after Q3 policy language update.&#x27;
+rejected: dataset content hash 27c3a4dee4e8 has no matching changelog entry -- every revision must be logged before it can be used
+</code></pre><p><code>v3</code> fails for the honest reason: nobody wrote a changelog entry for it at all, so
+<code>validate_revision</code> never gets far enough to even check whether the counts would have matched
+— an unlogged revision is rejected outright, not merely flagged.</p>
+<p><strong>Exercise:</strong>
+Using <code>ChangelogEntry</code>, <code>validate_revision</code>, <code>ChangelogError</code>, and <code>dataset_hash_of</code> from this
+concept's Example, validate the revision below, where a changelog entry exists but its claimed
+counts are wrong.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>v4_questions = v2_questions + [&quot;umbrella liability scope&quot;]
+mismatched_changelog = changelog + [
+    ChangelogEntry(
+        revision=&quot;v4&quot;,
+        dataset_hash=dataset_hash_of(v4_questions),
+        summary=&quot;Added umbrella liability scope question.&quot;,
+        questions_added=2,  # wrong -- actual diff is +1/-0
+        questions_retired=0,
+    ),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>rejected: changelog entry v4 claims +2/-0 but the real diff is +1/-0
+</code></pre><hr />
+<h3>Concept 4 — Two-Reviewer Approval Before a Question Is Added or Retired</h3>
+<p>A single annotator adding a golden-set question is exactly Week 26 Day 1 Concept 3's own
+single-point-of-failure risk — nobody double-checks whether the new question is well-formed,
+correctly labeled, or free of the ambiguity markers that concept flagged. Requiring two
+DISTINCT reviewer approvals before a change merges, and rejecting a reviewer's second
+approval as a duplicate rather than silently counting it twice, is the same discipline a code
+review's required-approvals rule already enforces elsewhere in this repo — golden-set changes
+get no exemption just because they are data, not code.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass, field
+from typing import List
+
+@dataclass
+class ReviewRequest:
+    change_id: str
+    action: str  # &quot;add&quot; | &quot;retire&quot;
+    question: str
+    approvals: List[str] = field(default_factory=list)
+
+class ApprovalError(ValueError):
+    pass
+
+MIN_REVIEWERS = 2
+
+def approve(request, reviewer):
+    if reviewer in request.approvals:
+        raise ApprovalError(f&quot;{reviewer} already approved {request.change_id} -- cannot double-count&quot;)
+    request.approvals.append(reviewer)
+    return request
+
+def can_merge(request):
+    distinct = set(request.approvals)
+    if len(distinct) &lt; MIN_REVIEWERS:
+        raise ApprovalError(
+            f&quot;{request.change_id} has {len(distinct)} distinct reviewer(s), needs {MIN_REVIEWERS}&quot;
+        )
+    return True
+
+req = ReviewRequest(change_id=&quot;CH-101&quot;, action=&quot;add&quot;, question=&quot;Is flood damage from a burst pipe covered?&quot;)
+approve(req, &quot;reviewer_amir&quot;)
+try:
+    can_merge(req)
+    print(&quot;unexpectedly merged with 1 reviewer&quot;)
+except ApprovalError as e:
+    print(f&quot;blocked: {e}&quot;)
+
+approve(req, &quot;reviewer_dana&quot;)
+print(f&quot;{req.change_id} mergeable after 2 distinct reviewers: {can_merge(req)}&quot;)
+
+req2 = ReviewRequest(change_id=&quot;CH-102&quot;, action=&quot;retire&quot;, question=&quot;Old wording: does the policy renew automatically?&quot;)
+approve(req2, &quot;reviewer_amir&quot;)
+try:
+    approve(req2, &quot;reviewer_amir&quot;)
+    print(&quot;unexpectedly allowed double approval&quot;)
+except ApprovalError as e:
+    print(f&quot;rejected: {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>blocked: CH-101 has 1 distinct reviewer(s), needs 2
+CH-101 mergeable after 2 distinct reviewers: True
+rejected: reviewer_amir already approved CH-102 -- cannot double-count
+</code></pre><p><strong>Exercise:</strong>
+Using <code>ReviewRequest</code>, <code>approve</code>, <code>can_merge</code>, and <code>ApprovalError</code> from this concept's Example,
+walk the change request below through one reviewer, a blocked merge attempt, a second
+reviewer, then a successful merge, in the same format.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>req3 = ReviewRequest(change_id=&quot;CH-103&quot;, action=&quot;add&quot;, question=&quot;Does umbrella liability apply automatically or require opt-in?&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>blocked: CH-103 has 1 distinct reviewer(s), needs 2
+CH-103 mergeable after 2 distinct reviewers: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> a golden set built against Week 13/18's mainframe-sourced corpus ages the
+moment the source system's own export format changes underneath it — Concept 1's pointer file
+catches the symptom (the dataset's bytes no longer match what CI expects) but Concept 3's
+changelog is what tells an on-call engineer whether that was a deliberate content update or a
+silent upstream break, which is the difference between merging a PR and paging someone.</p>
+<p><strong>Compliance angle:</strong> Concept 4's two-reviewer rule is not procedural theater for a BFSI golden
+set specifically because Week 26 Day 1 Concept 3 already showed one annotator can misread a
+policy's own hedged language as a flat fact — a second reviewer is the actual control that
+catches that before it enters the set a regression gate will trust for months.</p>
+<p><strong>What breaks in production:</strong> a golden set with no changelog and no pointer file looks
+identical to a well-governed one right up until someone asks &quot;why did our recall score change
+between last Tuesday and today&quot; and there is no answer — Concepts 1 and 3 together are what
+make that question answerable in minutes instead of requiring a reconstruction from memory.</p>
+<hr />
+<h2 id="day-2">Day 2 — GitHub Actions Eval Workflow</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="27-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=jd0lxt7WGL0" target="_blank" rel="noopener"><b>GitHub Actions Matrix Strategy Explained | Multi-OS Testing in 2026</b><small>LearnITGuide Tutorials · 8:10</small></a></li><li><a href="https://www.youtube.com/watch?v=BDQivAobxKA" target="_blank" rel="noopener"><b>Caching Dependencies to SPEED UP Workflows in GitHub Actions</b><small>CoderDave · 5:58</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=GitHub%20Actions%20matrix%20strategy%20secrets%20actions%20cache%20python" target="_blank" rel="noopener">Search YouTube: GitHub Actions matrix strategy secrets actions cache python</a></p></div>
+<hr />
+<p>This sandbox has no GitHub Actions runner, so nothing in this day claims to have executed
+inside one. What every Example below genuinely does is build the real workflow YAML as a
+Python string and call <code>yaml.safe_load()</code> on it — proving it parses as valid YAML with the
+exact keys/structure a real job needs — and where a concept needs to show the YAML's actual
+EFFECT (matrix expansion, cache hit/miss), a small, genuinely-executed Python function
+alongside it simulates that effect, the same way this track's own Airflow content elsewhere
+simulates a DAG runner as a plain Python class instead of claiming a live scheduler. This
+day's YAML follows this repo's own real <code>.github/workflows/regression.yml</code> and <code>ai.yml</code>
+conventions (<code>on:</code>/<code>jobs:</code>/<code>steps:</code> shape, <code>actions/checkout@v4</code>, <code>actions/setup-python@v5</code>,
+a <code>pip install</code> step, then a <code>pytest</code> invocation) rather than an invented generic example.</p>
+<h3>Concept 1 — <code>pull_request</code> and <code>workflow_dispatch</code> Triggers on the Eval Job</h3>
+<p>An eval job needs to run automatically on every pull request that could regress the pipeline
+(<code>pull_request</code>), and needs a manual escape hatch a reviewer can fire on demand without
+opening a throwaway PR (<code>workflow_dispatch</code>) — for example to re-run the exact same gate
+against a smaller <code>question_count</code> while debugging a flaky result. Both triggers coexist under
+one <code>&quot;on&quot;:</code> key, exactly the way <code>regression.yml</code> already declares <code>pull_request</code> alone and
+<code>ai.yml</code> declares <code>push</code>+<code>pull_request</code> together for this repo's earlier weeks.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import yaml
+
+WORKFLOW_YAML = &quot;&quot;&quot;
+name: FDE Eval Gate
+
+&quot;on&quot;:
+  pull_request:
+    branches: [main]
+    paths:
+      - &quot;FDE_Fintech_Insurance/Week_2*/**&quot;
+  workflow_dispatch:
+    inputs:
+      question_count:
+        description: &quot;How many golden questions to run (default: full set)&quot;
+        required: false
+        default: &quot;all&quot;
+
+jobs:
+  eval-gate:
+    name: Golden Set Regression Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: &quot;3.11&quot;
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pytest pyyaml
+
+      - name: Run golden-set eval suite
+        run: |
+          cd FDE_Fintech_Insurance
+          pytest tools/tests/test_eval_gate.py -v --tb=short
+&quot;&quot;&quot;
+
+UNQUOTED_ON_YAML = &quot;&quot;&quot;
+name: Trigger Check
+on:
+  pull_request:
+    branches: [main]
+&quot;&quot;&quot;
+
+parsed = yaml.safe_load(WORKFLOW_YAML)
+print(f&quot;valid YAML: {isinstance(parsed, dict)}&quot;)
+print(f&quot;job name: {parsed[&#x27;name&#x27;]}&quot;)
+print(f&quot;triggers: {sorted(parsed[&#x27;on&#x27;].keys())}&quot;)
+job = parsed[&quot;jobs&quot;][&quot;eval-gate&quot;]
+print(f&quot;job step names: {[s[&#x27;name&#x27;] for s in job[&#x27;steps&#x27;]]}&quot;)
+print(f&quot;workflow_dispatch has a question_count input: {&#x27;question_count&#x27; in parsed[&#x27;on&#x27;][&#x27;workflow_dispatch&#x27;][&#x27;inputs&#x27;]}&quot;)
+
+# the real gotcha: an unquoted `on:` key is YAML-1.1 boolean True, not the string &quot;on&quot;
+unquoted_parsed = yaml.safe_load(UNQUOTED_ON_YAML)
+print(f&quot;unquoted &#x27;on:&#x27; key actually parses as: {list(unquoted_parsed.keys())[1]!r} (type {type(list(unquoted_parsed.keys())[1]).__name__})&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>valid YAML: True
+job name: FDE Eval Gate
+triggers: [&#x27;pull_request&#x27;, &#x27;workflow_dispatch&#x27;]
+job step names: [&#x27;Checkout repository&#x27;, &#x27;Set up Python 3.11&#x27;, &#x27;Install dependencies&#x27;, &#x27;Run golden-set eval suite&#x27;]
+workflow_dispatch has a question_count input: True
+unquoted &#x27;on:&#x27; key actually parses as: True (type bool)
+</code></pre><p>GitHub Actions itself special-cases the literal top-level <code>on:</code> key and never trips over this
+— but any OTHER tool that runs <code>yaml.safe_load()</code> against the same file (a linter, this very
+verification step, a config-diffing script) follows plain YAML 1.1 rules, where an unquoted
+<code>on</code>, <code>off</code>, <code>yes</code>, or <code>no</code> key is a boolean, not a string. <code>WORKFLOW_YAML</code> above quotes
+<code>&quot;on&quot;:</code> specifically so it round-trips identically through both GitHub's own parser and any
+generic YAML tool — real, workflow-breaking-for-tooling behavior this concept ran into while
+building this exact YAML, not a hypothetical.</p>
+<p><strong>Exercise:</strong>
+Using the parsing pattern from this concept's Example, parse the scheduled workflow below and
+print its name, triggers, step names, and cron schedule.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>NIGHTLY_TRIGGER_YAML = &quot;&quot;&quot;
+name: FDE Nightly Eval
+
+&quot;on&quot;:
+  schedule:
+    - cron: &quot;0 6 * * *&quot;
+  workflow_dispatch: {}
+
+jobs:
+  nightly-eval:
+    name: Nightly Golden Set Sweep
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run nightly eval
+        run: |
+          cd FDE_Fintech_Insurance
+          python tools/run_eval.py --set nightly
+&quot;&quot;&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>valid YAML: True
+job name: FDE Nightly Eval
+triggers: [&#x27;schedule&#x27;, &#x27;workflow_dispatch&#x27;]
+job step names: [&#x27;Checkout repository&#x27;, &#x27;Run nightly eval&#x27;]
+cron schedule: 0 6 * * *
+</code></pre><hr />
+<h3>Concept 2 — Matrix Strategy Across Retrieval Configurations</h3>
+<p>Week 25 proved reranking earns its cost at some <code>k</code> values and not others — a single eval run
+answers &quot;does the CURRENT configuration still pass,&quot; not &quot;which configuration is actually
+best.&quot; A <code>strategy.matrix</code> job runs the same steps once per combination of named dimensions,
+and <code>exclude</code> prunes combinations that make no sense to run at all (a <code>reranker: none</code> run at
+a large <code>retrieval_k</code> that only matters once a reranker is narrowing the field). <code>expand_matrix</code>
+below reproduces GitHub Actions' own real expansion rule: the full cartesian product of every
+dimension's values, minus any row an <code>exclude</code> entry matches on every one of its listed keys.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import yaml
+import itertools
+
+MATRIX_YAML = &quot;&quot;&quot;
+name: FDE Eval Gate
+
+&quot;on&quot;:
+  pull_request:
+    branches: [main]
+
+jobs:
+  eval-gate:
+    name: Golden Set Regression Check (${{ matrix.retrieval_k }}, reranker=${{ matrix.reranker }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        retrieval_k: [3, 5]
+        reranker: [none, bge]
+        exclude:
+          - retrieval_k: 5
+            reranker: none
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run eval at this configuration
+        run: |
+          cd FDE_Fintech_Insurance
+          python tools/run_eval.py --k ${{ matrix.retrieval_k }} --reranker ${{ matrix.reranker }}
+&quot;&quot;&quot;
+
+parsed = yaml.safe_load(MATRIX_YAML)
+matrix = parsed[&quot;jobs&quot;][&quot;eval-gate&quot;][&quot;strategy&quot;][&quot;matrix&quot;]
+print(f&quot;valid YAML: {isinstance(parsed, dict)}&quot;)
+print(f&quot;matrix dimensions: {[k for k in matrix if k != &#x27;exclude&#x27;]}&quot;)
+print(f&quot;exclude rules: {matrix.get(&#x27;exclude&#x27;, [])}&quot;)
+
+
+def expand_matrix(matrix):
+    dims = {k: v for k, v in matrix.items() if k != &quot;exclude&quot;}
+    excludes = matrix.get(&quot;exclude&quot;, [])
+    keys = list(dims.keys())
+    combos = []
+    for values in itertools.product(*[dims[k] for k in keys]):
+        row = dict(zip(keys, values))
+        if any(all(row.get(ek) == ev for ek, ev in ex.items()) for ex in excludes):
+            continue
+        combos.append(row)
+    return combos
+
+
+jobs_to_run = expand_matrix(matrix)
+print(f&quot;jobs GitHub Actions would actually run: {len(jobs_to_run)}&quot;)
+for row in jobs_to_run:
+    print(f&quot;  {row}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>valid YAML: True
+matrix dimensions: [&#x27;retrieval_k&#x27;, &#x27;reranker&#x27;]
+exclude rules: [{&#x27;retrieval_k&#x27;: 5, &#x27;reranker&#x27;: &#x27;none&#x27;}]
+jobs GitHub Actions would actually run: 3
+  {&#x27;retrieval_k&#x27;: 3, &#x27;reranker&#x27;: &#x27;none&#x27;}
+  {&#x27;retrieval_k&#x27;: 3, &#x27;reranker&#x27;: &#x27;bge&#x27;}
+  {&#x27;retrieval_k&#x27;: 5, &#x27;reranker&#x27;: &#x27;bge&#x27;}
+</code></pre><p>A naive 2x2 grid would be 4 jobs; the one <code>exclude</code> rule prunes exactly the combination that
+would waste a runner minute re-proving what Week 25 already measured (a wide <code>k</code> gains nothing
+without a reranker to narrow it back down) — <code>fail-fast: false</code> is set deliberately too, so
+one configuration's regression does not cancel the other two still in flight and hide their
+results.</p>
+<p><strong>Exercise:</strong>
+Using <code>expand_matrix</code> from this concept's Example, expand the matrix below and print in the
+same format.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>chunking_matrix = {
+    &quot;chunk_size&quot;: [256, 512, 1024],
+    &quot;reranker&quot;: [&quot;none&quot;, &quot;bge&quot;],
+    &quot;exclude&quot;: [
+        {&quot;chunk_size&quot;: 1024, &quot;reranker&quot;: &quot;none&quot;},
+        {&quot;chunk_size&quot;: 256, &quot;reranker&quot;: &quot;bge&quot;},
+    ],
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>jobs GitHub Actions would actually run: 4
+  {&#x27;chunk_size&#x27;: 256, &#x27;reranker&#x27;: &#x27;none&#x27;}
+  {&#x27;chunk_size&#x27;: 512, &#x27;reranker&#x27;: &#x27;none&#x27;}
+  {&#x27;chunk_size&#x27;: 512, &#x27;reranker&#x27;: &#x27;bge&#x27;}
+  {&#x27;chunk_size&#x27;: 1024, &#x27;reranker&#x27;: &#x27;bge&#x27;}
+</code></pre><hr />
+<h3>Concept 3 — Judge-LLM API Key via Repository Secrets</h3>
+<p>A judge-scored eval job needs a real API key to call a judge model, and that key must never
+sit in the workflow file itself, in plain text, where anyone who can read the repository can
+read it — <code>${{ secrets.JUDGE_LLM_API_KEY }}</code> is GitHub's own substitution syntax for pulling
+it from the repository's encrypted secret store at run time instead, masked in every log line
+it touches. The part every judge-scored job also needs, and the part most first drafts skip,
+is what happens the one time the secret is NOT there: GitHub withholds repository secrets from
+workflow runs triggered by a pull request from a fork, specifically so a malicious fork PR
+cannot exfiltrate them — a judge job that does not check for this fails open (silently scores
+nothing, reports a hollow PASS) unless it is written to fail closed instead.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import yaml
+
+SECRET_YAML = &quot;&quot;&quot;
+name: FDE Eval Gate
+
+&quot;on&quot;:
+  pull_request:
+    branches: [main]
+
+jobs:
+  eval-gate:
+    runs-on: ubuntu-latest
+    env:
+      JUDGE_API_KEY: ${{ secrets.JUDGE_LLM_API_KEY }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run judge-scored eval
+        run: |
+          cd FDE_Fintech_Insurance
+          python tools/run_judge_eval.py
+&quot;&quot;&quot;
+
+parsed = yaml.safe_load(SECRET_YAML)
+print(f&quot;valid YAML: {isinstance(parsed, dict)}&quot;)
+env_block = parsed[&quot;jobs&quot;][&quot;eval-gate&quot;][&quot;env&quot;]
+print(f&quot;env keys: {list(env_block.keys())}&quot;)
+print(f&quot;JUDGE_API_KEY references a secret expression: {&#x27;secrets.JUDGE_LLM_API_KEY&#x27; in env_block[&#x27;JUDGE_API_KEY&#x27;]}&quot;)
+
+
+class MissingSecretError(RuntimeError):
+    pass
+
+
+def require_judge_api_key(env):
+    key = env.get(&quot;JUDGE_API_KEY&quot;, &quot;&quot;)
+    if not key:
+        raise MissingSecretError(
+            &quot;JUDGE_API_KEY is empty -- this happens on a fork PR, where GitHub withholds &quot;
+            &quot;repository secrets from the workflow run for security; the judge-scored &quot;
+            &quot;job must fail closed here, not silently skip scoring and report a false PASS&quot;
+        )
+    return key
+
+
+configured_env = {&quot;JUDGE_API_KEY&quot;: &quot;sk-real-key-value-not-shown&quot;}
+fork_pr_env = {&quot;JUDGE_API_KEY&quot;: &quot;&quot;}
+
+for label, env in [(&quot;same-repo PR (secret present)&quot;, configured_env), (&quot;fork PR (secret withheld)&quot;, fork_pr_env)]:
+    try:
+        require_judge_api_key(env)
+        print(f&quot;{label}: judge job proceeds&quot;)
+    except MissingSecretError as e:
+        print(f&quot;{label}: BLOCKED -- {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>valid YAML: True
+env keys: [&#x27;JUDGE_API_KEY&#x27;]
+JUDGE_API_KEY references a secret expression: True
+same-repo PR (secret present): judge job proceeds
+fork PR (secret withheld): BLOCKED -- JUDGE_API_KEY is empty -- this happens on a fork PR, where GitHub withholds repository secrets from the workflow run for security; the judge-scored job must fail closed here, not silently skip scoring and report a false PASS
+</code></pre><p><strong>Exercise:</strong>
+Using <code>MissingSecretError</code> and <code>require_judge_api_key</code> from this concept's Example, check the
+env below (a Dependabot-triggered PR, which GitHub also withholds secrets from by default) and
+print the result.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>dependabot_pr_env = {}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>dependabot PR: BLOCKED -- JUDGE_API_KEY is empty -- this happens on a fork PR, where GitHub withholds repository secrets from the workflow run for security; the judge-scored job must fail closed here, not silently skip scoring and report a false PASS
+</code></pre><hr />
+<h3>Concept 4 — <code>actions/cache</code> for the Embedding Cache</h3>
+<p>Re-embedding every golden-set question on every single PR run is real, recurring cost and
+real, recurring latency for text that has not changed since the last run — <code>actions/cache</code>
+lets a job restore a prior run's cache directory keyed by a hash of the files that actually
+determine its contents, so an unrelated code change in this same PR gets a cache hit instead
+of paying to re-embed unchanged questions. <code>hashFiles()</code> (real GitHub Actions expression
+syntax) computes that hash server-side from the matched files' real content; <code>hash_files_sim</code>
+below reproduces the same idea with <code>hashlib</code> directly so its result is genuinely computable
+in this sandbox, and <code>resolve_cache</code> reproduces the exact lookup GitHub's cache action performs:
+an exact key match is a HIT, a <code>restore-keys</code> prefix match is a PARTIAL hit (Concept 4's
+<code>restore-keys:</code> field), and no match at all is a MISS.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import yaml
+import hashlib
+
+CACHE_YAML = &quot;&quot;&quot;
+name: FDE Eval Gate
+
+&quot;on&quot;:
+  pull_request:
+    branches: [main]
+
+jobs:
+  eval-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Cache embedding cache
+        uses: actions/cache@v4
+        with:
+          path: FDE_Fintech_Insurance/.embedding_cache
+          key: embedding-cache-${{ hashFiles(&#x27;FDE_Fintech_Insurance/Week_2*/**/*.md&#x27;) }}
+          restore-keys: |
+            embedding-cache-
+      - name: Run eval
+        run: |
+          cd FDE_Fintech_Insurance
+          python tools/run_eval.py
+&quot;&quot;&quot;
+
+parsed = yaml.safe_load(CACHE_YAML)
+print(f&quot;valid YAML: {isinstance(parsed, dict)}&quot;)
+steps = parsed[&quot;jobs&quot;][&quot;eval-gate&quot;][&quot;steps&quot;]
+cache_step = next(s for s in steps if s.get(&quot;uses&quot;, &quot;&quot;).startswith(&quot;actions/cache&quot;))
+print(f&quot;cache step uses: {cache_step[&#x27;uses&#x27;]}&quot;)
+print(f&quot;cache path: {cache_step[&#x27;with&#x27;][&#x27;path&#x27;]}&quot;)
+print(f&quot;cache key references hashFiles(): {&#x27;hashFiles(&#x27; in cache_step[&#x27;with&#x27;][&#x27;key&#x27;]}&quot;)
+
+
+def hash_files_sim(contents_by_path):
+    combined = &quot;&quot;.join(contents_by_path[p] for p in sorted(contents_by_path))
+    return hashlib.sha256(combined.encode()).hexdigest()[:16]
+
+
+def resolve_cache(key, cache_store):
+    if key in cache_store:
+        return &quot;HIT&quot;, key
+    prefix = key.rsplit(&quot;-&quot;, 1)[0] + &quot;-&quot;
+    fallback = next((k for k in cache_store if k.startswith(prefix)), None)
+    if fallback:
+        return &quot;PARTIAL (restore-keys fallback)&quot;, fallback
+    return &quot;MISS&quot;, None
+
+
+day2_files_v1 = {&quot;week27_day1.md&quot;: &quot;golden set content v1&quot;, &quot;week27_day2.md&quot;: &quot;workflow content v1&quot;}
+day2_files_v2 = {&quot;week27_day1.md&quot;: &quot;golden set content v1&quot;, &quot;week27_day2.md&quot;: &quot;workflow content v2 -- edited&quot;}
+
+cache_store = {}
+key_v1 = f&quot;embedding-cache-{hash_files_sim(day2_files_v1)}&quot;
+status, hit_key = resolve_cache(key_v1, cache_store)
+print(f&quot;run 1 (empty cache): key={key_v1[:30]}...  status={status}&quot;)
+cache_store[key_v1] = &quot;embeddings blob v1&quot;
+
+key_v1_again = f&quot;embedding-cache-{hash_files_sim(day2_files_v1)}&quot;
+status, hit_key = resolve_cache(key_v1_again, cache_store)
+print(f&quot;run 2 (same files):  status={status}  hit_key matches run 1 key: {hit_key == key_v1}&quot;)
+
+key_v2 = f&quot;embedding-cache-{hash_files_sim(day2_files_v2)}&quot;
+status, hit_key = resolve_cache(key_v2, cache_store)
+print(f&quot;run 3 (files changed): status={status}  fell back to: {hit_key[:30] if hit_key else None}...&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>valid YAML: True
+cache step uses: actions/cache@v4
+cache path: FDE_Fintech_Insurance/.embedding_cache
+cache key references hashFiles(): True
+run 1 (empty cache): key=embedding-cache-db4311cf774a0a...  status=MISS
+run 2 (same files):  status=HIT  hit_key matches run 1 key: True
+run 3 (files changed): status=PARTIAL (restore-keys fallback)  fell back to: embedding-cache-db4311cf774a0a...
+</code></pre><p>Run 3 is the whole point of <code>restore-keys</code>: the exact key misses (the files genuinely changed,
+so a fresh embedding pass for the NEW content is unavoidable), but the fallback prefix match
+still hands back the PRIOR cache as a warm starting point rather than an empty directory — a
+partial hit costs less than a cold cache even when it cannot be a full one.</p>
+<p><strong>Exercise:</strong>
+Using <code>hash_files_sim</code> and <code>resolve_cache</code> from this concept's Example, run the two-call
+sequence below and print in the same format as the Example's first two print lines.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>day5_files_v1 = {&quot;week27_day5.md&quot;: &quot;scorecard artifact content v1&quot;}
+cache_store2 = {}
+key_a = f&quot;embedding-cache-{hash_files_sim(day5_files_v1)}&quot;
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>run 1 (empty cache): status=MISS
+run 2 (same files):  status=HIT  hit_key matches run 1 key: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> the <code>paths:</code> filter in Concept 1's <code>pull_request</code> trigger matters more once
+this repo's other legacy-heavy weeks (mainframe extracts, MSSQL/Oracle CDC) sit in the same
+CI pipeline — an eval job scoped to fire on every push repo-wide would burn runner minutes on
+every unrelated COBOL-copybook fix that never touches the RAG pipeline at all.</p>
+<p><strong>Compliance angle:</strong> Concept 3's fail-closed secret handling is the same posture Week 15's
+guardrail middleware took for a missing config — a judge-scored gate that silently passes
+because its own credential never arrived is worse than no gate at all, because it looks green
+in exactly the review an auditor would trust.</p>
+<p><strong>What breaks in production:</strong> a matrix job (Concept 2) with <code>fail-fast</code> left at its GitHub
+default (<code>true</code>) cancels every OTHER configuration the instant any ONE of them fails — a team
+debugging &quot;does this only break at k=5&quot; loses the other three data points that would have
+answered the question, which is why this day's own YAML sets <code>fail-fast: false</code> explicitly
+rather than leaving it implicit.</p>
+<hr />
+<h2 id="day-3">Day 3 — Score-Regression Deploy Gates</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="27-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=cBcmk1sn0vw" target="_blank" rel="noopener"><b>Building Automated Quality Gates into your CI pipelines | Craig Risi | Conf42 SRE 2023</b><small>Conf42 · 1:05:12</small></a></li><li><a href="https://www.youtube.com/watch?v=5Ubqv8W6DOs" target="_blank" rel="noopener"><b>GitHub Actions Tutorial: CI Pipeline with Caching and Quality Gates | QA to Full-Stack #39</b><small>AI Test Automation Hub · 8:10</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=CI%20quality%20gate%20regression%20threshold%20branch%20protection%20required%20checks" target="_blank" rel="noopener">Search YouTube: CI quality gate regression threshold branch protection required checks</a></p></div>
+<hr />
+<h3>Concept 1 — Absolute Per-Metric Floors Plus Delta-vs-Baseline Gates</h3>
+<p>Week 26 Day 5 Concept 4's <code>evaluate_gate</code> checked an absolute floor per metric plus one
+composite floor — enough to catch a pipeline that is simply bad, but not enough to catch one
+that used to be noticeably better and quietly got worse while staying above every absolute
+number. Extending the same gate with a second, independent check — how far has each metric
+dropped from a recorded baseline, not just where does it sit today — catches that second,
+more common failure: nothing here is broken outright, it just isn't as good as it was
+yesterday, and an absolute-floor-only gate has no way to say so.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json
+
+# Reusing EvalGateError, evaluate_gate&#x27;s absolute-floor-first ordering from Week 26 Day 5
+# Concept 4 -- extended below with baseline + max_regression
+
+EVAL_CONFIG = {
+    &quot;weights&quot;: {&quot;faithfulness&quot;: 0.4, &quot;context_precision&quot;: 0.3, &quot;context_recall&quot;: 0.3},
+    &quot;thresholds&quot;: {&quot;composite_min&quot;: 0.55, &quot;faithfulness_min&quot;: 0.3},
+    &quot;baseline&quot;: {&quot;faithfulness&quot;: 0.62, &quot;context_precision&quot;: 0.55, &quot;context_recall&quot;: 0.71},
+    &quot;max_regression&quot;: {&quot;faithfulness&quot;: 0.08, &quot;context_precision&quot;: 0.08, &quot;context_recall&quot;: 0.08},
+}
+
+
+class EvalGateError(ValueError):
+    pass
+
+
+def composite_score(metrics, config):
+    weights = config[&quot;weights&quot;]
+    return round(sum(metrics[m] * w for m, w in weights.items()), 4)
+
+
+def evaluate_gate(metrics, config):
+    faithfulness_floor = config[&quot;thresholds&quot;][&quot;faithfulness_min&quot;]
+    if metrics[&quot;faithfulness&quot;] &lt; faithfulness_floor:
+        raise EvalGateError(f&quot;faithfulness {metrics[&#x27;faithfulness&#x27;]} below absolute floor {faithfulness_floor}&quot;)
+
+    composite = composite_score(metrics, config)
+    composite_floor = config[&quot;thresholds&quot;][&quot;composite_min&quot;]
+    if composite &lt; composite_floor:
+        raise EvalGateError(f&quot;composite {composite} below absolute floor {composite_floor}&quot;)
+
+    for metric_name, baseline_value in config[&quot;baseline&quot;].items():
+        current = metrics[metric_name]
+        drop = round(baseline_value - current, 4)
+        max_drop = config[&quot;max_regression&quot;][metric_name]
+        if drop &gt; max_drop:
+            raise EvalGateError(
+                f&quot;{metric_name} dropped {drop} vs. baseline {baseline_value} &quot;
+                f&quot;(current {current}), exceeding max allowed drop {max_drop}&quot;
+            )
+
+    return composite
+
+
+healthy_metrics = {&quot;faithfulness&quot;: 0.60, &quot;context_precision&quot;: 0.53, &quot;context_recall&quot;: 0.70}
+absolute_floor_break = {&quot;faithfulness&quot;: 0.20, &quot;context_precision&quot;: 0.55, &quot;context_recall&quot;: 0.71}
+delta_only_break = {&quot;faithfulness&quot;: 0.50, &quot;context_precision&quot;: 0.55, &quot;context_recall&quot;: 0.71}
+
+for label, metrics in [
+    (&quot;healthy (small drift, within tolerance)&quot;, healthy_metrics),
+    (&quot;absolute floor break&quot;, absolute_floor_break),
+    (&quot;delta-vs-baseline break (still above absolute floor)&quot;, delta_only_break),
+]:
+    try:
+        score = evaluate_gate(metrics, EVAL_CONFIG)
+        print(f&quot;{label}: PASS  composite={score}&quot;)
+    except EvalGateError as e:
+        print(f&quot;{label}: FAIL  {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>healthy (small drift, within tolerance): PASS  composite=0.609
+absolute floor break: FAIL  faithfulness 0.2 below absolute floor 0.3
+delta-vs-baseline break (still above absolute floor): FAIL  faithfulness dropped 0.12 vs. baseline 0.62 (current 0.5), exceeding max allowed drop 0.08
+</code></pre><p>The third case is the entire point of this concept: <code>faithfulness=0.5</code> clears the absolute
+floor of <code>0.3</code> by a wide margin, and the composite would clear <code>0.55</code> too if the delta check
+did not run — only the baseline comparison catches that this specific pipeline used to score
+<code>0.62</code> on this exact metric and now scores noticeably worse, which an absolute-floor-only gate
+(Week 26's version) would have waved through.</p>
+<p><strong>Exercise:</strong>
+Using <code>evaluate_gate</code>, <code>EvalGateError</code>, and <code>EVAL_CONFIG</code> from this concept's Example,
+evaluate the metrics below, where <code>context_precision</code> is the one that regressed past its
+allowed drop.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>context_precision_regression = {&quot;faithfulness&quot;: 0.61, &quot;context_precision&quot;: 0.40, &quot;context_recall&quot;: 0.71}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>FAIL  context_precision dropped 0.15 vs. baseline 0.55 (current 0.4), exceeding max allowed drop 0.08
+</code></pre><hr />
+<h3>Concept 2 — Establishing the Statistical Noise Floor From Repeated Runs</h3>
+<p>Setting <code>max_regression</code> in Concept 1's config to some plausible-sounding number without first
+measuring how much a genuinely UNCHANGED pipeline's own score moves between two runs is how a
+gate manufactures its own false alarms — Week 26 Day 2 Concept 4 showed a single score's own
+sampling noise at a real judge's residual temperature; this concept measures the noise floor of
+the actual quantity a delta gate compares — a BATCH AVERAGE across a repeated identical run —
+and only then proposes a threshold with real headroom above it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import random
+import statistics
+
+# Reusing simulated_judge_score/run_n_times from Week 26 Day 2 Concept 4
+
+def simulated_judge_score(base_score, temperature, rng):
+    noise = rng.uniform(-temperature, temperature)
+    return max(0.0, min(1.0, round(base_score + noise, 4)))
+
+
+def run_n_times(base_score, temperature, n, seed):
+    rng = random.Random(seed)
+    return [simulated_judge_score(base_score, temperature, rng) for _ in range(n)]
+
+
+def measure_noise_floor(base_score, temperature, n_runs, n_repeats, seed):
+    &quot;&quot;&quot;Runs an n_runs-sized eval batch n_repeats times and measures how much the
+    BATCH AVERAGE itself moves between repeats -- the real quantity a delta-vs-baseline
+    gate should compare its own threshold against, not the single-score spread.&quot;&quot;&quot;
+    batch_averages = []
+    for repeat in range(n_repeats):
+        scores = run_n_times(base_score, temperature, n_runs, seed=seed + repeat)
+        batch_averages.append(round(statistics.fmean(scores), 4))
+    return batch_averages
+
+
+def recommend_threshold(noise_floor_stdev, safety_multiplier=3):
+    # A threshold set below what pure sampling noise can already produce guarantees
+    # false alarms; a safety multiplier gives real signal room to still be caught.
+    return round(noise_floor_stdev * safety_multiplier, 4)
+
+
+base_score = 0.62
+temperature = 0.05  # a small residual temperature even after pinning near 0 (Week 26 Day 2
+                     # Concept 3), modeling real prompt/context-order sensitivity
+
+batch_averages = measure_noise_floor(base_score, temperature, n_runs=8, n_repeats=6, seed=100)
+noise_floor_stdev = round(statistics.pstdev(batch_averages), 4)
+noise_floor_spread = round(max(batch_averages) - min(batch_averages), 4)
+
+print(f&quot;batch averages across 6 repeated identical runs: {batch_averages}&quot;)
+print(f&quot;noise floor: stdev={noise_floor_stdev}  spread={noise_floor_spread}&quot;)
+
+recommended = recommend_threshold(noise_floor_stdev)
+print(f&quot;recommended max_regression threshold (3x noise floor stdev): {recommended}&quot;)
+
+too_tight_threshold = 0.005
+print(f&quot;threshold {too_tight_threshold} would false-alarm on pure noise: {too_tight_threshold &lt; noise_floor_spread}&quot;)
+print(f&quot;threshold {recommended} clears the observed noise spread: {recommended &gt; noise_floor_spread}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>batch averages across 6 repeated identical runs: [0.6272, 0.6229, 0.6178, 0.6188, 0.6283, 0.6269]
+noise floor: stdev=0.0041  spread=0.0105
+recommended max_regression threshold (3x noise floor stdev): 0.0123
+threshold 0.005 would false-alarm on pure noise: True
+threshold 0.0123 clears the observed noise spread: True
+</code></pre><p>Concept 1's <code>EVAL_CONFIG</code> sets <code>max_regression[&quot;faithfulness&quot;]</code> to <code>0.08</code> — comfortably above
+the <code>~0.01</code> noise floor measured here for this specific pipeline's own repeated-run behavior,
+which is the actual justification for that number; a threshold picked without ever running
+this measurement is a guess dressed up as a policy.</p>
+<p><strong>Exercise:</strong>
+Using <code>measure_noise_floor</code> and <code>recommend_threshold</code> from this concept's Example, measure the
+noise floor for the case below and print in the same three-line format.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>context_recall_base = 0.71
+context_recall_temp = 0.03
+ex_batch_averages = measure_noise_floor(context_recall_base, context_recall_temp, n_runs=8, n_repeats=6, seed=200)
+ex_noise_floor_stdev = round(statistics.pstdev(ex_batch_averages), 4)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>batch averages: [0.7001, 0.7051, 0.7171, 0.7142, 0.7015, 0.7156]
+noise floor stdev: 0.0069
+recommended max_regression threshold (3x): 0.0207
+</code></pre><hr />
+<h3>Concept 3 — Branch Protection With the Eval Job as a Required Check</h3>
+<p>A gate that only runs and prints PASS/FAIL protects nothing until a human — or better, GitHub
+itself — actually stops a merge on FAIL. Branch protection's <code>required_status_checks.contexts</code>
+names the exact job (by its <code>name:</code> string) that must report <code>success</code> before the merge button
+unlocks; applying it for real needs a live repository and an admin token this sandbox does not
+have, so that specific API call is shown as reference syntax, checked against the real GitHub
+REST API shape rather than invented.</p>
+<p><strong>REAL MODE — not executed (needs a live repository and an admin token this sandbox does not have):</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import requests
+
+resp = requests.put(
+    &quot;https://api.github.com/repos/cwinter1/python-cyber-ssis/branches/main/protection&quot;,
+    headers={&quot;Authorization&quot;: &quot;Bearer &lt;admin-token&gt;&quot;, &quot;Accept&quot;: &quot;application/vnd.github+json&quot;},
+    json={
+        &quot;required_status_checks&quot;: {
+            &quot;strict&quot;: True,
+            &quot;contexts&quot;: [&quot;Golden Set Regression Check&quot;, &quot;W8 Regression Gate&quot;],
+        },
+        &quot;enforce_admins&quot;: True,
+        &quot;required_pull_request_reviews&quot;: {&quot;required_approving_review_count&quot;: 1},
+        &quot;restrictions&quot;: None,
+    },
+)
+print(resp.status_code)  # 200 on success
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (shape only — this needs a live repository and admin credentials this sandbox does not have):</p>
+<pre><code>200
+</code></pre><p>What matters underneath that one API call is the merge-gate decision it causes GitHub to
+enforce on every PR afterward — genuinely reproducible without the live call, and worth
+proving directly, including the real, easy-to-miss failure mode where a required context is
+renamed (a workflow job's <code>name:</code> changes) without updating the branch protection rule to
+match: the check simply never reports again, and the PR sits permanently blocked with no
+obvious error telling anyone why.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>BRANCH_PROTECTION_JSON = {
+    &quot;required_status_checks&quot;: {
+        &quot;strict&quot;: True,
+        &quot;contexts&quot;: [&quot;Golden Set Regression Check&quot;, &quot;W8 Regression Gate&quot;],
+    },
+    &quot;enforce_admins&quot;: True,
+    &quot;required_pull_request_reviews&quot;: {&quot;required_approving_review_count&quot;: 1},
+    &quot;restrictions&quot;: None,
+}
+
+print(f&quot;required contexts: {BRANCH_PROTECTION_JSON[&#x27;required_status_checks&#x27;][&#x27;contexts&#x27;]}&quot;)
+print(f&quot;strict mode (must be up to date with base branch): {BRANCH_PROTECTION_JSON[&#x27;required_status_checks&#x27;][&#x27;strict&#x27;]}&quot;)
+
+
+class MergeBlockedError(RuntimeError):
+    pass
+
+
+def evaluate_mergeability(pr_check_runs, required_contexts):
+    &quot;&quot;&quot;pr_check_runs: {context_name: status}. Mirrors GitHub&#x27;s own merge-button logic:
+    every REQUIRED context must report success; anything not required (or not present
+    at all) does not block the merge.&quot;&quot;&quot;
+    missing = [c for c in required_contexts if c not in pr_check_runs]
+    if missing:
+        raise MergeBlockedError(f&quot;required check(s) never reported at all: {missing}&quot;)
+    failing = [c for c, status in pr_check_runs.items() if c in required_contexts and status != &quot;success&quot;]
+    if failing:
+        raise MergeBlockedError(f&quot;required check(s) not passing: {failing}&quot;)
+    return True
+
+
+good_pr_checks = {&quot;Golden Set Regression Check&quot;: &quot;success&quot;, &quot;W8 Regression Gate&quot;: &quot;success&quot;}
+failing_pr_checks = {&quot;Golden Set Regression Check&quot;: &quot;failure&quot;, &quot;W8 Regression Gate&quot;: &quot;success&quot;}
+renamed_job_checks = {&quot;Golden Set Regression Check (v2)&quot;: &quot;success&quot;, &quot;W8 Regression Gate&quot;: &quot;success&quot;}
+
+for label, checks in [
+    (&quot;all required checks green&quot;, good_pr_checks),
+    (&quot;eval job actually failing&quot;, failing_pr_checks),
+    (&quot;eval job renamed, branch protection not updated&quot;, renamed_job_checks),
+]:
+    try:
+        evaluate_mergeability(checks, BRANCH_PROTECTION_JSON[&quot;required_status_checks&quot;][&quot;contexts&quot;])
+        print(f&quot;{label}: MERGE ALLOWED&quot;)
+    except MergeBlockedError as e:
+        print(f&quot;{label}: BLOCKED -- {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>required contexts: [&#x27;Golden Set Regression Check&#x27;, &#x27;W8 Regression Gate&#x27;]
+strict mode (must be up to date with base branch): True
+all required checks green: MERGE ALLOWED
+eval job actually failing: BLOCKED -- required check(s) not passing: [&#x27;Golden Set Regression Check&#x27;]
+eval job renamed, branch protection not updated: BLOCKED -- required check(s) never reported at all: [&#x27;Golden Set Regression Check&#x27;]
+</code></pre><p>The last case is worse in practice than the second: a failing check at least SAYS it failed —
+a renamed job leaves the PR blocked with a check that just never shows up, which reads to a
+confused reviewer as &quot;CI is stuck,&quot; not &quot;the eval gate no longer runs under this name.&quot;</p>
+<p><strong>Exercise:</strong>
+Using <code>MergeBlockedError</code>, <code>evaluate_mergeability</code>, and <code>required_contexts</code> from this concept's
+Example, evaluate the checks below, where the eval job is still mid-run.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>required_contexts = [&quot;Golden Set Regression Check&quot;, &quot;W8 Regression Gate&quot;]
+still_running_checks = {&quot;Golden Set Regression Check&quot;: &quot;pending&quot;, &quot;W8 Regression Gate&quot;: &quot;success&quot;}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>BLOCKED -- required check(s) not passing: [&#x27;Golden Set Regression Check&#x27;]
+</code></pre><hr />
+<h3>Concept 4 — A Documented, Logged Override Path for Genuine False Alarms</h3>
+<p>Concept 2 measured a real noise floor and Concept 1's thresholds sit above it — but no
+threshold eliminates false alarms entirely, and a gate with no legitimate way past a genuine
+one just trains engineers to disable the gate itself the first time it is inconvenient, which
+protects nothing at all. The fix is not a backdoor — it is a narrow, auditable path: an
+override needs a real justification long enough to actually explain the false alarm (not
+<code>&quot;flaky, ignore&quot;</code>) and a named human approver, both permanently written to the same kind of
+log Concept 3's merge decision itself belongs next to.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class OverrideRequest:
+    pr_number: int
+    failing_check: str
+    gate_error: str
+    justification: str
+    approver: Optional[str] = None
+    logged_at: Optional[float] = None
+
+
+class OverrideError(ValueError):
+    pass
+
+MIN_JUSTIFICATION_CHARS = 40
+override_log = []
+
+
+def request_override(pr_number, failing_check, gate_error, justification):
+    if len(justification) &lt; MIN_JUSTIFICATION_CHARS:
+        raise OverrideError(
+            f&quot;justification is {len(justification)} chars, needs at least {MIN_JUSTIFICATION_CHARS} -- &quot;
+            f&quot;&#x27;flaky, ignore&#x27; is not an audit trail&quot;
+        )
+    return OverrideRequest(pr_number, failing_check, gate_error, justification)
+
+
+def approve_override(request, approver, at):
+    if approver is None:
+        raise OverrideError(&quot;an override needs a named human approver, not an automated bypass&quot;)
+    request.approver = approver
+    request.logged_at = at
+    override_log.append(request)
+    return request
+
+
+weak_justification = &quot;flaky test, ignore&quot;
+try:
+    request_override(1042, &quot;Golden Set Regression Check&quot;, &quot;faithfulness dropped 0.12 vs baseline&quot;, weak_justification)
+    print(&quot;unexpectedly accepted weak justification&quot;)
+except OverrideError as e:
+    print(f&quot;rejected: {e}&quot;)
+
+strong_justification = (
+    &quot;Baseline itself was measured against a golden-set revision retired in changelog v3; &quot;
+    &quot;re-running against the current golden set shows faithfulness=0.61, no real regression.&quot;
+)
+req = request_override(1042, &quot;Golden Set Regression Check&quot;, &quot;faithfulness dropped 0.12 vs baseline&quot;, strong_justification)
+approve_override(req, approver=&quot;reviewer_dana&quot;, at=1_726_000_000.0)
+print(f&quot;override logged: pr={req.pr_number}  approver={req.approver}  check={req.failing_check!r}&quot;)
+print(f&quot;override log now has {len(override_log)} entry(ies)&quot;)
+
+try:
+    approve_override(req, approver=None, at=1_726_000_100.0)
+    print(&quot;unexpectedly allowed an unapproved override&quot;)
+except OverrideError as e:
+    print(f&quot;rejected: {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>rejected: justification is 18 chars, needs at least 40 -- &#x27;flaky, ignore&#x27; is not an audit trail
+override logged: pr=1042  approver=reviewer_dana  check=&#x27;Golden Set Regression Check&#x27;
+override log now has 1 entry(ies)
+rejected: an override needs a named human approver, not an automated bypass
+</code></pre><p>An override on <code>req</code> is already logged BEFORE the last, rejected call — <code>approve_override</code>
+raises before it mutates anything or appends a second time, so the log correctly still shows
+exactly one real, approved override, not a corrupted half-written second entry.</p>
+<p><strong>Exercise:</strong>
+Using <code>OverrideRequest</code>, <code>OverrideError</code>, <code>request_override</code>, and <code>approve_override</code> from this
+concept's Example, request and approve the override below, printing in the same two-line
+format as the Example's successful case.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>override_log2 = []
+pr_1088_justification = (
+    &quot;Nightly run used a corrupted embedding cache (Concept 4&#x27;s own restore-keys fallback &quot;
+    &quot;served a stale partial); re-run from a clean cache shows composite=0.61, healthy.&quot;
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>override logged: pr=1088  approver=reviewer_lior  check=&#x27;W8 Regression Gate&#x27;
+override log now has 1 entry(ies)
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> Concept 1's baseline-drift check matters even more for a pipeline sitting on
+top of a legacy extract than for a pure-cloud one — a slow schema drift in an upstream COBOL
+copybook export can degrade retrieval gradually enough that no single day's absolute-floor
+check ever trips, while the baseline comparison catches the same slide clearly once it exceeds
+Concept 2's measured noise floor.</p>
+<p><strong>Compliance angle:</strong> Concept 4's override log is not a workaround for compliance, it IS the
+compliance artifact — &quot;this regression was investigated, explained, and signed off by a named
+reviewer, on this date, for this reason&quot; is exactly the sentence an examiner wants when a score
+regression shipped anyway, and a silent <code>git commit --no-verify</code>-style bypass gives them
+nothing to read.</p>
+<p><strong>What breaks in production:</strong> a gate whose threshold was picked without Concept 2's noise-
+floor measurement first either false-alarms so often that engineers route around it (Concept
+4's override path becomes the default path, not the exception), or is set so loose it never
+catches a real regression at all — both failure modes look identical from the outside (&quot;the
+eval gate exists&quot;) until the day it actually needed to catch something and didn't.</p>
+<hr />
+<h2 id="day-4">Day 4 — Nightly Eval and Drift Alerting</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="27-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=CWITmPJyuNY" target="_blank" rel="noopener"><b>CV 39 | Evaluation Monitoring and Drift | AI Model Performance | Computer Vision Course | Uplatz</b><small>Uplatz · 9:21</small></a></li><li><a href="https://www.youtube.com/watch?v=nBisTGZUL3A" target="_blank" rel="noopener"><b>You don&#x27;t know that your ML Model is Drifting - Here&#x27;s a Fix | Monitoring &amp; Alerting Drift</b><small>iQuant · 25:57</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=scheduled%20model%20evaluation%20drift%20monitoring%20alerting%20production" target="_blank" rel="noopener">Search YouTube: scheduled model evaluation drift monitoring alerting production</a></p></div>
+<hr />
+<h3>Concept 1 — A Scheduled Cron Run Over a Larger Question Set Than the PR Gate</h3>
+<p>Day 2's <code>pull_request</code> gate has to stay fast and cheap enough that a contributor is not
+staring at a spinner for ten minutes on every push — it runs a small, representative subset of
+the golden set. A nightly <code>schedule</code> trigger has no such constraint: nobody is blocked waiting
+on it, so it can afford to run the FULL golden set, catching a regression that only shows up on
+questions the PR gate's smaller sample never happens to sample.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import yaml
+
+NIGHTLY_YAML = &quot;&quot;&quot;
+name: FDE Nightly Eval Sweep
+
+&quot;on&quot;:
+  schedule:
+    - cron: &quot;0 6 * * *&quot;
+  workflow_dispatch: {}
+
+jobs:
+  nightly-eval:
+    name: Nightly Golden Set Sweep (Full Set)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run nightly eval over the FULL golden set
+        env:
+          JUDGE_API_KEY: ${{ secrets.JUDGE_LLM_API_KEY }}
+        run: |
+          cd FDE_Fintech_Insurance
+          python tools/run_eval.py --set nightly --question-count all --max-cost-usd 5.00
+&quot;&quot;&quot;
+
+parsed = yaml.safe_load(NIGHTLY_YAML)
+print(f&quot;valid YAML: {isinstance(parsed, dict)}&quot;)
+print(f&quot;triggers: {sorted(parsed[&#x27;on&#x27;].keys())}&quot;)
+print(f&quot;cron: {parsed[&#x27;on&#x27;][&#x27;schedule&#x27;][0][&#x27;cron&#x27;]}&quot;)
+
+PR_GATE_QUESTION_COUNT = 15   # Day 2&#x27;s pull_request gate: a fast, cheap subset
+NIGHTLY_QUESTION_COUNT = 60   # this day&#x27;s scheduled sweep: the full golden set
+
+print(f&quot;PR gate question count: {PR_GATE_QUESTION_COUNT}&quot;)
+print(f&quot;nightly sweep question count: {NIGHTLY_QUESTION_COUNT}&quot;)
+print(f&quot;nightly sweep covers {NIGHTLY_QUESTION_COUNT / PR_GATE_QUESTION_COUNT:.1f}x the PR gate&#x27;s question set&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>valid YAML: True
+triggers: [&#x27;schedule&#x27;, &#x27;workflow_dispatch&#x27;]
+cron: 0 6 * * *
+PR gate question count: 15
+nightly sweep question count: 60
+nightly sweep covers 4.0x the PR gate&#x27;s question set
+</code></pre><p><code>workflow_dispatch</code> is kept alongside <code>schedule</code> here too, for the same reason Day 1's
+changelog gate matters: when a nightly run's own result is in question, a reviewer needs to be
+able to re-fire the exact same full-set sweep on demand, not wait until the next 06:00 UTC
+cron tick to get a second data point.</p>
+<p><strong>Exercise:</strong>
+Using the same pattern as this concept's Example, compute and print the coverage ratio for the
+question counts below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>PR_GATE_QUESTION_COUNT = 15
+nightly_full_set_count = 45
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>PR gate question count: 15
+nightly sweep question count: 45
+nightly sweep covers 3.0x the PR gate&#x27;s question set
+</code></pre><hr />
+<h3>Concept 2 — Tracking Faithfulness and Context Recall as a Time Series</h3>
+<p>Week 26 Day 5 Concept 3's <code>build_scorecard</code> wrote one JSON artifact per run, standing alone —
+useful for that run, but not for a trend. Appending each nightly run's key metrics as one more
+line to a JSON-lines file, instead of overwriting a single scorecard file each night, turns
+those per-run artifacts into an actual queryable history: the same idea Week 26 Day 3 Concept 4
+built with a real TruLens database, done here with the plainest possible durable format.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import json, os, tempfile
+
+# Reusing build_scorecard&#x27;s JSON-artifact shape from Week 26 Day 5 Concept 3 -- appended
+# nightly instead of written fresh per run, so the file accumulates a real time series.
+
+TS_PATH = os.path.join(tempfile.gettempdir(), &quot;w27_nightly_timeseries.jsonl&quot;)
+if os.path.exists(TS_PATH):
+    os.remove(TS_PATH)  # fresh state every run, per known-issues.md item 16&#x27;s --repeat gotcha
+
+
+def append_nightly_run(path, run_date, faithfulness, context_recall):
+    row = {&quot;run_date&quot;: run_date, &quot;faithfulness&quot;: faithfulness, &quot;context_recall&quot;: context_recall}
+    with open(path, &quot;a&quot;) as f:
+        f.write(json.dumps(row, sort_keys=True) + &quot;\n&quot;)
+    return row
+
+
+def read_timeseries(path):
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+nightly_runs = [
+    (&quot;2026-09-14&quot;, 0.63, 0.72),
+    (&quot;2026-09-15&quot;, 0.62, 0.71),
+    (&quot;2026-09-16&quot;, 0.60, 0.69),
+    (&quot;2026-09-17&quot;, 0.58, 0.67),
+    (&quot;2026-09-18&quot;, 0.57, 0.66),
+]
+for run_date, f_score, cr_score in nightly_runs:
+    append_nightly_run(TS_PATH, run_date, f_score, cr_score)
+
+series = read_timeseries(TS_PATH)
+print(f&quot;nights logged: {len(series)}&quot;)
+for row in series:
+    print(f&quot;  {row[&#x27;run_date&#x27;]}  faithfulness={row[&#x27;faithfulness&#x27;]}  context_recall={row[&#x27;context_recall&#x27;]}&quot;)
+
+faithfulness_trend = [row[&quot;faithfulness&quot;] for row in series]
+print(f&quot;faithfulness trend, first vs. last night: {faithfulness_trend[0]} -&gt; {faithfulness_trend[-1]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>nights logged: 5
+  2026-09-14  faithfulness=0.63  context_recall=0.72
+  2026-09-15  faithfulness=0.62  context_recall=0.71
+  2026-09-16  faithfulness=0.6  context_recall=0.69
+  2026-09-17  faithfulness=0.58  context_recall=0.67
+  2026-09-18  faithfulness=0.57  context_recall=0.66
+faithfulness trend, first vs. last night: 0.63 -&gt; 0.57
+</code></pre><p>This five-night run is deliberately a decline, not a healthy series — it is Concept 3's own
+starting data, so the alerting logic there has a real time series to run against rather than a
+disconnected example.</p>
+<p><strong>Exercise:</strong>
+Using <code>append_nightly_run</code> and <code>read_timeseries</code> from this concept's Example, log the three
+nights below and print in the same nights-logged/trend format for <code>context_recall</code>.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>recovering_nights = [
+    (&quot;2026-09-19&quot;, 0.55, 0.60),
+    (&quot;2026-09-20&quot;, 0.59, 0.65),
+    (&quot;2026-09-21&quot;, 0.63, 0.70),
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>nights logged: 3
+context_recall trend, first vs. last night: 0.6 -&gt; 0.7
+</code></pre><hr />
+<h3>Concept 3 — Alerting on Sustained Decline Rather Than a Single Bad Run</h3>
+<p>Day 3 Concept 2 already measured that a single run's score moves on its own from ordinary
+judge sampling noise — paging someone the first night a score dips below yesterday's number
+means paging them on pure noise more often than on a real problem, and a team that gets paged
+on noise stops trusting the pager. <code>check_sustained_decline</code> only alerts once a metric has
+gotten WORSE for several consecutive nights in a row, which noise essentially never does by
+chance, while a real, ongoing regression reliably does.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def check_sustained_decline(series, metric, min_consecutive_drops=3):
+    &quot;&quot;&quot;Alerts only when a metric has dropped for `min_consecutive_drops` consecutive
+    nights in a row, not on any single bad run -- a one-night dip (real judge noise,
+    Day 3 Concept 2) recovers on its own and should never page anyone.&quot;&quot;&quot;
+    values = [row[metric] for row in series]
+    if len(values) &lt; min_consecutive_drops + 1:
+        return False, 0
+    consecutive_drops = 0
+    max_consecutive = 0
+    for i in range(1, len(values)):
+        if values[i] &lt; values[i - 1]:
+            consecutive_drops += 1
+            max_consecutive = max(max_consecutive, consecutive_drops)
+        else:
+            consecutive_drops = 0
+    return max_consecutive &gt;= min_consecutive_drops, max_consecutive
+
+
+sustained_decline_series = [
+    {&quot;run_date&quot;: &quot;d1&quot;, &quot;faithfulness&quot;: 0.63},
+    {&quot;run_date&quot;: &quot;d2&quot;, &quot;faithfulness&quot;: 0.62},
+    {&quot;run_date&quot;: &quot;d3&quot;, &quot;faithfulness&quot;: 0.60},
+    {&quot;run_date&quot;: &quot;d4&quot;, &quot;faithfulness&quot;: 0.58},
+    {&quot;run_date&quot;: &quot;d5&quot;, &quot;faithfulness&quot;: 0.57},
+]
+single_dip_series = [
+    {&quot;run_date&quot;: &quot;d1&quot;, &quot;faithfulness&quot;: 0.63},
+    {&quot;run_date&quot;: &quot;d2&quot;, &quot;faithfulness&quot;: 0.62},
+    {&quot;run_date&quot;: &quot;d3&quot;, &quot;faithfulness&quot;: 0.55},  # one bad night
+    {&quot;run_date&quot;: &quot;d4&quot;, &quot;faithfulness&quot;: 0.63},  # recovers immediately
+    {&quot;run_date&quot;: &quot;d5&quot;, &quot;faithfulness&quot;: 0.64},
+]
+
+for label, series in [(&quot;sustained decline&quot;, sustained_decline_series), (&quot;single-night dip&quot;, single_dip_series)]:
+    should_alert, streak = check_sustained_decline(series, &quot;faithfulness&quot;, min_consecutive_drops=3)
+    verdict = &quot;ALERT&quot; if should_alert else &quot;no alert&quot;
+    print(f&quot;{label}: {verdict}  (longest consecutive-drop streak: {streak})&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>sustained decline: ALERT  (longest consecutive-drop streak: 4)
+single-night dip: no alert  (longest consecutive-drop streak: 2)
+</code></pre><p><code>sustained_decline_series</code> here is Concept 2's own five-night result — the same data now
+correctly triggers an alert once viewed through this concept's lens, which is the point: Day 5
+turns this exact check into the thing that actually pages someone, not a second, disconnected
+example.</p>
+<p><strong>Exercise:</strong>
+Using <code>check_sustained_decline</code> from this concept's Example, check the series below (a
+two-night dip that recovers on the fourth night).</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>context_recall_series = [
+    {&quot;run_date&quot;: &quot;d1&quot;, &quot;context_recall&quot;: 0.71},
+    {&quot;run_date&quot;: &quot;d2&quot;, &quot;context_recall&quot;: 0.68},
+    {&quot;run_date&quot;: &quot;d3&quot;, &quot;context_recall&quot;: 0.65},
+    {&quot;run_date&quot;: &quot;d4&quot;, &quot;context_recall&quot;: 0.71},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>no alert  (longest consecutive-drop streak: 2)
+</code></pre><hr />
+<h3>Concept 4 — A Hard Token-Cost Cap Per Nightly Run</h3>
+<p>Concept 1's full-set nightly sweep calls a judge model on every one of 60 questions, every
+night, forever — Week 23's own cost-governance discipline applies here exactly as it did
+there: an unbounded loop making real per-call charges needs a hard ceiling, not a hope that
+nobody ever points it at a larger question set without noticing the bill. <code>NightlyCostTracker</code>
+stops the sweep the moment the NEXT charge would cross the cap, rather than after it — a
+partial night's results, logged honestly as capped, beats an unbounded one that quietly costs
+more than anyone approved.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>class CostCapExceeded(RuntimeError):
+    pass
+
+
+COST_PER_1K_TOKENS_USD = 0.003  # judge model input+output blended rate for this pipeline
+
+
+class NightlyCostTracker:
+    def __init__(self, max_cost_usd):
+        self.max_cost_usd = max_cost_usd
+        self.spent_usd = 0.0
+        self.questions_scored = 0
+
+    def charge(self, tokens_used):
+        cost = round((tokens_used / 1000) * COST_PER_1K_TOKENS_USD, 6)
+        if self.spent_usd + cost &gt; self.max_cost_usd:
+            raise CostCapExceeded(
+                f&quot;charging ${cost} would bring total to ${round(self.spent_usd + cost, 4)}, &quot;
+                f&quot;over the ${self.max_cost_usd} nightly cap -- stopping after &quot;
+                f&quot;{self.questions_scored} of the intended question set&quot;
+            )
+        self.spent_usd = round(self.spent_usd + cost, 6)
+        self.questions_scored += 1
+        return self.spent_usd
+
+
+def run_nightly_sweep(question_tokens, max_cost_usd):
+    tracker = NightlyCostTracker(max_cost_usd)
+    scored = []
+    capped = False
+    for tokens in question_tokens:
+        try:
+            tracker.charge(tokens)
+            scored.append(tokens)
+        except CostCapExceeded as e:
+            capped = True
+            print(f&quot;  STOPPED: {e}&quot;)
+            break
+    return tracker, capped
+
+
+affordable_run_tokens = [1500] * 20
+overrunning_run_tokens = [1500] * 60
+
+tracker1, capped1 = run_nightly_sweep(affordable_run_tokens, max_cost_usd=5.00)
+print(f&quot;affordable run: scored={tracker1.questions_scored}  spent=${tracker1.spent_usd}  capped={capped1}&quot;)
+
+tracker2, capped2 = run_nightly_sweep(overrunning_run_tokens, max_cost_usd=0.20)
+print(f&quot;overrunning run: scored={tracker2.questions_scored}  spent=${tracker2.spent_usd}  capped={capped2}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>affordable run: scored=20  spent=$0.09  capped=False
+  STOPPED: charging $0.0045 would bring total to $0.2025, over the $0.2 nightly cap -- stopping after 44 of the intended question set
+overrunning run: scored=44  spent=$0.198  capped=True
+</code></pre><p>The overrunning run still produces 44 real, useful scored questions before it stops — a hard
+cap that aborts the whole sweep at the first sign of running long would throw away results
+that were already paid for; stopping cleanly and reporting the partial set as capped is the
+better failure mode.</p>
+<p><strong>Exercise:</strong>
+Using <code>CostCapExceeded</code>, <code>NightlyCostTracker</code>, and <code>run_nightly_sweep</code> from this concept's
+Example, run the sweep below and print in the same one-line format.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>long_context_run_tokens = [4000] * 15
+max_cost_usd = 0.10
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>run: scored=8  spent=$0.096  capped=True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> a nightly sweep is the right place, not the PR gate, to run the slower
+checks a mainframe-sourced corpus needs — a full reconciliation against Week 13/18's
+copybook-derived extract, or a recount of every chunk's parent-child link — because nobody is
+blocked waiting on it and Concept 4's cost cap already bounds how far it can run if something
+upstream is slower than expected that night.</p>
+<p><strong>Compliance angle:</strong> Concept 2's time-series log is the artifact a model-risk review actually
+wants for an ongoing system, not a point-in-time snapshot — &quot;here is this system's faithfulness
+every night for the last quarter&quot; answers &quot;has this degraded&quot; in a way a single scorecard
+(Week 26 Day 5 Concept 3) cannot, by design.</p>
+<p><strong>What breaks in production:</strong> a monitoring setup that alerts on every single bad night
+(skipping Concept 3's sustained-decline requirement) gets muted or ignored within a week — the
+same alert-fatigue failure mode that makes an over-eager PR gate get routed around with
+overrides (Day 3 Concept 4) shows up again here, just on a slower, nightly clock instead of a
+per-PR one.</p>
+<hr />
+<h2 id="day-5">Day 5 — Eval Report Artifacts and Review</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="27-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=Uyls8rcviBg" target="_blank" rel="noopener"><b>Ticket to Pull Request Automation with Claude &amp; GitHub Actions</b><small>Daniel Radman · 6:51</small></a></li><li><a href="https://www.youtube.com/watch?v=yfBtjLxn_6k" target="_blank" rel="noopener"><b>How GitHub Actions 10x my productivity</b><small>Beyond Fireship · 8:18</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=GitHub%20Actions%20upload%20artifact%20pull%20request%20comment%20bot%20automation" target="_blank" rel="noopener">Search YouTube: GitHub Actions upload artifact pull request comment bot automation</a></p></div>
+<hr />
+<h3>Concept 1 — Markdown and HTML Scorecards Uploaded via <code>actions/upload-artifact</code></h3>
+<p>A PASS/FAIL printed to a CI log scrolls away the moment the job finishes and the runner is torn
+down — <code>actions/upload-artifact</code> attaches real files to the workflow run itself, downloadable
+from the PR's Checks tab for as long as <code>retention-days</code> keeps them. Markdown renders directly
+in GitHub's own UI when someone opens the artifact; HTML is the same content in a form that
+opens cleanly in a browser outside GitHub entirely, for sharing with a reviewer who does not
+have repo access.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import yaml
+
+UPLOAD_YAML = &quot;&quot;&quot;
+name: FDE Eval Gate
+
+&quot;on&quot;:
+  pull_request:
+    branches: [main]
+
+jobs:
+  eval-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run eval and build scorecards
+        run: |
+          cd FDE_Fintech_Insurance
+          python tools/run_eval.py --out-dir ./eval_out
+      - name: Upload scorecard artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-scorecard
+          path: |
+            FDE_Fintech_Insurance/eval_out/scorecard.md
+            FDE_Fintech_Insurance/eval_out/scorecard.html
+          retention-days: 30
+&quot;&quot;&quot;
+
+parsed = yaml.safe_load(UPLOAD_YAML)
+print(f&quot;valid YAML: {isinstance(parsed, dict)}&quot;)
+steps = parsed[&quot;jobs&quot;][&quot;eval-gate&quot;][&quot;steps&quot;]
+upload_step = next(s for s in steps if s.get(&quot;uses&quot;, &quot;&quot;).startswith(&quot;actions/upload-artifact&quot;))
+print(f&quot;upload step uses: {upload_step[&#x27;uses&#x27;]}&quot;)
+print(f&quot;artifact name: {upload_step[&#x27;with&#x27;][&#x27;name&#x27;]}&quot;)
+print(f&quot;retention days: {upload_step[&#x27;with&#x27;][&#x27;retention-days&#x27;]}&quot;)
+
+
+# Reusing build_scorecard&#x27;s shape from Week 26 Day 5 Concept 3 / Day 4&#x27;s time series
+
+def build_scorecard(run_date, rows):
+    faithfulness_avg = round(sum(r[&quot;faithfulness&quot;] for r in rows) / len(rows), 4)
+    return {&quot;run_date&quot;: run_date, &quot;case_count&quot;: len(rows), &quot;faithfulness_avg&quot;: faithfulness_avg, &quot;cases&quot;: rows}
+
+
+def render_markdown_scorecard(scorecard):
+    lines = [
+        f&quot;# Eval Scorecard -- {scorecard[&#x27;run_date&#x27;]}&quot;,
+        &quot;&quot;,
+        f&quot;- Cases: {scorecard[&#x27;case_count&#x27;]}&quot;,
+        f&quot;- Faithfulness (avg): {scorecard[&#x27;faithfulness_avg&#x27;]}&quot;,
+        &quot;&quot;,
+        &quot;| Question | Faithfulness | Correct |&quot;,
+        &quot;|---|---|---|&quot;,
+    ]
+    for row in scorecard[&quot;cases&quot;]:
+        lines.append(f&quot;| {row[&#x27;question&#x27;][:40]} | {row[&#x27;faithfulness&#x27;]} | {row[&#x27;correct&#x27;]} |&quot;)
+    return &quot;\n&quot;.join(lines)
+
+
+def render_html_scorecard(scorecard):
+    rows_html = &quot;&quot;.join(
+        f&quot;&lt;tr&gt;&lt;td&gt;{row[&#x27;question&#x27;][:40]}&lt;/td&gt;&lt;td&gt;{row[&#x27;faithfulness&#x27;]}&lt;/td&gt;&lt;td&gt;{row[&#x27;correct&#x27;]}&lt;/td&gt;&lt;/tr&gt;&quot;
+        for row in scorecard[&quot;cases&quot;]
+    )
+    return (
+        f&quot;&lt;h1&gt;Eval Scorecard -- {scorecard[&#x27;run_date&#x27;]}&lt;/h1&gt;&quot;
+        f&quot;&lt;p&gt;Cases: {scorecard[&#x27;case_count&#x27;]} | Faithfulness (avg): {scorecard[&#x27;faithfulness_avg&#x27;]}&lt;/p&gt;&quot;
+        f&quot;&lt;table&gt;&lt;tr&gt;&lt;th&gt;Question&lt;/th&gt;&lt;th&gt;Faithfulness&lt;/th&gt;&lt;th&gt;Correct&lt;/th&gt;&lt;/tr&gt;{rows_html}&lt;/table&gt;&quot;
+    )
+
+
+rows = [
+    {&quot;question&quot;: &quot;How many days to reinstate a lapsed policy?&quot;, &quot;faithfulness&quot;: 0.54, &quot;correct&quot;: True},
+    {&quot;question&quot;: &quot;Is mold damage covered under my property policy?&quot;, &quot;faithfulness&quot;: 0.64, &quot;correct&quot;: True},
+]
+scorecard = build_scorecard(&quot;2026-09-18&quot;, rows)
+md = render_markdown_scorecard(scorecard)
+html = render_html_scorecard(scorecard)
+
+print(f&quot;markdown scorecard has {md.count(chr(10)) + 1} lines&quot;)
+print(f&quot;markdown starts with a level-1 heading: {md.startswith(&#x27;# Eval Scorecard&#x27;)}&quot;)
+print(f&quot;html scorecard is well-formed table markup: {&#x27;&lt;table&gt;&#x27; in html and &#x27;&lt;/table&gt;&#x27; in html}&quot;)
+print(f&quot;html row count matches case count: {html.count(&#x27;&lt;tr&gt;&#x27;) - 1 == scorecard[&#x27;case_count&#x27;]}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>valid YAML: True
+upload step uses: actions/upload-artifact@v4
+artifact name: eval-scorecard
+retention days: 30
+markdown scorecard has 9 lines
+markdown starts with a level-1 heading: True
+html scorecard is well-formed table markup: True
+html row count matches case count: True
+</code></pre><p><code>path:</code> takes a multi-line block naming both files explicitly, so the SAME <code>actions/upload- artifact</code> step packages both formats into one named artifact — a reviewer downloads one zip
+and gets whichever rendering they actually want, instead of hunting through two separate
+uploaded artifacts for the right one.</p>
+<p><strong>Exercise:</strong>
+Using <code>build_scorecard</code>, <code>render_markdown_scorecard</code>, and <code>render_html_scorecard</code> from this
+concept's Example, build a scorecard for the rows below and print in the same three-line
+format, plus the computed <code>faithfulness_avg</code>.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>nightly_rows = [
+    {&quot;question&quot;: &quot;What is the grace period for premium payment?&quot;, &quot;faithfulness&quot;: 1.0, &quot;correct&quot;: True},
+    {&quot;question&quot;: &quot;Is my deductible waived for a first claim?&quot;, &quot;faithfulness&quot;: 0.6, &quot;correct&quot;: True},
+    {&quot;question&quot;: &quot;Is umbrella liability included automatically?&quot;, &quot;faithfulness&quot;: 0.3, &quot;correct&quot;: False},
+]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>markdown starts with a level-1 heading: True
+html row count matches case count: True
+faithfulness_avg: 0.6333
+</code></pre><hr />
+<h3>Concept 2 — A PR Comment Posting Metric Deltas Against the Base Branch</h3>
+<p>An artifact a reviewer has to download and open (Concept 1) is real, but it is not the FIRST
+thing they see on a PR — a comment posted directly on the PR, showing exactly which metrics
+moved and by how much versus the base branch, is what actually gets read before anyone clicks
+into the Checks tab at all. <code>compute_deltas</code> and <code>render_pr_comment</code> below build that comment's
+real content; posting it for real needs the GitHub REST API's issue-comments endpoint (a PR is
+an issue, in GitHub's own API model) with a live token, shown separately as reference syntax.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def compute_deltas(base_metrics, pr_metrics):
+    deltas = {}
+    for name, base_value in base_metrics.items():
+        current = pr_metrics[name]
+        delta = round(current - base_value, 4)
+        deltas[name] = {&quot;base&quot;: base_value, &quot;pr&quot;: current, &quot;delta&quot;: delta}
+    return deltas
+
+
+def render_pr_comment(deltas, pr_number):
+    lines = [f&quot;### Eval Gate Report -- PR #{pr_number}&quot;, &quot;&quot;, &quot;| Metric | Base | PR | Delta |&quot;, &quot;|---|---|---|---|&quot;]
+    for name, d in deltas.items():
+        arrow = &quot;up&quot; if d[&quot;delta&quot;] &gt; 0 else (&quot;down&quot; if d[&quot;delta&quot;] &lt; 0 else &quot;flat&quot;)
+        sign = &quot;+&quot; if d[&quot;delta&quot;] &gt;= 0 else &quot;&quot;
+        lines.append(f&quot;| {name} | {d[&#x27;base&#x27;]} | {d[&#x27;pr&#x27;]} | {sign}{d[&#x27;delta&#x27;]} ({arrow}) |&quot;)
+    return &quot;\n&quot;.join(lines)
+
+
+base_metrics = {&quot;faithfulness&quot;: 0.62, &quot;context_precision&quot;: 0.55, &quot;context_recall&quot;: 0.71}
+pr_metrics_improved = {&quot;faithfulness&quot;: 0.66, &quot;context_precision&quot;: 0.55, &quot;context_recall&quot;: 0.73}
+pr_metrics_regressed = {&quot;faithfulness&quot;: 0.58, &quot;context_precision&quot;: 0.50, &quot;context_recall&quot;: 0.71}
+
+for label, pr_metrics in [(&quot;improved PR&quot;, pr_metrics_improved), (&quot;regressed PR&quot;, pr_metrics_regressed)]:
+    deltas = compute_deltas(base_metrics, pr_metrics)
+    comment = render_pr_comment(deltas, pr_number=204)
+    print(f&quot;--- {label} ---&quot;)
+    print(comment)
+    print()
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>--- improved PR ---
+### Eval Gate Report -- PR #204
+
+| Metric | Base | PR | Delta |
+|---|---|---|---|
+| faithfulness | 0.62 | 0.66 | +0.04 (up) |
+| context_precision | 0.55 | 0.55 | +0.0 (flat) |
+| context_recall | 0.71 | 0.73 | +0.02 (up) |
+
+--- regressed PR ---
+### Eval Gate Report -- PR #204
+
+| Metric | Base | PR | Delta |
+|---|---|---|---|
+| faithfulness | 0.62 | 0.58 | -0.04 (down) |
+| context_precision | 0.55 | 0.5 | -0.05 (down) |
+| context_recall | 0.71 | 0.71 | +0.0 (flat) |
+
+</code></pre><p>The actual GitHub API call this comment goes out through is one <code>POST</code> to
+<code>/repos/{owner}/{repo}/issues/{pr_number}/comments</code> with <code>{&quot;body&quot;: comment}</code> — a live token and
+repository this sandbox does not have, so it is shown next as reference syntax rather than
+executed; every real, checkable content decision (which metrics, what the delta table looks
+like, up/down/flat labeling) already happened above, in code that genuinely ran.</p>
+<p><strong>REAL MODE — not executed (needs a live repository, PR number, and token this sandbox does not have):</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import requests
+
+resp = requests.post(
+    &quot;https://api.github.com/repos/cwinter1/python-cyber-ssis/issues/204/comments&quot;,
+    headers={&quot;Authorization&quot;: &quot;Bearer &lt;github-token&gt;&quot;, &quot;Accept&quot;: &quot;application/vnd.github+json&quot;},
+    json={&quot;body&quot;: comment},
+)
+print(resp.status_code)  # 201 on success
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (shape only — this needs a live repository, PR number, and token this sandbox does not have):</p>
+<pre><code>201
+</code></pre><p><strong>Exercise:</strong>
+Using <code>compute_deltas</code> and <code>render_pr_comment</code> from this concept's Example, render a comment
+for the case below.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>base_metrics2 = {&quot;faithfulness&quot;: 0.60, &quot;context_precision&quot;: 0.50, &quot;context_recall&quot;: 0.70}
+pr_metrics2 = {&quot;faithfulness&quot;: 0.60, &quot;context_precision&quot;: 0.45, &quot;context_recall&quot;: 0.75}
+pr_number = 311
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>### Eval Gate Report -- PR #311
+
+| Metric | Base | PR | Delta |
+|---|---|---|---|
+| faithfulness | 0.6 | 0.6 | +0.0 (flat) |
+| context_precision | 0.5 | 0.45 | -0.05 (down) |
+| context_recall | 0.7 | 0.75 | +0.05 (up) |
+</code></pre><hr />
+<h3>Concept 3 — A Per-Question Diff Listing Newly Failing Cases</h3>
+<p>Concept 2's aggregate deltas answer &quot;did the average get worse&quot; but not &quot;worse FOR WHICH
+questions&quot; — a reviewer fixing a regression needs the second answer, not the first.
+<code>diff_per_question_results</code> compares two runs' pass/fail verdicts question by question and
+reports exactly which ones flipped in each direction, which is the same retrieval-vs-
+generation-failure framing Day 1 Concept 1 built, applied here across two runs instead of
+within one.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>def diff_per_question_results(base_results, pr_results):
+    &quot;&quot;&quot;base_results/pr_results: {question: bool (passed)}. Returns questions that
+    passed on base but fail on the PR -- the actual, actionable regression list a
+    reviewer needs, not just an aggregate score that moved.&quot;&quot;&quot;
+    newly_failing = []
+    newly_fixed = []
+    for question, base_passed in base_results.items():
+        pr_passed = pr_results.get(question)
+        if base_passed and pr_passed is False:
+            newly_failing.append(question)
+        elif not base_passed and pr_passed is True:
+            newly_fixed.append(question)
+    return sorted(newly_failing), sorted(newly_fixed)
+
+
+base_results = {
+    &quot;How many days to reinstate a lapsed policy?&quot;: True,
+    &quot;Is mold damage covered under my property policy?&quot;: True,
+    &quot;What is the grace period for premium payment?&quot;: False,
+    &quot;Is my deductible waived for a first claim?&quot;: True,
+}
+pr_results = {
+    &quot;How many days to reinstate a lapsed policy?&quot;: True,
+    &quot;Is mold damage covered under my property policy?&quot;: False,   # regressed
+    &quot;What is the grace period for premium payment?&quot;: True,       # fixed
+    &quot;Is my deductible waived for a first claim?&quot;: True,
+}
+
+newly_failing, newly_fixed = diff_per_question_results(base_results, pr_results)
+print(f&quot;newly failing ({len(newly_failing)}):&quot;)
+for q in newly_failing:
+    print(f&quot;  - {q}&quot;)
+print(f&quot;newly fixed ({len(newly_fixed)}):&quot;)
+for q in newly_fixed:
+    print(f&quot;  - {q}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>newly failing (1):
+  - Is mold damage covered under my property policy?
+newly fixed (1):
+  - What is the grace period for premium payment?
+</code></pre><p>A composite score computed across all four questions here could easily net out to &quot;roughly
+unchanged&quot; — one regression, one fix — while hiding both from a reviewer who only looked at the
+aggregate; the per-question diff is what actually tells them a real regression happened at all.</p>
+<p><strong>Exercise:</strong>
+Using <code>diff_per_question_results</code> from this concept's Example, diff the results below, where
+both questions regressed and none were fixed.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>base_results2 = {
+    &quot;Is umbrella liability included automatically?&quot;: True,
+    &quot;Does roadside assistance cover a lockout call?&quot;: True,
+}
+pr_results2 = {
+    &quot;Is umbrella liability included automatically?&quot;: False,
+    &quot;Does roadside assistance cover a lockout call?&quot;: False,
+}
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>newly failing (2):
+  - Does roadside assistance cover a lockout call?
+  - Is umbrella liability included automatically?
+newly fixed (0):
+</code></pre><hr />
+<h3>Concept 4 — An Eval Appendix Section Suitable for a Model Card</h3>
+<p>Everything this week built — the golden set's own version (Day 1), the gate that ran against
+it (Day 3), the nightly trend (Day 4) — is exactly the evidence a model card's own evaluation
+section should cite, and citing it as a static number copied in by hand goes stale the moment
+the pipeline is re-evaluated. Generating the appendix directly from the same <code>EvalAppendix</code>
+data structure the CI job already produces keeps the model card's evaluation claims honestly
+tied to a specific, hashed golden-set revision and a specific run date, not a number someone
+remembers from a few weeks ago.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from dataclasses import dataclass
+from typing import Dict
+
+@dataclass
+class EvalAppendix:
+    model_version: str
+    golden_set_revision: str
+    golden_set_hash: str
+    metrics: Dict[str, float]
+    thresholds: Dict[str, float]
+    eval_date: str
+
+
+def render_model_card_appendix(appendix):
+    lines = [
+        &quot;## Appendix: Automated Evaluation&quot;,
+        &quot;&quot;,
+        f&quot;Model version: `{appendix.model_version}`  &quot;,
+        f&quot;Golden set revision: `{appendix.golden_set_revision}` (content hash `{appendix.golden_set_hash}`)  &quot;,
+        f&quot;Evaluated: {appendix.eval_date}&quot;,
+        &quot;&quot;,
+        &quot;| Metric | Score | Floor |&quot;,
+        &quot;|---|---|---|&quot;,
+    ]
+    for name, score in appendix.metrics.items():
+        floor = appendix.thresholds.get(name, &quot;n/a&quot;)
+        status = &quot;PASS&quot; if floor == &quot;n/a&quot; or score &gt;= floor else &quot;FAIL&quot;
+        lines.append(f&quot;| {name} | {score} | {floor} ({status}) |&quot;)
+    lines.append(&quot;&quot;)
+    lines.append(
+        &quot;Scores are produced by the automated eval gate wired into CI (Week 27); &quot;
+        &quot;see the linked scorecard artifact for the full per-question breakdown.&quot;
+    )
+    return &quot;\n&quot;.join(lines)
+
+
+appendix = EvalAppendix(
+    model_version=&quot;claude-sonnet-5-2026-02-01&quot;,
+    golden_set_revision=&quot;v4&quot;,
+    golden_set_hash=&quot;a1b2c3d4e5f6&quot;,
+    metrics={&quot;faithfulness&quot;: 0.61, &quot;context_precision&quot;: 0.54, &quot;context_recall&quot;: 0.72},
+    thresholds={&quot;faithfulness&quot;: 0.3, &quot;context_precision&quot;: 0.3, &quot;context_recall&quot;: 0.3},
+    eval_date=&quot;2026-09-18&quot;,
+)
+appendix_md = render_model_card_appendix(appendix)
+print(f&quot;appendix has a level-2 heading: {appendix_md.startswith(&#x27;## Appendix: Automated Evaluation&#x27;)}&quot;)
+print(f&quot;appendix mentions the golden set hash: {appendix.golden_set_hash in appendix_md}&quot;)
+print(f&quot;appendix has one table row per metric: {appendix_md.count(&#x27;(PASS)&#x27;) + appendix_md.count(&#x27;(FAIL)&#x27;) == len(appendix.metrics)}&quot;)
+print()
+print(appendix_md)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>appendix has a level-2 heading: True
+appendix mentions the golden set hash: True
+appendix has one table row per metric: True
+
+## Appendix: Automated Evaluation
+
+Model version: `claude-sonnet-5-2026-02-01`  
+Golden set revision: `v4` (content hash `a1b2c3d4e5f6`)  
+Evaluated: 2026-09-18
+
+| Metric | Score | Floor |
+|---|---|---|
+| faithfulness | 0.61 | 0.3 (PASS) |
+| context_precision | 0.54 | 0.3 (PASS) |
+| context_recall | 0.72 | 0.3 (PASS) |
+
+Scores are produced by the automated eval gate wired into CI (Week 27); see the linked scorecard artifact for the full per-question breakdown.
+</code></pre><p><strong>Exercise:</strong>
+Using <code>EvalAppendix</code> and <code>render_model_card_appendix</code> from this concept's Example, render the
+appendix below, where <code>faithfulness</code> fails its own floor.</p>
+<p><strong>Starting point:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>regressed_appendix = EvalAppendix(
+    model_version=&quot;claude-sonnet-5-2026-02-01&quot;,
+    golden_set_revision=&quot;v5&quot;,
+    golden_set_hash=&quot;f6e5d4c3b2a1&quot;,
+    metrics={&quot;faithfulness&quot;: 0.22, &quot;context_precision&quot;: 0.54, &quot;context_recall&quot;: 0.72},
+    thresholds={&quot;faithfulness&quot;: 0.3, &quot;context_precision&quot;: 0.3, &quot;context_recall&quot;: 0.3},
+    eval_date=&quot;2026-09-19&quot;,
+)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output:</p>
+<pre><code>appendix has one table row per metric: True
+any metric FAILs its floor: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> Concept 3's per-question diff is what actually lets a team separate &quot;the RAG
+pipeline regressed&quot; from &quot;the upstream legacy extract changed and a question's ground truth is
+now stale&quot; — both look identical as an aggregate score drop, and only the per-question list,
+cross-referenced against Day 1's changelog, tells a reviewer which explanation is real.</p>
+<p><strong>Compliance angle:</strong> Concept 4's generated appendix is the piece that finally closes the loop
+this whole week opened — a model card's evaluation claims are now provably tied to a specific,
+hashed, changelog-tracked golden-set revision (Day 1) run through a documented gate (Day 3) on
+a fixed schedule (Day 4), which is a materially stronger answer to a model-risk review than a
+narrative paragraph written from memory.</p>
+<p><strong>What breaks in production:</strong> a scorecard artifact (Concept 1) nobody ever opens because the
+PR comment (Concept 2) told the whole story already is not a wasted step — it is the fallback
+for the one time a reviewer needs more than the comment's summary, and skipping it because &quot;the
+comment already shows the deltas&quot; is how a team discovers, only when they actually need the
+per-question detail, that the artifact was never actually being generated correctly in the
+first place.</p>
+<hr />
+<h2>Architecture Decision — Week 27</h2>
+<p>Choosing between: <strong>a PR-blocking gate</strong> (Days 2-3's <code>pull_request</code>-triggered job with
+absolute-floor and delta-vs-baseline checks, wired as a branch-protection required check) vs.
+<strong>nightly-only monitoring</strong> (Day 4's scheduled sweep with sustained-decline alerting) vs. <strong>no
+automated gate at all, human review only</strong> (what every week before this one in Phase 5 actually
+shipped with).</p>
+<p>Rule of thumb: put a check in the PR-blocking gate only once Day 3 Concept 2's noise floor has
+actually been measured for it and the threshold sits comfortably above that floor — an
+unmeasured threshold in a PR-blocking position does not protect the codebase, it teaches every
+contributor to route around CI the first time it false-alarms on their unrelated change (Day 3
+Concept 4's override path exists for the genuine exception, not as the normal path). Move a
+check to nightly-only when it is too slow, too expensive, or too noisy to run on every PR but
+still worth tracking as a trend — Day 4's full-set sweep and Concept 3's sustained-decline logic
+exist specifically because &quot;every PR, every metric, at full strictness&quot; is not actually
+affordable or reliable at PR-gate cadence, and pretending it is just produces Day 3's
+false-alarm failure mode on a tighter clock. The one thing this week argues against outright is
+the third option: an eval harness this rigorous (Weeks 26-27, golden-set governance, four real
+scoring approaches, a measured noise floor, a version-controlled gate config) that only a human
+remembers to consult before a release is worth almost nothing next to a $0 marginal-cost CI job
+that runs it automatically on every single change — the entire value Phase 5 built across four
+weeks was never the metrics themselves, it was making them impossible to skip.</p>
+<p>This closes Phase 5 (Weeks 24-27): Week 24 built the retrieval refinements to measure, Week 25
+proved when the extra reranking stage earns its cost, Week 26 built four real, cross-checked
+ways to score the result, and this week made all of it a permanent, automatic part of how a
+change to this pipeline ships — a regression can still happen, but it can no longer happen
+silently.</p>
+<div class="pager"><a class="btn ghost" href="week-26.html">&larr; Week 26</a><a class="btn ghost" href="week-28.html">Week 28 &rarr;</a></div>
+</main></body></html>

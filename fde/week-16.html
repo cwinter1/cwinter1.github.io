@@ -1,0 +1,1051 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Week 16 — OpenLineage for Unstructured Data</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script></head>
+<body>
+<header class="top"><div class="in">
+<a class="brand" href="index.html">FDE Track</a>
+<a href="index.html">Weeks</a><a href="play.html">Playground</a>
+<span class="sp"></span><span class="prog" id="prog"></span>
+</div></header>
+<main>
+<div class="toc"><a class="btn ghost" href="#day-1">Day 1</a><a class="btn ghost" href="#day-2">Day 2</a><a class="btn ghost" href="#day-3">Day 3</a><a class="btn ghost" href="#day-4">Day 4</a><a class="btn ghost" href="#day-5">Day 5</a></div><p class="note">Done this week: <span data-week-count="16" data-size="5"></span></p><p class="note">Code blocks run in your browser. <button class="ghost" id="resetpy" type="button">Reset Python session</button></p><h1>Week 16 — OpenLineage for Unstructured Data</h1>
+<h2>Metadata</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase</td>
+<td>3 — FinServ Compliance, Guardrails &amp; Governance for AI</td>
+</tr>
+<tr>
+<td>Pillar</td>
+<td>Advanced</td>
+</tr>
+<tr>
+<td>Prerequisites</td>
+<td>Weeks 08-13's parse→chunk→embed→upsert pipeline shape (this week traces lineage through exactly that shape). Week 14's masking gate and Week 15's guardrails are the sibling controls this week's audit trail sits alongside, not on top of. No prior OpenLineage or Marquez experience assumed.</td>
+</tr>
+<tr>
+<td>Est. Hours</td>
+<td>8–10 hrs</td>
+</tr>
+<tr>
+<td>Companion notebook</td>
+<td>none yet. <code>openlineage-python</code> installs and imports cleanly here, and its <code>ConsoleTransport</code> (logs the exact JSON <code>HttpTransport</code> would POST to a real Marquez, without needing one) means almost everything this week emits is genuinely executed, not REAL MODE — a better outcome than anticipated when this week was scoped. The one real exception is Day 5's live Marquez lineage-graph API traversal, which needs an actually-running Marquez server this sandbox doesn't have.</td>
+</tr>
+</tbody>
+</table>
+<p>Weeks 08 through 13 built a DataPrep pipeline — parse, chunk, embed, upsert — for sources
+ranging from scanned PDFs to COBOL copybook extracts. Weeks 14 and 15 added controls that
+protect what happens <em>inside</em> that pipeline: masking before embedding, guardrails around
+the agent that answers from it. None of those controls answer a question a regulator or an
+incident responder actually asks after the fact: &quot;this answer cited policy clause 4.2 —
+what document did that come from, which chunk, embedded by which model version, on what
+date?&quot; A structured ETL job has decades of off-the-shelf lineage tooling (<code>dbt</code>'s own
+manifest, Airflow's task graph, warehouse query logs) that answers exactly that question
+for free. A parse→chunk→embed→retrieve pipeline over unstructured documents has none of
+that — chunking is not a SQL <code>SELECT</code>, and an embedding call is not a table write any
+lineage tool already understands. This week builds that missing trace by hand, using
+OpenLineage's open spec rather than inventing a bespoke logging format.</p>
+<hr />
+<h2 id="day-1">Day 1 — The OpenLineage Run and Job Model</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-1"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=AVNzNThXn9M" target="_blank" rel="noopener"><b>Lessons from Building a Data Observability Product with OpenLineage - DEOF 2026</b><small>Data Engineer Things · 14:50</small></a></li><li><a href="https://www.youtube.com/watch?v=8p8wxN_y9hk" target="_blank" rel="noopener"><b>Minkyu Park (Oleander): OpenLineage for the DataFusion Ecosystem</b><small>Hotdata · 24:44</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=OpenLineage%20spec%20explained%20run%20event%20job%20dataset%20facets" target="_blank" rel="noopener">Search YouTube: OpenLineage spec explained run event job dataset facets</a></p></div>
+<hr />
+<h3>Concept 1 — RunEvent Lifecycle: START, RUNNING, COMPLETE, FAIL, ABORT</h3>
+<p>OpenLineage models one execution of one pipeline stage as a <strong>run</strong> — a UUID that stays
+fixed across every event describing that execution — and reports its progress as a
+sequence of <code>RunEvent</code>s, each carrying an <code>eventType</code> from a fixed <code>RunState</code> enum:
+<code>START</code>, <code>RUNNING</code> (an optional heartbeat for a long-running stage), <code>COMPLETE</code>, <code>FAIL</code>,
+or <code>ABORT</code>. A consumer like Marquez rebuilds &quot;did this run succeed&quot; purely from which
+terminal state (<code>COMPLETE</code>, <code>FAIL</code>, or <code>ABORT</code>) the last event for a given <code>run.runId</code>
+carried — there is no separate &quot;status&quot; field anywhere else. A <code>Job</code> is namespaced
+separately from the run: <code>job.namespace</code> + <code>job.name</code> identifies <em>what</em> runs (a stable
+pipeline-stage identity, reused across every execution), while <code>run.runId</code> identifies
+<em>this one execution</em> of it. <code>run_id</code>/<code>fail_run_id</code> below are real UUIDv7 values that
+differ on every run -- only their <em>relationship</em>, not their literal digits, is
+deterministic, so the Example checks their shape and relationship rather than printing
+the raw values.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import datetime
+from openlineage.client.run import RunEvent, RunState, Run, Job
+from openlineage.client.uuid import generate_new_uuid
+
+def make_event(state, run_id, job_namespace, job_name, producer=&quot;fde-finserv-dataprep&quot;):
+    return RunEvent(
+        eventType=state,
+        eventTime=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        run=Run(runId=run_id),
+        job=Job(namespace=job_namespace, name=job_name),
+        producer=producer,
+    )
+
+run_id = str(generate_new_uuid())
+print(f&quot;run_id is a real UUID: {len(run_id) == 36}&quot;)
+
+states_seen = []
+for state in (RunState.START, RunState.RUNNING, RunState.COMPLETE):
+    ev = make_event(state, run_id, &quot;fde.finserv.dataprep&quot;, &quot;parse_policy_pdf&quot;)
+    states_seen.append(ev.eventType.value)
+print(f&quot;lifecycle emitted for one run: {states_seen}&quot;)
+
+fail_run_id = str(generate_new_uuid())
+fail_ev = make_event(RunState.FAIL, fail_run_id, &quot;fde.finserv.dataprep&quot;, &quot;parse_policy_pdf&quot;)
+print(f&quot;a FAILED execution gets its OWN run_id: {fail_run_id != run_id}&quot;)
+print(f&quot;its eventType: {fail_ev.eventType.value}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>run_id is a real UUID: True
+lifecycle emitted for one run: [&#x27;START&#x27;, &#x27;RUNNING&#x27;, &#x27;COMPLETE&#x27;]
+a FAILED execution gets its OWN run_id: True
+its eventType: FAIL
+</code></pre><p><strong>Exercise:</strong>
+A long-running batch chunking job gets manually cancelled by an operator partway through
+— no exception was raised in the code, the process was killed from outside. Write
+<code>make_event(RunState.ABORT, ...)</code> for that case and print a one-line explanation of why
+<code>ABORT</code> is the correct terminal state here rather than <code>FAIL</code> (which implies the code
+itself detected and reported an error).</p>
+<p><strong>Starting point:</strong> The <code>make_event</code> function from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>its eventType: ABORT
+ABORT means an external actor stopped the run; FAIL means the run&#x27;s own code raised an error and reported it.
+</code></pre><hr />
+<h3>Concept 2 — Dataset Naming: postgres://, s3://, and Vector-Store Namespaces</h3>
+<p>A <code>Dataset</code> is namespaced the same two-part way a <code>Job</code> is: <code>namespace</code> identifies <em>where</em>
+the data lives (a connection string convention, not the actual credential), <code>name</code>
+identifies <em>which</em> dataset within it. OpenLineage's own convention for <code>namespace</code> is a
+URI scheme plus host — <code>postgres://host:port</code>, <code>s3://bucket</code>, <code>hdfs://namenode:port</code> — so
+two pipelines emitting lineage for the same physical Postgres table always agree on its
+namespace without coordinating in advance. Nothing in the spec defines a reserved scheme
+for a vector store, because none existed when the spec's early conventions were set — this
+week adopts the same <code>scheme://host:port</code> shape for Qdrant/Milvus/pgvector namespaces
+(<code>qdrant://host:6333</code>, <code>milvus://host:19530</code>) so a chunk-index dataset composes with the
+same tooling a <code>postgres://</code> dataset does, rather than inventing an incompatible shape.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from openlineage.client.run import Dataset, Job
+
+pg_ds = Dataset(namespace=&quot;postgres://finserv-db.internal:5432&quot;, name=&quot;claims.policy_documents&quot;)
+s3_ds = Dataset(namespace=&quot;s3://finserv-raw-policies&quot;, name=&quot;2026/09/policy_batch_0417.pdf&quot;)
+vec_ds = Dataset(namespace=&quot;qdrant://finserv-vectors:6333&quot;, name=&quot;policy_chunks_v3&quot;)
+
+for ds in (pg_ds, s3_ds, vec_ds):
+    print(f&quot;{ds.namespace!r} / {ds.name!r}&quot;)
+
+job_names = [
+    Job(namespace=&quot;fde.finserv.dataprep&quot;, name=&quot;parse_policy_pdf&quot;),
+    Job(namespace=&quot;fde.finserv.dataprep&quot;, name=&quot;chunk_policy_text&quot;),
+    Job(namespace=&quot;fde.finserv.dataprep&quot;, name=&quot;embed_policy_chunks&quot;),
+    Job(namespace=&quot;fde.finserv.retrieval&quot;, name=&quot;retrieve_policy_chunks&quot;),
+]
+for j in job_names:
+    print(f&quot;{j.namespace}.{j.name}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>&#x27;postgres://finserv-db.internal:5432&#x27; / &#x27;claims.policy_documents&#x27;
+&#x27;s3://finserv-raw-policies&#x27; / &#x27;2026/09/policy_batch_0417.pdf&#x27;
+&#x27;qdrant://finserv-vectors:6333&#x27; / &#x27;policy_chunks_v3&#x27;
+fde.finserv.dataprep.parse_policy_pdf
+fde.finserv.dataprep.chunk_policy_text
+fde.finserv.dataprep.embed_policy_chunks
+fde.finserv.retrieval.retrieve_policy_chunks
+</code></pre><p><strong>Exercise:</strong>
+Add a fourth dataset for a Milvus collection (<code>milvus://finserv-vectors:19530</code>, collection
+name <code>policy_chunks_v3_milvus</code>) and a fifth <code>Job</code> for a <code>rerank_policy_chunks</code> stage under
+the same <code>fde.finserv.retrieval</code> namespace as <code>retrieve_policy_chunks</code>. Print all five
+datasets and all five jobs, then print one line confirming every dataset namespace in the
+list follows the same <code>scheme://host[:port]</code> shape (write a small check, don't eyeball it).</p>
+<p><strong>Starting point:</strong> <code>pg_ds</code>, <code>s3_ds</code>, <code>vec_ds</code>, and <code>job_names</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>&#x27;postgres://finserv-db.internal:5432&#x27; / &#x27;claims.policy_documents&#x27;
+&#x27;s3://finserv-raw-policies&#x27; / &#x27;2026/09/policy_batch_0417.pdf&#x27;
+&#x27;qdrant://finserv-vectors:6333&#x27; / &#x27;policy_chunks_v3&#x27;
+&#x27;milvus://finserv-vectors:19530&#x27; / &#x27;policy_chunks_v3_milvus&#x27;
+fde.finserv.dataprep.parse_policy_pdf
+fde.finserv.dataprep.chunk_policy_text
+fde.finserv.dataprep.embed_policy_chunks
+fde.finserv.retrieval.retrieve_policy_chunks
+fde.finserv.retrieval.rerank_policy_chunks
+all 4 dataset namespaces match scheme://host[:port]: True
+</code></pre><hr />
+<h3>Concept 3 — Why Parse/Chunk/Embed Has No Off-the-Shelf Integration</h3>
+<p>Airflow's own OpenLineage provider emits lineage automatically for a <code>PythonOperator</code> or a
+SQL operator, because Airflow already knows a task's inputs/outputs at the operator level.
+<code>dbt</code>'s OpenLineage integration works the same way, reading <code>dbt</code>'s own manifest. Neither
+mechanism has anything to attach to for a hand-written <code>parse_policy_pdf()</code> function
+called directly inside a script — there is no operator, no manifest, no SQL statement for
+an off-the-shelf integration to introspect. The only way lineage exists for this shape of
+pipeline is a human wrapping each stage explicitly, which is exactly what the rest of this
+week builds. This concept proves the gap is real (not just asserted) by wrapping one stage
+by hand and showing the emitted events with OpenLineage's own <code>ConsoleTransport</code> — the
+same client code path <code>HttpTransport</code> uses, minus an actual network call to Marquez.
+<code>ConsoleTransport</code> logs its JSON through Python's <code>logging</code> module (to stderr by default,
+verifiable by running this block directly in a terminal), so only the <code>print()</code> lines
+below are real, captured stdout.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import contextlib
+import datetime
+import logging
+
+from openlineage.client import OpenLineageClient
+from openlineage.client.transport.console import ConsoleConfig, ConsoleTransport
+from openlineage.client.run import Job, Run, RunEvent, RunState
+from openlineage.client.uuid import generate_new_uuid
+
+logging.basicConfig(level=logging.INFO, format=&quot;%(message)s&quot;)
+client = OpenLineageClient(transport=ConsoleTransport(ConsoleConfig()))
+
+@contextlib.contextmanager
+def emit_stage_run(job_namespace, job_name, producer=&quot;fde-finserv-dataprep&quot;):
+    run_id = str(generate_new_uuid())
+    run, job = Run(runId=run_id), Job(namespace=job_namespace, name=job_name)
+    client.emit(RunEvent(
+        eventType=RunState.START,
+        eventTime=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        run=run, job=job, producer=producer,
+    ))
+    try:
+        yield run_id
+    except Exception:
+        client.emit(RunEvent(
+            eventType=RunState.FAIL,
+            eventTime=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            run=run, job=job, producer=producer,
+        ))
+        raise
+    else:
+        client.emit(RunEvent(
+            eventType=RunState.COMPLETE,
+            eventTime=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            run=run, job=job, producer=producer,
+        ))
+
+def parse_policy_pdf(path):
+    if path.endswith(&quot;.corrupt&quot;):
+        raise ValueError(&quot;cannot parse corrupt PDF&quot;)
+    return f&quot;parsed text from {path}&quot;
+
+with emit_stage_run(&quot;fde.finserv.dataprep&quot;, &quot;parse_policy_pdf&quot;):
+    result = parse_policy_pdf(&quot;policy_batch_0417.pdf&quot;)
+print(f&quot;stage succeeded, result: {result!r}&quot;)
+
+try:
+    with emit_stage_run(&quot;fde.finserv.dataprep&quot;, &quot;parse_policy_pdf&quot;):
+        parse_policy_pdf(&quot;policy_batch_0418.corrupt&quot;)
+except ValueError as e:
+    print(f&quot;stage raised and FAIL was emitted before re-raise: {e}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>stage succeeded, result: &#x27;parsed text from policy_batch_0417.pdf&#x27;
+stage raised and FAIL was emitted before re-raise: cannot parse corrupt PDF
+</code></pre><p><strong>Exercise:</strong>
+Wrap a second, made-up stage function <code>chunk_policy_text(text, max_chars)</code> (raise
+<code>ValueError</code> if <code>max_chars &lt;= 0</code>, otherwise return a list of <code>max_chars</code>-sized slices of
+<code>text</code>) with <code>emit_stage_run(&quot;fde.finserv.dataprep&quot;, &quot;chunk_policy_text&quot;)</code>, call it once
+successfully and once with <code>max_chars=0</code> to trigger the <code>FAIL</code> path, and count (by
+inspecting the two run IDs <code>emit_stage_run</code> yields) how many <em>distinct</em> runs were created
+across the whole exercise.</p>
+<p><strong>Starting point:</strong> <code>emit_stage_run</code> and <code>client</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>stage succeeded, chunks: [&#x27;parsed text from policy_batch_0417.pdf&#x27;]
+stage raised and FAIL was emitted before re-raise: max_chars must be positive
+distinct runs created in this exercise: 2
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 1</h3>
+<p><strong>Legacy angle:</strong> A mainframe-sourced extract (Week 13) already has no off-the-shelf
+lineage tool either — this week's hand-wrapped-stage pattern is the same shape needed
+there, not a new problem specific to unstructured documents.</p>
+<p><strong>Compliance angle:</strong> A regulator's single question — &quot;where did this answer's source data
+come from&quot; — is exactly what a <code>run.runId</code> chain from retrieve back to parse is built to
+answer. Without it, the honest answer to that question is &quot;we don't know,&quot; which is a
+finding, not a technicality.</p>
+<p><strong>What breaks in production:</strong> A team wraps <code>parse</code> and <code>embed</code> with <code>emit_stage_run</code> but
+forgets <code>chunk</code> because it &quot;felt like an internal implementation detail.&quot; Every lineage
+query from then on has a gap in the middle of the chain — retrieve can be traced back to an
+embed run, and an embed run's inputs point at <em>a</em> document, but which chunk of it, and by
+what rule it was split, is unrecoverable after the fact.</p>
+<hr />
+<h2 id="day-2">Day 2 — Emitting Events from Python Pipelines</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-2"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=eg-jy92S5ZA" target="_blank" rel="noopener"><b>Getting Started with Open Data lineage | Marquez Project | Apache Hudi Spark jobs</b><small>Soumil Shah · 8:49</small></a></li><li><a href="https://www.youtube.com/watch?v=vV2y7qhRFFs" target="_blank" rel="noopener"><b>Marquez Project Explained! How to Use the Marquez Project to Visualize Your Data Lineage!</b><small>The Data and AI Guy · 10:31</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=OpenLineage%20python%20client%20marquez%20docker%20quickstart" target="_blank" rel="noopener">Search YouTube: OpenLineage python client marquez docker quickstart</a></p></div>
+<hr />
+<h3>Concept 1 — <code>OpenLineageClient</code> via <code>HttpTransport</code> and <code>openlineage.yml</code></h3>
+<p>Day 1's <code>ConsoleTransport</code> was passed to <code>OpenLineageClient</code> explicitly in code. In a real
+deployment the transport is configured externally, through an <code>openlineage.yml</code> file (or
+the equivalent environment variables) that names <code>transport.type: http</code> plus the target
+Marquez URL — so the same pipeline code emits to a laptop's local Marquez in dev and a
+shared production Marquez without a single code change. <code>OpenLineageClient()</code> with no
+arguments reads that config automatically (via the <code>OPENLINEAGE_CONFIG</code> environment
+variable, or <code>~/.openlineage/client.yaml</code> as a fallback) and builds the transport it
+describes. Building and inspecting an <code>HttpTransport</code> this way is genuinely real — the
+same object <code>client.emit()</code> would use to POST to an actual Marquez — it is only the
+network call itself this sandbox cannot make, so this concept stops one step short of that
+call, at &quot;the client is correctly configured and ready to send.&quot; <code>OpenLineageClient</code> also
+logs its transport choice through Python's <code>logging</code> module (to stderr by default), so
+only the <code>print()</code> lines below are real, captured stdout.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import os
+import tempfile
+
+from openlineage.client.client import OpenLineageClient
+
+cfg_yaml = &quot;&quot;&quot;
+transport:
+  type: http
+  url: http://marquez.internal:5000
+  endpoint: api/v1/lineage
+  timeout: 5
+&quot;&quot;&quot;
+with tempfile.TemporaryDirectory() as d:
+    cfg_path = os.path.join(d, &quot;openlineage.yml&quot;)
+    with open(cfg_path, &quot;w&quot;) as f:
+        f.write(cfg_yaml)
+    os.environ[&quot;OPENLINEAGE_CONFIG&quot;] = cfg_path
+    configured_client = OpenLineageClient()
+    print(f&quot;transport kind: {configured_client.transport.kind}&quot;)
+    print(f&quot;transport url: {configured_client.transport.config.url}&quot;)
+    print(f&quot;transport endpoint: {configured_client.transport.config.endpoint}&quot;)
+    print(f&quot;transport timeout: {configured_client.transport.config.timeout}&quot;)
+del os.environ[&quot;OPENLINEAGE_CONFIG&quot;]
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>transport kind: http
+transport url: http://marquez.internal:5000
+transport endpoint: api/v1/lineage
+transport timeout: 5
+</code></pre><p><strong>Exercise:</strong>
+Write a second <code>openlineage.yml</code> for a production Marquez behind TLS on a non-default
+port (<code>https://marquez.prod.internal:8443</code>), a 10-second timeout, and <code>compression: gzip</code>.
+Load it the same way and print its transport kind, url, timeout, and compression setting.</p>
+<p><strong>Starting point:</strong> The config-loading pattern from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>transport kind: http
+transport url: https://marquez.prod.internal:8443
+transport timeout: 10
+transport compression: gzip
+</code></pre><hr />
+<h3>Concept 2 — Paired START/COMPLETE Emission Around Each Pipeline Stage</h3>
+<p>Day 1 Concept 3 built <code>emit_stage_run</code> as a proof that the wrapping has to be hand-written.
+This concept makes it the week's reusable baseline: a context manager that always emits a
+matched <code>START</code> immediately before the wrapped code runs and exactly one terminal event
+(<code>COMPLETE</code> on normal exit, <code>FAIL</code> on an exception, propagated in both cases) immediately
+after — never zero terminal events, never two. It also accepts an optional <code>run_facets</code>
+dict so later concepts can attach structure (a parent-run link, a schema facet) to the
+<code>Run</code> object itself without changing the emission logic. <code>ConsoleTransport</code> logs its real
+JSON through Python's <code>logging</code> module (to stderr, not captured below), and <code>run_id</code> is a
+fresh, genuinely different value on every run, so the Example checks its shape rather
+than printing the raw value.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import contextlib
+import datetime
+import logging
+
+from openlineage.client import OpenLineageClient
+from openlineage.client.transport.console import ConsoleConfig, ConsoleTransport
+from openlineage.client.run import Job, Run, RunEvent, RunState
+from openlineage.client.uuid import generate_new_uuid
+
+logging.basicConfig(level=logging.INFO, format=&quot;%(message)s&quot;)
+console_client = OpenLineageClient(transport=ConsoleTransport(ConsoleConfig()))
+
+@contextlib.contextmanager
+def emit_stage_run(client, job_namespace, job_name, producer=&quot;fde-finserv-dataprep&quot;, run_facets=None):
+    run_id = str(generate_new_uuid())
+    run = Run(runId=run_id, facets=run_facets or {})
+    job = Job(namespace=job_namespace, name=job_name)
+    client.emit(RunEvent(
+        eventType=RunState.START,
+        eventTime=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        run=run, job=job, producer=producer,
+    ))
+    try:
+        yield run_id
+    except Exception:
+        client.emit(RunEvent(
+            eventType=RunState.FAIL,
+            eventTime=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            run=run, job=job, producer=producer,
+        ))
+        raise
+    else:
+        client.emit(RunEvent(
+            eventType=RunState.COMPLETE,
+            eventTime=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            run=run, job=job, producer=producer,
+        ))
+
+with emit_stage_run(console_client, &quot;fde.finserv.dataprep&quot;, &quot;parse_policy_pdf&quot;) as run_id:
+    print(f&quot;parse stage ran under a real UUID run_id: {len(run_id) == 36}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>parse stage ran under a real UUID run_id: True
+</code></pre><p><strong>Exercise:</strong>
+<code>emit_stage_run</code> yields before the <code>try</code> body has a chance to fail, so any code that runs
+<em>inside</em> the <code>with</code> block after the yield is what determines COMPLETE vs FAIL. Write a
+<code>chunk_policy_text_batch(paths)</code> function that raises <code>RuntimeError</code> if <code>paths</code> is empty,
+call it once inside <code>emit_stage_run</code> with a non-empty list (prints &quot;batch of N chunked&quot;)
+and once with an empty list, and print one line stating whether the empty-list call's
+<code>FAIL</code> event was emitted with the SAME <code>run_id</code> the <code>START</code> event used (it must be — a
+run's identity doesn't change mid-lifecycle).</p>
+<p><strong>Starting point:</strong> <code>emit_stage_run</code> and <code>console_client</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>batch of 3 chunked
+FAIL used the same run_id as its own START: True
+</code></pre><hr />
+<h3>Concept 3 — <code>parentRunFacet</code>: Linking Stage Runs to One Orchestrating DAG Run</h3>
+<p>Each stage run built so far stands alone — nothing connects <code>parse_policy_pdf</code>'s run to
+<code>chunk_policy_text</code>'s run as <em>part of the same pipeline execution</em>. <code>parentRunFacet</code>
+(the real facet is <code>ParentRunFacet</code>, attached under <code>run.facets[&quot;parent&quot;]</code>) closes that
+gap: it records the orchestrating run's own <code>runId</code> plus its job's namespace and name
+inside each child stage's <code>Run</code> object. A Marquez UI or lineage-graph API query can then
+group every stage run under the one DAG run that orchestrated them, and separately, two
+different DAG runs (an ingest pipeline and a retrieval pipeline) never get their stage runs
+confused with each other because each set of children carries its own distinct parent
+<code>runId</code>. <code>ConsoleTransport</code> logs the real JSON for every one of these events through
+Python's <code>logging</code> module (to stderr, not captured below); <code>dag_run_id</code> and each stage's
+<code>run_id</code> are fresh, genuinely different values every run, so the Example checks their
+shape rather than printing the raw values.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from openlineage.client.facet_v2 import parent_run
+
+@contextlib.contextmanager
+def emit_child_stage_run(client, job_namespace, job_name, dag_run_id, dag_job, producer=&quot;fde-finserv-dataprep&quot;):
+    parent_facet = parent_run.ParentRunFacet(
+        run=parent_run.Run(runId=dag_run_id),
+        job=parent_run.Job(namespace=dag_job.namespace, name=dag_job.name),
+    )
+    with emit_stage_run(client, job_namespace, job_name, producer, run_facets={&quot;parent&quot;: parent_facet}) as run_id:
+        yield run_id
+
+dag_run_id = str(generate_new_uuid())
+dag_job = Job(namespace=&quot;fde.finserv.dataprep&quot;, name=&quot;policy_ingest_dag&quot;)
+console_client.emit(RunEvent(
+    eventType=RunState.START,
+    eventTime=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    run=Run(runId=dag_run_id), job=dag_job, producer=&quot;fde-finserv-dataprep&quot;,
+))
+
+child_run_ids = []
+for stage_name in (&quot;parse_policy_pdf&quot;, &quot;chunk_policy_text&quot;, &quot;embed_policy_chunks&quot;):
+    with emit_child_stage_run(console_client, &quot;fde.finserv.dataprep&quot;, stage_name, dag_run_id, dag_job) as run_id:
+        child_run_ids.append(run_id)
+
+console_client.emit(RunEvent(
+    eventType=RunState.COMPLETE,
+    eventTime=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    run=Run(runId=dag_run_id), job=dag_job, producer=&quot;fde-finserv-dataprep&quot;,
+))
+
+print(f&quot;dag_run_id is a real UUID: {len(dag_run_id) == 36}&quot;)
+print(f&quot;three stage runs, all distinct: {len(set(child_run_ids)) == 3}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>dag_run_id is a real UUID: True
+three stage runs, all distinct: True
+</code></pre><p><strong>Exercise:</strong>
+Start a second, independent DAG run (<code>fde.finserv.retrieval</code> / <code>policy_answer_dag</code>), wrap
+one child stage (<code>retrieve_policy_chunks</code>) with <code>emit_child_stage_run</code> under it, close the
+DAG run, and print one line confirming this second DAG run's <code>runId</code> is different from the
+first DAG's <code>dag_run_id</code> — proving two pipeline executions never accidentally share a
+parent identity.</p>
+<p><strong>Starting point:</strong> <code>emit_child_stage_run</code>, <code>console_client</code>, and <code>dag_run_id</code> from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>retrieve stage&#x27;s parent dag_run_id differs from the ingest DAG&#x27;s: True
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 2</h3>
+<p><strong>Legacy angle:</strong> The <code>openlineage.yml</code>-vs-code-config split (Concept 1) matters more for
+a legacy-adjacent pipeline than a greenfield one: the same ingest code that ran against a
+COBOL extract in a dev sandbox can point at production Marquez purely by shipping a
+different config file with the deploy, with no risk of a hardcoded dev URL leaking into a
+production build.</p>
+<p><strong>Compliance angle:</strong> <code>parentRunFacet</code> is what turns &quot;we have lineage for individual
+stages&quot; into &quot;we have lineage for this specific customer-facing pipeline execution that
+produced this specific answer&quot; — a regulator's audit question is almost always about one
+execution, not the general capability.</p>
+<p><strong>What breaks in production:</strong> Two independent pipelines (an ingest DAG and a retrieval
+DAG) are wired to write to the same Marquez, and a developer copy-pastes the ingest DAG's
+<code>dag_job</code> object into the retrieval pipeline's stage-wrapping code without giving it a
+different <code>name</code>. Marquez now shows retrieval stage runs nested under what looks like an
+ingest job, and any lineage query scoped to &quot;the ingest pipeline&quot; silently includes runs
+that were never part of it.</p>
+<hr />
+<h2 id="day-3">Day 3 — Modeling Chunks and Embeddings as Datasets</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-3"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=MdQqBXB7qoU" target="_blank" rel="noopener"><b>Mastering LLM Ops: Tracing, Data Lineage, and the Fine-Tuning Decision</b><small>Analytics Vidhya · 12:46</small></a></li><li><a href="https://www.youtube.com/watch?v=uKMPrYrwyNA" target="_blank" rel="noopener"><b>CAP Certification: Data Lineage and Provenance Tracking</b><small>Skill:RE - Enabling Enterprise AI · 4:10</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=data%20lineage%20for%20RAG%20pipelines%20chunk%20provenance%20tracking" target="_blank" rel="noopener">Search YouTube: data lineage for RAG pipelines chunk provenance tracking</a></p></div>
+<hr />
+<h3>Concept 1 — Stable Dataset Identifiers for a Chunk Set and an Index Collection</h3>
+<p>Everything emitted so far described <strong>runs</strong> (executions of a stage). This concept turns
+to the other half of the spec: <strong>datasets</strong> as first-class, addressable things a run
+reads from or writes to. A document's chunk set needs a <code>name</code> that is stable across every
+re-run of the chunking stage for the same source document — <code>{doc_id}::chunk_set</code>, not a
+name derived from a random ID generated fresh each run — so a lineage query can find &quot;the
+chunks for policy_doc_101&quot; regardless of which run produced them most recently. The vector
+index collection they land in is a <em>second</em>, separate dataset (<code>policy_chunks_v3</code> in the
+<code>qdrant://</code> namespace already introduced Day 1), because the chunk set and the index
+collection have different lifecycles: re-chunking a document replaces its chunk-set
+dataset's content, but the index collection persists across many documents' worth of
+upserts.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from openlineage.client.run import Dataset
+
+def chunk_set_dataset(doc_id):
+    return Dataset(namespace=&quot;fde.finserv.dataprep&quot;, name=f&quot;{doc_id}::chunk_set&quot;)
+
+def index_collection_dataset():
+    return Dataset(namespace=&quot;qdrant://finserv-vectors:6333&quot;, name=&quot;policy_chunks_v3&quot;)
+
+doc_101_chunks_run1 = chunk_set_dataset(&quot;policy_doc_101&quot;)
+doc_101_chunks_run2 = chunk_set_dataset(&quot;policy_doc_101&quot;)
+doc_102_chunks = chunk_set_dataset(&quot;policy_doc_102&quot;)
+index_ds = index_collection_dataset()
+
+print(f&quot;same doc, two runs, SAME dataset identity: {doc_101_chunks_run1.name == doc_101_chunks_run2.name}&quot;)
+print(f&quot;two different docs, DIFFERENT identity: {doc_101_chunks_run1.name != doc_102_chunks.name}&quot;)
+print(f&quot;chunk-set namespace vs index namespace: {doc_101_chunks_run1.namespace!r} vs {index_ds.namespace!r}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>same doc, two runs, SAME dataset identity: True
+two different docs, DIFFERENT identity: True
+chunk-set namespace vs index namespace: &#x27;fde.finserv.dataprep&#x27; vs &#x27;qdrant://finserv-vectors:6333&#x27;
+</code></pre><p><strong>Exercise:</strong>
+Write <code>raw_document_dataset(doc_id)</code> returning a <code>Dataset</code> in the <code>s3://finserv-raw- policies</code> namespace named <code>{doc_id}.pdf</code>, and confirm three things print <code>True</code>: the raw
+document dataset for <code>policy_doc_101</code> is stable across two calls, its namespace differs
+from the chunk-set namespace, and its namespace differs from the index-collection
+namespace.</p>
+<p><strong>Starting point:</strong> <code>chunk_set_dataset</code> and <code>index_collection_dataset</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>raw document identity stable across calls: True
+raw namespace differs from chunk-set namespace: True
+raw namespace differs from index namespace: True
+</code></pre><hr />
+<h3>Concept 2 — <code>schemaDatasetFacet</code>: Chunk Fields and Embedding Dimension</h3>
+<p>A chunk-set dataset is more useful once its <em>shape</em> is attached, not just its name.
+<code>SchemaDatasetFacet</code> carries a list of <code>SchemaDatasetFacetFields</code> — each with a <code>name</code>,
+<code>type</code>, and optional <code>description</code> — describing exactly the fields a downstream consumer
+would find in that dataset, including the embedding vector's declared dimension (which is
+a property of the embedding <em>model</em>, not of any one chunk, and belongs in the schema
+description rather than being silently implied).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from openlineage.client.facet_v2 import schema_dataset
+
+def chunk_set_schema_facet(embedding_dim):
+    fields = [
+        schema_dataset.SchemaDatasetFacetFields(name=&quot;chunk_id&quot;, type=&quot;STRING&quot;),
+        schema_dataset.SchemaDatasetFacetFields(name=&quot;source_doc_id&quot;, type=&quot;STRING&quot;),
+        schema_dataset.SchemaDatasetFacetFields(name=&quot;chunk_text&quot;, type=&quot;STRING&quot;),
+        schema_dataset.SchemaDatasetFacetFields(
+            name=&quot;embedding_vector&quot;,
+            type=f&quot;ARRAY&lt;FLOAT32&gt;&quot;,
+            description=f&quot;{embedding_dim}-dim embedding&quot;,
+        ),
+    ]
+    return schema_dataset.SchemaDatasetFacet(fields=fields)
+
+schema_facet = chunk_set_schema_facet(embedding_dim=384)
+chunk_ds = Dataset(
+    namespace=&quot;fde.finserv.dataprep&quot;,
+    name=&quot;policy_doc_101::chunk_set&quot;,
+    facets={&quot;schema&quot;: schema_facet},
+)
+
+for f in chunk_ds.facets[&quot;schema&quot;].fields:
+    print(f&quot;{f.name}: {f.type}&quot; + (f&quot; ({f.description})&quot; if f.description else &quot;&quot;))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>chunk_id: STRING
+source_doc_id: STRING
+chunk_text: STRING
+embedding_vector: ARRAY&lt;FLOAT32&gt; (384-dim embedding)
+</code></pre><p><strong>Exercise:</strong>
+Two embedding models are in play this week: a 384-dim model for fast retrieval and a
+768-dim model for a higher-accuracy reranking pass. Build both schema facets with
+<code>chunk_set_schema_facet</code>, attach them to two separately-named chunk-set datasets
+(<code>policy_doc_101::chunk_set_fast</code> and <code>policy_doc_101::chunk_set_rerank</code>), and print each
+dataset's <code>embedding_vector</code> field description to confirm the two dimensions are
+distinguishable from the schema alone, without inspecting any actual vector.</p>
+<p><strong>Starting point:</strong> <code>chunk_set_schema_facet</code> and <code>Dataset</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>policy_doc_101::chunk_set_fast -&gt; 384-dim embedding
+policy_doc_101::chunk_set_rerank -&gt; 768-dim embedding
+</code></pre><hr />
+<h3>Concept 3 — Custom Facets, and Keeping Fan-Out From Exploding the Graph</h3>
+<p>The spec's built-in facets don't have a field for &quot;which chunker version produced this&quot;
+or &quot;which embedding model name&quot; — those are pipeline-specific, so OpenLineage lets any
+producer define a <strong>custom facet</strong>: a plain <code>attrs</code>-decorated class carrying whatever
+fields it needs, inheriting from <code>DatasetFacet</code> (or <code>RunFacet</code>/<code>JobFacet</code>) so it still
+carries the required <code>_producer</code>/<code>_schemaURL</code> metadata every facet needs. Separately, and
+more consequentially for a busy pipeline: one document with 20 chunks does <strong>not</strong> mean 20
+new graph nodes. Modeling the <em>chunk set</em> as one dataset (Concept 1) rather than one
+dataset per chunk is what keeps a lineage graph proportional to document count instead of
+chunk count — this concept measures that difference rather than just asserting it.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import attr
+from openlineage.client.facet_v2 import DatasetFacet
+
+@attr.define
+class ChunkerVersionDatasetFacet(DatasetFacet):
+    chunker_name: str = &quot;&quot;
+    chunker_version: str = &quot;&quot;
+    embedding_model: str = &quot;&quot;
+
+chunker_facet = ChunkerVersionDatasetFacet(
+    chunker_name=&quot;sentence_window&quot;,
+    chunker_version=&quot;2.3.0&quot;,
+    embedding_model=&quot;bge-small-en-v1.5&quot;,
+)
+print(f&quot;chunker: {chunker_facet.chunker_name} v{chunker_facet.chunker_version}&quot;)
+print(f&quot;embedding model: {chunker_facet.embedding_model}&quot;)
+
+docs = {&quot;policy_doc_101&quot;: 8, &quot;policy_doc_102&quot;: 12, &quot;policy_doc_103&quot;: 5, &quot;policy_doc_104&quot;: 20, &quot;policy_doc_105&quot;: 3}
+
+def naive_per_chunk_datasets(docs):
+    return [
+        Dataset(namespace=&quot;qdrant://finserv-vectors:6333&quot;, name=f&quot;{doc_id}#chunk-{i}&quot;)
+        for doc_id, n_chunks in docs.items()
+        for i in range(n_chunks)
+    ]
+
+def chunk_set_datasets(docs):
+    return [chunk_set_dataset(doc_id) for doc_id in docs]
+
+naive = naive_per_chunk_datasets(docs)
+chunk_sets = chunk_set_datasets(docs)
+
+print(f&quot;total chunks across all documents: {sum(docs.values())}&quot;)
+print(f&quot;naive per-chunk graph nodes: {len(naive)}&quot;)
+print(f&quot;chunk-set graph nodes: {len(chunk_sets)}&quot;)
+print(f&quot;reduction factor: {len(naive) / len(chunk_sets):.1f}x&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>chunker: sentence_window v2.3.0
+embedding model: bge-small-en-v1.5
+total chunks across all documents: 48
+naive per-chunk graph nodes: 48
+chunk-set graph nodes: 5
+reduction factor: 9.6x
+</code></pre><p><strong>Exercise:</strong>
+A sixth document, <code>policy_doc_106</code>, has 150 chunks (an unusually long master policy
+document). Add it to <code>docs</code>, recompute both node counts and the reduction factor, and
+print one line stating whether the reduction factor <em>grew</em> compared to the 5-document
+case — and, in a second line, explain in one sentence why a single very-long document
+makes the naive per-chunk approach's cost grow worse than the chunk-set approach's.</p>
+<p><strong>Starting point:</strong> <code>docs</code>, <code>naive_per_chunk_datasets</code>, and <code>chunk_set_datasets</code> from this
+concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>naive per-chunk graph nodes: 198
+chunk-set graph nodes: 6
+reduction factor: 33.0x
+reduction factor grew: True
+because the naive approach adds one node per CHUNK (150 more), while the chunk-set approach adds exactly one node per DOCUMENT (1 more) regardless of how long it is.
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 3</h3>
+<p><strong>Legacy angle:</strong> A COBOL-sourced report (Week 13) chunked by control-break section faces
+the exact same fan-out choice as a PDF chunked by page — the chunk-set-as-one-dataset
+pattern is source-format-agnostic, it depends only on &quot;many small pieces come from one
+source,&quot; which is true of both.</p>
+<p><strong>Compliance angle:</strong> <code>SchemaDatasetFacet</code>'s recorded embedding dimension is what lets an
+auditor confirm, from the lineage graph alone and without querying the live vector store,
+that a retrieval result actually came from the fast-path 384-dim index rather than the
+768-dim rerank index — a distinction that matters if the two indexes are governed under
+different retention or access rules.</p>
+<p><strong>What breaks in production:</strong> A pipeline is changed to emit one dataset per chunk
+&quot;temporarily, just for debugging one document,&quot; and the change is never reverted. Six
+months and ten thousand documents later, Marquez's dataset table has millions of rows for
+a system that only ever needed thousands, and every lineage query against it gets slower
+for a debugging convenience nobody remembers turning on.</p>
+<hr />
+<h2 id="day-4">Day 4 — Quality and Column-Level Facets</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-4"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=uIuBBp3Ib64" target="_blank" rel="noopener"><b>OpenLineage - A Common Observability Framework for Data Pipelines</b><small>Datadog Community · 39:01</small></a></li><li><a href="https://www.youtube.com/watch?v=Vmz7Ri1jfw8" target="_blank" rel="noopener"><b>Engineering Dynamic Lineage: Column-level lineage using Open Lineage, Spark, and Delta Lake</b><small>Delta Lake · 1:00:43</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=OpenLineage%20column%20lineage%20facet%20data%20quality%20metrics" target="_blank" rel="noopener">Search YouTube: OpenLineage column lineage facet data quality metrics</a></p></div>
+<hr />
+<h3>Concept 1 — <code>columnLineageDatasetFacet</code>: Mapping Source Fields to Derived Fields</h3>
+<p><code>ColumnLineageDatasetFacet</code> records, per output column, which input dataset/column it was
+derived from and how — its <code>fields</code> argument is a <code>dict[str, Fields]</code> keyed by the output
+column name, and each <code>Fields</code> carries a list of <code>InputField</code>s (namespace, name, and
+source field) plus a <code>transformationType</code> (<code>&quot;IDENTITY&quot;</code> for a straight copy, or the real
+spec's other declared value, <code>&quot;TRANSFORMATION&quot;</code>, for anything that changes the value —
+OpenLineage does not have a finer-grained category between the two). This is finer-grained
+than Day 3's dataset-level <code>SchemaDatasetFacet</code>: it answers &quot;where did THIS column's
+values come from,&quot; not just &quot;what columns exist.&quot;</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from openlineage.client.facet_v2 import column_lineage_dataset as cld
+
+field_mapping = {
+    &quot;chunk_text&quot;: cld.Fields(
+        inputFields=[cld.InputField(
+            namespace=&quot;s3://finserv-raw-policies&quot;,
+            name=&quot;policy_batch_0417.pdf&quot;,
+            field=&quot;body_text&quot;,
+        )],
+        transformationDescription=&quot;split into overlapping windows by sentence-window chunker v2.3.0&quot;,
+        transformationType=&quot;TRANSFORMATION&quot;,
+    ),
+    &quot;source_doc_id&quot;: cld.Fields(
+        inputFields=[cld.InputField(
+            namespace=&quot;s3://finserv-raw-policies&quot;,
+            name=&quot;policy_batch_0417.pdf&quot;,
+            field=&quot;doc_id&quot;,
+        )],
+        transformationDescription=&quot;copied verbatim&quot;,
+        transformationType=&quot;IDENTITY&quot;,
+    ),
+}
+column_lineage_facet = cld.ColumnLineageDatasetFacet(fields=field_mapping)
+
+for col, f in column_lineage_facet.fields.items():
+    src = f.inputFields[0]
+    print(f&quot;{col} &lt;- {src.namespace}/{src.name}.{src.field} ({f.transformationType})&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>chunk_text &lt;- s3://finserv-raw-policies/policy_batch_0417.pdf.body_text (TRANSFORMATION)
+source_doc_id &lt;- s3://finserv-raw-policies/policy_batch_0417.pdf.doc_id (IDENTITY)
+</code></pre><p><strong>Exercise:</strong>
+Add a third output column, <code>chunk_id</code>, derived NOT from the source document at all but
+generated by the chunker itself (a deterministic hash of <code>doc_id</code> + chunk index) — so it
+has no real <code>InputField</code> to point at. Represent that honestly: give it an empty
+<code>inputFields=[]</code> list and a <code>transformationDescription</code> explaining it is
+pipeline-generated, not sourced. Print all three columns' transformation info, and one
+line confirming <code>chunk_id</code> is the only column with zero input fields.</p>
+<p><strong>Starting point:</strong> <code>field_mapping</code> and <code>cld</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>chunk_text &lt;- s3://finserv-raw-policies/policy_batch_0417.pdf.body_text (TRANSFORMATION)
+source_doc_id &lt;- s3://finserv-raw-policies/policy_batch_0417.pdf.doc_id (IDENTITY)
+chunk_id: 0 input field(s) -- pipeline-generated deterministic hash of doc_id + chunk index, not sourced
+only chunk_id has zero input fields: True
+</code></pre><hr />
+<h3>Concept 2 — <code>dataQualityMetricsInputDatasetFacet</code>: Row and Chunk Counts</h3>
+<p><code>DataQualityMetricsInputDatasetFacet</code> attaches per-column measured statistics
+(<code>ColumnMetrics</code>: <code>nullCount</code>, <code>distinctCount</code>, <code>min</code>/<code>max</code>/<code>sum</code> where numeric) plus an
+overall <code>rowCount</code> to an input dataset — &quot;row&quot; here means &quot;chunk,&quot; since a chunk set's
+rows are its chunks. This is what lets a lineage consumer answer &quot;how many chunks did this
+document actually produce, and how clean were they&quot; without a separate query against the
+live chunk store.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from openlineage.client.facet_v2 import data_quality_metrics_input_dataset as dqm
+
+col_metrics = {
+    &quot;embedding_vector&quot;: dqm.ColumnMetrics(nullCount=0, distinctCount=48),
+    &quot;chunk_text&quot;: dqm.ColumnMetrics(nullCount=2, distinctCount=46),
+}
+quality_metrics_facet = dqm.DataQualityMetricsInputDatasetFacet(columnMetrics=col_metrics, rowCount=48)
+
+print(f&quot;rowCount: {quality_metrics_facet.rowCount}&quot;)
+for col, m in quality_metrics_facet.columnMetrics.items():
+    null_rate = m.nullCount / quality_metrics_facet.rowCount
+    print(f&quot;{col}: nullCount={m.nullCount} null_rate={null_rate:.3f} distinctCount={m.distinctCount}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>rowCount: 48
+embedding_vector: nullCount=0 null_rate=0.000 distinctCount=48
+chunk_text: nullCount=2 null_rate=0.042 distinctCount=46
+</code></pre><p><strong>Exercise:</strong>
+A second document produces 20 chunks, 5 of which have a null <code>chunk_text</code> (a parsing gap
+on a scanned page) and 3 duplicate <code>embedding_vector</code> values (a chunker bug producing
+identical windows). Build its <code>DataQualityMetricsInputDatasetFacet</code> and print its
+<code>chunk_text</code> null rate and <code>embedding_vector</code> distinct count, then print one line
+comparing this document's <code>chunk_text</code> null rate against Day 4 Concept 2's Example
+document's null rate (which is worse).</p>
+<p><strong>Starting point:</strong> <code>dqm</code> and the pattern from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>chunk_text null_rate: 0.250
+embedding_vector distinctCount: 17
+this document&#x27;s null rate is worse: True
+</code></pre><hr />
+<h3>Concept 3 — <code>dataQualityAssertionsDatasetFacet</code>: Asserting Dimension and Null Rate</h3>
+<p><code>DataQualityAssertionsDatasetFacet</code> carries a list of <code>Assertion</code>s — each a named check
+with a boolean <code>success</code>, and optionally the <code>column</code> it applies to plus <code>expected</code>/
+<code>actual</code> values recorded as strings for display. This turns Concept 2's raw measurements
+into pass/fail gates: &quot;embedding dimension must equal the declared schema dimension&quot; and
+&quot;null rate must stay under a threshold&quot; are both real assertions a pipeline can act on
+(quarantine the batch, page someone) rather than numbers nobody is watching.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from openlineage.client.facet_v2 import data_quality_assertions_dataset as dqa
+
+EXPECTED_EMBEDDING_DIM = 384
+
+def assert_embedding_dimension(vectors, expected_dim):
+    bad = [i for i, v in enumerate(vectors) if len(v) != expected_dim]
+    return dqa.Assertion(
+        assertion=&quot;embedding dimension equals declared schema dimension&quot;,
+        success=(len(bad) == 0),
+        column=&quot;embedding_vector&quot;,
+        expected=str(expected_dim),
+        actual=str(sorted(set(len(v) for v in vectors))),
+    )
+
+def assert_null_rate(null_rate, threshold):
+    return dqa.Assertion(
+        assertion=f&quot;null rate below {threshold:.0%}&quot;,
+        success=(null_rate &lt;= threshold),
+        column=&quot;chunk_text&quot;,
+        expected=f&quot;&lt;= {threshold}&quot;,
+        actual=f&quot;{null_rate:.3f}&quot;,
+    )
+
+vectors_ok = [[0.0] * 384 for _ in range(5)]
+vectors_bad = [[0.0] * 384 for _ in range(4)] + [[0.0] * 300]
+
+assertion_ok = assert_embedding_dimension(vectors_ok, EXPECTED_EMBEDDING_DIM)
+assertion_bad = assert_embedding_dimension(vectors_bad, EXPECTED_EMBEDDING_DIM)
+assertion_nulls = assert_null_rate(0.042, 0.05)
+
+assertions_facet = dqa.DataQualityAssertionsDatasetFacet(
+    assertions=[assertion_ok, assertion_bad, assertion_nulls]
+)
+for a in assertions_facet.assertions:
+    print(f&quot;{a.assertion}: success={a.success} expected={a.expected} actual={a.actual}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>embedding dimension equals declared schema dimension: success=True expected=384 actual=[384]
+embedding dimension equals declared schema dimension: success=False expected=384 actual=[300, 384]
+null rate below 5%: success=True expected=&lt;= 0.05 actual=0.042
+</code></pre><p><strong>Exercise:</strong>
+Run <code>assert_null_rate</code> against Concept 2 exercise's 0.250 null rate at the same 5%
+threshold, and print whether that assertion's <code>success</code> is <code>False</code>. Then build one
+<code>DataQualityAssertionsDatasetFacet</code> containing all four assertions produced so far in this
+concept and this exercise, and print how many of the four have <code>success=False</code>.</p>
+<p><strong>Starting point:</strong> <code>assert_null_rate</code>, <code>assertion_ok</code>, <code>assertion_bad</code>, and
+<code>assertion_nulls</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>second document&#x27;s null-rate assertion fails: True
+2 of 4 assertions failed
+</code></pre><hr />
+<h3>Concept 4 — <code>errorMessageRunFacet</code>: Attaching a Real Error to a FAIL Event</h3>
+<p>Day 1's <code>emit_stage_run</code> already emits <code>FAIL</code> on an exception, but with no detail attached
+— a lineage consumer sees a run failed, not why. <code>ErrorMessageRunFacet</code> (<code>message</code>,
+<code>programmingLanguage</code>, optional <code>stackTrace</code>) attaches on <code>run.facets</code>, the same way
+<code>parentRunFacet</code> did in Day 2, so the <code>FAIL</code> event itself carries the diagnosis rather than
+requiring a correlated application-log lookup. <code>ConsoleTransport</code> logs the real START/FAIL
+JSON (including the real <code>stackTrace</code>) through Python's <code>logging</code> module (to stderr, not
+captured below).</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>import traceback
+
+from openlineage.client.facet_v2 import error_message_run as emr
+
+def embed_policy_chunks(chunks):
+    if not chunks:
+        raise ValueError(&quot;cannot embed an empty chunk list&quot;)
+    return [[0.0] * 384 for _ in chunks]
+
+run_id = str(generate_new_uuid())
+job = Job(namespace=&quot;fde.finserv.dataprep&quot;, name=&quot;embed_policy_chunks&quot;)
+console_client.emit(RunEvent(
+    eventType=RunState.START,
+    eventTime=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    run=Run(runId=run_id), job=job, producer=&quot;fde-finserv-dataprep&quot;,
+))
+try:
+    embed_policy_chunks([])
+except ValueError as e:
+    error_facet = emr.ErrorMessageRunFacet(
+        message=str(e), programmingLanguage=&quot;PYTHON&quot;, stackTrace=traceback.format_exc(),
+    )
+    failed_run = Run(runId=run_id, facets={&quot;errorMessage&quot;: error_facet})
+    console_client.emit(RunEvent(
+        eventType=RunState.FAIL,
+        eventTime=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        run=failed_run, job=job, producer=&quot;fde-finserv-dataprep&quot;,
+    ))
+    print(f&quot;FAIL emitted with error message: {failed_run.facets[&#x27;errorMessage&#x27;].message}&quot;)
+    print(f&quot;programming language recorded: {failed_run.facets[&#x27;errorMessage&#x27;].programmingLanguage}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>FAIL emitted with error message: cannot embed an empty chunk list
+programming language recorded: PYTHON
+</code></pre><p><strong>Exercise:</strong>
+Write <code>chunk_policy_text_strict(text, max_chars)</code> that raises <code>TypeError</code> (not
+<code>ValueError</code>) if <code>text</code> is not a <code>str</code>, call it with <code>text=None</code> inside the same
+START/FAIL-with-<code>ErrorMessageRunFacet</code> pattern, and print the recorded error message plus
+one line confirming the facet's <code>programmingLanguage</code> field is still <code>&quot;PYTHON&quot;</code> regardless
+of which exception type was raised.</p>
+<p><strong>Starting point:</strong> The pattern from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>FAIL emitted with error message: text must be a str, got NoneType
+programming language recorded: PYTHON
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 4</h3>
+<p><strong>Legacy angle:</strong> Week 13's COBOL-derived fields have exactly this same column-lineage
+need — a modernized <code>account_balance</code> column traces back to a COMP-3 byte range in a
+specific copybook version, and <code>columnLineageDatasetFacet</code> is the same mechanism whether
+the source is a mainframe extract or a PDF.</p>
+<p><strong>Compliance angle:</strong> A <code>dataQualityAssertionsDatasetFacet</code> failure on embedding dimension
+is exactly the kind of automated control a model-risk-management review asks for evidence
+of — &quot;how do you know a corrupted embedding never silently entered the index&quot; — answered by
+a recorded, timestamped assertion result rather than a verbal assurance.</p>
+<p><strong>What breaks in production:</strong> A pipeline emits <code>dataQualityMetricsInputDatasetFacet</code>
+faithfully but never wires <code>dataQualityAssertionsDatasetFacet</code>'s <code>success=False</code> results
+to anything that pages a human. The metrics exist, are queryable, and completely fail to
+prevent the actual incident they were meant to catch, because measuring and gating are two
+different pieces of work and only one of them was built.</p>
+<hr />
+<h2 id="day-5">Day 5 — Tracing an Answer to Source</h2><label class="daydone"><input type="checkbox" class="daydone" data-id="16-5"> Mark this day done</label>
+<div class="watch"><h4>Watch</h4><ul><li><a href="https://www.youtube.com/watch?v=l5i65j1eT4E" target="_blank" rel="noopener"><b>End-to-End Data Lineage with OpenMetadata &amp; Marquez | Open Source Data Governance &amp; Observability</b><small>SystemDR - Scalable System Design  · 14:57</small></a></li><li><a href="https://www.youtube.com/watch?v=vV2y7qhRFFs" target="_blank" rel="noopener"><b>Marquez Project Explained! How to Use the Marquez Project to Visualize Your Data Lineage!</b><small>The Data and AI Guy · 10:31</small></a></li></ul><p class="alt">Not what you need? <a href="https://www.youtube.com/results?search_query=end%20to%20end%20data%20lineage%20audit%20trail%20marquez" target="_blank" rel="noopener">Search YouTube: end to end data lineage audit trail marquez</a></p></div>
+<hr />
+<h3>Concept 1 — Walking a Citation Back Through Retrieve, Embed, Chunk, Parse</h3>
+<p>Every prior day built the pieces — runs, datasets, facets — that a lineage graph is made
+of. This concept assembles them into the thing the week exists to answer: given one cited
+chunk, walk backward stage by stage to the original source document. The walk itself needs
+no live Marquez — it is pure graph traversal over the same <code>{job, inputs, outputs}</code> shape
+every event emitted this week already carries, so it is built and run genuinely here, over
+an in-memory list of exactly the kind of records <code>emit_stage_run</code> (Day 2) would have
+produced across one full pipeline execution.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>lineage_events = [
+    {&quot;job&quot;: &quot;parse_policy_pdf&quot;, &quot;run_id&quot;: &quot;run-parse-01&quot;,
+     &quot;inputs&quot;: [&quot;s3://finserv-raw-policies/policy_batch_0417.pdf&quot;],
+     &quot;outputs&quot;: [&quot;fde.finserv.dataprep/policy_doc_101::parsed_text&quot;]},
+    {&quot;job&quot;: &quot;chunk_policy_text&quot;, &quot;run_id&quot;: &quot;run-chunk-01&quot;,
+     &quot;inputs&quot;: [&quot;fde.finserv.dataprep/policy_doc_101::parsed_text&quot;],
+     &quot;outputs&quot;: [&quot;fde.finserv.dataprep/policy_doc_101::chunk_set&quot;]},
+    {&quot;job&quot;: &quot;embed_policy_chunks&quot;, &quot;run_id&quot;: &quot;run-embed-01&quot;,
+     &quot;inputs&quot;: [&quot;fde.finserv.dataprep/policy_doc_101::chunk_set&quot;],
+     &quot;outputs&quot;: [&quot;qdrant://finserv-vectors:6333/policy_chunks_v3&quot;]},
+    {&quot;job&quot;: &quot;retrieve_policy_chunks&quot;, &quot;run_id&quot;: &quot;run-retrieve-01&quot;,
+     &quot;inputs&quot;: [&quot;qdrant://finserv-vectors:6333/policy_chunks_v3&quot;],
+     &quot;outputs&quot;: [&quot;fde.finserv.retrieval/answer_042::retrieved_chunks&quot;]},
+]
+
+def trace_citation(dataset_name, events):
+    chain = []
+    current = dataset_name
+    while True:
+        producing = [e for e in events if current in e[&quot;outputs&quot;]]
+        if not producing:
+            break
+        stage = producing[0]
+        chain.append(stage[&quot;job&quot;])
+        current = stage[&quot;inputs&quot;][0]
+    chain.append(f&quot;SOURCE: {current}&quot;)
+    return chain
+
+chain = trace_citation(&quot;fde.finserv.retrieval/answer_042::retrieved_chunks&quot;, lineage_events)
+print(&quot; &lt;- &quot;.join(chain))
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>retrieve_policy_chunks &lt;- embed_policy_chunks &lt;- chunk_policy_text &lt;- parse_policy_pdf &lt;- SOURCE: s3://finserv-raw-policies/policy_batch_0417.pdf
+</code></pre><p><strong>Exercise:</strong>
+Add a <code>rerank_policy_chunks</code> stage whose input is <code>answer_042::retrieved_chunks</code> and whose
+output is <code>answer_042::reranked_chunks</code>, trace from that new output, and print one line
+confirming the new chain is exactly one stage longer than the original.</p>
+<p><strong>Starting point:</strong> <code>lineage_events</code> and <code>trace_citation</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>rerank_policy_chunks &lt;- retrieve_policy_chunks &lt;- embed_policy_chunks &lt;- chunk_policy_text &lt;- parse_policy_pdf &lt;- SOURCE: s3://finserv-raw-policies/policy_batch_0417.pdf
+chain length increased by one stage: True
+</code></pre><hr />
+<h3>Concept 2 — Marquez Lineage API Traversal for a Regulator's Single Question</h3>
+<p>A real Marquez server exposes <code>GET /api/v1/lineage?nodeId=dataset:{namespace}:{name}&amp;depth=N</code>,
+returning the upstream (and downstream) graph within <code>depth</code> hops of one node — the actual
+HTTP call needs a live Marquez this sandbox doesn't have, so that specific request stays
+<strong>REAL MODE — not executed:</strong> the correct endpoint shape, not a guess. What genuinely
+executes here is the traversal <em>logic</em> the endpoint implements: a breadth-first walk
+bounded by <code>depth</code>, over the same event list Concept 1 built — the identical shape a
+regulator's &quot;where did this come from&quot; question needs answered, satisfied without a
+network call. This uses <code>lineage_events</code> exactly as Concept 1's Example built it — Concept
+1's Exercise (which adds a <code>rerank_policy_chunks</code> stage) is a reader exercise, not code
+shipped in this file, so this concept's own <code>lineage_events</code> does not include it.</p>
+<p><strong>Example:</strong></p>
+<div class="code"><pre><code>def marquez_style_lineage_query(node_id, events, depth=5):
+    &quot;&quot;&quot;Mimics GET /api/v1/lineage?nodeId=dataset:{namespace}:{name}&amp;depth=N:
+    REAL MODE for the actual HTTP call against a live Marquez; this traversal
+    logic itself is genuinely executed over the same event shape Marquez stores.&quot;&quot;&quot;
+    visited = []
+    frontier = [node_id]
+    for _ in range(depth):
+        next_frontier = []
+        for node in frontier:
+            producing = [e for e in events if node in e[&quot;outputs&quot;]]
+            for e in producing:
+                if e not in visited:
+                    visited.append(e)
+                next_frontier.extend(e[&quot;inputs&quot;])
+        if not next_frontier:
+            break
+        frontier = next_frontier
+    return visited
+
+result = marquez_style_lineage_query(&quot;fde.finserv.retrieval/answer_042::retrieved_chunks&quot;, lineage_events, depth=5)
+print(f&quot;nodes visited answering the regulator&#x27;s single question: {[n[&#x27;job&#x27;] for n in result]}&quot;)
+
+shallow = marquez_style_lineage_query(&quot;fde.finserv.retrieval/answer_042::retrieved_chunks&quot;, lineage_events, depth=1)
+print(f&quot;depth-1 query visits fewer nodes than depth-5: {len(shallow) &lt; len(result)}&quot;)
+</code></pre><div class="bar"><span class="hint">Needs a live service, so it is for reading only.</span></div></div><p>Expected output (actually run):</p>
+<pre><code>nodes visited answering the regulator&#x27;s single question: [&#x27;retrieve_policy_chunks&#x27;, &#x27;embed_policy_chunks&#x27;, &#x27;chunk_policy_text&#x27;, &#x27;parse_policy_pdf&#x27;]
+depth-1 query visits fewer nodes than depth-5: True
+</code></pre><p><strong>Exercise:</strong>
+Call <code>marquez_style_lineage_query</code> at <code>depth=2</code> and <code>depth=3</code> for the same node, print how
+many nodes each visits, and print one line stating whether <code>depth=3</code> visits exactly one
+more node than <code>depth=2</code> (it should — each additional depth level in this particular chain
+adds exactly one upstream stage, since none of these stages fan in from more than one
+producer).</p>
+<p><strong>Starting point:</strong> <code>marquez_style_lineage_query</code> and <code>lineage_events</code> from this concept's
+Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>depth=2 visits 2 nodes
+depth=3 visits 3 nodes
+depth=3 visits exactly one more node than depth=2: True
+</code></pre><hr />
+<h3>Concept 3 — Versioning Lineage When Documents Are Re-Embedded</h3>
+<p>A policy document gets re-embedded months later — a chunker upgrade, a new embedding
+model — and its chunk-set dataset gets a NEW version rather than a new name (Day 1
+Concept 1 already established the identifier itself must stay stable). <code>DatasetVersion DatasetFacet</code> records which version a given dataset reference actually pointed to, so a
+citation traced from an OLD answer still resolves to the version that answer's retrieval
+run actually saw — re-embedding a document must never retroactively change what an
+already-given answer's lineage record points to.</p>
+<p><strong>Example:</strong></p>
+<div class="code" data-run><pre contenteditable="true" spellcheck="false" aria-label="Editable Python code"><code>from openlineage.client.facet_v2 import dataset_version_dataset as dvd
+from openlineage.client.run import Dataset
+
+def versioned_chunk_set_dataset(doc_id, version):
+    return Dataset(
+        namespace=&quot;fde.finserv.dataprep&quot;,
+        name=f&quot;{doc_id}::chunk_set&quot;,
+        facets={&quot;version&quot;: dvd.DatasetVersionDatasetFacet(datasetVersion=version)},
+    )
+
+v1 = versioned_chunk_set_dataset(&quot;policy_doc_101&quot;, &quot;2026-08-01T00:00:00Z&quot;)
+v2 = versioned_chunk_set_dataset(&quot;policy_doc_101&quot;, &quot;2026-09-15T00:00:00Z&quot;)
+
+print(f&quot;same dataset NAME across re-embeds: {v1.name == v2.name}&quot;)
+print(f&quot;different dataset VERSION: {v1.facets[&#x27;version&#x27;].datasetVersion != v2.facets[&#x27;version&#x27;].datasetVersion}&quot;)
+print(f&quot;an answer&#x27;s citation traced to v1 still resolves to its real, retained version: {v1.facets[&#x27;version&#x27;].datasetVersion}&quot;)
+</code></pre><div class="bar"><button class="run" type="button">Run</button><span class="hint">Editable. Blocks on a page share one session, so run them in order.</span></div><pre class="out" hidden></pre></div><p>Expected output (actually run):</p>
+<pre><code>same dataset NAME across re-embeds: True
+different dataset VERSION: True
+an answer&#x27;s citation traced to v1 still resolves to its real, retained version: 2026-08-01T00:00:00Z
+</code></pre><p><strong>Exercise:</strong>
+A third re-embed happens on <code>2026-10-01T00:00:00Z</code>. Build <code>v3</code>, then build a small
+<code>version_history = [v1, v2, v3]</code> list and write <code>version_at_or_before(history, timestamp)</code>
+that returns the latest version whose <code>datasetVersion</code> is <code>&lt;=</code> a given timestamp string
+(ISO-8601 strings sort correctly as plain strings). Call it for <code>&quot;2026-09-01T00:00:00Z&quot;</code>
+(should resolve to <code>v1</code>, since <code>v2</code> postdates it) and print the resolved version.</p>
+<p><strong>Starting point:</strong> <code>versioned_chunk_set_dataset</code>, <code>v1</code>, <code>v2</code> from this concept's Example.</p>
+<p>Expected output (actually run):</p>
+<pre><code>version_at_or_before(&#x27;2026-09-01T00:00:00Z&#x27;) resolves to: 2026-08-01T00:00:00Z
+</code></pre><hr />
+<h3>BFSI Reality Check — Day 5</h3>
+<p><strong>Legacy angle:</strong> A COBOL-sourced report re-run after a copybook change (Week 13) needs
+the exact same version discipline — an old audit answer must trace to the copybook version
+that actually produced it, not whichever version happens to be current when someone asks.</p>
+<p><strong>Compliance angle:</strong> Concept 2's single-question traversal is literally the capability a
+regulator's audit exercises: &quot;show me where this specific customer-facing answer's source
+data came from,&quot; answered in one bounded graph query instead of an open-ended, multi-team
+investigation.</p>
+<p><strong>What breaks in production:</strong> A document is re-embedded and the pipeline reuses the SAME
+dataset version string (or omits <code>datasetVersion</code> entirely) instead of minting a new one.
+Every citation traced against an answer given before the re-embed now resolves to the
+NEW chunk content, which may say something different from what the answer actually quoted
+— an audit trail that silently rewrites history is worse than no audit trail, because it
+looks trustworthy while being wrong.</p>
+<hr />
+<h2>Architecture Decision — Week 16</h2>
+<p><strong>Choosing between:</strong> emitting a full <code>START</code>/<code>COMPLETE</code> (or <code>FAIL</code>) lineage event, with
+every applicable facet, for every single pipeline stage execution — vs. sampling or
+batching lineage emission for high-volume stages to keep emission overhead low.</p>
+<p><strong>Rule of thumb:</strong> Any stage on the path that produces content a customer-facing answer
+can actually cite — parse, chunk, embed, retrieve, and anything downstream of retrieve —
+emits full, unsampled lineage for every execution, with no exception, the same way Week
+15's Architecture Decision kept irreversible-harm guardrails inline regardless of cost:
+losing a lineage record for one chunk that ends up cited in one answer is exactly the gap
+Day 5's &quot;an audit trail that silently omits data is worse than no audit trail&quot; finding
+warns about, and there is no way to know in advance which chunk that will be. A
+stage that exists purely for internal instrumentation — a periodic health-check ping, a
+cache-warming job that touches no dataset an answer could ever cite — can be sampled or
+batched, because losing one of its records has no audit consequence. The dividing line is
+never &quot;is this stage expensive to instrument,&quot; it is &quot;could this stage's output ever be
+the answer to a regulator's single question&quot; — Day 5 exists because the answer to that
+question, for this week's whole parse→chunk→embed→retrieve chain, is always yes.</p>
+<div class="pager"><a class="btn ghost" href="week-15.html">&larr; Week 15</a><a class="btn ghost" href="week-17.html">Week 17 &rarr;</a></div>
+</main></body></html>
