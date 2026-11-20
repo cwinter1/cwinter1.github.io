@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>עדכון — מה השתנה ומה זה אומר</title>
+<script src="auth.js"></script>
+<link rel="stylesheet" href="wf.css">
+<script src="wf.js"></script>
+</head>
+<body>
+<nav id="wfnav"></nav>
+<div class="page">
+  <h1>עדכון</h1>
+  <div class="lead" id="lead"></div>
+  <div id="log"></div>
+  <div class="note" style="margin-top:18px">
+    <b>איך לקרוא:</b> "שבוע" = מהמוצאי שבת עד היום (ראשון עד שבת). "גמיש" = הקטגוריות עם תקרה בתוכנית המינוס (בלי טיולים ובלי חיסכון).
+    השינוי מוצג מול הריצה הקודמת. הערה נכתבת ידנית כשמשהו משתנה בתוכנית או בסיווג.
+  </div>
+</div>
+
+<script>
+WF.nav('update.html');
+WF.boot(function (D) {
+  var log = Array.isArray(D.updates) ? D.updates : [];
+  var lead = document.getElementById('lead'), box = document.getElementById('log');
+  if (!log.length) { lead.textContent = 'עוד אין עדכונים. הם יופיעו אחרי הריצה היומית הבאה.'; return; }
+  var runs = log.filter(function (e) { return e.kind === 'run'; });
+  var last = runs[runs.length - 1];
+  lead.textContent = 'עודכן עד ' + (last ? last.data_through : '') + ' · ' + log.length + ' רשומות';
+
+  function day(s) { var p = s.split('-'); return p[2] + '.' + p[1]; }
+  function mLabel(ym) { var p = ym.split('-'); return p[1] + '/' + p[0]; }
+  function sign(x) { return (x > 0 ? '+' : x < 0 ? '−' : '') + '₪' + WF.n0(Math.abs(x)); }
+  function esc(s) { return WF.esc(String(s == null ? '' : s)); }
+
+  function runHTML(e) {
+    var w = e.weekly || {}, m = e.monthly || {}, o = e.overdraft || {}, c = e.change, p = e.pulled || {};
+    var wPct = w.cap ? Math.round(100 * w.spent / w.cap) : 0;
+    var fPct = m.flex_cap ? Math.round(100 * m.flex_spent / m.flex_cap) : 0;
+    var lines = [];
+    lines.push('<div><b>מה קרה:</b> ' + (p.new ? 'נוספו ' + p.new + ' תנועות' : 'לא נוספו תנועות חדשות') +
+      (p.changed ? ', ' + p.changed + ' עודכנו' : '') + (p.removed ? ', ' + p.removed + ' הוסרו' : '') + '.</div>');
+    lines.push('<div><b>שבוע:</b> ' + WF.ilsText(w.spent) + ' מתוך ' + WF.ilsText(w.cap) + ' (' + wPct + '%) · גמיש ' +
+      WF.ilsText(w.flex_spent) + ' מתוך ' + WF.ilsText(w.flex_cap) + '</div>');
+    lines.push('<div><b>חודש:</b> ' + WF.ilsText(m.spent) + ' מתוך ' + WF.ilsText(m.budget) +
+      (m.pace != null ? ' · קצב לסוף החודש ' + WF.ilsText(m.pace) : '') + '</div>');
+    lines.push('<div><b>יציאה מהמינוס (שלב ' + (o.phase || 1) + '):</b> גמיש החודש ' + WF.ilsText(m.flex_spent) + ' מתוך ' +
+      WF.ilsText(m.flex_cap) + ' (' + fPct + '%) · נשאר ' + (o.flex_left < 0 ? '−' : '') + WF.ilsText(Math.abs(o.flex_left)) + '</div>');
+    if (c) {
+      lines.push('<div class="hint"><b>מאז ' + day(c.since) + ':</b> הוצאות ' + sign(c.spent) + ' · גמיש ' + sign(c.flex_spent) +
+        (c.pace != null ? ' · קצב ' + sign(c.pace) : '') + '</div>');
+    }
+    return '<div class="card2 upd">' + '<div class="updh"><b>' + day(e.date) + '</b> <span class="tag">ריצה</span></div>' +
+      lines.join('') + '</div>';
+  }
+  function noteHTML(e) {
+    return '<div class="card2 upd note-e"><div class="updh"><b>' + day(e.date) + '</b> <span class="tag warn">הערה</span></div>' +
+      '<div>' + esc(e.text) + '</div></div>';
+  }
+
+  // group: month (newest first) -> week (newest first) -> entries (newest first)
+  var byM = {};
+  log.slice().reverse().forEach(function (e) {
+    var m = e.month || e.date.slice(0, 7), w = e.week || e.date;
+    (byM[m] = byM[m] || {}); (byM[m][w] = byM[m][w] || []).push(e);
+  });
+  var html = '';
+  Object.keys(byM).sort().reverse().forEach(function (m) {
+    html += '<div class="sec"><h2>חודש ' + mLabel(m) + '</h2></div>';
+    var weeks = byM[m];
+    Object.keys(weeks).sort().reverse().forEach(function (w) {
+      html += '<div class="sec" style="margin:14px 0 6px"><span class="hint">שבוע מ-' + day(w) + '</span></div>';
+      weeks[w].forEach(function (e) { html += e.kind === 'note' ? noteHTML(e) : runHTML(e); });
+    });
+  });
+  box.innerHTML = html;
+});
+</script>
+</body>
+</html>
