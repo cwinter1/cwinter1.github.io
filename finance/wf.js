@@ -30,6 +30,7 @@
     cash:            ['מזומן', '#a39f6a', 'flex'],
     savings:         ['חיסכון והשקעות', '#4fae6a', 'flex'],
     travel:          ['נסיעות וחופשות', '#2fb3d1', 'travel'],
+    furniture:       ['רהיטים', '#b58b6a', 'fixed'],
     unclassified:    ['לא מסווג', '#777f89', 'flex']
   };
   var GROUPS = { fixed: 'הוצאות קבועות', living: 'הוצאות משתנות: מחיה', flex: 'הוצאות משתנות: גמישות', travel: 'נסיעות' };
