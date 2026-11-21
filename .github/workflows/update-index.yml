@@ -1,0 +1,69 @@
+name: Update site index
+
+# Keeps index.html in sync with every site published under cwinter1.github.io:
+#  - public repos of the owner that have GitHub Pages enabled
+#  - top-level folders of this repo that contain an index.html
+# Titles/groups for known sites live in sites.json; new sites get a default card.
+
+on:
+  schedule:
+    - cron: '23 */3 * * *'   # every 3 hours
+  workflow_dispatch:          # "Run workflow" button in the Actions tab
+  push:
+    branches: [main]
+    paths:
+      - sites.json
+      - scripts/**
+      - .github/workflows/update-index.yml
+  pull_request:               # tests + dry run only, never commits
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: update-index
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Test the generator
+        run: node scripts/build-index.test.js
+
+      - name: Dry run (pull requests)
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/build-index.js --dry-run
+
+      - name: Build index
+        if: github.event_name != 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/build-index.js
+
+      - name: Commit and publish
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet -- index.html; then
+            echo "Index already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git commit -m "Update site index"
+          git push
+          # a push made with GITHUB_TOKEN may not start a Pages build, so ask for one explicitly
+          gh api -X POST "repos/${{ github.repository }}/pages/builds" || echo "Pages build request failed; the push normally triggers one anyway."
