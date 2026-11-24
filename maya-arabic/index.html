@@ -1,0 +1,1736 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>מאיה - ערבית לבחינה שכבת ז'</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Heebo:wght@400;600;700;900&family=Noto+Naskh+Arabic:wght@400;700&display=swap');
+
+  :root {
+    --bg: #0f0c29;
+    --card: #1a1540;
+    --accent1: #7c3aed;
+    --accent2: #db2777;
+    --accent3: #0891b2;
+    --gold: #f59e0b;
+    --green: #10b981;
+    --red: #ef4444;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --radius: 16px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Heebo', sans-serif;
+    background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+    min-height: 100vh;
+    color: var(--text);
+    direction: rtl;
+  }
+
+  /* ===== HUD ===== */
+  #hud {
+    position: fixed;
+    top: 0; right: 0; left: 0;
+    background: rgba(15,12,41,0.95);
+    backdrop-filter: blur(8px);
+    padding: 10px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    z-index: 100;
+    border-bottom: 1px solid rgba(124,58,237,0.3);
+  }
+
+  .hud-score {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 15px;
+    font-weight: 700;
+  }
+
+  .hud-score .icon { font-size: 18px; }
+  .hud-score .val { color: var(--gold); font-size: 20px; }
+
+  #timer {
+    background: rgba(124,58,237,0.3);
+    border: 1px solid var(--accent1);
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  #timer.urgent { color: var(--red); border-color: var(--red); animation: pulse 0.5s infinite; }
+
+  @keyframes pulse {
+    0%,100% { opacity:1; }
+    50% { opacity:0.6; }
+  }
+
+  /* ===== MAIN ===== */
+  #app {
+    padding-top: 70px;
+    padding-bottom: 40px;
+    max-width: 480px;
+    margin: 0 auto;
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  /* ===== HOME SCREEN ===== */
+  #home-screen {
+    text-align: center;
+    padding: 20px 0;
+  }
+
+  .title-emoji { font-size: 60px; display: block; margin-bottom: 12px; }
+
+  .main-title {
+    font-size: 28px;
+    font-weight: 900;
+    background: linear-gradient(90deg, #c084fc, #f472b6);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 6px;
+  }
+
+  .sub-title {
+    font-size: 15px;
+    color: var(--muted);
+    margin-bottom: 24px;
+  }
+
+  .exam-badge {
+    background: linear-gradient(135deg, var(--accent2), #be185d);
+    border-radius: 12px;
+    padding: 12px 20px;
+    margin-bottom: 28px;
+    font-size: 14px;
+    font-weight: 700;
+  }
+
+  .exam-badge .date { font-size: 20px; color: #fde68a; }
+
+  .missions-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .mission-card {
+    background: var(--card);
+    border: 1px solid rgba(124,58,237,0.3);
+    border-radius: var(--radius);
+    padding: 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    cursor: pointer;
+    transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
+    text-align: right;
+  }
+
+  .mission-card:hover, .mission-card:active {
+    transform: scale(1.02);
+    border-color: var(--accent1);
+    box-shadow: 0 4px 20px rgba(124,58,237,0.3);
+  }
+
+  .mission-card.locked { opacity: 0.45; cursor: not-allowed; }
+  .mission-card.done { border-color: var(--green); }
+  .mission-card.done .mission-icon { background: rgba(16,185,129,0.2); }
+
+  .mission-icon {
+    width: 52px; height: 52px;
+    background: rgba(124,58,237,0.2);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 26px;
+    flex-shrink: 0;
+  }
+
+  .mission-info { flex: 1; }
+  .mission-title { font-size: 16px; font-weight: 700; }
+  .mission-desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  .mission-status {
+    font-size: 20px;
+    flex-shrink: 0;
+  }
+
+  /* ===== GAME SCREEN ===== */
+  #game-screen { display: none; }
+
+  .game-header {
+    text-align: center;
+    margin-bottom: 20px;
+  }
+
+  .mission-label {
+    font-size: 13px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .question-title {
+    font-size: 20px;
+    font-weight: 900;
+    margin: 6px 0 2px;
+    background: linear-gradient(90deg, #c084fc, #f472b6);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .progress-bar-wrap {
+    background: rgba(255,255,255,0.1);
+    border-radius: 10px;
+    height: 6px;
+    margin: 10px 0;
+    overflow: hidden;
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent1), var(--accent2));
+    border-radius: 10px;
+    transition: width 0.4s;
+  }
+
+  /* question card */
+  .q-card {
+    background: var(--card);
+    border: 1px solid rgba(124,58,237,0.25);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+
+  .q-text {
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.6;
+    margin-bottom: 16px;
+    text-align: center;
+  }
+
+  /* choice buttons */
+  .choices { display: flex; flex-direction: column; gap: 10px; }
+
+  .choice-btn {
+    background: rgba(255,255,255,0.05);
+    border: 1.5px solid rgba(255,255,255,0.15);
+    border-radius: 12px;
+    padding: 14px 16px;
+    font-family: 'Heebo', sans-serif;
+    font-size: 15px;
+    color: var(--text);
+    cursor: pointer;
+    text-align: right;
+    direction: rtl;
+    transition: all 0.15s;
+    line-height: 1.5;
+  }
+
+  .choice-btn:hover:not(:disabled) {
+    background: rgba(124,58,237,0.2);
+    border-color: var(--accent1);
+  }
+
+  .choice-btn.correct {
+    background: rgba(16,185,129,0.2);
+    border-color: var(--green);
+    color: #6ee7b7;
+    font-weight: 700;
+  }
+
+  .choice-btn.wrong {
+    background: rgba(239,68,68,0.15);
+    border-color: var(--red);
+    color: #fca5a5;
+  }
+
+  .choice-btn:disabled { cursor: default; }
+
+  /* feedback */
+  .feedback-box {
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-top: 12px;
+    font-size: 14px;
+    line-height: 1.6;
+    display: none;
+  }
+
+  .feedback-box.show { display: block; }
+  .feedback-box.ok { background: rgba(16,185,129,0.15); border: 1px solid var(--green); }
+  .feedback-box.fail { background: rgba(239,68,68,0.1); border: 1px solid var(--red); }
+
+  .feedback-emoji { font-size: 22px; margin-bottom: 4px; }
+
+  /* next btn */
+  .next-btn {
+    width: 100%;
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    border: none;
+    border-radius: 14px;
+    padding: 16px;
+    font-family: 'Heebo', sans-serif;
+    font-size: 17px;
+    font-weight: 700;
+    color: white;
+    cursor: pointer;
+    display: none;
+    margin-top: 12px;
+    transition: opacity 0.2s, transform 0.1s;
+  }
+
+  .next-btn.show { display: block; }
+  .next-btn:active { transform: scale(0.98); }
+
+  /* ===== FLIP CARDS ===== */
+  .flip-grid { display: flex; flex-direction: column; gap: 12px; }
+
+  .flip-card-wrapper {
+    perspective: 800px;
+    height: 110px;
+    cursor: pointer;
+  }
+
+  .flip-card-inner {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    transition: transform 0.5s;
+    transform-style: preserve-3d;
+  }
+
+  .flip-card-wrapper.flipped .flip-card-inner { transform: rotateY(180deg); }
+
+  .flip-front, .flip-back {
+    position: absolute;
+    width: 100%; height: 100%;
+    backface-visibility: hidden;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 14px;
+    text-align: center;
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .flip-front {
+    background: rgba(124,58,237,0.2);
+    border: 1.5px solid rgba(124,58,237,0.5);
+  }
+
+  .flip-back {
+    background: rgba(16,185,129,0.15);
+    border: 1.5px solid var(--green);
+    transform: rotateY(180deg);
+    font-size: 14px;
+    color: #6ee7b7;
+  }
+
+  .flip-hint {
+    position: absolute;
+    bottom: 6px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  /* ===== SORTING ===== */
+  .sort-buckets { display: flex; gap: 10px; margin-bottom: 14px; }
+
+  .sort-bucket {
+    flex: 1;
+    background: rgba(124,58,237,0.1);
+    border: 2px dashed rgba(124,58,237,0.4);
+    border-radius: 12px;
+    padding: 10px;
+    min-height: 90px;
+    text-align: center;
+  }
+
+  .sort-bucket-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #c084fc;
+    margin-bottom: 8px;
+  }
+
+  .sort-items { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+
+  .sort-item {
+    background: rgba(255,255,255,0.08);
+    border: 1.5px solid rgba(255,255,255,0.2);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: center;
+  }
+
+  .sort-item:hover:not(.used) {
+    background: rgba(124,58,237,0.2);
+    border-color: var(--accent1);
+  }
+
+  .sort-item.used { opacity: 0.3; cursor: not-allowed; }
+  .sort-item.in-bucket { font-size: 12px; padding: 6px 10px; cursor: default; }
+  .sort-item.in-bucket:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.2); }
+
+  /* ===== ORDER CHAIN ===== */
+  .order-items { display: flex; flex-direction: column; gap: 8px; }
+
+  .order-item {
+    background: rgba(255,255,255,0.07);
+    border: 1.5px solid rgba(255,255,255,0.15);
+    border-radius: 12px;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    font-size: 15px;
+    transition: all 0.15s;
+  }
+
+  .order-item:hover:not(.selected):not(.locked-order) {
+    background: rgba(124,58,237,0.2);
+    border-color: var(--accent1);
+  }
+
+  .order-item.selected {
+    background: rgba(124,58,237,0.25);
+    border-color: var(--accent1);
+  }
+
+  .order-num {
+    width: 28px; height: 28px;
+    background: rgba(124,58,237,0.4);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  .order-num.filled { background: var(--accent2); }
+  .order-num.correct-o { background: var(--green); }
+  .order-num.wrong-o { background: var(--red); }
+
+  /* ===== TRUE/FALSE BLITZ ===== */
+  .tf-statement {
+    font-size: 18px;
+    font-weight: 700;
+    text-align: center;
+    padding: 20px;
+    background: rgba(124,58,237,0.15);
+    border-radius: 14px;
+    line-height: 1.6;
+    margin-bottom: 16px;
+  }
+
+  .tf-buttons { display: flex; gap: 12px; }
+
+  .tf-btn {
+    flex: 1;
+    padding: 18px;
+    border-radius: 14px;
+    border: none;
+    font-family: 'Heebo', sans-serif;
+    font-size: 20px;
+    font-weight: 900;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .tf-btn.true-btn {
+    background: rgba(16,185,129,0.2);
+    border: 2px solid var(--green);
+    color: #6ee7b7;
+  }
+
+  .tf-btn.false-btn {
+    background: rgba(239,68,68,0.15);
+    border: 2px solid var(--red);
+    color: #fca5a5;
+  }
+
+  .tf-btn:hover:not(:disabled) { transform: scale(1.04); }
+  .tf-btn:disabled { opacity: 0.5; cursor: default; }
+
+  /* ===== FIND IN TEXT ===== */
+  .text-passage {
+    background: rgba(8,145,178,0.1);
+    border: 1px solid rgba(8,145,178,0.4);
+    border-radius: 12px;
+    padding: 16px;
+    font-size: 15px;
+    line-height: 2;
+    margin-bottom: 14px;
+    text-align: center;
+  }
+
+  .text-passage .highlight {
+    background: rgba(245,158,11,0.3);
+    border-radius: 4px;
+    padding: 1px 4px;
+    font-weight: 700;
+    color: #fde68a;
+  }
+
+  /* ===== END SCREEN ===== */
+  #end-screen {
+    display: none;
+    text-align: center;
+    padding: 20px 0;
+  }
+
+  .stars-row {
+    font-size: 48px;
+    margin: 10px 0;
+    letter-spacing: 4px;
+  }
+
+  .final-score-big {
+    font-size: 60px;
+    font-weight: 900;
+    background: linear-gradient(90deg, var(--gold), #f97316);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .rank-badge {
+    display: inline-block;
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    border-radius: 20px;
+    padding: 8px 24px;
+    font-size: 20px;
+    font-weight: 700;
+    margin: 10px 0 20px;
+  }
+
+  .score-breakdown {
+    background: var(--card);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 20px;
+  }
+
+  .score-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    font-size: 14px;
+  }
+
+  .score-row:last-child { border: none; }
+  .score-row .pts { color: var(--gold); font-weight: 700; }
+
+  .restart-btn {
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    border: none;
+    border-radius: 14px;
+    padding: 16px 32px;
+    font-family: 'Heebo', sans-serif;
+    font-size: 17px;
+    font-weight: 700;
+    color: white;
+    cursor: pointer;
+    width: 100%;
+    margin-top: 8px;
+  }
+
+  .back-home-btn {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 14px;
+    padding: 14px 32px;
+    font-family: 'Heebo', sans-serif;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    cursor: pointer;
+    width: 100%;
+    margin-top: 8px;
+  }
+
+  /* mission end card */
+  #mission-end {
+    display: none;
+    text-align: center;
+    padding: 20px 0;
+  }
+
+  .mission-result-emoji { font-size: 64px; display: block; margin-bottom: 12px; }
+
+  .mission-result-title {
+    font-size: 24px;
+    font-weight: 900;
+    margin-bottom: 6px;
+  }
+
+  .mission-result-score {
+    font-size: 36px;
+    font-weight: 900;
+    color: var(--gold);
+    margin-bottom: 10px;
+  }
+
+  .lesson-box {
+    background: rgba(8,145,178,0.15);
+    border: 1px solid rgba(8,145,178,0.4);
+    border-radius: 12px;
+    padding: 16px;
+    font-size: 14px;
+    line-height: 1.7;
+    text-align: right;
+    margin-bottom: 20px;
+  }
+
+  .lesson-title { font-weight: 700; color: #67e8f9; margin-bottom: 8px; font-size: 15px; }
+
+  /* ===== TOAST ===== */
+  #toast {
+    position: fixed;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: rgba(30,27,75,0.95);
+    border: 1px solid var(--accent1);
+    border-radius: 20px;
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    opacity: 0;
+    transition: all 0.3s;
+    z-index: 200;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+
+  #toast.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+
+  /* sort bucket placed items */
+  .placed-item {
+    background: rgba(124,58,237,0.2);
+    border: 1px solid rgba(124,58,237,0.4);
+    border-radius: 8px;
+    padding: 5px 8px;
+    font-size: 12px;
+    margin-bottom: 4px;
+    text-align: center;
+  }
+
+  .success-gif {
+    display: none;
+    width: 100%;
+    max-width: 320px;
+    margin: 0 auto 14px;
+    border-radius: var(--radius);
+    border: 2px solid var(--gold);
+    box-shadow: 0 4px 24px rgba(245,158,11,0.35);
+  }
+
+  .ar {
+    font-family: 'Noto Naskh Arabic', 'Amiri', 'Geeza Pro', 'Traditional Arabic', 'DejaVu Sans', 'Arial', serif;
+    font-size: 1.35em;
+    line-height: 1.9;
+    unicode-bidi: isolate;
+  }
+  .ar.big { font-size: 2.6em; line-height: 1.5; display: inline-block; padding: 0 6px; }
+  .ar.letter { font-size: 2.2em; line-height: 1.3; }
+  .choice-btn .ar { font-size: 1.5em; line-height: 1.5; }
+  .choice-btn .ar.letter { font-size: 2.2em; line-height: 1.3; }
+  .flip-front .ar.big, .flip-back .ar { font-size: 1.6em; line-height: 1.3; }
+  .flip-front .ar.big { font-size: 2.4em; }
+  .sort-item .ar, .placed-item .ar, .order-item .ar { font-size: 1.35em; line-height: 1.5; }
+  .sort-item .ar.letter, .order-item .ar.letter { font-size: 1.9em; line-height: 1.3; }
+  .placed-item .ar.letter { font-size: 1.6em; line-height: 1.3; }
+  .tf-statement .ar { font-size: 1.5em; }
+  .lesson-box .ar, .learn-note .ar, .feedback-box .ar { font-size: 1.25em; line-height: 1.6; }
+  .learn-note .ar.letter, .feedback-box .ar.letter { font-size: 1.6em; line-height: 1.3; }
+  .learn-note {
+    margin-top: 12px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: rgba(245,158,11,0.12);
+    border: 1px solid var(--gold);
+    font-size: 14px;
+    line-height: 1.7;
+  }
+  .learn-note .learn-title { font-weight: 700; color: #fde68a; margin-bottom: 4px; }
+  .learn-note .learn-answer { color: #6ee7b7; font-weight: 700; }
+  .learn-note details { margin-top: 8px; color: var(--muted); font-size: 13px; }
+  .learn-note summary { cursor: pointer; color: #67e8f9; font-weight: 600; }
+
+  #sound-btn {
+    background: rgba(124,58,237,0.3);
+    border: 1px solid var(--accent1);
+    border-radius: 50%;
+    width: 34px; height: 34px;
+    font-size: 16px;
+    color: var(--text);
+    cursor: pointer;
+    line-height: 1;
+  }
+</style>
+</head>
+<body>
+
+<!-- HUD -->
+<div id="hud">
+  <div class="hud-score">
+    <span class="icon">⭐</span>
+    <span class="val" id="score-display">0</span>
+  </div>
+  <div id="timer">00:00</div>
+  <div class="hud-score">
+    <span class="icon">📚</span>
+    <span style="font-size:13px;color:var(--muted)" id="mission-counter">0/4</span>
+  </div>
+  <button id="sound-btn" onclick="toggleSound()" aria-label="צליל">🔊</button>
+</div>
+
+<div id="app">
+
+  <!-- HOME SCREEN -->
+  <div id="home-screen">
+    <span class="title-emoji">🌙</span>
+    <div class="main-title">מאיה – ערבית לבחינה</div>
+    <div class="sub-title">שכבת ז׳ • הכנה מלאה לבחינה</div>
+
+    <div class="exam-badge">
+      🗓️ הבחינה: <span class="date">יום שני 30/11/2026</span><br>
+      <span style="font-size:13px;opacity:0.85">עוד <span id="days-left">?</span> ימים — בואי נתכונן! 💪</span>
+    </div>
+
+    <div class="missions-list" id="missions-list">
+      <!-- filled by JS -->
+    </div>
+  </div>
+
+  <!-- GAME SCREEN -->
+  <div id="game-screen">
+    <div class="game-header">
+      <div class="mission-label" id="mission-label">משימה</div>
+      <div class="question-title" id="mission-title-game">-</div>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="progress-bar" style="width:0%"></div>
+      </div>
+    </div>
+    <div id="question-area"></div>
+    <button class="next-btn" id="next-btn" onclick="nextQuestion()">הבאה ➡️</button>
+  </div>
+
+  <!-- MISSION END -->
+  <div id="mission-end">
+    <span class="mission-result-emoji" id="me-emoji">🎉</span>
+    <div class="mission-result-title" id="me-title">-</div>
+    <div class="mission-result-score" id="me-score">0 נקודות</div>
+    <img id="me-gif" class="success-gif" alt="">
+    <div class="lesson-box" id="me-lesson"></div>
+    <button class="next-btn show" onclick="goHome()" style="display:block">חזרה לראשי 🏠</button>
+  </div>
+
+  <!-- END SCREEN -->
+  <div id="end-screen">
+    <img id="end-gif" class="success-gif" alt="">
+    <div class="stars-row" id="stars-row">⭐⭐⭐</div>
+    <div style="font-size:18px;font-weight:700;margin-bottom:4px">הסתיים! 🎓</div>
+    <div class="final-score-big" id="final-score">0</div>
+    <div style="font-size:14px;color:var(--muted);margin-bottom:8px">נקודות</div>
+    <div class="rank-badge" id="rank-badge">-</div>
+    <div class="score-breakdown" id="score-breakdown"></div>
+    <button class="restart-btn" onclick="fullRestart()">🔄 שחקי שוב</button>
+  </div>
+
+</div>
+
+<div id="toast">+10 נקודות!</div>
+
+<script>
+// ===== STATE =====
+let totalScore = 0;
+let timerInterval = null;
+let timerSecs = 0;
+let currentMission = null;
+let currentRound = [];      // the questions picked for the current play
+let currentQuestion = null; // data for the question on screen
+let currentQ = 0;
+let missionScore = 0;
+let missionDone = [];
+let missionScores = {};
+let pendingAnswer = false;
+let qWeight = 0;
+
+const ROUND_SIZE = 6;       // questions per play
+const MAX_PER_MISSION = 100; // perfect play = 100 points
+
+// sort state
+let sortState = {};
+// order state
+let orderState = {};
+
+// ===== MISSIONS (each has a pool; every play draws ROUND_SIZE questions) =====
+// ===== ARABIC HELPERS =====
+const AR = s => `<span class="ar" lang="ar" dir="rtl">${s}</span>`;      // inline Arabic
+const AL = s => `<span class="ar letter" lang="ar" dir="rtl">${s}</span>`; // a single letter as an answer option
+const AB = s => `<span class="ar big" lang="ar" dir="rtl">${s}</span>`;  // big Arabic (letters, words in a question)
+
+// question builders
+function mc(q, opts, ans, exp, fixed) { return { type: 'choice', q, opts, ans, exp, fixed: !!fixed }; }
+function mc1(q, correct, wrong, exp) { return mc(q, [correct, ...wrong], 0, exp); } // correct first; shuffled when shown
+function tf(q, ans, exp) { return { type: 'tf', q, ans, exp }; }
+// n options starting at a rotating offset of a list, skipping anything in `skip`
+function take(list, start, n, skip) {
+  const out = [];
+  for (let k = 0; out.length < n && k < list.length * 2; k++) {
+    const v = list[(start + k) % list.length];
+    if (!skip.includes(v) && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+// ===================== 1. LETTERS: alif .. dal + ya =====================
+const LET = [
+  { ch: 'ا', name: 'אלף',   dots: 'בלי נקודות' },
+  { ch: 'ب', name: 'בא',    dots: 'נקודה אחת מתחת' },
+  { ch: 'ت', name: 'תא',    dots: 'שתי נקודות מעל' },
+  { ch: 'ث', name: 'ת׳א',   dots: 'שלוש נקודות מעל' },
+  { ch: 'ج', name: 'ג׳ים',  dots: 'נקודה אחת מתחת' },
+  { ch: 'ح', name: 'חא',    dots: 'בלי נקודות' },
+  { ch: 'خ', name: 'ח׳א',   dots: 'נקודה אחת מעל' },
+  { ch: 'د', name: 'דאל',   dots: 'בלי נקודות' },
+  { ch: 'ي', name: 'יא',    dots: 'שתי נקודות מתחת' },
+];
+const DOTS = ['בלי נקודות', 'נקודה אחת מתחת', 'נקודה אחת מעל', 'שתי נקודות מעל', 'שתי נקודות מתחת', 'שלוש נקודות מעל'];
+const letterCards = list => list.map(i => ({ front: AB(LET[i].ch), back: `${LET[i].name} · ${LET[i].dots}` }));
+
+const Q_LETTERS = [];
+LET.forEach((l, i) => {
+  // letter -> name
+  Q_LETTERS.push(mc1(`מה שם האות ${AB(l.ch)}?`, l.name, [1, 3, 5].map(o => LET[(i + o) % 9].name),
+    `האות ${AR(l.ch)} נקראת ${l.name}. ${l.dots}.`));
+  // letter -> where are the dots
+  const wrongDots = take(DOTS, i, 3, [l.dots]);
+  Q_LETTERS.push(mc1(`איפה הנקודות של האות ${AB(l.ch)} (${l.name})?`, l.dots, wrongDots,
+    `לאות ${AR(l.ch)} (${l.name}): ${l.dots}.`));
+});
+// name -> letter
+[0, 1, 4, 7, 8, 2].forEach(i => {
+  const l = LET[i];
+  Q_LETTERS.push(mc1(`איזו אות נקראת "${l.name}"?`, AL(l.ch), [2, 4, 6].map(o => AL(LET[(i + o) % 9].ch)),
+    `${l.name} היא האות ${AR(l.ch)}. ${l.dots}.`));
+});
+// sounds
+[
+  ['ب', 'ב', ['ت', 'د', 'ي']],
+  ['ت', 'ת', ['ب', 'د', 'ج']],
+  ['د', 'ד', ['ب', 'ت', 'ي']],
+  ['ي', 'י', ['ب', 'ت', 'د']],
+  ['ا', 'א (אָ)', ['ب', 'ت', 'ي']],
+  ['ج', 'ג׳ (כמו ב"ג׳ירפה")', ['ب', 'ت', 'د']],
+].forEach(([ch, heb, wrong]) => {
+  Q_LETTERS.push(mc1(`איזו אות נשמעת כמו ${heb}?`, AL(ch), wrong.map(AL), `${AR(ch)} נשמעת כמו ${heb}.`));
+});
+// which letter comes next
+[['ا', 'ب'], ['ب', 'ت'], ['ت', 'ث'], ['ث', 'ج'], ['ج', 'ح'], ['ح', 'خ'], ['خ', 'د']].forEach(([a, b], k) => {
+  const pool = LET.map(x => x.ch).filter(c => c !== a && c !== b);
+  Q_LETTERS.push(mc1(`איזו אות באה מיד אחרי ${AB(a)} באלף-בית הערבי?`, AL(b), take(pool, k, 3, []).map(AL),
+    `הסדר: ${LET.slice(0, 8).map(x => x.ch).join(' ')}. אחרי ${AR(a)} באה ${AR(b)}.`));
+});
+// true / false about dots
+Q_LETTERS.push(
+  tf(`לאות ${AR('ت')} יש שתי נקודות מעל`, true, `נכון! ${AR('ت')} (תא) – שתי נקודות מעל.`),
+  tf(`לאות ${AR('ب')} יש שתי נקודות מתחת`, false, `לא נכון! ל${AR('ب')} (בא) נקודה אחת מתחת. שתי נקודות מתחת יש לאות ${AR('ي')} (יא).`),
+  tf(`לאות ${AR('ي')} (יא) יש שתי נקודות מתחת`, true, `נכון! ${AR('ي')} – שתי נקודות מתחת.`),
+  tf(`לאות ${AR('ث')} יש שלוש נקודות מעל`, true, `נכון! ${AR('ث')} (ת׳א) – שלוש נקודות מעל.`),
+  tf(`לאות ${AR('ح')} יש נקודה אחת`, false, `לא נכון! ${AR('ح')} (חא) בלי נקודות. ${AR('ج')} – נקודה אחת מתחת, ${AR('خ')} – נקודה אחת מעל.`),
+  tf(`האות ${AR('ا')} (אלף) היא אות בלי נקודות`, true, `נכון! אלף ${AR('ا')} בלי נקודות.`),
+  tf(`לאות ${AR('د')} (דאל) יש נקודה אחת מעל`, false, `לא נכון! ${AR('د')} (דאל) בלי נקודות.`),
+  tf(`האותיות ${AR('ج')} ו-${AR('خ')} נבדלות במקום הנקודה`, true, `נכון! ב${AR('ج')} הנקודה מתחת, וב${AR('خ')} היא מעל. ${AR('ح')} בלי נקודה.`)
+);
+Q_LETTERS.push(
+  { type: 'order', q: 'סדרי לפי סדר האלף-בית הערבי (מ-בא עד חא):', items: ['ب', 'ت', 'ث', 'ج', 'ح'].map(AL),
+    exp: 'בא, תא, ת׳א, ג׳ים, חא' },
+  { type: 'order', q: 'סדרי לפי סדר האלף-בית הערבי (מ-ג׳ים עד דאל):', items: ['ج', 'ح', 'خ', 'د'].map(AL),
+    exp: 'ג׳ים, חא, ח׳א, דאל' },
+  { type: 'order', q: 'סדרי לפי סדר האלף-בית הערבי (מ-אלף עד ת׳א):', items: ['ا', 'ب', 'ت', 'ث'].map(AL),
+    exp: 'אלף, בא, תא, ת׳א' },
+  { type: 'sort', q: 'אילו אותיות עם נקודות ואילו בלי?', bucketA: 'עם נקודות', bucketB: 'בלי נקודות',
+    items: [{ text: AL('ب'), bucket: 0 }, { text: AL('ا'), bucket: 1 }, { text: AL('ج'), bucket: 0 }, { text: AL('د'), bucket: 1 }],
+    exp: `עם נקודות: ${AR('ب')} ${AR('ج')}. בלי נקודות: ${AR('ا')} ${AR('د')} (וגם ${AR('ح')}).` },
+  { type: 'sort', q: 'איפה הנקודות?', bucketA: 'מעל', bucketB: 'מתחת',
+    items: [{ text: AL('ت'), bucket: 0 }, { text: AL('خ'), bucket: 0 }, { text: AL('ب'), bucket: 1 }, { text: AL('ي'), bucket: 1 }],
+    exp: `מעל: ${AR('ت')} (שתיים) ${AR('خ')} (אחת). מתחת: ${AR('ب')} (אחת) ${AR('ي')} (שתיים).` },
+  { type: 'flipcards', q: 'הכירי את האותיות – הפכי כדי לראות:', cards: letterCards([0, 1, 2, 3]) },
+  { type: 'flipcards', q: 'עוד אותיות – הפכי כדי לראות:', cards: letterCards([4, 5, 6, 7, 8]) }
+);
+
+// ===================== 2. WORDS =====================
+// [arabic, hebrew meaning, group (words with the same meaning never appear as wrong answers of each other)]
+const WORDS = [
+  ['بَيْت', 'בית', 'house'], ['دَار', 'בית', 'house'], ['بَاب', 'דלת', 'door'], ['يَد', 'יד', 'hand'],
+  ['أَب', 'אבא', 'father'], ['أَخ', 'אח', 'brother'], ['كِتَاب', 'ספר', 'book'], ['قَلَم', 'עט', 'pen'],
+  ['وَلَد', 'ילד', 'boy'], ['بِنْت', 'ילדה', 'girl'], ['تِين', 'תאנים', 'figs'], ['ثَوْب', 'בגד', 'garment'],
+  ['جَمَل', 'גמל', 'camel'], ['خُبْز', 'לחם', 'bread'], ['حَلِيب', 'חלב', 'milk'],
+];
+const wordsOtherGroup = (i, start, n, uniqueHebrew) => {
+  const g = WORDS[i][2];
+  const idx = WORDS.map((_, k) => k).filter(k => WORDS[k][2] !== g);
+  const out = [], seen = new Set();
+  for (let k = 0; out.length < n && k < idx.length * 2; k++) {
+    const w = WORDS[idx[(start + k) % idx.length]];
+    const key = uniqueHebrew ? w[1] : w[0];
+    if (!seen.has(key)) { seen.add(key); out.push(w); }
+  }
+  return out;
+};
+
+const Q_WORDS = [];
+WORDS.forEach(([ar, he], i) => {
+  Q_WORDS.push(mc1(`מה פירוש המילה ${AB(ar)}?`, he, wordsOtherGroup(i, i * 2, 3, true).map(w => w[1]),
+    `${AR(ar)} = ${he}.`));
+});
+[0, 2, 3, 4, 6, 7, 8, 13, 12].forEach((i, k) => {
+  const [ar, he] = WORDS[i];
+  Q_WORDS.push(mc1(`איך אומרים "${he}" בערבית?`, AR(ar), wordsOtherGroup(i, k * 3 + 1, 3).map(w => AR(w[0])),
+    `${he} = ${AR(ar)}.`));
+});
+// first letter of a word
+[['بَاب', 'ب'], ['تِين', 'ت'], ['ثَوْب', 'ث'], ['يَد', 'ي'], ['جَمَل', 'ج'], ['خُبْز', 'خ'], ['حَلِيب', 'ح']].forEach(([w, c], k) => {
+  const pool = LET.map(x => x.ch).filter(x => x !== c);
+  Q_WORDS.push(mc1(`באיזו אות מתחילה המילה ${AB(w)}?`, AL(c), take(pool, k * 2, 3, []).map(AL),
+    `${AR(w)} מתחילה באות ${AR(c)} (${LET.find(x => x.ch === c).name}).`));
+});
+// which word contains a letter
+[
+  ['ث', 'ثَوْب', ['بَاب', 'يَد', 'قَلَم']],
+  ['ج', 'جَمَل', ['بَاب', 'يَد', 'قَلَم']],
+  ['خ', 'خُبْز', ['بَاب', 'يَد', 'قَلَم']],
+  ['ح', 'حَلِيب', ['بَاب', 'يَد', 'قَلَم']],
+].forEach(([c, w, wrong]) => {
+  Q_WORDS.push(mc1(`באיזו מילה מופיעה האות ${AB(c)}?`, AR(w), wrong.map(AR),
+    `האות ${AR(c)} מופיעה במילה ${AR(w)}.`));
+});
+Q_WORDS.push(
+  tf(`${AR('بَيْت')} פירושו "דלת"`, false, `לא נכון! ${AR('بَيْت')} = בית. דלת = ${AR('بَاب')}.`),
+  tf(`${AR('يَد')} פירושו "יד"`, true, `נכון! ${AR('يَد')} = יד.`),
+  tf(`${AR('كِتَاب')} פירושו "ספר"`, true, `נכון! ${AR('كِتَاب')} = ספר.`),
+  tf(`${AR('قَلَم')} פירושו "ילד"`, false, `לא נכון! ${AR('قَلَم')} = עט. ילד = ${AR('وَلَد')}.`),
+  tf(`${AR('خُبْز')} פירושו "לחם"`, true, `נכון! ${AR('خُبْز')} = לחם.`),
+  tf(`${AR('بِنْت')} פירושו "ילד"`, false, `לא נכון! ${AR('بِنْت')} = ילדה. ילד = ${AR('وَلَد')}.`),
+  tf(`${AR('أَب')} פירושו "אבא"`, true, `נכון! ${AR('أَب')} = אבא.`),
+  tf(`${AR('جَمَل')} פירושו "חלב"`, false, `לא נכון! ${AR('جَمَل')} = גמל. חלב = ${AR('حَلِيب')}.`),
+  { type: 'sort', q: 'אנשים או חפצים?', bucketA: 'אנשים', bucketB: 'חפצים',
+    items: [{ text: AR('أَب'), bucket: 0 }, { text: AR('وَلَد'), bucket: 0 }, { text: AR('قَلَم'), bucket: 1 }, { text: AR('كِتَاب'), bucket: 1 }],
+    exp: `אנשים: ${AR('أَب')} (אבא) ${AR('وَلَد')} (ילד). חפצים: ${AR('قَلَم')} (עט) ${AR('كِتَاب')} (ספר).` },
+  { type: 'sort', q: 'אוכל או לא אוכל?', bucketA: 'אוכל ושתייה', bucketB: 'לא אוכל',
+    items: [{ text: AR('خُبْز'), bucket: 0 }, { text: AR('حَلِيب'), bucket: 0 }, { text: AR('بَاب'), bucket: 1 }, { text: AR('يَد'), bucket: 1 }],
+    exp: `אוכל ושתייה: ${AR('خُبْز')} (לחם) ${AR('حَلِيب')} (חלב). לא אוכל: ${AR('بَاب')} (דלת) ${AR('يَد')} (יד).` }
+);
+
+// ===================== 3. NUMBERS =====================
+// [value, arabic digit, arabic word, how it sounds (Hebrew letters, approximate)]
+const NUM = [
+  [0, '٠', 'صِفْر', 'סִפְר'], [1, '١', 'وَاحِد', 'ואחִד'], [2, '٢', 'اِثْنَان', 'אִתְנאן'], [3, '٣', 'ثَلَاثَة', 'תלאתה'],
+  [4, '٤', 'أَرْبَعَة', 'ארבעה'], [5, '٥', 'خَمْسَة', 'חמסה'], [6, '٦', 'سِتَّة', 'סִתָּה'], [7, '٧', 'سَبْعَة', 'סבעה'],
+  [8, '٨', 'ثَمَانِيَة', 'תמאניה'], [9, '٩', 'تِسْعَة', 'תסעה'], [10, '١٠', 'عَشَرَة', 'עשרה'],
+  [11, '١١', 'أَحَدَ عَشَر', 'אחדא עשר'], [12, '١٢', 'اِثْنَا عَشَر', 'אתנא עשר'], [13, '١٣', 'ثَلَاثَةَ عَشَر', 'תלאתה עשר'],
+  [14, '١٤', 'أَرْبَعَةَ عَشَر', 'ארבעה עשר'], [15, '١٥', 'خَمْسَةَ عَشَر', 'חמסה עשר'], [16, '١٦', 'سِتَّةَ عَشَر', 'סתה עשר'],
+  [17, '١٧', 'سَبْعَةَ عَشَر', 'סבעה עשר'], [18, '١٨', 'ثَمَانِيَةَ عَشَر', 'תמאניה עשר'], [19, '١٩', 'تِسْعَةَ عَشَر', 'תסעה עשר'],
+  [20, '٢٠', 'عِشْرُون', 'עשרון'], [30, '٣٠', 'ثَلَاثُون', 'תלאתון'], [40, '٤٠', 'أَرْبَعُون', 'ארבעון'],
+  [50, '٥٠', 'خَمْسُون', 'חמסון'], [60, '٦٠', 'سِتُّون', 'סתון'], [70, '٧٠', 'سَبْعُون', 'סבעון'],
+  [80, '٨٠', 'ثَمَانُون', 'תמאנון'], [90, '٩٠', 'تِسْعُون', 'תסעון'],
+];
+const N = v => NUM.find(x => x[0] === v);
+const nums = (...vs) => vs.map(N);
+// numeric multiple choice with ascending (fixed) options
+function numChoice(q, correct, wrong, exp) {
+  const all = [correct, ...wrong].sort((a, b) => a - b);
+  return mc(q, all.map(String), all.indexOf(correct), exp, true);
+}
+const Q_NUMS = [];
+// Arabic digit -> normal number
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].forEach(v => {
+  const near = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].filter(x => x !== v).sort((a, b) => Math.abs(a - v) - Math.abs(b - v)).slice(0, 3);
+  Q_NUMS.push(numChoice(`איזה מספר כתוב כאן? ${AB(N(v)[1])}`, v, near, `${AR(N(v)[1])} = ${v}`));
+});
+// normal number -> Arabic digit (how to write)
+[2, 4, 6, 7, 8].forEach(v => {
+  const near = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].filter(x => x !== v).sort((a, b) => Math.abs(a - v) - Math.abs(b - v)).slice(0, 3);
+  Q_NUMS.push(mc1(`איך כותבים ${v} בספרות ערביות?`, AR(N(v)[1]), near.map(x => AR(N(x)[1])), `${v} = ${AR(N(v)[1])}`));
+});
+// Arabic word -> number
+[1, 3, 5, 6, 8, 9].forEach(v => {
+  const near = [1, 2, 3, 4, 5, 6, 7, 8, 9].filter(x => x !== v).sort((a, b) => Math.abs(a - v) - Math.abs(b - v)).slice(0, 3);
+  Q_NUMS.push(numChoice(`איזה מספר הוא ${AB(N(v)[2])}?`, v, near, `${AR(N(v)[2])} = ${v}`));
+});
+// number -> how to write it in words
+[2, 3, 5, 6, 7, 9].forEach(v => {
+  const near = [1, 2, 3, 4, 5, 6, 7, 8, 9].filter(x => x !== v).sort((a, b) => Math.abs(a - v) - Math.abs(b - v)).slice(0, 3);
+  Q_NUMS.push(mc1(`איך כותבים במילים בערבית את המספר ${v} (${AR(N(v)[1])})?`, AR(N(v)[2]), near.map(x => AR(N(x)[2])),
+    `${v} = ${AR(N(v)[2])}`));
+});
+// number -> how to say it
+[1, 4, 5, 6, 8, 9].forEach(v => {
+  const near = [1, 2, 3, 4, 5, 6, 7, 8, 9].filter(x => x !== v).sort((a, b) => Math.abs(a - v) - Math.abs(b - v)).slice(0, 3);
+  Q_NUMS.push(mc1(`איך אומרים בערבית את המספר ${v}?`, N(v)[3], near.map(x => N(x)[3]),
+    `${v} – אומרים: ${N(v)[3]} (כותבים: ${AR(N(v)[2])})`));
+});
+// Arabic word -> how to say it
+[3, 5, 7, 9, 2].forEach(v => {
+  const near = [1, 2, 3, 4, 5, 6, 7, 8, 9].filter(x => x !== v).sort((a, b) => Math.abs(a - v) - Math.abs(b - v)).slice(0, 3);
+  Q_NUMS.push(mc1(`איך אומרים ${AB(N(v)[2])}?`, N(v)[3], near.map(x => N(x)[3]), `${AR(N(v)[2])} – אומרים: ${N(v)[3]} (${v})`));
+});
+// 11-19
+[11, 12, 13, 15, 17, 19].forEach(v => {
+  const unit = v - 10;
+  const wrong = [N(unit)[2], N(10)[2], N(unit === 1 ? 20 : unit * 10)[2]];
+  Q_NUMS.push(mc1(`איך כותבים בערבית את המספר ${v}?`, AR(N(v)[2]), wrong.map(AR),
+    `${v} = ${AR(N(v)[2])}. המספרים 11–19: מספר + ${AR('عَشَر')}.`));
+});
+// the tens
+[20, 30, 50, 70, 90].forEach(v => {
+  const u = v / 10;
+  Q_NUMS.push(numChoice(`איזה מספר הוא ${AB(N(v)[2])}?`, v, [u, u + 10, v + 10 > 90 ? v - 10 : v + 10], `${AR(N(v)[2])} = ${v}. העשרות מסתיימות ב-${AR('ـُون')}.`));
+});
+[40, 60, 80].forEach(v => {
+  Q_NUMS.push(mc1(`איך אומרים בערבית את המספר ${v}?`, N(v)[3], [N(v / 10)[3], N(v / 10 + 10)[3], N(v - 10)[3]],
+    `${v} – אומרים: ${N(v)[3]} (כותבים: ${AR(N(v)[2])})`));
+});
+Q_NUMS.push(
+  tf(`${AR('سَبْعَة')} = 7`, true, `נכון! ${AR('سَبْعَة')} = 7.`),
+  tf(`${AR('خَمْسُون')} = 5`, false, `לא נכון! ${AR('خَمْسُون')} = 50. 5 = ${AR('خَمْسَة')}.`),
+  tf(`${AR('ثَمَانِيَة')} = 8`, true, `נכון! ${AR('ثَمَانِيَة')} = 8.`),
+  tf(`${AR('سِتَّة')} = 7`, false, `לא נכון! ${AR('سِتَّة')} = 6. 7 = ${AR('سَبْعَة')}.`),
+  tf(`${AR('٤')} = 4`, true, `נכון! ${AR('٤')} = 4.`),
+  tf(`${AR('٦')} = 9`, false, `לא נכון! ${AR('٦')} = 6. 9 = ${AR('٩')}.`),
+  tf(`${AR('صِفْر')} = 0`, true, `נכון! ${AR('صِفْر')} = 0.`),
+  tf(`${AR('عِشْرُون')} = 20`, true, `נכון! ${AR('عِشْرُون')} = 20.`),
+  tf(`${AR('أَرْبَعَةَ عَشَر')} = 14`, true, `נכון! 4 + 10 = 14.`),
+  tf(`${AR('سَبْعُون')} = 17`, false, `לא נכון! ${AR('سَبْعُون')} = 70. 17 = ${AR('سَبْعَةَ عَشَر')}.`),
+  { type: 'order', q: 'סדרי מהקטן לגדול (1–5):', items: [1, 2, 3, 4, 5].map(v => AR(N(v)[2])), exp: '1 2 3 4 5 – واحد, اثنان, ثلاثة, أربعة, خمسة' },
+  { type: 'order', q: 'סדרי מהקטן לגדול (5–9):', items: [5, 6, 7, 8, 9].map(v => AR(N(v)[2])), exp: '5 6 7 8 9' },
+  { type: 'order', q: 'סדרי מהקטן לגדול (ספרות ערביות):', items: [3, 5, 6, 8].map(v => AR(N(v)[1])), exp: '3 5 6 8' },
+  { type: 'order', q: 'סדרי מהקטן לגדול (העשרות):', items: [20, 30, 40, 50].map(v => AR(N(v)[2])), exp: '20 30 40 50' },
+  { type: 'sort', q: 'עשרות או יחידות?', bucketA: 'עשרות (20, 30...)', bucketB: 'יחידות (1–9)',
+    items: [{ text: AR('عِشْرُون'), bucket: 0 }, { text: AR('خَمْسَة'), bucket: 1 }, { text: AR('ثَلَاثُون'), bucket: 0 }, { text: AR('تِسْعَة'), bucket: 1 }],
+    exp: `עשרות: ${AR('عِشْرُون')} (20) ${AR('ثَلَاثُون')} (30). יחידות: ${AR('خَمْسَة')} (5) ${AR('تِسْعَة')} (9).` },
+  { type: 'sort', q: '11–19 או עשרות?', bucketA: 'המספרים 11–19', bucketB: 'עשרות',
+    items: [{ text: AR('أَرْبَعَةَ عَشَر'), bucket: 0 }, { text: AR('خَمْسُون'), bucket: 1 }, { text: AR('سَبْعَةَ عَشَر'), bucket: 0 }, { text: AR('سِتُّون'), bucket: 1 }],
+    exp: `11–19: ${AR('أَرْبَعَةَ عَشَر')} (14) ${AR('سَبْعَةَ عَشَر')} (17). עשרות: ${AR('خَمْسُون')} (50) ${AR('سِتُّون')} (60).` },
+  { type: 'flipcards', q: 'הספרות הערביות 0–4 – הפכי כדי לראות:', cards: nums(0, 1, 2, 3, 4).map(n => ({ front: AB(n[1]), back: `${n[0]} · ${AR(n[2])} · ${n[3]}` })) },
+  { type: 'flipcards', q: 'הספרות הערביות 5–9 – הפכי כדי לראות:', cards: nums(5, 6, 7, 8, 9).map(n => ({ front: AB(n[1]), back: `${n[0]} · ${AR(n[2])} · ${n[3]}` })) }
+);
+
+// ===================== 4. "MY"  (suffix ـِي, nouns only) =====================
+// [base, "my" form, hebrew, sounds-like (my form)]
+const NOUNS = [
+  ['يَد', 'يَدِي', 'יד', 'ידי'], ['دَار', 'دَارِي', 'בית', 'דארי'], ['بَيْت', 'بَيْتِي', 'בית', 'בייתי'],
+  ['بَاب', 'بَابِي', 'דלת', 'באבי'], ['كِتَاب', 'كِتَابِي', 'ספר', 'כיתאבי'], ['قَلَم', 'قَلَمِي', 'עט', 'קלמי'],
+  ['أَب', 'أَبِي', 'אבא', 'אבי'], ['وَلَد', 'وَلَدِي', 'ילד', 'ולדי'], ['أَخ', 'أَخِي', 'אח', 'אחי'],
+  ['بِنْت', 'بِنْتِي', 'ילדה', 'בנתי'], ['اِسْم', 'اِسْمِي', 'שם', 'אסמי'],
+];
+const nounGroup = i => NOUNS[i][2];
+const otherNouns = (i, start, n) => {
+  const idx = NOUNS.map((_, k) => k).filter(k => k !== i && NOUNS[k][2] !== NOUNS[i][2]);
+  const out = [], seen = new Set();
+  for (let k = 0; out.length < n && k < idx.length * 2; k++) {
+    const nn = NOUNS[idx[(start + k) % idx.length]];
+    if (!seen.has(nn[2])) { seen.add(nn[2]); out.push(nn); }
+  }
+  return out;
+};
+
+const Q_MY = [];
+NOUNS.forEach((nn, i) => {
+  const [base, mine, he] = nn;
+  const o = otherNouns(i, i, 2);
+  // hebrew -> arabic (with the plain word as a trap)
+  // two nouns mean "house": say which Arabic word the question is about, so no two prompts are identical
+  const dupHe = NOUNS.filter(x => x[2] === he).length > 1;
+  Q_MY.push(mc1(`איך אומרים "${he} שלי" בערבית${dupHe ? ` (מהמילה ${AR(base)})` : ''}?`, AR(mine), [AR(base), AR(o[0][1]), AR(o[1][1])],
+    `${he} שלי = ${AR(mine)}. מוסיפים ${AR('ـِي')} לסוף המילה ${AR(base)}.`));
+  // arabic -> hebrew
+  Q_MY.push(mc1(`מה פירוש ${AB(mine)}?`, `${he} שלי`, otherNouns(i, i + 3, 3).map(x => `${x[2]} שלי`),
+    `${AR(mine)} = ${he} שלי.`));
+});
+// how it sounds
+[0, 1, 3, 4, 5, 6].forEach((i, k) => {
+  const [, mine, he, snd] = NOUNS[i];
+  const wrong = otherNouns(i, k * 2 + 1, 3).map(x => x[3]);
+  Q_MY.push(mc1(`איך קוראים ${AB(mine)}?`, snd, wrong, `${AR(mine)} – קוראים: ${snd} (${he} שלי).`));
+});
+Q_MY.push(
+  mc1('איזו סיומת מוסיפים לשם עצם כדי לומר "שלי"?', AR('ـِي'), [AR('ـِب'), AR('ـِت'), AR('ـِد')],
+    `הסיומת ${AR('ـِي')} (י) = "שלי". למשל ${AR('يَد')} ← ${AR('يَدِي')}.`),
+  mc1(`איזו אות מוסיפים בסוף המילה ${AR('بَيْت')} כדי לקבל "ביתי"?`, AR('ي'), [AR('ب'), AR('ت'), AR('د')],
+    `${AR('بَيْت')} + ${AR('ـِي')} = ${AR('بَيْتِي')}.`),
+  mc1(`איזו תנועה נשמעת לפני ה-י בסוף המילה ${AR('يَدِي')}?`, 'i (כמו חיריק)', ['a (כמו פתח)', 'u (כמו שורוק)', 'אין תנועה'],
+    `לפני ${AR('ـِي')} האות האחרונה של השם מקבלת ${AR('ـِ')} (קול i). ${AR('يَد')} ← ${AR('يَدِي')} (ידי).`),
+  mc1(`במילה ${AR('بَابِي')} – איזו תנועה נשמעת לפני ה-י שבסוף?`, 'i (כמו חיריק)', ['a (כמו פתח)', 'u (כמו שורוק)', 'אין תנועה'],
+    `${AR('بَاب')} + ${AR('ـِي')} = ${AR('بَابِي')} (באבי). לפני ה-י נשמע i.`)
+);
+// only nouns
+[
+  ['מחברת', ['לרוץ', 'יפה', 'מהר']],
+  ['חתול', ['לקרוא', 'גדול', 'מאוד']],
+  ['כיסא', ['לאכול', 'חם', 'היום']],
+  ['שולחן', ['לכתוב', 'חדש', 'מחר']],
+].forEach(([noun, wrong], k) => {
+  const prompts = [
+    `לאיזו מילה אפשר להוסיף "שלי" (בערבית – ${AR('ـِي')})?`,
+    `איזו מילה מקבלת את הסיומת ${AR('ـِي')} (שלי)?`,
+    'איזו מהמילים היא שם עצם שאפשר לומר עליו "... שלי"?',
+    `מבין המילים, באיזו מילה מוסיפים ${AR('ـِي')} כדי לקבל "שלי"?`,
+  ];
+  Q_MY.push(mc1(prompts[k], noun, wrong,
+    `אפשר להוסיף "שלי" לשמות עצם בלבד. "${noun}" הוא שם עצם; הפועל, התואר ותואר הפועל – לא.`));
+});
+Q_MY.push(
+  mc1('לאיזו מילה אי אפשר להוסיף "שלי"?', 'לרוץ', ['שולחן', 'בית', 'עט'], `"לרוץ" הוא פועל. "שלי" מוסיפים לשמות עצם בלבד.`),
+  mc1('איזו מהמילים אינה שם עצם, ולכן אי אפשר להוסיף לה "שלי"?', 'גדול', ['דלת', 'ספר', 'ילד'], `"גדול" הוא תואר. "שלי" מוסיפים לשמות עצם בלבד.`),
+  tf(`את הסיומת ${AR('ـِي')} (שלי) אפשר להוסיף לשמות עצם בלבד`, true, 'נכון! "שלי" מוסיפים לשמות עצם בלבד.'),
+  tf(`את הסיומת ${AR('ـِي')} (שלי) אפשר להוסיף גם לפעלים`, false, 'לא נכון! מוסיפים אותה לשמות עצם בלבד.'),
+  tf(`${AR('يَدِي')} פירושו "יד שלי"`, true, `נכון! ${AR('يَد')} + ${AR('ـِي')} = ${AR('يَدِي')} (ידי).`),
+  tf(`${AR('قَلَمِي')} פירושו "ספר שלי"`, false, `לא נכון! ${AR('قَلَمِي')} = עט שלי. ספר שלי = ${AR('كِتَابِي')}.`),
+  tf(`${AR('كِتَاب')} + ${AR('ـِي')} = ${AR('كِتَابِي')}`, true, `נכון! ספר + שלי = ${AR('كِتَابِي')}.`),
+  tf(`${AR('دَارِي')} פירושו "בית שלי"`, true, `נכון! ${AR('دَار')} + ${AR('ـِي')} = ${AR('دَارِي')} (דארי).`),
+  { type: 'sort', q: 'לאילו מילים אפשר להוסיף "שלי"?', bucketA: 'אפשר (שם עצם)', bucketB: 'אי אפשר',
+    items: [{ text: 'דלת', bucket: 0 }, { text: 'לרוץ', bucket: 1 }, { text: 'עט', bucket: 0 }, { text: 'גדול', bucket: 1 }],
+    exp: '"דלת" ו"עט" הם שמות עצם. "לרוץ" הוא פועל ו"גדול" הוא תואר.' },
+  { type: 'sort', q: 'אילו מהמילים הן שמות עצם?', bucketA: 'שם עצם (אפשר "שלי")', bucketB: 'לא שם עצם',
+    items: [{ text: 'מחברת', bucket: 0 }, { text: 'מהר', bucket: 1 }, { text: 'חתול', bucket: 0 }, { text: 'לקרוא', bucket: 1 }],
+    exp: '"מחברת" ו"חתול" הם שמות עצם. "מהר" הוא תואר פועל ו"לקרוא" הוא פועל.' }
+);
+
+// ===================== MISSIONS =====================
+const MISSIONS = [
+  {
+    id: 0, icon: '🔤', title: 'האותיות א–ד + י', desc: 'אלף עד דאל, ויא – שם, נקודות וצליל', color: '#7c3aed',
+    lesson: `האותיות: ${AR('ا')} אלף (בלי נקודות) · ${AR('ب')} בא (נקודה מתחת) · ${AR('ت')} תא (שתי נקודות מעל) · ${AR('ث')} ת׳א (שלוש נקודות מעל) · ${AR('ج')} ג׳ים (נקודה מתחת) · ${AR('ح')} חא (בלי נקודות) · ${AR('خ')} ח׳א (נקודה מעל) · ${AR('د')} דאל (בלי נקודות) · ${AR('ي')} יא (שתי נקודות מתחת). ${AR('خ')} נשמעת כמו ח רגילה בעברית, ו-${AR('ح')} היא ח עמוקה יותר מהגרון.`,
+    questions: Q_LETTERS
+  },
+  {
+    id: 1, icon: '📖', title: 'מילים', desc: 'לקרוא מילים ולזהות את האותיות שבהן', color: '#0891b2',
+    lesson: `המילים: ${WORDS.map(w => `${AR(w[0])} = ${w[1]}`).join(' · ')}.`,
+    questions: Q_WORDS
+  },
+  {
+    id: 2, icon: '🔢', title: 'מספרים', desc: '0–9, 11–19 והעשרות – איך כותבים ואיך אומרים', color: '#db2777',
+    lesson: `ספרות: ${NUM.slice(0, 10).map(n => `${AR(n[1])} ${n[0]}`).join(' · ')}. מילים: ${NUM.slice(0, 10).map(n => AR(n[2])).join(' · ')}. את המספרים 11–19 כותבים: מספר + ${AR('عَشَر')} (למשל ${AR('ثَلَاثَةَ عَشَر')} = 13). העשרות מסתיימות ב-${AR('ـُون')}: ${NUM.slice(20).map(n => AR(n[2])).join(' · ')}.`,
+    questions: Q_NUMS
+  },
+  {
+    id: 3, icon: '🙋', title: 'שלי (ـِي)', desc: 'להוסיף "שלי" לשמות עצם', color: '#f59e0b',
+    lesson: `כדי לומר "שלי" מוסיפים לשם העצם את הסיומת ${AR('ـِي')}. האות האחרונה של השם מקבלת ${AR('ـِ')} (קול i) והסיומת היא י. ${AR('يَد')} ← ${AR('يَدِي')} (ידי), ${AR('دَار')} ← ${AR('دَارِي')} (דארי). מוסיפים "שלי" לשמות עצם בלבד – לא לפעלים ולא לתארים.`,
+    questions: Q_MY
+  }
+];
+
+
+// ===== SOUND (generated in the browser, no audio files) =====
+let audioCtx = null;
+let soundOn = true;
+try { soundOn = localStorage.getItem('maya_sound') !== 'off'; } catch (e) {}
+
+function getAudio() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    try { audioCtx = new AC(); } catch (e) { return null; }
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function tone(freq, start, dur, type, vol) {
+  const ctx = getAudio();
+  if (!ctx || !soundOn) return;
+  const t0 = ctx.currentTime + start;
+  const o = ctx.createOscillator();
+  const g = ctx.createGain();
+  o.type = type || 'sine';
+  o.frequency.setValueAtTime(freq, t0);
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(vol || 0.25, t0 + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g);
+  g.connect(ctx.destination);
+  o.start(t0);
+  o.stop(t0 + dur + 0.05);
+}
+
+const sounds = {
+  correct() { tone(660, 0, 0.15, 'sine', 0.28); tone(880, 0.1, 0.28, 'sine', 0.28); },
+  partial() { tone(520, 0, 0.18, 'triangle', 0.25); tone(620, 0.12, 0.22, 'triangle', 0.25); },
+  wrong()   { tone(220, 0, 0.22, 'sawtooth', 0.14); tone(165, 0.16, 0.32, 'sawtooth', 0.14); },
+  flip()    { tone(480, 0, 0.07, 'square', 0.08); tone(640, 0.05, 0.08, 'square', 0.08); },
+  finish()  { tone(392, 0, 0.18, 'triangle', 0.22); tone(330, 0.18, 0.3, 'triangle', 0.22); },
+  fanfare() {
+    [523, 659, 784, 1047].forEach((f, i) => tone(f, i * 0.13, 0.3, 'triangle', 0.28));
+    tone(1047, 0.56, 0.8, 'triangle', 0.3);
+    tone(1319, 0.56, 0.8, 'sine', 0.2);
+  }
+};
+
+function toggleSound() {
+  soundOn = !soundOn;
+  try { localStorage.setItem('maya_sound', soundOn ? 'on' : 'off'); } catch (e) {}
+  updateSoundBtn();
+  if (soundOn) sounds.correct();
+}
+
+function updateSoundBtn() {
+  document.getElementById('sound-btn').textContent = soundOn ? '🔊' : '🔇';
+}
+
+// show the success gif (re-set src so the animation restarts)
+function showGif(id) {
+  const el = document.getElementById(id);
+  el.src = 'success.gif?t=' + Date.now();
+  el.style.display = 'block';
+}
+
+// ===== HELPERS =====
+function shuffle(a) {
+  const r = [...a];
+  for (let i = r.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [r[i], r[j]] = [r[j], r[i]];
+  }
+  return r;
+}
+
+// remember which questions were already shown, so each play gets new ones
+const SEEN_KEY = 'maya_arabic_seen_v1'; // different from the Tanakh game (same origin)
+function loadSeen() { try { return JSON.parse(localStorage.getItem(SEEN_KEY)) || {}; } catch (e) { return {}; } }
+function saveSeen(s) { try { localStorage.setItem(SEEN_KEY, JSON.stringify(s)); } catch (e) {} }
+
+function pickRound(m) {
+  const seen = loadSeen();
+  let used = (seen[m.id] || []).filter(i => i < m.questions.length);
+  const all = m.questions.map((_, i) => i);
+  const fresh = all.filter(i => !used.includes(i));
+  let chosen;
+  if (fresh.length >= ROUND_SIZE) {
+    chosen = shuffle(fresh).slice(0, ROUND_SIZE);
+    used = used.concat(chosen);
+  } else {
+    // pool exhausted: take what's left unseen, top up with others, start a new cycle
+    const rest = shuffle(all.filter(i => !fresh.includes(i))).slice(0, ROUND_SIZE - fresh.length);
+    chosen = shuffle(fresh.concat(rest));
+    used = chosen.slice();
+  }
+  seen[m.id] = used;
+  saveSeen(seen);
+  return chosen.map(i => m.questions[i]);
+}
+
+// each question is worth qWeight points; a perfect play = 100
+function award(fraction, silent) {
+  if (!silent) sounds.correct();
+  const pts = fraction * qWeight;
+  missionScore += pts;
+  totalScore += pts;
+  updateScore();
+  const r = Math.round(pts);
+  if (r > 0) showToast('+' + r + ' ✨');
+}
+
+// ===== TIMER =====
+function startTimer() {
+  timerSecs = 0;
+  clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    timerSecs++;
+    const m = String(Math.floor(timerSecs/60)).padStart(2,'0');
+    const s = String(timerSecs%60).padStart(2,'0');
+    document.getElementById('timer').textContent = m + ':' + s;
+  }, 1000);
+}
+
+function stopTimer() { clearInterval(timerInterval); }
+
+// ===== DAYS LEFT =====
+function calcDaysLeft() {
+  const exam = new Date('2026-11-30');
+  const now = new Date();
+  const diff = Math.ceil((exam - now) / 86400000);
+  document.getElementById('days-left').textContent = diff > 0 ? diff : 0;
+}
+
+// ===== HOME =====
+function renderHome() {
+  document.getElementById('home-screen').style.display = 'block';
+  document.getElementById('game-screen').style.display = 'none';
+  document.getElementById('mission-end').style.display = 'none';
+  document.getElementById('end-screen').style.display = 'none';
+  document.getElementById('mission-counter').textContent = missionDone.length + '/' + MISSIONS.length;
+
+  const list = document.getElementById('missions-list');
+  list.innerHTML = '';
+  MISSIONS.forEach((m, i) => {
+    const done = missionDone.includes(m.id);
+    const card = document.createElement('div');
+    card.className = 'mission-card' + (done ? ' done' : '');
+    card.innerHTML = `
+      <div class="mission-icon">${m.icon}</div>
+      <div class="mission-info">
+        <div class="mission-title">${m.title}</div>
+        <div class="mission-desc">${m.desc}</div>
+        ${done && missionScores[m.id] !== undefined ? `<div style="font-size:12px;color:var(--gold);margin-top:3px">הניקוד שלך: ${Math.round(missionScores[m.id])}/${MAX_PER_MISSION}</div>` : ''}
+      </div>
+      <div class="mission-status">${done ? '✅' : '▶️'}</div>
+    `;
+    card.addEventListener('click', () => startMission(m.id));
+    list.appendChild(card);
+  });
+
+  if (missionDone.length === MISSIONS.length) {
+    setTimeout(showEndScreen, 400);
+  }
+}
+
+function goHome() { renderHome(); }
+
+// ===== START MISSION =====
+function startMission(id) {
+  currentMission = MISSIONS.find(m => m.id === id);
+
+  // replaying: drop the old score so the total isn't double counted
+  if (missionScores[id] !== undefined) {
+    totalScore = Math.max(0, totalScore - missionScores[id]);
+    delete missionScores[id];
+    updateScore();
+  }
+
+  currentRound = pickRound(currentMission);
+  // flip cards are study-only (no points); the scored questions share the 100 points
+  qWeight = MAX_PER_MISSION / Math.max(1, currentRound.filter(q => q.type !== 'flipcards').length);
+  currentQ = 0;
+  missionScore = 0;
+  pendingAnswer = false;
+  sortState = {};
+  orderState = {};
+
+  document.getElementById('home-screen').style.display = 'none';
+  document.getElementById('game-screen').style.display = 'block';
+  document.getElementById('mission-end').style.display = 'none';
+  document.getElementById('mission-label').textContent = 'משימה ' + (id+1) + ' מתוך ' + MISSIONS.length;
+  document.getElementById('mission-title-game').textContent = currentMission.title;
+
+  startTimer();
+  renderQuestion();
+}
+
+// ===== RENDER QUESTION =====
+function renderQuestion() {
+  const qs = currentRound;
+  const prog = (currentQ / qs.length) * 100;
+  document.getElementById('progress-bar').style.width = prog + '%';
+  document.getElementById('next-btn').classList.remove('show');
+  pendingAnswer = false;
+
+  const q = qs[currentQ];
+  const area = document.getElementById('question-area');
+
+  if (q.type === 'choice') renderChoice(q, area);
+  else if (q.type === 'tf') renderTF(q, area);
+  else if (q.type === 'flipcards') renderFlip(q, area);
+  else if (q.type === 'sort') renderSort(q, area);
+  else if (q.type === 'order') renderOrder(q, area);
+}
+
+// ===== CHOICE =====
+function renderChoice(q, area) {
+  // shuffle the options (unless they are an ordered list like numbers)
+  const order = q.fixed ? q.opts.map((_, i) => i) : shuffle(q.opts.map((_, i) => i));
+  const opts = order.map(i => q.opts[i]);
+  currentQuestion = { correct: order.indexOf(q.ans), exp: q.exp, correctText: q.opts[q.ans] };
+  area.innerHTML = `
+    <div class="q-card">
+      <div class="q-text">${q.q}</div>
+      <div class="choices" id="choices">
+        ${opts.map((o,i) => `<button class="choice-btn" onclick="answerChoice(${i})">${o}</button>`).join('')}
+      </div>
+      <div class="feedback-box" id="feedback"></div>
+    </div>
+  `;
+}
+
+function answerChoice(picked) {
+  if (pendingAnswer) return;
+  pendingAnswer = true;
+  const correct = currentQuestion.correct;
+  document.querySelectorAll('.choice-btn').forEach((b,i) => {
+    b.disabled = true;
+    if (i === correct) b.classList.add('correct');
+    if (i === picked && picked !== correct) b.classList.add('wrong');
+  });
+  const ok = picked === correct;
+  if (ok) award(1); else sounds.wrong();
+  showFeedback(ok, currentQuestion.exp, currentQuestion.correctText);
+  document.getElementById('next-btn').classList.add('show');
+}
+
+// ===== TRUE/FALSE =====
+function renderTF(q, area) {
+  currentQuestion = { ans: q.ans, exp: q.exp, correctText: q.ans ? 'ההיגד נכון ✅' : 'ההיגד לא נכון ❌' };
+  area.innerHTML = `
+    <div class="q-card">
+      <div class="tf-statement">${q.q}</div>
+      <div class="tf-buttons">
+        <button class="tf-btn true-btn" onclick="answerTF(true)">✅ נכון</button>
+        <button class="tf-btn false-btn" onclick="answerTF(false)">❌ לא נכון</button>
+      </div>
+      <div class="feedback-box" id="feedback"></div>
+    </div>
+  `;
+}
+
+function answerTF(picked) {
+  if (pendingAnswer) return;
+  pendingAnswer = true;
+  document.querySelectorAll('.tf-btn').forEach(b => b.disabled = true);
+  const ok = (picked === currentQuestion.ans);
+  if (ok) award(1); else sounds.wrong();
+  showFeedback(ok, currentQuestion.exp, currentQuestion.correctText);
+  document.getElementById('next-btn').classList.add('show');
+}
+
+// ===== FLIP CARDS =====
+function renderFlip(q, area) {
+  area.innerHTML = `
+    <div class="q-card">
+      <div class="q-text">${q.q}</div>
+      <div class="flip-grid">
+        ${q.cards.map((c,i) => `
+          <div class="flip-card-wrapper" id="fc${i}" onclick="flipCard(${i})">
+            <div class="flip-card-inner">
+              <div class="flip-front">${c.front}<span class="flip-hint">הקלי להפוך 👆</span></div>
+              <div class="flip-back">${c.back}</div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+  document.getElementById('next-btn').classList.add('show');
+}
+
+function flipCard(i) {
+  const el = document.getElementById('fc'+i);
+  el.classList.toggle('flipped');
+  sounds.flip();
+}
+
+// ===== SORT =====
+function renderSort(q, area) {
+  sortState = { q: q, correct: 0, selected: null };
+
+  area.innerHTML = `
+    <div class="q-card">
+      <div class="q-text">${q.q}</div>
+      <div class="sort-buckets">
+        <div class="sort-bucket">
+          <div class="sort-bucket-title">${q.bucketA}</div>
+          <div id="bucketA"></div>
+        </div>
+        <div class="sort-bucket">
+          <div class="sort-bucket-title">${q.bucketB}</div>
+          <div id="bucketB"></div>
+        </div>
+      </div>
+      <div class="sort-items" id="sort-items">
+        ${q.items.map((item,i) => `<div class="sort-item" id="si${i}" onclick="pickSortItem(${i})">${item.text}</div>`).join('')}
+      </div>
+      <div class="feedback-box" id="feedback"></div>
+    </div>
+  `;
+}
+
+function pickSortItem(i) {
+  if (pendingAnswer) return;
+  const item = document.getElementById('si' + i);
+  if (item.classList.contains('used')) return;
+
+  if (sortState.selected === i) {
+    item.style.borderColor = '';
+    sortState.selected = null;
+    document.getElementById('feedback').className = 'feedback-box';
+    return;
+  }
+
+  document.querySelectorAll('.sort-item').forEach(el => el.style.borderColor = '');
+  item.style.borderColor = 'var(--gold)';
+  sortState.selected = i;
+
+  const fb = document.getElementById('feedback');
+  fb.className = 'feedback-box show';
+  fb.style.background = 'rgba(245,158,11,0.1)';
+  fb.style.border = '1px solid var(--gold)';
+  fb.innerHTML = `
+    <div style="text-align:center;font-size:14px;margin-bottom:10px">📌 שייכי את "<strong>${sortState.q.items[i].text}</strong>" ל:</div>
+    <div style="display:flex;gap:8px">
+      <button onclick="placeSortItem(0)" style="flex:1;padding:10px;background:rgba(124,58,237,0.2);border:1px solid var(--accent1);border-radius:10px;color:white;font-family:Heebo,sans-serif;font-size:13px;cursor:pointer">${sortState.q.bucketA}</button>
+      <button onclick="placeSortItem(1)" style="flex:1;padding:10px;background:rgba(219,39,119,0.2);border:1px solid var(--accent2);border-radius:10px;color:white;font-family:Heebo,sans-serif;font-size:13px;cursor:pointer">${sortState.q.bucketB}</button>
+    </div>
+  `;
+}
+
+function placeSortItem(bucketIdx) {
+  const i = sortState.selected;
+  if (i === null || i === undefined) return;
+  const item = sortState.q.items[i];
+  const el = document.getElementById('si' + i);
+  el.classList.add('used');
+  document.querySelectorAll('.sort-item').forEach(x => x.style.borderColor = '');
+
+  const placed = document.createElement('div');
+  placed.className = 'placed-item';
+  placed.textContent = item.text + (item.bucket === bucketIdx ? ' ✅' : ' ❌');
+  if (item.bucket !== bucketIdx) placed.style.color = '#fca5a5';
+  document.getElementById(bucketIdx === 0 ? 'bucketA' : 'bucketB').appendChild(placed);
+
+  const n = sortState.q.items.length;
+  if (item.bucket === bucketIdx) {
+    sortState.correct++;
+    award(1 / n);
+  } else {
+    sounds.wrong();
+  }
+
+  sortState.selected = null;
+  document.getElementById('feedback').className = 'feedback-box';
+
+  const allUsed = sortState.q.items.every((_,idx) => document.getElementById('si'+idx).classList.contains('used'));
+  if (allUsed) {
+    pendingAnswer = true;
+    setTimeout(() => {
+      const sq = sortState.q;
+      const group = b => sq.items.filter(x => x.bucket === b).map(x => x.text).join(', ');
+      showFeedback(sortState.correct === n, sq.exp,
+        '<br>' + sq.bucketA + ': ' + group(0) + '<br>' + sq.bucketB + ': ' + group(1));
+      document.getElementById('next-btn').classList.add('show');
+    }, 400);
+  }
+}
+
+// ===== ORDER =====
+function renderOrder(q, area) {
+  let shuffled;
+  do { shuffled = shuffle(q.items); } while (shuffled.every((x, i) => x === q.items[i]));
+  orderState = { q: q, items: shuffled, selected: [], done: false };
+
+  area.innerHTML = `
+    <div class="q-card">
+      <div class="q-text">${q.q}</div>
+      <div class="order-items" id="order-items">
+        ${shuffled.map((item,i) => `
+          <div class="order-item" id="oi${i}" onclick="selectOrderItem(${i})">
+            <div class="order-num" id="on${i}">-</div>
+            <div>${item}</div>
+          </div>
+        `).join('')}
+      </div>
+      <div class="feedback-box" id="feedback"></div>
+    </div>
+  `;
+}
+
+function selectOrderItem(i) {
+  if (orderState.done) return;
+  const el = document.getElementById('oi' + i);
+  const num = document.getElementById('on' + i);
+
+  if (orderState.selected.includes(i)) {
+    // deselect last
+    const idx = orderState.selected.indexOf(i);
+    if (idx === orderState.selected.length - 1) {
+      orderState.selected.pop();
+      num.textContent = '-';
+      num.className = 'order-num';
+      el.classList.remove('selected');
+    }
+    return;
+  }
+
+  const rank = orderState.selected.length + 1;
+  orderState.selected.push(i);
+  num.textContent = rank;
+  num.classList.add('filled');
+  el.classList.add('selected');
+
+  if (orderState.selected.length === orderState.items.length) {
+    orderState.done = true;
+    pendingAnswer = true;
+    let correct = 0;
+    orderState.selected.forEach((itemIdx, rank) => {
+      const actualItem = orderState.items[itemIdx];
+      const expectedItem = orderState.q.items[rank];
+      const on = document.getElementById('on' + itemIdx);
+      if (actualItem === expectedItem) {
+        on.className = 'order-num correct-o';
+        correct++;
+      } else {
+        on.className = 'order-num wrong-o';
+      }
+    });
+    award(correct / orderState.q.items.length, true);
+    if (correct === orderState.q.items.length) sounds.correct();
+    else if (correct > 0) sounds.partial();
+    else sounds.wrong();
+    showFeedback(correct === orderState.q.items.length, orderState.q.exp,
+      orderState.q.items.join(' → '));
+    document.getElementById('next-btn').classList.add('show');
+  }
+}
+
+// ===== FEEDBACK =====
+// shown only after a wrong answer: the right answer + a refresher of the topic
+function learnNote(correctText) {
+  return `
+    <div class="learn-note">
+      <div class="learn-title">📝 כדי ללמוד מהטעות</div>
+      ${correctText ? `<div><span class="learn-answer">✔️ התשובה הנכונה:</span> ${correctText}</div>` : ''}
+      <details>
+        <summary>📚 לחזרה על הנושא</summary>
+        ${currentMission.lesson}
+      </details>
+    </div>`;
+}
+
+function showFeedback(ok, exp, correctText) {
+  const fb = document.getElementById('feedback');
+  fb.className = 'feedback-box show ' + (ok ? 'ok' : 'fail');
+  fb.style.background = '';
+  fb.style.border = '';
+  fb.innerHTML = `
+    <div class="feedback-emoji">${ok ? '🎉' : '💡'}</div>
+    <strong>${ok ? 'כל הכבוד!' : 'לא מדויק...'}</strong><br>
+    ${exp.replace(/\n/g, '<br>')}
+    ${ok ? '' : learnNote(correctText)}
+  `;
+}
+
+// ===== NEXT QUESTION =====
+function nextQuestion() {
+  currentQ++;
+  pendingAnswer = false;
+  document.getElementById('next-btn').classList.remove('show');
+
+  if (currentQ >= currentRound.length) {
+    endMission();
+  } else {
+    renderQuestion();
+  }
+}
+
+// ===== END MISSION =====
+function endMission() {
+  stopTimer();
+  if (!missionDone.includes(currentMission.id)) {
+    missionDone.push(currentMission.id);
+  }
+  missionScores[currentMission.id] = missionScore;
+
+  document.getElementById('game-screen').style.display = 'none';
+  document.getElementById('mission-end').style.display = 'block';
+
+  const shown = Math.round(missionScore);
+  const pct = shown / MAX_PER_MISSION;
+  let emoji = '😕', title = 'אפשר טוב יותר!';
+  if (pct >= 0.9) { emoji = '🏆'; title = 'מדהים!!! מושלם!'; }
+  else if (pct >= 0.7) { emoji = '🌟'; title = 'כל הכבוד! עוד קצת!'; }
+  else if (pct >= 0.5) { emoji = '😊'; title = 'לא רע! כדאי לחזור'; }
+
+  document.getElementById('me-emoji').textContent = emoji;
+  document.getElementById('me-title').textContent = title;
+  document.getElementById('me-score').textContent = shown + ' / ' + MAX_PER_MISSION + ' נקודות';
+  const gif = document.getElementById('me-gif');
+  gif.style.display = 'none';
+  if (pct >= 0.7) { showGif('me-gif'); sounds.fanfare(); } else { sounds.finish(); }
+  document.getElementById('me-lesson').innerHTML = '<div class="lesson-title">📚 מה למדנו:</div>' + currentMission.lesson;
+}
+
+// ===== END SCREEN =====
+function showEndScreen() {
+  document.getElementById('home-screen').style.display = 'none';
+  document.getElementById('end-screen').style.display = 'block';
+  const total = Math.round(totalScore);
+  document.getElementById('final-score').textContent = total;
+  showGif('end-gif');
+  sounds.fanfare();
+
+  const pct = total / (MISSIONS.length * MAX_PER_MISSION);
+  let stars = '⭐', rank = 'ממשיכה ללמוד 📖';
+  if (pct >= 0.9) { stars = '⭐⭐⭐'; rank = 'מלכת הערבית 👑'; }
+  else if (pct >= 0.7) { stars = '⭐⭐'; rank = 'מאיה החכמה 🌟'; }
+  else if (pct >= 0.5) { stars = '⭐'; rank = 'כמעט שם! 💪'; }
+
+  document.getElementById('stars-row').textContent = stars;
+  document.getElementById('rank-badge').textContent = rank;
+
+  let breakdown = '';
+  MISSIONS.forEach(m => {
+    const sc = Math.round(missionScores[m.id] ?? 0);
+    breakdown += `<div class="score-row"><span>${m.icon} ${m.title}</span><span class="pts">${sc}/${MAX_PER_MISSION}</span></div>`;
+  });
+  document.getElementById('score-breakdown').innerHTML = breakdown;
+}
+
+// ===== UTILS =====
+function updateScore() {
+  document.getElementById('score-display').textContent = Math.round(totalScore);
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 1500);
+}
+
+function fullRestart() {
+  totalScore = 0;
+  missionDone = [];
+  missionScores = {};
+  currentMission = null;
+  currentQ = 0;
+  updateScore();
+  document.getElementById('end-screen').style.display = 'none';
+  renderHome();
+}
+
+// ===== INIT =====
+calcDaysLeft();
+updateSoundBtn();
+// unlock audio on the first touch/click (browsers block sound until then) and preload the gif
+['pointerdown', 'click', 'touchend'].forEach(ev => document.addEventListener(ev, getAudio, { once: true }));
+new Image().src = 'success.gif';
+renderHome();
+</script>
+</body>
+</html>
