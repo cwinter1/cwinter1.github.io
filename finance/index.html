@@ -17,6 +17,9 @@
 
   <div class="grid g6" id="kpis"></div>
 
+  <div class="sec"><h2>מה התעדכן</h2><span class="hint" id="hUPD"></span></div>
+  <div class="card2" id="upd"></div>
+
   <div class="sec"><h2>הכנסות מול הוצאות</h2><span class="hint" id="hIE"></span></div>
   <div class="card2"><div class="chartbox"><canvas id="cIE"></canvas></div>
     <div class="legend"><span><i style="background:var(--income)"></i>הכנסה קבועה</span><span><i style="background:var(--expense)"></i>הוצאות</span><span><i style="background:var(--net)"></i>מאזן החודש</span><span><i style="background:var(--m);opacity:.5"></i>חודש חלקי (חסר מידע)</span></div>
@@ -71,6 +74,39 @@ WF.boot(function (D) {
   // header line
   var through = live && live.data_through ? live.data_through.split('-').reverse().join('.') : '';
   document.getElementById('lead').textContent = 'נתונים עד ' + through + (D.meta && D.meta.updated ? ' · עודכן ' + D.meta.updated.split('-').reverse().join('.') : '');
+
+  // what the last updates added (the "daily" block written by the sync)
+  (function () {
+    var runs = D.daily || [], box = document.getElementById('upd'), hint = document.getElementById('hUPD');
+    function dm(iso) { return iso ? iso.slice(8) + '.' + iso.slice(5, 7) : ''; }
+    if (!runs.length) { hint.textContent = ''; box.innerHTML = '<div class="empty">עוד אין רישום של עדכונים. הוא יופיע אחרי העדכון הבא.</div>'; return; }
+    var e = runs[0];
+    hint.textContent = 'עדכון ' + dm(e.on) + (e.through ? ' · נתונים עד ' + dm(e.through) : '');
+    var h = '<div style="font-weight:700;margin-bottom:6px">' + (e.n ? 'נוספו ' + e.n + ' חיובים והכנסות' + (e.unclassified ? ' · ' + e.unclassified + ' בלי קטגוריה' : '') : 'לא נוספו חיובים חדשים בעדכון האחרון') + '</div>';
+    function mv(label, a, b, debt) {
+      if (a == null || b == null) return '';
+      var d = b - a; if (Math.abs(d) < 1) return '<div class="note">' + label + ': ' + WF.ilsText(debt ? -b : b) + ' · בלי שינוי</div>';
+      var worse = debt ? d < 0 : d > 0;
+      return '<div class="note">' + label + ': ' + WF.ilsText(debt ? -a : a) + ' ← ' + WF.ilsText(debt ? -b : b) + ' · <span class="' + (worse ? 'neg' : 'pos') + '">' + (worse ? 'עלה' : 'ירד') + ' ב-' + WF.ilsText(Math.abs(d)) + '</span></div>';
+    }
+    h += mv('חוב נטו', e.net_before, e.net_after, true) + mv('צפי להוצאות לסוף החודש', e.pace_before, e.pace_after, false);
+    if (e.rows && e.rows.length) {
+      var show = e.rows.slice(0, 8);
+      function tr(r) {
+        var inc = r[5] === 'income', pend = r[6] === 'P';
+        return '<tr><td class="n" style="white-space:nowrap;color:var(--m)">' + dm(r[1]) + '</td><td>' + WF.esc(r[3]) + (pend ? ' <span class="tag">ממתין</span>' : '') +
+          '</td><td><span class="dot" style="background:' + WF.color(r[2]) + '"></span>' + WF.esc(inc ? 'הכנסה' : r[2] && r[2] !== 'unclassified' ? WF.name(r[2]) : 'ללא קטגוריה') + '</td><td class="n ' + (inc ? 'pos' : '') + '">' + (inc ? '+' : '') + WF.ilsText(r[4]) + '</td></tr>';
+      }
+      h += '<div class="scroll-x" style="margin-top:8px"><table class="tb" id="updT">' + show.map(tr).join('') + '</table></div>';
+      if (e.rows.length > show.length) h += '<span class="chip" id="updMore" style="margin-top:8px;cursor:pointer">הצג את כל ' + e.rows.length + '</span>';
+      box.innerHTML = h;
+      var bt = document.getElementById('updMore');
+      if (bt) bt.onclick = function () { document.getElementById('updT').innerHTML = e.rows.map(tr).join(''); bt.remove(); };
+    } else box.innerHTML = h;
+    if (runs.length > 1) {
+      box.insertAdjacentHTML('beforeend', '<div class="note" style="margin-top:10px">עדכונים קודמים: ' + runs.slice(1, 6).map(function (r) { return dm(r.on) + ' (' + r.n + ')'; }).join(' · ') + '</div>');
+    }
+  })();
 
   // KPIs
   var inc = WF.avg(last3.map(function (m) { return m.inc; })), exp = WF.avg(last3.map(function (m) { return m.exp; }));
