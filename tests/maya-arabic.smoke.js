@@ -115,10 +115,10 @@ function check(name, ok, detail) {
       const seen = new Set();
       m.questions.forEach((q, i) => {
         const w = `mission ${m.id} #${i} (${q.type})`;
-        const key = q.type === 'flipcards' ? q.cards[0].front : (q.type === 'order' || q.type === 'sort') ? q.q + JSON.stringify(q.items) : q.q;
+        const key = q.type === 'flipcards' ? q.cards[0].front : (q.type === 'order' || q.type === 'sort') ? q.q + JSON.stringify(q.items) : q.type === 'match' ? q.group + '#' + q.slot : q.q;
         if (seen.has(key)) issues.push('duplicate question: ' + w);
         seen.add(key);
-        if (q.type !== 'flipcards' && !q.exp) issues.push('missing explanation: ' + w);
+        if (q.type !== 'flipcards' && q.type !== 'match' && !q.exp) issues.push('missing explanation: ' + w);
         if (q.type === 'choice') {
           if (!(q.ans >= 0 && q.ans < q.opts.length)) issues.push('answer index out of range: ' + w);
           if (new Set(q.opts).size !== q.opts.length) issues.push('duplicate options: ' + w);
@@ -129,7 +129,7 @@ function check(name, ok, detail) {
         } else if (q.type === 'sort') {
           if (!q.items.some(x => x.bucket === 0) || !q.items.some(x => x.bucket === 1)) issues.push('sort has an empty bucket: ' + w);
         } else if (q.type === 'match') {
-          if (q.values.length !== 5 || new Set(q.values).size !== 5) issues.push('a match set needs 5 different numbers: ' + w);
+          if (!(q.pool && new Set(q.pool).size >= 5 && q.count === 5)) issues.push('a match question needs a pool of at least 5 different numbers and count 5: ' + w);
         } else if (q.type !== 'flipcards') issues.push('unknown type: ' + w);
       });
     });
@@ -214,10 +214,13 @@ function check(name, ok, detail) {
 
   // ---------------------------------------------------------------
   console.log('\nMatching game (join with a line)');
+  // starts the matching mission with one question; `values` (e.g. '5,6,7,8,9') forces the numbers, otherwise they are random
   const startMatch = (pg, values) => pg.evaluate(vals => {
     const orig = pickRound;
-    pickRound = m => [m.questions.find(q => q.type === 'match' && (!vals || q.values.join() === vals))];
-    startMission(2); pickRound = orig;
+    pickRound = m => [m.questions.find(q => q.type === 'match')];
+    startMission(2);
+    pickRound = orig;
+    if (vals) renderMatch({ ...currentRound[0], values: vals.split(',').map(Number) }, document.getElementById('question-area'));
   }, values);
   const lines = pg => pg.locator('#match-lines line').count();
   const score = pg => pg.evaluate(() => Math.round(missionScore));
@@ -271,6 +274,35 @@ function check(name, ok, detail) {
   check('match: all wrong gives no credit', (await score(page)) === 0);
   await page.evaluate(() => goHome());
 
+  // different NUMBERS every time, not just different positions
+  const variety = await page.evaluate(() => {
+    const area = document.getElementById('question-area'), out = {};
+    MISSIONS[2].questions.filter(q => q.type === 'match' && q.slot === 0).forEach(q => {
+      const sets = new Set(); let back = 0, prev = '';
+      for (let k = 0; k < 60; k++) {
+        renderMatch(q, area);
+        const key = mt.a.map(p => p.v).sort((x, y) => x - y).join();
+        sets.add(key); if (key === prev) back++; prev = key;
+        if (mt.n !== 5 || new Set(mt.a.map(p => p.v)).size !== 5) back += 1000;           // always 5 different numbers
+        if (!mt.a.every(p => q.pool.includes(p.v))) back += 1000;                         // always from the group's range
+      }
+      out[q.group] = { distinct: sets.size, back };
+    });
+    return out;
+  });
+  Object.entries(variety).forEach(([group, v]) => check(`match "${group}": 60 showings give ${'>= 25'} different sets of numbers`, v.distinct >= 25, v.distinct + ' distinct'));
+  check('match: the same 5 numbers never come twice in a row, always 5 different numbers from the right range', Object.values(variety).every(v => v.back === 0), JSON.stringify(variety));
+  // with only 6 numbers to choose from there are 6 possible sets, so without the guard the same set would repeat about 1 time in 6
+  const backToBack = await page.evaluate(() => {
+    const area = document.getElementById('question-area'); let back = 0, prev = '';
+    for (let k = 0; k < 300; k++) {
+      renderMatch({ type: 'match', group: 'tiny', pool: [1, 2, 3, 4, 5, 6], count: 5, q: 'x' }, area);
+      const key = mt.a.map(p => p.v).sort((x, y) => x - y).join();
+      if (key === prev) back++; prev = key;
+    }
+    return back;
+  });
+  check('match: the same numbers never repeat back to back (300 tries, 6-number pool)', backToBack === 0, backToBack + ' repeats');
   const aOrders = new Set(), bOrders = new Set();
   let lined = 0;
   for (let k = 0; k < 14; k++) {
@@ -350,12 +382,12 @@ function check(name, ok, detail) {
     // exactly the numbers from the board: 0-9, 11-19 and the tens
     const want = [...Array(10).keys(), ...Array.from({ length: 9 }, (_, i) => 11 + i), 10, 20, 30, 40, 50, 60, 70, 80, 90].sort((a, b) => a - b).join(',');
     if ([...NUM_VALUES].sort((a, b) => a - b).join(',') !== want) issues.push('NUM_VALUES is not 0-9, 11-19 and the tens');
-    // the matching sets: every number appears in some set, no set is repeated, every number is inside the board's range
-    const sets = Q_NUMS.filter(q => q.type === 'match').map(q => q.values);
-    const used = new Set(sets.flat());
-    NUM_VALUES.forEach(v => { if (!used.has(v)) issues.push(`${v} is in no matching set`); });
-    sets.flat().forEach(v => { if (!NUM_VALUES.includes(v)) issues.push(`${v} is not on the board`); });
-    if (new Set(sets.map(x => [...x].sort((a, b) => a - b).join())).size !== sets.length) issues.push('a matching set is repeated');
+    // the matching questions draw from pools: together they cover exactly the board's numbers, nothing outside it
+    const pools = Q_NUMS.filter(q => q.type === 'match').map(q => q.pool);
+    const covered = new Set(pools.flat());
+    NUM_VALUES.forEach(v => { if (!covered.has(v)) issues.push(`${v} is in no matching pool`); });
+    covered.forEach(v => { if (!NUM_VALUES.includes(v)) issues.push(`${v} is not on the board`); });
+    pools.forEach(pl => { if (new Set(pl).size !== pl.length) issues.push('a pool has a repeated number'); });
     // study cards: the numeral on the front is the number on the back
     Q_NUMS.filter(q => q.type === 'flipcards').forEach(q => q.cards.forEach(c => {
       if (strip(c.front) !== toAr(Number(c.back.replace('= ', '')))) issues.push(`card ${strip(c.front)} does not show ${c.back}`);
@@ -385,7 +417,7 @@ function check(name, ok, detail) {
     if (new Set(LET.map(l => l.name)).size !== LET.length) issues.push('two letters share a name');
     return issues;
   });
-  check('Arabic numerals, matching sets, "my" forms and letter-in-word claims are consistent', content.length === 0, content.slice(0, 3).join(' | '));
+  check('Arabic numerals, matching pools, "my" forms and letter-in-word claims are consistent', content.length === 0, content.slice(0, 3).join(' | '));
 
   // ---------------------------------------------------------------
   console.log('\nSound');

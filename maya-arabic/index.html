@@ -996,33 +996,20 @@ const tipsFor = values => [...new Set(values.flatMap(n => [...String(n)]))].sort
   .map(t => t.replace(/\(([٠-٩])\)/, (m, g) => `(${AR(g)})`)).join(' ');
 const leftToRight = values => values.some(n => String(n).length > 1) ? ' מספרים עם כמה ספרות כותבים משמאל לימין, כמו אצלנו: ' + AR('١٣') + ' = 13.' : '';
 
-// every set has a fixed name; the columns are shuffled again every time it is shown
-function seeded(seed) { let x = seed; return () => (x = (x * 1664525 + 1013904223) % 4294967296) / 4294967296; }
-function makeSets(list, fixed, extra, seed) {
-  const rnd = seeded(seed), sets = fixed.map(f => [...f]);
-  const key = set => [...set].sort((a, b) => a - b).join();
-  const seen = new Set(sets.map(key));
-  for (let guard = 0; sets.length < fixed.length + extra && guard < 500; guard++) {
-    const pool = [...list], set = [];
-    while (set.length < 5) set.push(pool.splice(Math.floor(rnd() * pool.length), 1)[0]);
-    set.sort((a, b) => a - b);
-    if (!seen.has(key(set))) { seen.add(key(set)); sets.push(set); }
-  }
-  return sets;
-}
+// Nothing is fixed in advance: every time a matching question is shown, it picks 5 NEW random numbers from its group
+// (and the game shuffles both columns). A group is just the range the numbers come from.
 const GROUPS = [
-  { name: 'ספרות 0–9', list: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], fixed: [[0, 1, 2, 3, 4], [5, 6, 7, 8, 9]], extra: 6, seed: 11 },
-  { name: 'המספרים 11–19', list: [11, 12, 13, 14, 15, 16, 17, 18, 19], fixed: [[11, 12, 13, 14, 15], [15, 16, 17, 18, 19]], extra: 4, seed: 23 },
-  { name: 'העשרות', list: [10, 20, 30, 40, 50, 60, 70, 80, 90], fixed: [[10, 20, 30, 40, 50], [50, 60, 70, 80, 90]], extra: 4, seed: 37 },
-  { name: 'מכל המספרים', list: NUM_VALUES, fixed: [], extra: 4, seed: 41 },
+  { name: 'ספרות 0–9', list: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], slots: 4 },
+  { name: 'המספרים 11–19', list: [11, 12, 13, 14, 15, 16, 17, 18, 19], slots: 3 },
+  { name: 'העשרות', list: [10, 20, 30, 40, 50, 60, 70, 80, 90], slots: 3 },
+  { name: 'מכל המספרים', list: NUM_VALUES, slots: 3 },
 ];
 const Q_NUMS = [];
-GROUPS.forEach(g => makeSets(g.list, g.fixed, g.extra, g.seed).forEach((set, i) => {
-  Q_NUMS.push({
-    type: 'match', values: set, q: `חברי בקו כל ספרה ערבית למספר הרגיל – ${g.name} (סט ${i + 1})`,
-    exp: `הספרות הערביות נראות אחרת משלנו. ${tipsFor(set)}${leftToRight(set)}`,
-  });
-}));
+GROUPS.forEach(g => {
+  for (let k = 0; k < g.slots; k++) {
+    Q_NUMS.push({ type: 'match', group: g.name, slot: k, pool: g.list, count: 5, q: `חברי בקו כל ספרה ערבית למספר הרגיל – ${g.name}` });
+  }
+});
 const numCards = list => list.map(n => ({ front: AB(toAr(n)), back: `= ${n}` }));
 Q_NUMS.push(
   { type: 'flipcards', q: 'הספרות הערביות 0–4 – הפכי כדי לראות:', cards: numCards([0, 1, 2, 3, 4]) },
@@ -1601,14 +1588,31 @@ function selectOrderItem(i) {
 // Drag from one column to the other, or tap one item and then the other. Tap a joined item to remove its line.
 let mt = null; // state of the matching game on screen
 
+const lastMatchSet = {};   // the previous set of each group, so the same 5 numbers never come twice in a row
+
+// 5 random numbers from the group's range (different every time)
+function pickNumbers(q) {
+  if (q.values) return q.values;                                  // (tests can pass fixed numbers)
+  const key = list => [...list].sort((x, y) => x - y).join();
+  let set;
+  for (let t = 0; t < 20; t++) {
+    set = shuffle(q.pool).slice(0, q.count);
+    if (key(set) !== lastMatchSet[q.group]) break;
+  }
+  lastMatchSet[q.group] = key(set);
+  return set;
+}
+
 function renderMatch(q, area) {
-  const pairs = q.values.map(v => ({ v, ar: toAr(v), num: String(v) }));
+  const values = pickNumbers(q);
+  const exp = q.exp || `הספרות הערביות נראות אחרת משלנו. ${tipsFor(values)}${leftToRight(values)}`;
+  const pairs = values.map(v => ({ v, ar: toAr(v), num: String(v) }));
   const a = shuffle(pairs);                                       // column of Arabic numerals
   let b = shuffle(pairs);                                         // column of normal numbers
   for (let t = 0; t < 30 && b.every((p, i) => p === a[i]); t++) b = shuffle(pairs); // never start already lined up
   mt = { n: pairs.length, a, b, links: new Map(), sel: null, drag: null, locked: false, res: new Map() };
   const sorted = [...pairs].sort((x, y) => x.v - y.v);
-  currentQuestion = { exp: q.exp, correctText: '<br>' + sorted.map(p => `${AR(p.ar)} = ${p.num}`).join('<br>') };
+  currentQuestion = { exp, correctText: '<br>' + sorted.map(p => `${AR(p.ar)} = ${p.num}`).join('<br>') };
   area.innerHTML = `
     <div class="q-card">
       <div class="q-text">${q.q}</div>
