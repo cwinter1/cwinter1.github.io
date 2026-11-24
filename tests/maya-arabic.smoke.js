@@ -442,6 +442,20 @@ function check(name, ok, detail) {
     // the Arabic vowel marks exist only as fatha/kasra here (the lesson has no other vowel yet)
     // (the lesson word مُدِير has a damma inside it; that is fine, but no question is about it)
     if (/[\u064F\u064B\u064C\u064D]/.test(JSON.stringify(Q_VOWELS).split(cards[3]).join(''))) issues.push('an unexpected vowel mark (damma/tanwin) in the vowels mission');
+    // every single Arabic letter shown anywhere (an option, a sort item, a letter in a question) is one of ארז דוד + יא;
+    // and the letters mission contains no other Arabic letter at all (not even as a wrong answer)
+    const allowed = 'ارزدوذي';
+    const strings = [];
+    const walk = v => { if (typeof v === 'string') strings.push(v); else if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === 'object') Object.values(v).forEach(walk); };
+    MISSIONS.forEach(m => walk(m.questions));
+    strings.forEach(str => {
+      for (const m of str.matchAll(/<span class="ar[^"]*"[^>]*>([^<]*)<\/span>/g)) {
+        const letters = base(m[1]);
+        if (letters.length === 1 && /[\u0621-\u064A]/.test(letters) && !allowed.includes(letters)) issues.push(`the letter ${letters} is shown but is not in ארז דוד + יא`);
+      }
+    });
+    const lettersMissionText = JSON.stringify(MISSIONS[0].questions) + MISSIONS[0].lesson;
+    [...new Set(lettersMissionText.match(/[\u0621-\u063A\u0641-\u064A]/g))].forEach(ch => { if (!allowed.includes(ch)) issues.push(`the letters mission contains the letter ${ch}`); });
     // letters that are NOT in lesson 1 must never be taught as lesson letters
     if (/[بتثجحخ]/.test(LET.map(l => l.ch).join(''))) issues.push('a letter from outside lesson 1 is in LET');
     // letters: names and dots are consistent
