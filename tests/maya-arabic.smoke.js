@@ -451,6 +451,36 @@ function check(name, ok, detail) {
   check('Arabic numerals, matching pools, "my" forms and letter-in-word claims are consistent', content.length === 0, content.slice(0, 3).join(' | '));
 
   // ---------------------------------------------------------------
+  console.log('\nNothing broken on screen (every question, answered right and wrong)');
+  // Plays every single question of every mission, answering right and then wrong, and reads the text on the screen:
+  // raw markup (<span ...>), &quot; and the like, "undefined" or "NaN" must never show.
+  const leaks = await page.evaluate(async () => {
+    const issues = [], sleep = ms => new Promise(r => setTimeout(r, ms));
+    const bad = /<\/?span|class="|&lt;|&gt;|&quot;|&amp;|\bundefined\b|\bNaN\b|\[object/;
+    let played = 0;
+    for (const m of MISSIONS) {
+      for (let qi = 0; qi < m.questions.length; qi++) {
+        for (const right of [true, false]) {
+          const orig = pickRound; pickRound = mm => [mm.questions[qi]]; startMission(m.id); pickRound = orig;
+          const q = currentRound[0];
+          if (q.type === 'choice') answerChoice(right ? currentQuestion.correct : (currentQuestion.correct + 1) % 4);
+          else if (q.type === 'tf') answerTF(right ? q.ans : !q.ans);
+          else if (q.type === 'order') { const o = orderState.q.items.map(it => orderState.items.indexOf(it)); (right ? o : o.reverse()).forEach(i => selectOrderItem(i)); }
+          else if (q.type === 'sort') { q.items.forEach((it, i) => { pickSortItem(i); placeSortItem(right ? it.bucket : 1 - it.bucket); }); await sleep(450); }
+          else if (q.type === 'match') { mt.a.forEach((p, ai) => { const bi = mt.b.findIndex(x => x.v === p.v); matchLink(ai, right ? bi : (bi + 1) % mt.n); }); matchCheck(); }
+          const text = document.getElementById('game-screen').innerText;
+          const hit = text.match(new RegExp('.{0,40}(' + bad.source + ').{0,40}'));
+          if (hit) issues.push(`${m.id}#${qi} ${q.type} ${right ? 'right' : 'wrong'}: ${hit[0].replace(/\s+/g, ' ')}`);
+          played++;
+          stopTimer(); goHome();
+        }
+      }
+    }
+    return { issues, played };
+  });
+  check(`no raw markup or "undefined" on screen in any of ${leaks.played} question plays`, leaks.issues.length === 0, leaks.issues.slice(0, 3).join(' | '));
+
+  // ---------------------------------------------------------------
   console.log('\nSound');
   check('audio unlocked after first click', (await page.evaluate(() => audioCtx && audioCtx.state)) === 'running');
   const count = () => page.evaluate(() => window.__osc.length);
