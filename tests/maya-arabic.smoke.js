@@ -11,7 +11,7 @@ const path = require('path');
 const { chromium } = require('playwright');
 
 const URL = process.env.SMOKE_URL || 'file://' + path.resolve(__dirname, '..', 'maya-arabic', 'index.html');
-const MISSIONS = 4;
+const MISSIONS = 5;
 const MAX = 100;
 
 const failures = [];
@@ -413,6 +413,37 @@ function check(name, ok, detail) {
         q.opts.forEach((o, i) => { if (i !== q.ans && base(strip(o)).includes(letter)) issues.push(`wrong option also contains ${letter}: ${strip(o)}`); });
       }
     });
+    // ---- the content must match the first lesson of the Ministry's book (the spec is written out here on purpose) ----
+    // letters "ארז דוד" = alif, rā, zāy, dāl, wāw, dhāl, plus yā; dots: zāy and dhāl one above, yā two below, the rest none
+    const spec = { 'ا': 'בלי נקודות', 'ر': 'בלי נקודות', 'ز': 'נקודה אחת מעל', 'د': 'בלי נקודות', 'و': 'בלי נקודות', 'ذ': 'נקודה אחת מעל', 'ي': 'שתי נקודות מתחת' };
+    if (LET.map(l => l.ch).join('') !== 'ارزدوذي') issues.push('the letters are not ا ر ز د و ذ ي: ' + LET.map(l => l.ch).join(''));
+    if (ARAZ.map(i => LET[i].ch).join('') !== 'ارزدوذ') issues.push('"ארז דוד" is not ا ر ز د و ذ');
+    LET.forEach(l => { if (l.dots !== spec[l.ch]) issues.push(`dots of ${l.ch} should be "${spec[l.ch]}"`); });
+    const names = { 'ا': 'אלף', 'ر': 'רא', 'ز': 'זאי', 'د': 'דאל', 'و': 'ואו', 'ذ': 'ד׳אל', 'ي': 'יא' };
+    LET.forEach(l => { if (l.name !== names[l.ch]) issues.push(`name of ${l.ch} should be ${names[l.ch]}`); });
+    // the words on the lesson cards (and nothing else)
+    const cards = ['زَارَ', 'يَوْم', 'دَار', 'مُدِير', 'أَرْز', 'نُورِي', 'دَوْلَة'];
+    if (WORDS.map(w => w[0]).join('|') !== cards.join('|')) issues.push('the words are not the 7 cards of the lesson');
+    // "my": only nouns from the lesson's words (and يَد from the board)
+    NOUNS.forEach(([b]) => { if (![...cards, 'يَد'].includes(b)) issues.push(`${b} is not a word from the lesson`); });
+    // "which letter is in the word": the right one is in the word, the wrong ones are not
+    Q_WORDS.forEach(q => {
+      if (q.type !== 'choice' || !q.q.includes('איזו אות מופיעה במילה')) return;
+      const w = base((q.q.match(/<span class="ar[^"]*"[^>]*>([^<]+)<\/span>/) || [])[1]);
+      q.opts.forEach((o, i) => { const has = w.includes(strip(o)); if (has !== (i === q.ans)) issues.push(`letter ${strip(o)} ${has ? 'is' : 'is not'} in ${w}`); });
+    });
+    // syllables: the Arabic vowel mark matches the Hebrew vowel (fatha = pataḥ, kasra = ḥiriq) and the letter matches
+    const heLetter = { 'د': 'ד', 'ر': 'ר', 'و': 'ו', 'ز': 'ז' };
+    SYL.forEach(([ar, he]) => {
+      if (ar.includes('\u064E') !== he.includes('\u05B7')) issues.push(`${ar} and ${he}: fatha must be pataḥ`);
+      if (ar.includes('\u0650') !== he.includes('\u05B4')) issues.push(`${ar} and ${he}: kasra must be ḥiriq`);
+      if (he[0] !== heLetter[ar[0]]) issues.push(`${ar} and ${he}: different letters`);
+    });
+    // the Arabic vowel marks exist only as fatha/kasra here (the lesson has no other vowel yet)
+    // (the lesson word مُدِير has a damma inside it; that is fine, but no question is about it)
+    if (/[\u064F\u064B\u064C\u064D]/.test(JSON.stringify(Q_VOWELS).split(cards[3]).join(''))) issues.push('an unexpected vowel mark (damma/tanwin) in the vowels mission');
+    // letters that are NOT in lesson 1 must never be taught as lesson letters
+    if (/[بتثجحخ]/.test(LET.map(l => l.ch).join(''))) issues.push('a letter from outside lesson 1 is in LET');
     // letters: names and dots are consistent
     if (new Set(LET.map(l => l.name)).size !== LET.length) issues.push('two letters share a name');
     return issues;
