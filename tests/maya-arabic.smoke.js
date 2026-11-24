@@ -11,7 +11,7 @@ const path = require('path');
 const { chromium } = require('playwright');
 
 const URL = process.env.SMOKE_URL || 'file://' + path.resolve(__dirname, '..', 'maya-arabic', 'index.html');
-const MISSIONS = 4;
+const MISSIONS = 5;
 const MAX = 100;
 
 const failures = [];
@@ -43,6 +43,21 @@ function check(name, ok, detail) {
   });
 
   // ---- real-click helpers ----
+  // join Arabic item ai to number item bi (by taps, or by a real mouse drag)
+  const centerOf = async (pg, id) => { const r = await pg.locator('#' + id).boundingBox(); return [r.x + r.width / 2, r.y + r.height / 2]; };
+  async function tapLink(pg, ai, bi) { await pg.locator('#ma' + ai).click(); await pg.locator('#mb' + bi).click(); }
+  async function dragLink(pg, ai, bi) {
+    const [x1, y1] = await centerOf(pg, 'ma' + ai), [x2, y2] = await centerOf(pg, 'mb' + bi);
+    await pg.mouse.move(x1, y1); await pg.mouse.down();
+    await pg.mouse.move((x1 + x2) / 2, (y1 + y2) / 2, { steps: 5 });
+    await pg.mouse.move(x2, y2, { steps: 5 }); await pg.mouse.up();
+  }
+  // the right partner of every Arabic item (or a wrong one: shifted by one place, so nothing is right)
+  const matchPlan = (pg, right) => pg.evaluate(right => mt.a.map((p, ai) => {
+    const bi = mt.b.findIndex(x => x.v === p.v);
+    return [ai, right ? bi : (bi + 1) % mt.n];
+  }), right);
+
   async function answerQuestion(right, skipNext) {
     const type = await page.evaluate(() => currentRound[currentQ].type);
     if (type === 'choice') {
@@ -61,6 +76,10 @@ function check(name, ok, detail) {
         await page.locator('#si' + i).click();
         await page.locator('#feedback button').nth(right ? buckets[i] : 1 - buckets[i]).click();
       }
+    }
+    else if (type === 'match') {
+      for (const [ai, bi] of await matchPlan(page, right)) await tapLink(page, ai, bi);
+      await page.locator('#btn-check').click();
     }
     // flip cards need no answer
     await page.locator('#next-btn.show').waitFor();
@@ -96,10 +115,10 @@ function check(name, ok, detail) {
       const seen = new Set();
       m.questions.forEach((q, i) => {
         const w = `mission ${m.id} #${i} (${q.type})`;
-        const key = q.type === 'flipcards' ? q.cards[0].front : (q.type === 'order' || q.type === 'sort') ? q.q + JSON.stringify(q.items) : q.q;
+        const key = q.type === 'flipcards' ? q.cards[0].front : (q.type === 'order' || q.type === 'sort') ? q.q + JSON.stringify(q.items) : q.type === 'match' ? q.group + '#' + q.slot : q.q;
         if (seen.has(key)) issues.push('duplicate question: ' + w);
         seen.add(key);
-        if (q.type !== 'flipcards' && !q.exp) issues.push('missing explanation: ' + w);
+        if (q.type !== 'flipcards' && q.type !== 'match' && !q.exp) issues.push('missing explanation: ' + w);
         if (q.type === 'choice') {
           if (!(q.ans >= 0 && q.ans < q.opts.length)) issues.push('answer index out of range: ' + w);
           if (new Set(q.opts).size !== q.opts.length) issues.push('duplicate options: ' + w);
@@ -109,6 +128,8 @@ function check(name, ok, detail) {
           if (new Set(q.items).size !== q.items.length) issues.push('duplicate order items: ' + w);
         } else if (q.type === 'sort') {
           if (!q.items.some(x => x.bucket === 0) || !q.items.some(x => x.bucket === 1)) issues.push('sort has an empty bucket: ' + w);
+        } else if (q.type === 'match') {
+          if (!(q.pool && new Set(q.pool).size >= 5 && q.count === 5)) issues.push('a match question needs a pool of at least 5 different numbers and count 5: ' + w);
         } else if (q.type !== 'flipcards') issues.push('unknown type: ' + w);
       });
     });
@@ -165,8 +186,8 @@ function check(name, ok, detail) {
   console.log('\nLearning note after a mistake');
   // every question type, answered wrong, must show the note with the correct answer;
   // answered right it must not. Force a one-question round of each type.
-  const missionWith = { choice: 0, tf: 0, order: 0, sort: 0 };
-  for (const type of ['choice', 'tf', 'order', 'sort']) {
+  const missionWith = { choice: 0, tf: 0, order: 0, sort: 0, match: 2 };
+  for (const type of ['choice', 'tf', 'order', 'sort', 'match']) {
     await page.evaluate(([t, m]) => {
       const orig = pickRound;
       pickRound = mission => [mission.questions.find(q => q.type === t)];
@@ -190,6 +211,141 @@ function check(name, ok, detail) {
     check(`${type}: a correct answer shows no learning note`, (await page.locator('#feedback .learn-note').count()) === 0);
     await page.evaluate(() => goHome());
   }
+
+  // ---------------------------------------------------------------
+  console.log('\nMatching game (join with a line)');
+  // starts the matching mission with one question; `values` (e.g. '5,6,7,8,9') forces the numbers, otherwise they are random
+  const startMatch = (pg, values) => pg.evaluate(vals => {
+    const orig = pickRound;
+    pickRound = m => [m.questions.find(q => q.type === 'match')];
+    startMission(2);
+    pickRound = orig;
+    if (vals) renderMatch({ ...currentRound[0], values: vals.split(',').map(Number) }, document.getElementById('question-area'));
+  }, values);
+  const lines = pg => pg.locator('#match-lines line').count();
+  const score = pg => pg.evaluate(() => Math.round(missionScore));
+
+  await startMatch(page, '5,6,7,8,9');
+  check('match: two columns of 5, Arabic numerals and normal numbers', (await page.locator('.match-col').count()) === 2 && (await page.locator('.match-item').count()) === 10);
+  check('match: the Arabic column shows Arabic-Indic digits', (await page.locator('#ma0').innerText()).trim().match(/^[٠-٩]+$/) !== null);
+  check('match: the columns do not start lined up', await page.evaluate(() => !mt.b.every((p, i) => p === mt.a[i])));
+  await tapLink(page, 0, 0);
+  check('match: tapping an Arabic numeral and then a number draws a line', (await lines(page)) === 1);
+  await page.locator('#mb1').click(); await page.locator('#ma0').click();   // pick a number, then an already-joined Arabic item
+  check('match: joining an item again moves its line (one line per item)', (await lines(page)) === 1 && (await page.evaluate(() => mt.links.get(0))) === 1);
+  await page.locator('#ma0').click();
+  check('match: tapping a joined item removes its line', (await lines(page)) === 0);
+  await tapLink(page, 3, 4); await tapLink(page, 1, 4);      // two Arabic numerals to the same number: the second takes the line
+  check('match: a number can have only one line (the new one replaces the old)', (await lines(page)) === 1 && (await page.evaluate(() => mt.links.has(3))) === false && (await page.evaluate(() => mt.links.get(1))) === 4);
+  await page.locator('#btn-clear').click();
+  await dragLink(page, 2, 3);
+  check('match: dragging from one column to the other draws a line', (await lines(page)) === 1 && (await page.evaluate(() => mt.links.get(2))) === 3);
+  await dragLink(page, 4, 4); await dragLink(page, 1, 0);
+  await page.locator('#btn-check').click();
+  check('match: check with missing lines asks her to join all (nothing revealed)', (await page.locator('#feedback.show').count()) === 0 && (await page.evaluate(() => !mt.locked)));
+  await page.locator('#btn-clear').click();
+  check('match: the clear button removes every line', (await lines(page)) === 0);
+  await page.evaluate(() => goHome());
+
+  await startMatch(page, '5,6,7,8,9');
+  for (const [ai, bi] of await matchPlan(page, true)) await dragLink(page, ai, bi);
+  await page.locator('#btn-check').click();
+  check('match: all five joined right gives full credit', (await score(page)) === 100, await score(page));
+  check('match: right lines turn green', (await page.locator('#match-lines line.l-ok').count()) === 5);
+  const frozen = await page.evaluate(() => JSON.stringify([...mt.links]));
+  await tapLink(page, 0, 1);
+  check('match: lines are locked after checking', (await page.evaluate(() => JSON.stringify([...mt.links]))) === frozen);
+  await page.evaluate(() => goHome());
+
+  await startMatch(page, '5,6,7,8,9');
+  const plan = await matchPlan(page, true);
+  [plan[0][1], plan[1][1]] = [plan[1][1], plan[0][1]];       // swap two partners: 3 of 5 right
+  for (const [ai, bi] of plan) await tapLink(page, ai, bi);
+  await page.locator('#btn-check').click();
+  check('match: 3 of 5 right gives 60%', (await score(page)) === 60, await score(page));
+  check('match: wrong lines turn red', (await page.locator('#match-lines line.l-bad').count()) === 2);
+  const note = await page.locator('#feedback .learn-note').innerText();
+  check('match: the note lists every correct pair', ['٥ = 5', '٦ = 6', '٧ = 7', '٨ = 8', '٩ = 9'].every(t => note.replace(/\s+/g, ' ').includes(t)), note.slice(0, 120));
+  await page.evaluate(() => goHome());
+
+  await startMatch(page, '5,6,7,8,9');
+  for (const [ai, bi] of await matchPlan(page, false)) await tapLink(page, ai, bi);
+  await page.locator('#btn-check').click();
+  check('match: all wrong gives no credit', (await score(page)) === 0);
+  await page.evaluate(() => goHome());
+
+  // different NUMBERS every time, not just different positions
+  const variety = await page.evaluate(() => {
+    const area = document.getElementById('question-area'), out = {};
+    MISSIONS[2].questions.filter(q => q.type === 'match' && q.slot === 0).forEach(q => {
+      const sets = new Set(); let back = 0, prev = '';
+      for (let k = 0; k < 60; k++) {
+        renderMatch(q, area);
+        const key = mt.a.map(p => p.v).sort((x, y) => x - y).join();
+        sets.add(key); if (key === prev) back++; prev = key;
+        if (mt.n !== 5 || new Set(mt.a.map(p => p.v)).size !== 5) back += 1000;           // always 5 different numbers
+        if (!mt.a.every(p => q.pool.includes(p.v))) back += 1000;                         // always from the group's range
+      }
+      out[q.group] = { distinct: sets.size, back };
+    });
+    return out;
+  });
+  Object.entries(variety).forEach(([group, v]) => check(`match "${group}": 60 showings give ${'>= 25'} different sets of numbers`, v.distinct >= 25, v.distinct + ' distinct'));
+  check('match: the same 5 numbers never come twice in a row, always 5 different numbers from the right range', Object.values(variety).every(v => v.back === 0), JSON.stringify(variety));
+  // with only 6 numbers to choose from there are 6 possible sets, so without the guard the same set would repeat about 1 time in 6
+  const backToBack = await page.evaluate(() => {
+    const area = document.getElementById('question-area'); let back = 0, prev = '';
+    for (let k = 0; k < 300; k++) {
+      renderMatch({ type: 'match', group: 'tiny', pool: [1, 2, 3, 4, 5, 6], count: 5, q: 'x' }, area);
+      const key = mt.a.map(p => p.v).sort((x, y) => x - y).join();
+      if (key === prev) back++; prev = key;
+    }
+    return back;
+  });
+  check('match: the same numbers never repeat back to back (300 tries, 6-number pool)', backToBack === 0, backToBack + ' repeats');
+  const aOrders = new Set(), bOrders = new Set();
+  let lined = 0;
+  for (let k = 0; k < 14; k++) {
+    await startMatch(page, '5,6,7,8,9');
+    const [a, b] = await page.evaluate(() => [mt.a.map(p => p.v).join(), mt.b.map(p => p.v).join()]);
+    aOrders.add(a); bOrders.add(b); if (a === b) lined++;
+    await page.evaluate(() => goHome());
+  }
+  check('match: the Arabic column is shuffled every time', aOrders.size >= 5, aOrders.size + ' orders in 14 tries');
+  check('match: the numbers column is shuffled every time', bOrders.size >= 5, bOrders.size + ' orders in 14 tries');
+  check('match: the two columns never start lined up', lined === 0, lined + ' of 14');
+  // a set of only two numbers lines up by luck half of the time, so 300 tries prove the guard really works
+  await startMatch(page, '5,6,7,8,9');
+  const aligned = await page.evaluate(() => {
+    let n = 0;
+    for (let k = 0; k < 300; k++) {
+      renderMatch({ values: [1, 2], q: 'x', exp: 'x' }, document.getElementById('question-area'));
+      if (mt.a.every((p, i) => p === mt.b[i])) n++;
+    }
+    return n;
+  });
+  check('match: even a two-number set never starts lined up (300 tries)', aligned === 0, aligned + ' of 300');
+  await page.evaluate(() => goHome());
+
+  // two-digit numbers fit in the boxes
+  await startMatch(page, '10,20,30,40,50');
+  const fits = await page.evaluate(() => [...document.querySelectorAll('.match-item')].every(b => b.scrollWidth <= b.clientWidth + 1));
+  check('match: two-digit numerals fit inside their boxes', fits);
+  await page.evaluate(() => goHome());
+
+  // real touch input, like a phone (pointer events from a finger)
+  const mctx = await browser.newContext({ viewport: { width: 390, height: 800 }, hasTouch: true, isMobile: true });
+  const mp = await mctx.newPage();
+  await mp.goto(URL);
+  await startMatch(mp, '0,1,2,3,4');
+  const cdp = await mctx.newCDPSession(mp);
+  const [ax, ay] = await centerOf(mp, 'ma0'), [bx, by] = await centerOf(mp, 'mb2');
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: ax, y: ay, id: 1 }] });
+  for (const f of [0.25, 0.5, 0.75, 1]) await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: ax + (bx - ax) * f, y: ay + (by - ay) * f, id: 1 }] });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  check('match: dragging a line with a finger works on a phone', (await mp.evaluate(() => mt.links.get(0))) === 2, await mp.evaluate(() => JSON.stringify([...mt.links])));
+  check('match: dragging with a finger does not scroll the page', (await mp.evaluate(() => window.scrollY)) === 0);
+  await mctx.close();
 
   // ---------------------------------------------------------------
   console.log('\nNew questions and shuffled answers every time');
@@ -218,24 +374,28 @@ function check(name, ok, detail) {
     const issues = [];
     const strip = h => h.replace(/<[^>]+>/g, '').trim();
     const base = w => w.replace(/[\u064B-\u0652\u0670\u0640]/g, '').replace(/[أإآ]/g, 'ا');   // no vowel marks, plain alif
-    // digits: the Arabic-Indic digit string must equal the number
-    NUM.forEach(([v, dig, word]) => {
-      const n = [...dig].map(c => c.codePointAt(0) - 0x660).join('');
-      if (Number(n) !== v) issues.push(`digit ${dig} is not ${v}`);
-      if (!word.trim()) issues.push('empty word for ' + v);
+    // the Arabic numerals: toAr() must give the Arabic-Indic digits (U+0660-0669), left to right
+    NUM_VALUES.forEach(v => {
+      const expected = [...String(v)].map(c => String.fromCodePoint(0x660 + Number(c))).join('');
+      if (toAr(v) !== expected) issues.push(`toAr(${v}) is ${toAr(v)}, expected ${expected}`);
     });
-    // 11-19 = unit word + " عَشَر", tens end in ون
-    const unitWord = v => NUM.find(x => x[0] === v)[2];
-    for (let v = 11; v <= 19; v++) {
-      const w = NUM.find(x => x[0] === v)[2];
-      if (!w.endsWith('عَشَر')) issues.push(`${v} does not end with عَشَر`);
-      if (base(w.replace(/\s*عَشَر$/, '')).replace(/ة$/, '') !== base(unitWord(v - 10)).replace(/ة$/, '').replace(/ان$/, '')
-          && v !== 11 && v !== 12) issues.push(`${v}: unit part does not match ${v - 10}`);
-    }
-    for (let v = 20; v <= 90; v += 10) if (!base(NUM.find(x => x[0] === v)[2]).endsWith('ون')) issues.push(`${v} does not end in ون`);
-    // every number is unique
-    if (new Set(NUM.map(x => x[2])).size !== NUM.length) issues.push('two numbers share the same word');
-    if (new Set(NUM.map(x => x[3])).size !== NUM.length) issues.push('two numbers share the same Hebrew sound');
+    // exactly the numbers from the board: 0-9, 11-19 and the tens
+    const want = [...Array(10).keys(), ...Array.from({ length: 9 }, (_, i) => 11 + i), 10, 20, 30, 40, 50, 60, 70, 80, 90].sort((a, b) => a - b).join(',');
+    if ([...NUM_VALUES].sort((a, b) => a - b).join(',') !== want) issues.push('NUM_VALUES is not 0-9, 11-19 and the tens');
+    // the matching questions draw from pools: together they cover exactly the board's numbers, nothing outside it
+    const pools = Q_NUMS.filter(q => q.type === 'match').map(q => q.pool);
+    const covered = new Set(pools.flat());
+    NUM_VALUES.forEach(v => { if (!covered.has(v)) issues.push(`${v} is in no matching pool`); });
+    covered.forEach(v => { if (!NUM_VALUES.includes(v)) issues.push(`${v} is not on the board`); });
+    pools.forEach(pl => { if (new Set(pl).size !== pl.length) issues.push('a pool has a repeated number'); });
+    // study cards: the numeral on the front is the number on the back
+    Q_NUMS.filter(q => q.type === 'flipcards').forEach(q => q.cards.forEach(c => {
+      if (strip(c.front) !== toAr(Number(c.back.replace('= ', '')))) issues.push(`card ${strip(c.front)} does not show ${c.back}`);
+    }));
+    // Persian/Urdu digits (U+06F0-06F9) look different from Arabic ones: they must never appear
+    if (/[\u06F0-\u06F9]/.test(JSON.stringify(MISSIONS))) issues.push('Persian digits found');
+    // the Arabic number words were removed on purpose (the exam is about the numerals)
+    if (/ثَلَاثَة|خَمْسَة|عِشْرُون/.test(JSON.stringify(MISSIONS))) issues.push('Arabic number words are back');
     // "my": base + kasra + yaa
     NOUNS.forEach(([b, mine]) => { if (mine !== b + '\u0650\u064A') issues.push(`${mine} is not ${b} + ـِي`); });
     // letters: first-letter and contains-letter questions are true
@@ -253,17 +413,48 @@ function check(name, ok, detail) {
         q.opts.forEach((o, i) => { if (i !== q.ans && base(strip(o)).includes(letter)) issues.push(`wrong option also contains ${letter}: ${strip(o)}`); });
       }
     });
+    // ---- the content must match the first lesson of the Ministry's book (the spec is written out here on purpose) ----
+    // letters "ארז דוד" = alif, rā, zāy, dāl, wāw, dhāl, plus yā; dots: zāy and dhāl one above, yā two below, the rest none
+    const spec = { 'ا': 'בלי נקודות', 'ر': 'בלי נקודות', 'ز': 'נקודה אחת מעל', 'د': 'בלי נקודות', 'و': 'בלי נקודות', 'ذ': 'נקודה אחת מעל', 'ي': 'שתי נקודות מתחת' };
+    if (LET.map(l => l.ch).join('') !== 'ارزدوذي') issues.push('the letters are not ا ر ز د و ذ ي: ' + LET.map(l => l.ch).join(''));
+    if (ARAZ.map(i => LET[i].ch).join('') !== 'ارزدوذ') issues.push('"ארז דוד" is not ا ر ز د و ذ');
+    LET.forEach(l => { if (l.dots !== spec[l.ch]) issues.push(`dots of ${l.ch} should be "${spec[l.ch]}"`); });
+    const names = { 'ا': 'אלף', 'ر': 'רא', 'ز': 'זאי', 'د': 'דאל', 'و': 'ואו', 'ذ': 'ד׳אל', 'ي': 'יא' };
+    LET.forEach(l => { if (l.name !== names[l.ch]) issues.push(`name of ${l.ch} should be ${names[l.ch]}`); });
+    // the words on the lesson cards (and nothing else)
+    const cards = ['زَارَ', 'يَوْم', 'دَار', 'مُدِير', 'أَرْز', 'نُورِي', 'دَوْلَة'];
+    if (WORDS.map(w => w[0]).join('|') !== cards.join('|')) issues.push('the words are not the 7 cards of the lesson');
+    // "my": only nouns from the lesson's words (and يَد from the board)
+    NOUNS.forEach(([b]) => { if (![...cards, 'يَد'].includes(b)) issues.push(`${b} is not a word from the lesson`); });
+    // "which letter is in the word": the right one is in the word, the wrong ones are not
+    Q_WORDS.forEach(q => {
+      if (q.type !== 'choice' || !q.q.includes('איזו אות מופיעה במילה')) return;
+      const w = base((q.q.match(/<span class="ar[^"]*"[^>]*>([^<]+)<\/span>/) || [])[1]);
+      q.opts.forEach((o, i) => { const has = w.includes(strip(o)); if (has !== (i === q.ans)) issues.push(`letter ${strip(o)} ${has ? 'is' : 'is not'} in ${w}`); });
+    });
+    // syllables: the Arabic vowel mark matches the Hebrew vowel (fatha = pataḥ, kasra = ḥiriq) and the letter matches
+    const heLetter = { 'د': 'ד', 'ر': 'ר', 'و': 'ו', 'ز': 'ז' };
+    SYL.forEach(([ar, he]) => {
+      if (ar.includes('\u064E') !== he.includes('\u05B7')) issues.push(`${ar} and ${he}: fatha must be pataḥ`);
+      if (ar.includes('\u0650') !== he.includes('\u05B4')) issues.push(`${ar} and ${he}: kasra must be ḥiriq`);
+      if (he[0] !== heLetter[ar[0]]) issues.push(`${ar} and ${he}: different letters`);
+    });
+    // the Arabic vowel marks exist only as fatha/kasra here (the lesson has no other vowel yet)
+    // (the lesson word مُدِير has a damma inside it; that is fine, but no question is about it)
+    if (/[\u064F\u064B\u064C\u064D]/.test(JSON.stringify(Q_VOWELS).split(cards[3]).join(''))) issues.push('an unexpected vowel mark (damma/tanwin) in the vowels mission');
+    // letters that are NOT in lesson 1 must never be taught as lesson letters
+    if (/[بتثجحخ]/.test(LET.map(l => l.ch).join(''))) issues.push('a letter from outside lesson 1 is in LET');
     // letters: names and dots are consistent
     if (new Set(LET.map(l => l.name)).size !== LET.length) issues.push('two letters share a name');
     return issues;
   });
-  check('digits, number words, "my" forms and letter-in-word claims are consistent', content.length === 0, content.slice(0, 3).join(' | '));
+  check('Arabic numerals, matching pools, "my" forms and letter-in-word claims are consistent', content.length === 0, content.slice(0, 3).join(' | '));
 
   // ---------------------------------------------------------------
   console.log('\nSound');
   check('audio unlocked after first click', (await page.evaluate(() => audioCtx && audioCtx.state)) === 'running');
   const count = () => page.evaluate(() => window.__osc.length);
-  await page.locator('.mission-card').nth(2).click();
+  await page.locator('.mission-card').nth(0).click();
   let before = await count();
   // find a choice/tf question to hear the difference between right and wrong
   async function nextSimple() {
@@ -285,7 +476,7 @@ function check(name, ok, detail) {
   await backHome();
   await page.locator('#sound-btn').click();
   check('mute button switches to muted', (await page.locator('#sound-btn').innerText()).includes('🔇'));
-  await page.locator('.mission-card').nth(3).click();
+  await page.locator('.mission-card').nth(1).click();
   await nextSimple();
   before = await count();
   await answerQuestion(true);

@@ -669,6 +669,32 @@
   .tf-statement .ar { font-size: 1.5em; }
   .lesson-box .ar, .learn-note .ar, .feedback-box .ar { font-size: 1.25em; line-height: 1.6; }
   .learn-note .ar.letter, .feedback-box .ar.letter { font-size: 1.6em; line-height: 1.3; }
+  .draw-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .draw-btn {
+    flex: 1; padding: 12px 6px; border-radius: 12px; border: 1.5px solid rgba(255,255,255,0.2);
+    background: rgba(255,255,255,0.06); color: var(--text); font-family: 'Heebo', sans-serif; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  .draw-btn.primary { background: linear-gradient(135deg, var(--accent1), var(--accent2)); border: none; color: white; }
+  .match-head { display: flex; justify-content: space-between; padding: 0 8px; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
+  .match-head span { width: 38%; text-align: center; }
+  .match-wrap { position: relative; display: flex; justify-content: space-between; padding: 2px 6px; touch-action: none; user-select: none; }
+  .match-col { display: flex; flex-direction: column; gap: 10px; width: 38%; }
+  .match-lines { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+  .match-lines line { stroke-width: 4; stroke-linecap: round; }
+  .match-lines .l-draft { stroke: #c084fc; }
+  .match-lines .l-draft.dash { stroke-dasharray: 2 8; }
+  .match-lines .l-ok { stroke: var(--green); }
+  .match-lines .l-bad { stroke: var(--red); }
+  .match-item {
+    height: 58px; border-radius: 14px; border: 2px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.07);
+    color: var(--text); font-family: 'Heebo', sans-serif; font-size: 30px; font-weight: 700; cursor: pointer;
+    touch-action: none; user-select: none; transition: border-color 0.15s, background 0.15s; position: relative; z-index: 1;
+  }
+  .match-item .ar { font-size: 1.25em; line-height: 1; }
+  .match-item.selected { border-color: var(--gold); background: rgba(245,158,11,0.18); }
+  .match-item.linked { border-color: var(--accent1); background: rgba(124,58,237,0.22); }
+  .match-item.ok { border-color: var(--green); background: rgba(16,185,129,0.2); }
+  .match-item.bad { border-color: var(--red); background: rgba(239,68,68,0.15); }
   .learn-note {
     margin-top: 12px;
     padding: 12px 14px;
@@ -811,286 +837,306 @@ function take(list, start, n, skip) {
   return out;
 }
 
-// ===================== 1. LETTERS: alif .. dal + ya =====================
+// ===================== 1. LETTERS of lesson 1: "ארז דוד" (alif, rā, zāy, dāl, wāw, dhāl) + yā =====================
+// The first lesson teaches six letters, remembered as "ארז דוד" (the 6 letters in this order), and yā is learned with them.
 const LET = [
-  { ch: 'ا', name: 'אלף',   dots: 'בלי נקודות' },
-  { ch: 'ب', name: 'בא',    dots: 'נקודה אחת מתחת' },
-  { ch: 'ت', name: 'תא',    dots: 'שתי נקודות מעל' },
-  { ch: 'ث', name: 'ת׳א',   dots: 'שלוש נקודות מעל' },
-  { ch: 'ج', name: 'ג׳ים',  dots: 'נקודה אחת מתחת' },
-  { ch: 'ح', name: 'חא',    dots: 'בלי נקודות' },
-  { ch: 'خ', name: 'ח׳א',   dots: 'נקודה אחת מעל' },
-  { ch: 'د', name: 'דאל',   dots: 'בלי נקודות' },
-  { ch: 'ي', name: 'יא',    dots: 'שתי נקודות מתחת' },
+  { ch: 'ا', name: 'אלף',  dots: 'בלי נקודות',      sound: 'א (אָ)' },
+  { ch: 'ر', name: 'רא',   dots: 'בלי נקודות',      sound: 'ר' },
+  { ch: 'ز', name: 'זאי',  dots: 'נקודה אחת מעל',   sound: 'ז' },
+  { ch: 'د', name: 'דאל',  dots: 'בלי נקודות',      sound: 'ד' },
+  { ch: 'و', name: 'ואו',  dots: 'בלי נקודות',      sound: 'ו' },
+  { ch: 'ذ', name: 'ד׳אל', dots: 'נקודה אחת מעל',   sound: 'ד׳ (כמו th באנגלית ב-this)' },
+  { ch: 'ي', name: 'יא',   dots: 'שתי נקודות מתחת', sound: 'י' },
 ];
-const DOTS = ['בלי נקודות', 'נקודה אחת מתחת', 'נקודה אחת מעל', 'שתי נקודות מעל', 'שתי נקודות מתחת', 'שלוש נקודות מעל'];
+const DOTS = ['בלי נקודות', 'נקודה אחת מעל', 'נקודה אחת מתחת', 'שתי נקודות מעל', 'שתי נקודות מתחת'];
 const letterCards = list => list.map(i => ({ front: AB(LET[i].ch), back: `${LET[i].name} · ${LET[i].dots}` }));
+const ARAZ = [0, 1, 2, 3, 4, 5];   // ארז דוד = ا ر ز د و ذ
 
 const Q_LETTERS = [];
 LET.forEach((l, i) => {
   // letter -> name
-  Q_LETTERS.push(mc1(`מה שם האות ${AB(l.ch)}?`, l.name, [1, 3, 5].map(o => LET[(i + o) % 9].name),
+  Q_LETTERS.push(mc1(`מה שם האות ${AB(l.ch)}?`, l.name, [1, 3, 5].map(o => LET[(i + o) % 7].name),
     `האות ${AR(l.ch)} נקראת ${l.name}. ${l.dots}.`));
   // letter -> where are the dots
-  const wrongDots = take(DOTS, i, 3, [l.dots]);
-  Q_LETTERS.push(mc1(`איפה הנקודות של האות ${AB(l.ch)} (${l.name})?`, l.dots, wrongDots,
+  Q_LETTERS.push(mc1(`איפה הנקודות של האות ${AB(l.ch)} (${l.name})?`, l.dots, take(DOTS, i, 3, [l.dots]),
     `לאות ${AR(l.ch)} (${l.name}): ${l.dots}.`));
-});
-// name -> letter
-[0, 1, 4, 7, 8, 2].forEach(i => {
-  const l = LET[i];
-  Q_LETTERS.push(mc1(`איזו אות נקראת "${l.name}"?`, AL(l.ch), [2, 4, 6].map(o => AL(LET[(i + o) % 9].ch)),
+  // name -> letter
+  Q_LETTERS.push(mc1(`איזו אות נקראת "${l.name}"?`, AL(l.ch), [2, 4, 5].map(o => AL(LET[(i + o) % 7].ch)),
     `${l.name} היא האות ${AR(l.ch)}. ${l.dots}.`));
 });
-// sounds
+// sounds (the wrong letters never sound alike: د and ذ are never offered together)
 [
-  ['ب', 'ב', ['ت', 'د', 'ي']],
-  ['ت', 'ת', ['ب', 'د', 'ج']],
-  ['د', 'ד', ['ب', 'ت', 'ي']],
-  ['ي', 'י', ['ب', 'ت', 'د']],
-  ['ا', 'א (אָ)', ['ب', 'ت', 'ي']],
-  ['ج', 'ג׳ (כמו ב"ג׳ירפה")', ['ب', 'ت', 'د']],
+  ['ا', 'א (אָ)', ['ر', 'ز', 'د']],
+  ['ر', 'ר', ['ز', 'د', 'و']],
+  ['ز', 'ז', ['ر', 'د', 'و']],
+  ['د', 'ד', ['ر', 'ز', 'و']],
+  ['و', 'ו', ['ر', 'ز', 'د']],
+  ['ي', 'י', ['ر', 'ز', 'د']],
+  ['ذ', 'ד׳ (כמו th באנגלית ב-this)', ['ر', 'ز', 'و']],
 ].forEach(([ch, heb, wrong]) => {
   Q_LETTERS.push(mc1(`איזו אות נשמעת כמו ${heb}?`, AL(ch), wrong.map(AL), `${AR(ch)} נשמעת כמו ${heb}.`));
 });
-// which letter comes next
-[['ا', 'ب'], ['ب', 'ت'], ['ت', 'ث'], ['ث', 'ج'], ['ج', 'ح'], ['ح', 'خ'], ['خ', 'د']].forEach(([a, b], k) => {
-  const pool = LET.map(x => x.ch).filter(c => c !== a && c !== b);
-  Q_LETTERS.push(mc1(`איזו אות באה מיד אחרי ${AB(a)} באלף-בית הערבי?`, AL(b), take(pool, k, 3, []).map(AL),
-    `הסדר: ${LET.slice(0, 8).map(x => x.ch).join(' ')}. אחרי ${AR(a)} באה ${AR(b)}.`));
+// which letter comes next in "ארז דוד"
+[[0, 1], [1, 2], [2, 3], [3, 4], [4, 5]].forEach(([a, b], k) => {
+  const others = ARAZ.filter(i => i !== a && i !== b).map(i => LET[i].ch);
+  Q_LETTERS.push(mc1(`איזו אות באה אחרי ${AB(LET[a].ch)} ב"ארז דוד"?`, AL(LET[b].ch), take(others, k, 3, []).map(AL),
+    `"ארז דוד": ${ARAZ.map(i => LET[i].ch).join(' ')}. אחרי ${AR(LET[a].ch)} באה ${AR(LET[b].ch)}.`));
 });
-// true / false about dots
+// which letter belongs to "ארז דוד"
+[
+  ['ز', ['ب', 'ت', 'ج']],
+  ['ر', ['ك', 'ل', 'م']],
+  ['و', ['س', 'ش', 'ب']],
+].forEach(([ch, wrong], k) => {
+  const prompts = [
+    'איזו מהאותיות האלה היא אחת מהאותיות של "ארז דוד"?',
+    'איזו מבין האותיות האלה נלמדה בשיעור הראשון ("ארז דוד")?',
+    'איזו מהאותיות הבאות שייכת ל"ארז דוד"?',
+  ];
+  Q_LETTERS.push(mc1(prompts[k], AL(ch), wrong.map(AL),
+    `${AR(ch)} היא אחת מהאותיות של "ארז דוד": ${ARAZ.map(i => AR(LET[i].ch)).join(' ')}.`));
+});
+// the look-alikes
 Q_LETTERS.push(
-  tf(`לאות ${AR('ت')} יש שתי נקודות מעל`, true, `נכון! ${AR('ت')} (תא) – שתי נקודות מעל.`),
-  tf(`לאות ${AR('ب')} יש שתי נקודות מתחת`, false, `לא נכון! ל${AR('ب')} (בא) נקודה אחת מתחת. שתי נקודות מתחת יש לאות ${AR('ي')} (יא).`),
+  tf(`לאות ${AR('ز')} (זאי) יש נקודה אחת מעל`, true, `נכון! ${AR('ز')} היא ${AR('ر')} עם נקודה מעל.`),
+  tf(`לאות ${AR('ر')} (רא) יש נקודה`, false, `לא נכון! ${AR('ر')} בלי נקודות. ${AR('ز')} (זאי) היא ${AR('ر')} עם נקודה מעל.`),
+  tf(`לאות ${AR('ذ')} (ד׳אל) יש נקודה אחת מעל`, true, `נכון! ${AR('ذ')} היא ${AR('د')} עם נקודה מעל.`),
+  tf(`לאות ${AR('د')} (דאל) יש נקודה אחת מעל`, false, `לא נכון! ${AR('د')} בלי נקודות. ${AR('ذ')} (ד׳אל) היא ${AR('د')} עם נקודה מעל.`),
+  tf(`ההבדל בין ${AR('د')} ל-${AR('ذ')} הוא נקודה אחת מעל`, true, `נכון! ${AR('ذ')} = ${AR('د')} + נקודה מעל.`),
+  tf(`ההבדל בין ${AR('ر')} ל-${AR('ز')} הוא נקודה אחת מעל`, true, `נכון! ${AR('ز')} = ${AR('ر')} + נקודה מעל.`),
   tf(`לאות ${AR('ي')} (יא) יש שתי נקודות מתחת`, true, `נכון! ${AR('ي')} – שתי נקודות מתחת.`),
-  tf(`לאות ${AR('ث')} יש שלוש נקודות מעל`, true, `נכון! ${AR('ث')} (ת׳א) – שלוש נקודות מעל.`),
-  tf(`לאות ${AR('ح')} יש נקודה אחת`, false, `לא נכון! ${AR('ح')} (חא) בלי נקודות. ${AR('ج')} – נקודה אחת מתחת, ${AR('خ')} – נקודה אחת מעל.`),
-  tf(`האות ${AR('ا')} (אלף) היא אות בלי נקודות`, true, `נכון! אלף ${AR('ا')} בלי נקודות.`),
-  tf(`לאות ${AR('د')} (דאל) יש נקודה אחת מעל`, false, `לא נכון! ${AR('د')} (דאל) בלי נקודות.`),
-  tf(`האותיות ${AR('ج')} ו-${AR('خ')} נבדלות במקום הנקודה`, true, `נכון! ב${AR('ج')} הנקודה מתחת, וב${AR('خ')} היא מעל. ${AR('ح')} בלי נקודה.`)
+  tf(`לאות ${AR('و')} (ואו) יש נקודה`, false, `לא נכון! ${AR('و')} בלי נקודות.`)
 );
 Q_LETTERS.push(
-  { type: 'order', q: 'סדרי לפי סדר האלף-בית הערבי (מ-בא עד חא):', items: ['ب', 'ت', 'ث', 'ج', 'ح'].map(AL),
-    exp: 'בא, תא, ת׳א, ג׳ים, חא' },
-  { type: 'order', q: 'סדרי לפי סדר האלף-בית הערבי (מ-ג׳ים עד דאל):', items: ['ج', 'ح', 'خ', 'د'].map(AL),
-    exp: 'ג׳ים, חא, ח׳א, דאל' },
-  { type: 'order', q: 'סדרי לפי סדר האלף-בית הערבי (מ-אלף עד ת׳א):', items: ['ا', 'ب', 'ت', 'ث'].map(AL),
-    exp: 'אלף, בא, תא, ת׳א' },
-  { type: 'sort', q: 'אילו אותיות עם נקודות ואילו בלי?', bucketA: 'עם נקודות', bucketB: 'בלי נקודות',
-    items: [{ text: AL('ب'), bucket: 0 }, { text: AL('ا'), bucket: 1 }, { text: AL('ج'), bucket: 0 }, { text: AL('د'), bucket: 1 }],
-    exp: `עם נקודות: ${AR('ب')} ${AR('ج')}. בלי נקודות: ${AR('ا')} ${AR('د')} (וגם ${AR('ح')}).` },
-  { type: 'sort', q: 'איפה הנקודות?', bucketA: 'מעל', bucketB: 'מתחת',
-    items: [{ text: AL('ت'), bucket: 0 }, { text: AL('خ'), bucket: 0 }, { text: AL('ب'), bucket: 1 }, { text: AL('ي'), bucket: 1 }],
-    exp: `מעל: ${AR('ت')} (שתיים) ${AR('خ')} (אחת). מתחת: ${AR('ب')} (אחת) ${AR('ي')} (שתיים).` },
-  { type: 'flipcards', q: 'הכירי את האותיות – הפכי כדי לראות:', cards: letterCards([0, 1, 2, 3]) },
-  { type: 'flipcards', q: 'עוד אותיות – הפכי כדי לראות:', cards: letterCards([4, 5, 6, 7, 8]) }
+  { type: 'order', q: 'סדרי את האותיות של "ארז דוד":', items: ARAZ.map(i => AL(LET[i].ch)),
+    exp: 'אלף, רא, זאי, דאל, ואו, ד׳אל – "ארז דוד"' },
+  { type: 'order', q: 'סדרי את תחילת "ארז דוד" (א-ר-ז):', items: [0, 1, 2].map(i => AL(LET[i].ch)),
+    exp: 'אלף, רא, זאי – "אר-ז"' },
+  { type: 'order', q: 'סדרי את סוף "ארז דוד" (ד-ו-ד׳):', items: [3, 4, 5].map(i => AL(LET[i].ch)),
+    exp: 'דאל, ואו, ד׳אל – "דוד׳"' },
+  { type: 'sort', q: 'אילו אותיות עם נקודה ואילו בלי?', bucketA: 'עם נקודה', bucketB: 'בלי נקודה',
+    items: [{ text: AL('ز'), bucket: 0 }, { text: AL('ر'), bucket: 1 }, { text: AL('ذ'), bucket: 0 }, { text: AL('د'), bucket: 1 }],
+    exp: `עם נקודה: ${AR('ز')} ${AR('ذ')}. בלי נקודה: ${AR('ر')} ${AR('د')} (וגם ${AR('ا')} ${AR('و')}).` },
+  { type: 'sort', q: 'מי מ"ארז דוד" ומי לא?', bucketA: 'מ"ארז דוד"', bucketB: 'לא מ"ארז דוד"',
+    items: [{ text: AL('ر'), bucket: 0 }, { text: AL('و'), bucket: 0 }, { text: AL('ب'), bucket: 1 }, { text: AL('ت'), bucket: 1 }],
+    exp: `${AR('ر')} ו-${AR('و')} הן מ"ארז דוד". ${AR('ب')} ו-${AR('ت')} לא נלמדו בשיעור הזה.` },
+  { type: 'flipcards', q: 'הכירי את האותיות – הפכי כדי לראות:', cards: letterCards([0, 1, 2]) },
+  { type: 'flipcards', q: 'עוד אותיות – הפכי כדי לראות:', cards: letterCards([3, 4, 5, 6]) }
 );
 
-// ===================== 2. WORDS =====================
-// [arabic, hebrew meaning, group (words with the same meaning never appear as wrong answers of each other)]
+// ===================== 2. WORDS from the lesson cards =====================
+// [arabic, hebrew meaning (null = she only has to find the letters in it)]
 const WORDS = [
-  ['بَيْت', 'בית', 'house'], ['دَار', 'בית', 'house'], ['بَاب', 'דלת', 'door'], ['يَد', 'יד', 'hand'],
-  ['أَب', 'אבא', 'father'], ['أَخ', 'אח', 'brother'], ['كِتَاب', 'ספר', 'book'], ['قَلَم', 'עט', 'pen'],
-  ['وَلَد', 'ילד', 'boy'], ['بِنْت', 'ילדה', 'girl'], ['تِين', 'תאנים', 'figs'], ['ثَوْب', 'בגד', 'garment'],
-  ['جَمَل', 'גמל', 'camel'], ['خُبْز', 'לחם', 'bread'], ['حَلِيب', 'חלב', 'milk'],
+  ['زَارَ', 'ביקר'], ['يَوْم', 'יום'], ['دَار', 'בית'], ['مُدِير', 'מנהל'], ['أَرْز', 'אורז'], ['نُورِي', null], ['دَوْلَة', 'מדינה'],
 ];
-const wordsOtherGroup = (i, start, n, uniqueHebrew) => {
-  const g = WORDS[i][2];
-  const idx = WORDS.map((_, k) => k).filter(k => WORDS[k][2] !== g);
-  const out = [], seen = new Set();
-  for (let k = 0; out.length < n && k < idx.length * 2; k++) {
-    const w = WORDS[idx[(start + k) % idx.length]];
-    const key = uniqueHebrew ? w[1] : w[0];
-    if (!seen.has(key)) { seen.add(key); out.push(w); }
-  }
-  return out;
-};
-
+const withMeaning = WORDS.filter(w => w[1]);
 const Q_WORDS = [];
-WORDS.forEach(([ar, he], i) => {
-  Q_WORDS.push(mc1(`מה פירוש המילה ${AB(ar)}?`, he, wordsOtherGroup(i, i * 2, 3, true).map(w => w[1]),
+withMeaning.forEach(([ar, he], i) => {
+  const others = withMeaning.filter(w => w[0] !== ar);
+  Q_WORDS.push(mc1(`מה פירוש המילה ${AB(ar)}?`, he, take(others, i, 3, []).map(w => w[1]),
     `${AR(ar)} = ${he}.`));
-});
-[0, 2, 3, 4, 6, 7, 8, 13, 12].forEach((i, k) => {
-  const [ar, he] = WORDS[i];
-  Q_WORDS.push(mc1(`איך אומרים "${he}" בערבית?`, AR(ar), wordsOtherGroup(i, k * 3 + 1, 3).map(w => AR(w[0])),
+  Q_WORDS.push(mc1(`איך אומרים "${he}" בערבית?`, AR(ar), take(WORDS.filter(w => w[0] !== ar), i * 2, 3, []).map(w => AR(w[0])),
     `${he} = ${AR(ar)}.`));
 });
-// first letter of a word
-[['بَاب', 'ب'], ['تِين', 'ت'], ['ثَوْب', 'ث'], ['يَد', 'ي'], ['جَمَل', 'ج'], ['خُبْز', 'خ'], ['حَلِيب', 'ح']].forEach(([w, c], k) => {
-  const pool = LET.map(x => x.ch).filter(x => x !== c);
-  Q_WORDS.push(mc1(`באיזו אות מתחילה המילה ${AB(w)}?`, AL(c), take(pool, k * 2, 3, []).map(AL),
-    `${AR(w)} מתחילה באות ${AR(c)} (${LET.find(x => x.ch === c).name}).`));
-});
-// which word contains a letter
+// which letter appears in the word (the wrong letters are not in it)
 [
-  ['ث', 'ثَوْب', ['بَاب', 'يَد', 'قَلَم']],
-  ['ج', 'جَمَل', ['بَاب', 'يَد', 'قَلَم']],
-  ['خ', 'خُبْز', ['بَاب', 'يَد', 'قَلَم']],
-  ['ح', 'حَلِيب', ['بَاب', 'يَد', 'قَلَم']],
+  ['زَارَ', 'ز', ['و', 'ذ', 'ي']],
+  ['يَوْم', 'ي', ['ز', 'ذ', 'ر']],
+  ['دَار', 'د', ['ز', 'و', 'ذ']],
+  ['مُدِير', 'ي', ['ز', 'و', 'ذ']],
+  ['أَرْز', 'ز', ['د', 'و', 'ذ']],
+  ['نُورِي', 'و', ['ز', 'د', 'ذ']],
+  ['دَوْلَة', 'و', ['ز', 'ر', 'ذ']],
+].forEach(([w, c, wrong]) => {
+  Q_WORDS.push(mc1(`איזו אות מופיעה במילה ${AB(w)}?`, AL(c), wrong.map(AL), `האות ${AR(c)} (${LET.find(x => x.ch === c).name}) מופיעה במילה ${AR(w)}.`));
+});
+// which word contains the letter (the wrong words do not contain it)
+[
+  ['ز', 'زَارَ', ['يَوْم', 'مُدِير', 'دَوْلَة']],
+  ['ي', 'مُدِير', ['دَار', 'أَرْز', 'دَوْلَة']],
+  ['د', 'دَار', ['يَوْم', 'أَرْز', 'نُورِي']],
+  ['و', 'دَوْلَة', ['دَار', 'أَرْز', 'زَارَ']],
 ].forEach(([c, w, wrong]) => {
-  Q_WORDS.push(mc1(`באיזו מילה מופיעה האות ${AB(c)}?`, AR(w), wrong.map(AR),
-    `האות ${AR(c)} מופיעה במילה ${AR(w)}.`));
+  Q_WORDS.push(mc1(`באיזו מילה מופיעה האות ${AB(c)}?`, AR(w), wrong.map(AR), `האות ${AR(c)} מופיעה במילה ${AR(w)}.`));
+});
+// first letter of the word
+[['زَارَ', 'ز'], ['يَوْم', 'ي'], ['دَار', 'د'], ['دَوْلَة', 'د'], ['أَرْز', 'ا']].forEach(([w, c], k) => {
+  const pool = ARAZ.map(i => LET[i].ch).filter(x => x !== c);
+  Q_WORDS.push(mc1(`באיזו אות מתחילה המילה ${AB(w)}?`, AL(c), take(pool, k, 3, []).map(AL),
+    c === 'ا' ? `${AR(w)} מתחילה באלף ${AR('ا')} (עם סימן ההמזה ${AR('أ')}).` : `${AR(w)} מתחילה באות ${AR(c)} (${LET.find(x => x.ch === c).name}).`));
 });
 Q_WORDS.push(
-  tf(`${AR('بَيْت')} פירושו "דלת"`, false, `לא נכון! ${AR('بَيْت')} = בית. דלת = ${AR('بَاب')}.`),
-  tf(`${AR('يَد')} פירושו "יד"`, true, `נכון! ${AR('يَد')} = יד.`),
-  tf(`${AR('كِتَاب')} פירושו "ספר"`, true, `נכון! ${AR('كِتَاب')} = ספר.`),
-  tf(`${AR('قَلَم')} פירושו "ילד"`, false, `לא נכון! ${AR('قَلَم')} = עט. ילד = ${AR('وَلَد')}.`),
-  tf(`${AR('خُبْز')} פירושו "לחם"`, true, `נכון! ${AR('خُبْز')} = לחם.`),
-  tf(`${AR('بِنْت')} פירושו "ילד"`, false, `לא נכון! ${AR('بِنْت')} = ילדה. ילד = ${AR('وَلَد')}.`),
-  tf(`${AR('أَب')} פירושו "אבא"`, true, `נכון! ${AR('أَب')} = אבא.`),
-  tf(`${AR('جَمَل')} פירושו "חלב"`, false, `לא נכון! ${AR('جَمَل')} = גמל. חלב = ${AR('حَلِيب')}.`),
-  { type: 'sort', q: 'אנשים או חפצים?', bucketA: 'אנשים', bucketB: 'חפצים',
-    items: [{ text: AR('أَب'), bucket: 0 }, { text: AR('وَلَد'), bucket: 0 }, { text: AR('قَلَم'), bucket: 1 }, { text: AR('كِتَاب'), bucket: 1 }],
-    exp: `אנשים: ${AR('أَب')} (אבא) ${AR('وَلَد')} (ילד). חפצים: ${AR('قَلَم')} (עט) ${AR('كِتَاب')} (ספר).` },
-  { type: 'sort', q: 'אוכל או לא אוכל?', bucketA: 'אוכל ושתייה', bucketB: 'לא אוכל',
-    items: [{ text: AR('خُبْز'), bucket: 0 }, { text: AR('حَلِيب'), bucket: 0 }, { text: AR('بَاب'), bucket: 1 }, { text: AR('يَد'), bucket: 1 }],
-    exp: `אוכל ושתייה: ${AR('خُبْز')} (לחם) ${AR('حَلِيب')} (חלב). לא אוכל: ${AR('بَاب')} (דלת) ${AR('يَد')} (יד).` }
+  tf(`${AR('زَارَ')} פירושו "ביקר"`, true, `נכון! ${AR('زَارَ')} = ביקר.`),
+  tf(`${AR('يَوْم')} פירושו "לילה"`, false, `לא נכון! ${AR('يَوْم')} = יום.`),
+  tf(`${AR('دَار')} פירושו "בית"`, true, `נכון! ${AR('دَار')} = בית.`),
+  tf(`${AR('مُدِير')} פירושו "מורה"`, false, `לא נכון! ${AR('مُدِير')} = מנהל.`),
+  tf(`${AR('أَرْز')} פירושו "אורז"`, true, `נכון! ${AR('أَرْز')} = אורז.`),
+  tf(`${AR('دَوْلَة')} פירושו "מדינה"`, true, `נכון! ${AR('دَوْلَة')} = מדינה.`),
+  tf(`${AR('دَار')} פירושו "יום"`, false, `לא נכון! ${AR('دَار')} = בית. יום = ${AR('يَوْم')}.`),
+  tf(`במילה ${AR('يَوْم')} מופיעה האות ${AR('ي')}`, true, `נכון! ${AR('يَوْم')} מתחילה ב-${AR('ي')} (יא).`),
+  { type: 'sort', q: 'באילו מילים יש את האות ר (רא)?', bucketA: 'יש ר', bucketB: 'אין ר',
+    items: [{ text: AR('دَار'), bucket: 0 }, { text: AR('يَوْم'), bucket: 1 }, { text: AR('أَرْز'), bucket: 0 }, { text: AR('دَوْلَة'), bucket: 1 }],
+    exp: `יש ${AR('ر')}: ${AR('دَار')} ${AR('أَرْز')}. אין: ${AR('يَوْم')} ${AR('دَوْلَة')}.` },
+  { type: 'sort', q: 'באילו מילים יש את האות ד (דאל)?', bucketA: 'יש ד', bucketB: 'אין ד',
+    items: [{ text: AR('دَار'), bucket: 0 }, { text: AR('يَوْم'), bucket: 1 }, { text: AR('دَوْلَة'), bucket: 0 }, { text: AR('أَرْز'), bucket: 1 }],
+    exp: `יש ${AR('د')}: ${AR('دَار')} ${AR('دَوْلَة')}. אין: ${AR('يَوْم')} ${AR('أَرْز')}.` },
+  { type: 'flipcards', q: 'מילים משיעור 1 – הפכי כדי לראות:', cards: [['زَارَ', 'ביקר'], ['يَوْم', 'יום'], ['دَار', 'בית']].map(([a, h]) => ({ front: AB(a), back: h })) },
+  { type: 'flipcards', q: 'עוד מילים – הפכי כדי לראות:', cards: [['مُدِير', 'מנהל'], ['أَرْز', 'אורז'], ['دَوْلَة', 'מדינה']].map(([a, h]) => ({ front: AB(a), back: h })) }
 );
 
-// ===================== 3. NUMBERS =====================
-// [value, arabic digit, arabic word, how it sounds (Hebrew letters, approximate)]
-const NUM = [
-  [0, '٠', 'صِفْر', 'סִפְר'], [1, '١', 'وَاحِد', 'ואחִד'], [2, '٢', 'اِثْنَان', 'אִתְנאן'], [3, '٣', 'ثَلَاثَة', 'תלאתה'],
-  [4, '٤', 'أَرْبَعَة', 'ארבעה'], [5, '٥', 'خَمْسَة', 'חמסה'], [6, '٦', 'سِتَّة', 'סִתָּה'], [7, '٧', 'سَبْعَة', 'סבעה'],
-  [8, '٨', 'ثَمَانِيَة', 'תמאניה'], [9, '٩', 'تِسْعَة', 'תסעה'], [10, '١٠', 'عَشَرَة', 'עשרה'],
-  [11, '١١', 'أَحَدَ عَشَر', 'אחדא עשר'], [12, '١٢', 'اِثْنَا عَشَر', 'אתנא עשר'], [13, '١٣', 'ثَلَاثَةَ عَشَر', 'תלאתה עשר'],
-  [14, '١٤', 'أَرْبَعَةَ عَشَر', 'ארבעה עשר'], [15, '١٥', 'خَمْسَةَ عَشَر', 'חמסה עשר'], [16, '١٦', 'سِتَّةَ عَشَر', 'סתה עשר'],
-  [17, '١٧', 'سَبْعَةَ عَشَر', 'סבעה עשר'], [18, '١٨', 'ثَمَانِيَةَ عَشَر', 'תמאניה עשר'], [19, '١٩', 'تِسْعَةَ عَشَر', 'תסעה עשר'],
-  [20, '٢٠', 'عِشْرُون', 'עשרון'], [30, '٣٠', 'ثَلَاثُون', 'תלאתון'], [40, '٤٠', 'أَرْبَعُون', 'ארבעון'],
-  [50, '٥٠', 'خَمْسُون', 'חמסון'], [60, '٦٠', 'سِتُّون', 'סתון'], [70, '٧٠', 'سَبْعُون', 'סבעון'],
-  [80, '٨٠', 'ثَمَانُون', 'תמאנון'], [90, '٩٠', 'تِسْعُون', 'תסעון'],
+// ===================== 3. NUMBERS: join each Arabic numeral to the normal number =====================
+// Arabic numerals look different from ours: ٠ ١ ٢ ٣ ٤ ٥ ٦ ٧ ٨ ٩ . Multi-digit numbers are written left to right, like ours.
+const AR_DIGITS = '٠١٢٣٤٥٦٧٨٩';
+const toAr = n => String(n).replace(/\d/g, d => AR_DIGITS[d]);
+// the numbers on the board: 0-9, 11-19 and the tens
+const NUM_VALUES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 10, 20, 30, 40, 50, 60, 70, 80, 90];
+// the digits that are easy to mix up with ours
+const DIGIT_TIPS = {
+  0: 'האפס בערבית (٠) הוא נקודה קטנה – לא עיגול!',
+  1: 'האחד (١) הוא קו ישר, בלי "דגל" כמו שלנו.',
+  5: 'החמש (٥) נראית כמו עיגול – כמו האפס שלנו.',
+  6: 'השש (٦) נראית כמו 7 שלנו.',
+  7: 'השבע (٧) נראית כמו האות V.',
+  8: 'השמונה (٨) נראית כמו V הפוכה (Λ).',
+  9: 'התשע (٩) נראית כמו 9 שלנו.',
+};
+const tipsFor = values => [...new Set(values.flatMap(n => [...String(n)]))].sort().map(d => DIGIT_TIPS[d]).filter(Boolean)
+  .map(t => t.replace(/\(([٠-٩])\)/, (m, g) => `(${AR(g)})`)).join(' ');
+const leftToRight = values => values.some(n => String(n).length > 1) ? ' מספרים עם כמה ספרות כותבים משמאל לימין, כמו אצלנו: ' + AR('١٣') + ' = 13.' : '';
+
+// Nothing is fixed in advance: every time a matching question is shown, it picks 5 NEW random numbers from its group
+// (and the game shuffles both columns). A group is just the range the numbers come from.
+const GROUPS = [
+  { name: 'ספרות 0–9', list: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], slots: 4 },
+  { name: 'המספרים 11–19', list: [11, 12, 13, 14, 15, 16, 17, 18, 19], slots: 3 },
+  { name: 'העשרות', list: [10, 20, 30, 40, 50, 60, 70, 80, 90], slots: 3 },
+  { name: 'מכל המספרים', list: NUM_VALUES, slots: 3 },
 ];
-const N = v => NUM.find(x => x[0] === v);
-const nums = (...vs) => vs.map(N);
-// numeric multiple choice with ascending (fixed) options
-function numChoice(q, correct, wrong, exp) {
-  const all = [correct, ...wrong].sort((a, b) => a - b);
-  return mc(q, all.map(String), all.indexOf(correct), exp, true);
-}
 const Q_NUMS = [];
-// Arabic digit -> normal number
-[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].forEach(v => {
-  const near = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].filter(x => x !== v).sort((a, b) => Math.abs(a - v) - Math.abs(b - v)).slice(0, 3);
-  Q_NUMS.push(numChoice(`איזה מספר כתוב כאן? ${AB(N(v)[1])}`, v, near, `${AR(N(v)[1])} = ${v}`));
+GROUPS.forEach(g => {
+  for (let k = 0; k < g.slots; k++) {
+    Q_NUMS.push({ type: 'match', group: g.name, slot: k, pool: g.list, count: 5, q: `חברי בקו כל ספרה ערבית למספר הרגיל – ${g.name}` });
+  }
 });
-// normal number -> Arabic digit (how to write)
-[2, 4, 6, 7, 8].forEach(v => {
-  const near = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].filter(x => x !== v).sort((a, b) => Math.abs(a - v) - Math.abs(b - v)).slice(0, 3);
-  Q_NUMS.push(mc1(`איך כותבים ${v} בספרות ערביות?`, AR(N(v)[1]), near.map(x => AR(N(x)[1])), `${v} = ${AR(N(v)[1])}`));
-});
-// Arabic word -> number
-[1, 3, 5, 6, 8, 9].forEach(v => {
-  const near = [1, 2, 3, 4, 5, 6, 7, 8, 9].filter(x => x !== v).sort((a, b) => Math.abs(a - v) - Math.abs(b - v)).slice(0, 3);
-  Q_NUMS.push(numChoice(`איזה מספר הוא ${AB(N(v)[2])}?`, v, near, `${AR(N(v)[2])} = ${v}`));
-});
-// number -> how to write it in words
-[2, 3, 5, 6, 7, 9].forEach(v => {
-  const near = [1, 2, 3, 4, 5, 6, 7, 8, 9].filter(x => x !== v).sort((a, b) => Math.abs(a - v) - Math.abs(b - v)).slice(0, 3);
-  Q_NUMS.push(mc1(`איך כותבים במילים בערבית את המספר ${v} (${AR(N(v)[1])})?`, AR(N(v)[2]), near.map(x => AR(N(x)[2])),
-    `${v} = ${AR(N(v)[2])}`));
-});
-// number -> how to say it
-[1, 4, 5, 6, 8, 9].forEach(v => {
-  const near = [1, 2, 3, 4, 5, 6, 7, 8, 9].filter(x => x !== v).sort((a, b) => Math.abs(a - v) - Math.abs(b - v)).slice(0, 3);
-  Q_NUMS.push(mc1(`איך אומרים בערבית את המספר ${v}?`, N(v)[3], near.map(x => N(x)[3]),
-    `${v} – אומרים: ${N(v)[3]} (כותבים: ${AR(N(v)[2])})`));
-});
-// Arabic word -> how to say it
-[3, 5, 7, 9, 2].forEach(v => {
-  const near = [1, 2, 3, 4, 5, 6, 7, 8, 9].filter(x => x !== v).sort((a, b) => Math.abs(a - v) - Math.abs(b - v)).slice(0, 3);
-  Q_NUMS.push(mc1(`איך אומרים ${AB(N(v)[2])}?`, N(v)[3], near.map(x => N(x)[3]), `${AR(N(v)[2])} – אומרים: ${N(v)[3]} (${v})`));
-});
-// 11-19
-[11, 12, 13, 15, 17, 19].forEach(v => {
-  const unit = v - 10;
-  const wrong = [N(unit)[2], N(10)[2], N(unit === 1 ? 20 : unit * 10)[2]];
-  Q_NUMS.push(mc1(`איך כותבים בערבית את המספר ${v}?`, AR(N(v)[2]), wrong.map(AR),
-    `${v} = ${AR(N(v)[2])}. המספרים 11–19: מספר + ${AR('عَشَر')}.`));
-});
-// the tens
-[20, 30, 50, 70, 90].forEach(v => {
-  const u = v / 10;
-  Q_NUMS.push(numChoice(`איזה מספר הוא ${AB(N(v)[2])}?`, v, [u, u + 10, v + 10 > 90 ? v - 10 : v + 10], `${AR(N(v)[2])} = ${v}. העשרות מסתיימות ב-${AR('ـُون')}.`));
-});
-[40, 60, 80].forEach(v => {
-  Q_NUMS.push(mc1(`איך אומרים בערבית את המספר ${v}?`, N(v)[3], [N(v / 10)[3], N(v / 10 + 10)[3], N(v - 10)[3]],
-    `${v} – אומרים: ${N(v)[3]} (כותבים: ${AR(N(v)[2])})`));
-});
+const numCards = list => list.map(n => ({ front: AB(toAr(n)), back: `= ${n}` }));
 Q_NUMS.push(
-  tf(`${AR('سَبْعَة')} = 7`, true, `נכון! ${AR('سَبْعَة')} = 7.`),
-  tf(`${AR('خَمْسُون')} = 5`, false, `לא נכון! ${AR('خَمْسُون')} = 50. 5 = ${AR('خَمْسَة')}.`),
-  tf(`${AR('ثَمَانِيَة')} = 8`, true, `נכון! ${AR('ثَمَانِيَة')} = 8.`),
-  tf(`${AR('سِتَّة')} = 7`, false, `לא נכון! ${AR('سِتَّة')} = 6. 7 = ${AR('سَبْعَة')}.`),
-  tf(`${AR('٤')} = 4`, true, `נכון! ${AR('٤')} = 4.`),
-  tf(`${AR('٦')} = 9`, false, `לא נכון! ${AR('٦')} = 6. 9 = ${AR('٩')}.`),
-  tf(`${AR('صِفْر')} = 0`, true, `נכון! ${AR('صِفْر')} = 0.`),
-  tf(`${AR('عِشْرُون')} = 20`, true, `נכון! ${AR('عِشْرُون')} = 20.`),
-  tf(`${AR('أَرْبَعَةَ عَشَر')} = 14`, true, `נכון! 4 + 10 = 14.`),
-  tf(`${AR('سَبْعُون')} = 17`, false, `לא נכון! ${AR('سَبْعُون')} = 70. 17 = ${AR('سَبْعَةَ عَشَر')}.`),
-  { type: 'order', q: 'סדרי מהקטן לגדול (1–5):', items: [1, 2, 3, 4, 5].map(v => AR(N(v)[2])), exp: '1 2 3 4 5 – واحد, اثنان, ثلاثة, أربعة, خمسة' },
-  { type: 'order', q: 'סדרי מהקטן לגדול (5–9):', items: [5, 6, 7, 8, 9].map(v => AR(N(v)[2])), exp: '5 6 7 8 9' },
-  { type: 'order', q: 'סדרי מהקטן לגדול (ספרות ערביות):', items: [3, 5, 6, 8].map(v => AR(N(v)[1])), exp: '3 5 6 8' },
-  { type: 'order', q: 'סדרי מהקטן לגדול (העשרות):', items: [20, 30, 40, 50].map(v => AR(N(v)[2])), exp: '20 30 40 50' },
-  { type: 'sort', q: 'עשרות או יחידות?', bucketA: 'עשרות (20, 30...)', bucketB: 'יחידות (1–9)',
-    items: [{ text: AR('عِشْرُون'), bucket: 0 }, { text: AR('خَمْسَة'), bucket: 1 }, { text: AR('ثَلَاثُون'), bucket: 0 }, { text: AR('تِسْعَة'), bucket: 1 }],
-    exp: `עשרות: ${AR('عِشْرُون')} (20) ${AR('ثَلَاثُون')} (30). יחידות: ${AR('خَمْسَة')} (5) ${AR('تِسْعَة')} (9).` },
-  { type: 'sort', q: '11–19 או עשרות?', bucketA: 'המספרים 11–19', bucketB: 'עשרות',
-    items: [{ text: AR('أَرْبَعَةَ عَشَر'), bucket: 0 }, { text: AR('خَمْسُون'), bucket: 1 }, { text: AR('سَبْعَةَ عَشَر'), bucket: 0 }, { text: AR('سِتُّون'), bucket: 1 }],
-    exp: `11–19: ${AR('أَرْبَعَةَ عَشَر')} (14) ${AR('سَبْعَةَ عَشَر')} (17). עשרות: ${AR('خَمْسُون')} (50) ${AR('سِتُّون')} (60).` },
-  { type: 'flipcards', q: 'הספרות הערביות 0–4 – הפכי כדי לראות:', cards: nums(0, 1, 2, 3, 4).map(n => ({ front: AB(n[1]), back: `${n[0]} · ${AR(n[2])} · ${n[3]}` })) },
-  { type: 'flipcards', q: 'הספרות הערביות 5–9 – הפכי כדי לראות:', cards: nums(5, 6, 7, 8, 9).map(n => ({ front: AB(n[1]), back: `${n[0]} · ${AR(n[2])} · ${n[3]}` })) }
+  { type: 'flipcards', q: 'הספרות הערביות 0–4 – הפכי כדי לראות:', cards: numCards([0, 1, 2, 3, 4]) },
+  { type: 'flipcards', q: 'הספרות הערביות 5–9 – הפכי כדי לראות:', cards: numCards([5, 6, 7, 8, 9]) },
+  { type: 'flipcards', q: 'העשרות בספרות ערביות – הפכי כדי לראות:', cards: numCards([10, 20, 30, 40, 50]) },
+  { type: 'flipcards', q: 'עוד עשרות – הפכי כדי לראות:', cards: numCards([60, 70, 80, 90]) }
+);
+
+// ===================== 3b. VOWELS and the hamza sign (lesson 1) =====================
+// The lesson writes the syllables of dāl, rā and wāw with the vowel ـَ (a, above the letter) and ـِ (i, below it),
+// and teaches the hamza sign on alif: أَ (a) and إِ (i).
+const FATHA = 'َ', KASRA = 'ِ';
+const HE_A = 'ַ', HE_I = 'ִ';                       // Hebrew pataḥ (a) and ḥiriq (i)
+const HE_LETTER = { 'د': 'ד', 'ر': 'ר', 'و': 'ו', 'ز': 'ז' };
+// [arabic syllable, hebrew reading]
+const SYL = [];
+['د', 'ر', 'و', 'ز'].forEach(l => {
+  SYL.push([l + FATHA, HE_LETTER[l] + HE_A]);
+  SYL.push([l + KASRA, HE_LETTER[l] + HE_I]);
+});
+const VOWEL_NAME = { a: 'a (פתח)', i: 'i (חיריק)' };
+const vowelOf = ar => ar.includes(FATHA) ? 'a' : 'i';
+const Q_VOWELS = [];
+SYL.forEach(([ar, he], i) => {
+  const l = ar[0], v = vowelOf(ar);
+  const otherV = SYL.find(([a2]) => a2[0] === l && vowelOf(a2) !== v);                       // same letter, other vowel
+  const pos = v === 'a' ? 'מעל האות' : 'מתחת לאות';
+  const lNext = ['د', 'ر', 'و', 'ز'][(['د', 'ر', 'و', 'ز'].indexOf(l) + 1) % 4];
+  const both = SYL.find(([a2]) => a2[0] === lNext && vowelOf(a2) !== v);                      // other letter, other vowel
+  const sameVNext = SYL.find(([a2]) => a2[0] === lNext && vowelOf(a2) === v);                 // other letter, same vowel
+  // syllable -> how it is read
+  Q_VOWELS.push(mc1(`איך קוראים ${AB(ar)}?`, he, [otherV[1], sameVNext[1], both[1]],
+    `${AR(ar)} נקראת ${he}: האות ${HE_LETTER[l]} עם התנועה ${VOWEL_NAME[v]}.`));
+  // how it is read -> syllable
+  Q_VOWELS.push(mc1(`איזו הברה נקראת "${he}"?`, AL(ar), [otherV[0], sameVNext[0], both[0]].map(AL),
+    `${he} נכתבת ${AR(ar)}: האות ${AR(l)} והתנועה ${VOWEL_NAME[v]} ${pos}.`));
+  // which vowel is on it
+  Q_VOWELS.push(mc1(`איזו תנועה יש בהברה ${AB(ar)}?`, VOWEL_NAME[v], [VOWEL_NAME[v === 'a' ? 'i' : 'a'], 'u (כמו שורוק)', 'אין תנועה'],
+    `ב-${AR(ar)} התנועה היא ${VOWEL_NAME[v]}, כתובה ${pos}.`));
+});
+// where the vowels are written
+Q_VOWELS.push(
+  mc1(`איפה כותבים את התנועה a (פתח) – ${AR('ـَ')}?`, 'מעל האות', ['מתחת לאות', 'בתוך האות', 'לפני האות'],
+    `התנועה a (${AR('ـَ')}) נכתבת מעל האות, למשל ${AR('دَ')} (דַ).`),
+  mc1(`איפה כותבים את התנועה i (חיריק) – ${AR('ـِ')}?`, 'מתחת לאות', ['מעל האות', 'בתוך האות', 'לפני האות'],
+    `התנועה i (${AR('ـِ')}) נכתבת מתחת לאות, למשל ${AR('دِ')} (דִ).`),
+  tf(`הסימן ${AR('ـَ')} נשמע a ונכתב מעל האות`, true, `נכון! ${AR('رَ')} = רַ.`),
+  tf(`הסימן ${AR('ـِ')} נשמע i ונכתב מתחת לאות`, true, `נכון! ${AR('رِ')} = רִ.`),
+  tf(`התנועה i (${AR('ـِ')}) נכתבת מעל האות`, false, `לא נכון! התנועה i נכתבת מתחת לאות: ${AR('دِ')}.`),
+  tf(`התנועה a (${AR('ـَ')}) נכתבת מתחת לאות`, false, `לא נכון! התנועה a נכתבת מעל האות: ${AR('دَ')}.`),
+  tf(`${AR('رَ')} נקראת "רַ"`, true, `נכון! ${AR('رَ')} = רַ.`),
+  tf(`${AR('وِ')} נקראת "וַ"`, false, `לא נכון! ${AR('وِ')} = וִ (התנועה i). וַ = ${AR('وَ')}.`)
+);
+// the vowel on a letter inside a word
+[
+  ['دَار', 'د', 'a'], ['يَوْم', 'ي', 'a'], ['زَارَ', 'ز', 'a'], ['مُدِير', 'د', 'i'],
+].forEach(([w, c, v]) => {
+  Q_VOWELS.push(mc1(`איזו תנועה כתובה על האות ${AB(c)} במילה ${AR(w)}?`, VOWEL_NAME[v], [VOWEL_NAME[v === 'a' ? 'i' : 'a'], 'u (כמו שורוק)', 'אין תנועה'],
+    `על ${AR(c)} במילה ${AR(w)} כתובה התנועה ${VOWEL_NAME[v]}.`));
+});
+// the hamza sign on alif
+Q_VOWELS.push(
+  mc1(`איך כותבים אַ (a) עם סימן ההמזה על האלף?`, AL('أَ'), [AL('إِ'), AL('ا'), AL('دَ')],
+    `אַ = ${AR('أَ')}: סימן ההמזה מעל האלף, והתנועה a מעליו.`),
+  mc1(`איך כותבים אִ (i) עם סימן ההמזה על האלף?`, AL('إِ'), [AL('أَ'), AL('ا'), AL('دِ')],
+    `אִ = ${AR('إِ')}: סימן ההמזה מתחת לאלף, והתנועה i מתחתיו.`),
+  mc1(`איך קוראים ${AB('أَ')}?`, `א${HE_A}`, [`א${HE_I}`, `ד${HE_A}`, `ר${HE_A}`], `${AR('أَ')} נקראת אַ.`),
+  mc1(`איך קוראים ${AB('إِ')}?`, `א${HE_I}`, [`א${HE_A}`, `ד${HE_I}`, `ר${HE_I}`], `${AR('إِ')} נקראת אִ.`),
+  mc1('איפה כותבים את סימן ההמזה על האלף כשהתנועה היא a (אַ)?', 'מעל האלף', ['מתחת לאלף', 'בתוך האלף', 'ליד האלף'],
+    `אַ = ${AR('أَ')}: ההמזה מעל האלף.`),
+  mc1('איפה כותבים את סימן ההמזה על האלף כשהתנועה היא i (אִ)?', 'מתחת לאלף', ['מעל האלף', 'בתוך האלף', 'ליד האלף'],
+    `אִ = ${AR('إِ')}: ההמזה מתחת לאלף.`),
+  tf(`${AR('أَ')} נקראת "אַ"`, true, `נכון! ${AR('أَ')} = אַ.`),
+  tf(`${AR('إِ')} נקראת "אַ"`, false, `לא נכון! ${AR('إِ')} = אִ. אַ = ${AR('أَ')}.`),
+  tf(`בהברה ${AR('إِ')} סימן ההמזה כתוב מתחת לאלף`, true, `נכון! כשהתנועה היא i ההמזה מתחת לאלף.`),
+  tf(`בהברה ${AR('أَ')} סימן ההמזה כתוב מתחת לאלף`, false, `לא נכון! כשהתנועה היא a ההמזה מעל האלף.`)
+);
+Q_VOWELS.push(
+  { type: 'sort', q: 'איפה כתובה התנועה?', bucketA: 'מעל האות (a)', bucketB: 'מתחת לאות (i)',
+    items: [{ text: AR('دَ'), bucket: 0 }, { text: AR('دِ'), bucket: 1 }, { text: AR('رَ'), bucket: 0 }, { text: AR('رِ'), bucket: 1 }],
+    exp: `מעל האות (a): ${AR('دَ')} ${AR('رَ')}. מתחת לאות (i): ${AR('دِ')} ${AR('رِ')}.` },
+  { type: 'sort', q: 'a או i?', bucketA: 'תנועה a (פתח)', bucketB: 'תנועה i (חיריק)',
+    items: [{ text: AR('وَ'), bucket: 0 }, { text: AR('زِ'), bucket: 1 }, { text: AR('زَ'), bucket: 0 }, { text: AR('وِ'), bucket: 1 }],
+    exp: `a: ${AR('وَ')} ${AR('زَ')}. i: ${AR('زِ')} ${AR('وِ')}.` },
+  { type: 'sort', q: 'המזה מעל או מתחת לאלף?', bucketA: 'המזה מעל (אַ)', bucketB: 'המזה מתחת (אִ)',
+    items: [{ text: AR('أَ'), bucket: 0 }, { text: AR('إِ'), bucket: 1 }],
+    exp: `${AR('أَ')} – ההמזה מעל. ${AR('إِ')} – ההמזה מתחת.` },
+  { type: 'flipcards', q: 'הברות עם דאל ורא – הפכי כדי לראות:', cards: SYL.slice(0, 4).map(([a, h]) => ({ front: AB(a), back: h })) },
+  { type: 'flipcards', q: 'הברות עם ואו וזאי – הפכי כדי לראות:', cards: SYL.slice(4, 8).map(([a, h]) => ({ front: AB(a), back: h })) },
+  { type: 'flipcards', q: 'סימן ההמזה על האלף – הפכי כדי לראות:', cards: [['أَ', `א${HE_A}`], ['إِ', `א${HE_I}`]].map(([a, h]) => ({ front: AB(a), back: h })) }
 );
 
 // ===================== 4. "MY"  (suffix ـِي, nouns only) =====================
-// [base, "my" form, hebrew, sounds-like (my form)]
+// nouns from the lesson's own words (plus يَد from the board): [base, "my" form, hebrew, how "my" sounds]
 const NOUNS = [
-  ['يَد', 'يَدِي', 'יד', 'ידי'], ['دَار', 'دَارِي', 'בית', 'דארי'], ['بَيْت', 'بَيْتِي', 'בית', 'בייתי'],
-  ['بَاب', 'بَابِي', 'דלת', 'באבי'], ['كِتَاب', 'كِتَابِي', 'ספר', 'כיתאבי'], ['قَلَم', 'قَلَمِي', 'עט', 'קלמי'],
-  ['أَب', 'أَبِي', 'אבא', 'אבי'], ['وَلَد', 'وَلَدِي', 'ילד', 'ולדי'], ['أَخ', 'أَخِي', 'אח', 'אחי'],
-  ['بِنْت', 'بِنْتِي', 'ילדה', 'בנתי'], ['اِسْم', 'اِسْمِي', 'שם', 'אסמי'],
+  ['يَد', 'يَدِي', 'יד', 'ידי'], ['دَار', 'دَارِي', 'בית', 'דארי'], ['مُدِير', 'مُدِيرِي', 'מנהל', 'מדירי'],
+  ['أَرْز', 'أَرْزِي', 'אורז', 'ארזי'], ['يَوْم', 'يَوْمِي', 'יום', 'יומי'],
 ];
-const nounGroup = i => NOUNS[i][2];
-const otherNouns = (i, start, n) => {
-  const idx = NOUNS.map((_, k) => k).filter(k => k !== i && NOUNS[k][2] !== NOUNS[i][2]);
-  const out = [], seen = new Set();
-  for (let k = 0; out.length < n && k < idx.length * 2; k++) {
-    const nn = NOUNS[idx[(start + k) % idx.length]];
-    if (!seen.has(nn[2])) { seen.add(nn[2]); out.push(nn); }
-  }
-  return out;
-};
+const otherNouns = (i, start, n) => take(NOUNS.map((_, k) => k).filter(k => k !== i), start, n, []).map(k => NOUNS[k]);
 
 const Q_MY = [];
 NOUNS.forEach((nn, i) => {
   const [base, mine, he] = nn;
   const o = otherNouns(i, i, 2);
-  // hebrew -> arabic (with the plain word as a trap)
-  // two nouns mean "house": say which Arabic word the question is about, so no two prompts are identical
-  const dupHe = NOUNS.filter(x => x[2] === he).length > 1;
-  Q_MY.push(mc1(`איך אומרים "${he} שלי" בערבית${dupHe ? ` (מהמילה ${AR(base)})` : ''}?`, AR(mine), [AR(base), AR(o[0][1]), AR(o[1][1])],
+  Q_MY.push(mc1(`איך אומרים "${he} שלי" בערבית?`, AR(mine), [AR(base), AR(o[0][1]), AR(o[1][1])],
     `${he} שלי = ${AR(mine)}. מוסיפים ${AR('ـِي')} לסוף המילה ${AR(base)}.`));
-  // arabic -> hebrew
-  Q_MY.push(mc1(`מה פירוש ${AB(mine)}?`, `${he} שלי`, otherNouns(i, i + 3, 3).map(x => `${x[2]} שלי`),
+  Q_MY.push(mc1(`מה פירוש ${AB(mine)}?`, `${he} שלי`, otherNouns(i, i + 1, 3).map(x => `${x[2]} שלי`),
     `${AR(mine)} = ${he} שלי.`));
-});
-// how it sounds
-[0, 1, 3, 4, 5, 6].forEach((i, k) => {
-  const [, mine, he, snd] = NOUNS[i];
-  const wrong = otherNouns(i, k * 2 + 1, 3).map(x => x[3]);
-  Q_MY.push(mc1(`איך קוראים ${AB(mine)}?`, snd, wrong, `${AR(mine)} – קוראים: ${snd} (${he} שלי).`));
+  Q_MY.push(mc1(`איך קוראים ${AB(mine)}?`, nn[3], otherNouns(i, i + 2, 3).map(x => x[3]), `${AR(mine)} – קוראים: ${nn[3]} (${he} שלי).`));
 });
 Q_MY.push(
-  mc1('איזו סיומת מוסיפים לשם עצם כדי לומר "שלי"?', AR('ـِي'), [AR('ـِب'), AR('ـِت'), AR('ـِد')],
+  mc1('איזו סיומת מוסיפים לשם עצם כדי לומר "שלי"?', AR('ـِي'), [AR('ـِر'), AR('ـِز'), AR('ـِد')],
     `הסיומת ${AR('ـِي')} (י) = "שלי". למשל ${AR('يَد')} ← ${AR('يَدِي')}.`),
-  mc1(`איזו אות מוסיפים בסוף המילה ${AR('بَيْت')} כדי לקבל "ביתי"?`, AR('ي'), [AR('ب'), AR('ت'), AR('د')],
-    `${AR('بَيْت')} + ${AR('ـِي')} = ${AR('بَيْتِي')}.`),
+  mc1(`איזו אות מוסיפים בסוף המילה ${AR('دَار')} כדי לקבל "ביתי"?`, AR('ي'), [AR('ر'), AR('ز'), AR('و')],
+    `${AR('دَار')} + ${AR('ـِي')} = ${AR('دَارِي')}.`),
   mc1(`איזו תנועה נשמעת לפני ה-י בסוף המילה ${AR('يَدِي')}?`, 'i (כמו חיריק)', ['a (כמו פתח)', 'u (כמו שורוק)', 'אין תנועה'],
     `לפני ${AR('ـِي')} האות האחרונה של השם מקבלת ${AR('ـِ')} (קול i). ${AR('يَد')} ← ${AR('يَدِي')} (ידי).`),
-  mc1(`במילה ${AR('بَابِي')} – איזו תנועה נשמעת לפני ה-י שבסוף?`, 'i (כמו חיריק)', ['a (כמו פתח)', 'u (כמו שורוק)', 'אין תנועה'],
-    `${AR('بَاب')} + ${AR('ـِي')} = ${AR('بَابِي')} (באבי). לפני ה-י נשמע i.`)
+  mc1(`במילה ${AR('دَارِي')} – איזו תנועה נשמעת לפני ה-י שבסוף?`, 'i (כמו חיריק)', ['a (כמו פתח)', 'u (כמו שורוק)', 'אין תנועה'],
+    `${AR('دَار')} + ${AR('ـِي')} = ${AR('دَارِي')} (דארי). לפני ה-י נשמע i.`)
 );
 // only nouns
 [
@@ -1114,8 +1160,9 @@ Q_MY.push(
   tf(`את הסיומת ${AR('ـِي')} (שלי) אפשר להוסיף לשמות עצם בלבד`, true, 'נכון! "שלי" מוסיפים לשמות עצם בלבד.'),
   tf(`את הסיומת ${AR('ـِي')} (שלי) אפשר להוסיף גם לפעלים`, false, 'לא נכון! מוסיפים אותה לשמות עצם בלבד.'),
   tf(`${AR('يَدِي')} פירושו "יד שלי"`, true, `נכון! ${AR('يَد')} + ${AR('ـِي')} = ${AR('يَدِي')} (ידי).`),
-  tf(`${AR('قَلَمِي')} פירושו "ספר שלי"`, false, `לא נכון! ${AR('قَلَمِي')} = עט שלי. ספר שלי = ${AR('كِتَابِي')}.`),
-  tf(`${AR('كِتَاب')} + ${AR('ـِي')} = ${AR('كِتَابِي')}`, true, `נכון! ספר + שלי = ${AR('كِتَابِي')}.`),
+  tf(`${AR('مُدِيرِي')} פירושו "מנהל שלי"`, true, `נכון! ${AR('مُدِير')} + ${AR('ـِي')} = ${AR('مُدِيرِي')}.`),
+  tf(`${AR('أَرْزِي')} פירושו "יד שלי"`, false, `לא נכון! ${AR('أَرْزِي')} = אורז שלי. יד שלי = ${AR('يَدِي')}.`),
+  tf(`${AR('دَار')} + ${AR('ـِي')} = ${AR('دَارِي')}`, true, `נכון! בית + שלי = ${AR('دَارِي')} (דארי).`),
   tf(`${AR('دَارِي')} פירושו "בית שלי"`, true, `נכון! ${AR('دَار')} + ${AR('ـِي')} = ${AR('دَارِي')} (דארי).`),
   { type: 'sort', q: 'לאילו מילים אפשר להוסיף "שלי"?', bucketA: 'אפשר (שם עצם)', bucketB: 'אי אפשר',
     items: [{ text: 'דלת', bucket: 0 }, { text: 'לרוץ', bucket: 1 }, { text: 'עט', bucket: 0 }, { text: 'גדול', bucket: 1 }],
@@ -1128,27 +1175,31 @@ Q_MY.push(
 // ===================== MISSIONS =====================
 const MISSIONS = [
   {
-    id: 0, icon: '🔤', title: 'האותיות א–ד + י', desc: 'אלף עד דאל, ויא – שם, נקודות וצליל', color: '#7c3aed',
-    lesson: `האותיות: ${AR('ا')} אלף (בלי נקודות) · ${AR('ب')} בא (נקודה מתחת) · ${AR('ت')} תא (שתי נקודות מעל) · ${AR('ث')} ת׳א (שלוש נקודות מעל) · ${AR('ج')} ג׳ים (נקודה מתחת) · ${AR('ح')} חא (בלי נקודות) · ${AR('خ')} ח׳א (נקודה מעל) · ${AR('د')} דאל (בלי נקודות) · ${AR('ي')} יא (שתי נקודות מתחת). ${AR('خ')} נשמעת כמו ח רגילה בעברית, ו-${AR('ح')} היא ח עמוקה יותר מהגרון.`,
+    id: 0, icon: '🔤', title: 'אותיות "ארז דוד" + י', desc: 'אלף, רא, זאי, דאל, ואו, ד׳אל ויא – שם, נקודות וצליל', color: '#7c3aed',
+    lesson: `בשיעור הראשון לומדים את האותיות "ארז דוד": ${ARAZ.map(i => `${AR(LET[i].ch)} ${LET[i].name}`).join(' · ')}, ואת ${AR('ي')} יא. נקודות: ${AR('ز')} (זאי) = ${AR('ر')} + נקודה מעל, ${AR('ذ')} (ד׳אל) = ${AR('د')} + נקודה מעל, ${AR('ي')} – שתי נקודות מתחת. ${AR('ا')} ${AR('ر')} ${AR('د')} ${AR('و')} בלי נקודות.`,
     questions: Q_LETTERS
   },
   {
-    id: 1, icon: '📖', title: 'מילים', desc: 'לקרוא מילים ולזהות את האותיות שבהן', color: '#0891b2',
-    lesson: `המילים: ${WORDS.map(w => `${AR(w[0])} = ${w[1]}`).join(' · ')}.`,
+    id: 1, icon: '📖', title: 'מילים', desc: 'המילים משיעור 1 ואיתור האותיות בהן', color: '#0891b2',
+    lesson: `המילים: ${WORDS.map(w => `${AR(w[0])}${w[1] ? ` = ${w[1]}` : ''}`).join(' · ')}.`,
     questions: Q_WORDS
   },
   {
-    id: 2, icon: '🔢', title: 'מספרים', desc: '0–9, 11–19 והעשרות – איך כותבים ואיך אומרים', color: '#db2777',
-    lesson: `ספרות: ${NUM.slice(0, 10).map(n => `${AR(n[1])} ${n[0]}`).join(' · ')}. מילים: ${NUM.slice(0, 10).map(n => AR(n[2])).join(' · ')}. את המספרים 11–19 כותבים: מספר + ${AR('عَشَر')} (למשל ${AR('ثَلَاثَةَ عَشَر')} = 13). העשרות מסתיימות ב-${AR('ـُون')}: ${NUM.slice(20).map(n => AR(n[2])).join(' · ')}.`,
+    id: 2, icon: '🔢', title: 'ספרות ערביות', desc: 'מחברים בקו כל ספרה ערבית למספר הרגיל', color: '#db2777', roundSize: 4,
+    lesson: `הספרות בערבית נראות אחרת משלנו: ${[...AR_DIGITS].map((d, i) => `${AR(d)} = ${i}`).join(' · ')}. שימי לב: ${AR('٠')} היא נקודה, ${AR('٥')} היא עיגול, ${AR('٦')} נראית כמו 7, ${AR('٧')} כמו V, ${AR('٨')} כמו V הפוכה ו-${AR('٩')} כמו 9. מספרים עם כמה ספרות כותבים משמאל לימין, כמו אצלנו: ${AR('١٣')} = 13, ${AR('٢٠')} = 20.`,
     questions: Q_NUMS
   },
   {
-    id: 3, icon: '🙋', title: 'שלי (ـِي)', desc: 'להוסיף "שלי" לשמות עצם', color: '#f59e0b',
+    id: 3, icon: '✨', title: 'תנועות והמזה', desc: 'פתח (a) מעל, חיריק (i) מתחת, וסימן ההמזה על האלף', color: '#10b981',
+    lesson: `התנועה a (פתח) ${AR('ـَ')} נכתבת מעל האות: ${AR('دَ')} ${AR('رَ')} ${AR('وَ')} (דַ רַ וַ). התנועה i (חיריק) ${AR('ـِ')} נכתבת מתחת לאות: ${AR('دِ')} ${AR('رِ')} ${AR('وِ')} (דִ רִ וִ). סימן ההמזה על האלף: ${AR('أَ')} = אַ (ההמזה מעל), ${AR('إِ')} = אִ (ההמזה מתחת).`,
+    questions: Q_VOWELS
+  },
+  {
+    id: 4, icon: '🙋', title: 'שלי (ـِي)', desc: 'להוסיף "שלי" לשמות עצם', color: '#f59e0b',
     lesson: `כדי לומר "שלי" מוסיפים לשם העצם את הסיומת ${AR('ـِي')}. האות האחרונה של השם מקבלת ${AR('ـِ')} (קול i) והסיומת היא י. ${AR('يَد')} ← ${AR('يَدِي')} (ידי), ${AR('دَار')} ← ${AR('دَارِي')} (דארי). מוסיפים "שלי" לשמות עצם בלבד – לא לפעלים ולא לתארים.`,
     questions: Q_MY
   }
 ];
-
 
 // ===== SOUND (generated in the browser, no audio files) =====
 let audioCtx = null;
@@ -1224,22 +1275,23 @@ function shuffle(a) {
 }
 
 // remember which questions were already shown, so each play gets new ones
-const SEEN_KEY = 'maya_arabic_seen_v1'; // different from the Tanakh game (same origin)
+const SEEN_KEY = 'maya_arabic_seen_v2'; // different from the Tanakh game (same origin); v2 = matching game for the numbers
 function loadSeen() { try { return JSON.parse(localStorage.getItem(SEEN_KEY)) || {}; } catch (e) { return {}; } }
 function saveSeen(s) { try { localStorage.setItem(SEEN_KEY, JSON.stringify(s)); } catch (e) {} }
 
 function pickRound(m) {
+  const SIZE = m.roundSize || ROUND_SIZE;
   const seen = loadSeen();
   let used = (seen[m.id] || []).filter(i => i < m.questions.length);
   const all = m.questions.map((_, i) => i);
   const fresh = all.filter(i => !used.includes(i));
   let chosen;
-  if (fresh.length >= ROUND_SIZE) {
-    chosen = shuffle(fresh).slice(0, ROUND_SIZE);
+  if (fresh.length >= SIZE) {
+    chosen = shuffle(fresh).slice(0, SIZE);
     used = used.concat(chosen);
   } else {
     // pool exhausted: take what's left unseen, top up with others, start a new cycle
-    const rest = shuffle(all.filter(i => !fresh.includes(i))).slice(0, ROUND_SIZE - fresh.length);
+    const rest = shuffle(all.filter(i => !fresh.includes(i))).slice(0, SIZE - fresh.length);
     chosen = shuffle(fresh.concat(rest));
     used = chosen.slice();
   }
@@ -1361,6 +1413,7 @@ function renderQuestion() {
   else if (q.type === 'flipcards') renderFlip(q, area);
   else if (q.type === 'sort') renderSort(q, area);
   else if (q.type === 'order') renderOrder(q, area);
+  else if (q.type === 'match') renderMatch(q, area);
 }
 
 // ===== CHOICE =====
@@ -1606,6 +1659,181 @@ function selectOrderItem(i) {
       orderState.q.items.join(' → '));
     document.getElementById('next-btn').classList.add('show');
   }
+}
+
+// ===== MATCH: join each Arabic numeral to the normal number with a line =====
+// Drag from one column to the other, or tap one item and then the other. Tap a joined item to remove its line.
+let mt = null; // state of the matching game on screen
+
+const lastMatchSet = {};   // the previous set of each group, so the same 5 numbers never come twice in a row
+
+// 5 random numbers from the group's range (different every time)
+function pickNumbers(q) {
+  if (q.values) return q.values;                                  // (tests can pass fixed numbers)
+  const key = list => [...list].sort((x, y) => x - y).join();
+  let set;
+  for (let t = 0; t < 20; t++) {
+    set = shuffle(q.pool).slice(0, q.count);
+    if (key(set) !== lastMatchSet[q.group]) break;
+  }
+  lastMatchSet[q.group] = key(set);
+  return set;
+}
+
+function renderMatch(q, area) {
+  const values = pickNumbers(q);
+  const exp = q.exp || `הספרות הערביות נראות אחרת משלנו. ${tipsFor(values)}${leftToRight(values)}`;
+  const pairs = values.map(v => ({ v, ar: toAr(v), num: String(v) }));
+  const a = shuffle(pairs);                                       // column of Arabic numerals
+  let b = shuffle(pairs);                                         // column of normal numbers
+  for (let t = 0; t < 30 && b.every((p, i) => p === a[i]); t++) b = shuffle(pairs); // never start already lined up
+  mt = { n: pairs.length, a, b, links: new Map(), sel: null, drag: null, locked: false, res: new Map() };
+  const sorted = [...pairs].sort((x, y) => x.v - y.v);
+  currentQuestion = { exp, correctText: '<br>' + sorted.map(p => `${AR(p.ar)} = ${p.num}`).join('<br>') };
+  area.innerHTML = `
+    <div class="q-card">
+      <div class="q-text">${q.q}</div>
+      <div class="match-head"><span>ספרות ערביות</span><span>מספרים רגילים</span></div>
+      <div class="match-wrap" id="match-wrap">
+        <svg class="match-lines" id="match-lines"></svg>
+        <div class="match-col">${a.map((p, i) => `<button class="match-item" id="ma${i}" data-side="a" data-i="${i}">${AR(p.ar)}</button>`).join('')}</div>
+        <div class="match-col">${b.map((p, i) => `<button class="match-item" id="mb${i}" data-side="b" data-i="${i}" dir="ltr">${p.num}</button>`).join('')}</div>
+      </div>
+      <div class="draw-actions" id="match-actions">
+        <button class="draw-btn" id="btn-clear" onclick="matchClear()">🧹 ניקוי</button>
+        <button class="draw-btn primary" id="btn-check" onclick="matchCheck()">✅ בדיקה</button>
+      </div>
+      <div class="feedback-box" id="feedback"></div>
+    </div>
+  `;
+  document.getElementById('match-wrap').addEventListener('pointerdown', matchDown);
+  drawMatch();
+}
+
+function matchItem(el) {
+  const it = el && el.closest ? el.closest('.match-item') : null;
+  return it ? { side: it.dataset.side, i: Number(it.dataset.i) } : null;
+}
+
+// which index on the other side is this item joined to? (-1 = none)
+function linkOf(side, i) {
+  if (side === 'a') return mt.links.has(i) ? mt.links.get(i) : -1;
+  for (const [k, v] of mt.links) if (v === i) return k;
+  return -1;
+}
+
+function matchLink(ai, bi) {
+  for (const [k, v] of [...mt.links]) if (k === ai || v === bi) mt.links.delete(k); // one line per item
+  mt.links.set(ai, bi);
+  mt.sel = null;
+  sounds.flip();
+}
+
+function matchTap(side, i) {
+  const s = mt.sel;
+  if (s && s.side !== side) matchLink(side === 'a' ? i : s.i, side === 'a' ? s.i : i);
+  else if (s && s.side === side && s.i === i) mt.sel = null;
+  else if (linkOf(side, i) !== -1) {
+    const other = linkOf(side, i);
+    mt.links.delete(side === 'a' ? i : other);
+    mt.sel = null;
+  } else mt.sel = { side, i };
+  drawMatch();
+}
+
+function matchDown(e) {
+  if (!mt || mt.locked) return;
+  const it = matchItem(e.target);
+  if (!it) return;
+  e.preventDefault();
+  mt.drag = { side: it.side, i: it.i, x: e.clientX, y: e.clientY, px: e.clientX, py: e.clientY, moved: false };
+}
+
+window.addEventListener('pointermove', e => {
+  if (!mt || !mt.drag) return;
+  const d = mt.drag;
+  d.px = e.clientX; d.py = e.clientY;
+  if (!d.moved && Math.hypot(d.px - d.x, d.py - d.y) > 8) d.moved = true;
+  if (d.moved) drawMatch();
+});
+window.addEventListener('pointerup', e => {
+  if (!mt || !mt.drag) return;
+  const d = mt.drag;
+  mt.drag = null;
+  if (mt.locked) { drawMatch(); return; }
+  if (!d.moved) { matchTap(d.side, d.i); return; }        // a tap
+  const target = matchItem(document.elementFromPoint(e.clientX, e.clientY));
+  if (target && target.side !== d.side) matchLink(d.side === 'a' ? d.i : target.i, d.side === 'a' ? target.i : d.i);
+  drawMatch();
+});
+window.addEventListener('pointercancel', () => { if (mt && mt.drag) { mt.drag = null; drawMatch(); } });
+window.addEventListener('resize', () => drawMatch());
+
+function drawMatch() {
+  if (!mt) return;
+  const wrap = document.getElementById('match-wrap');
+  const svg = document.getElementById('match-lines');
+  if (!wrap || !svg) return;
+  const wr = wrap.getBoundingClientRect();
+  svg.setAttribute('viewBox', `0 0 ${wr.width} ${wr.height}`);
+  const el = (side, i) => document.getElementById((side === 'a' ? 'ma' : 'mb') + i);
+  // the edge of an item that faces the other column
+  const edge = (side, i) => {
+    const r = el(side, i).getBoundingClientRect();
+    const other = el(side === 'a' ? 'b' : 'a', 0).getBoundingClientRect();
+    const x = r.left > other.left ? r.left : r.right;
+    return { x: x - wr.left, y: r.top + r.height / 2 - wr.top };
+  };
+  let html = '';
+  mt.links.forEach((bi, ai) => {
+    const p = edge('a', ai), q = edge('b', bi);
+    const cls = mt.res.has(ai) ? (mt.res.get(ai) ? 'l-ok' : 'l-bad') : 'l-draft';
+    html += `<line class="${cls}" x1="${p.x}" y1="${p.y}" x2="${q.x}" y2="${q.y}"/>`;
+  });
+  if (mt.drag && mt.drag.moved) {
+    const p = edge(mt.drag.side, mt.drag.i);
+    html += `<line class="l-draft dash" x1="${p.x}" y1="${p.y}" x2="${mt.drag.px - wr.left}" y2="${mt.drag.py - wr.top}"/>`;
+  }
+  svg.innerHTML = html;
+  ['a', 'b'].forEach(side => {
+    for (let i = 0; i < mt.n; i++) {
+      const it = el(side, i);
+      const partner = linkOf(side, i);
+      const key = side === 'a' ? i : partner;                     // the Arabic-side index of this item's line
+      it.classList.toggle('linked', partner !== -1);
+      it.classList.toggle('selected', !!mt.sel && mt.sel.side === side && mt.sel.i === i);
+      it.classList.toggle('ok', mt.res.has(key) && mt.res.get(key) === true && partner !== -1);
+      it.classList.toggle('bad', mt.res.has(key) && mt.res.get(key) === false && partner !== -1);
+    }
+  });
+}
+
+function matchClear() {
+  if (!mt || mt.locked) return;
+  mt.links.clear();
+  mt.sel = null;
+  drawMatch();
+}
+
+function matchCheck() {
+  if (!mt || mt.locked) return;
+  if (mt.links.size < mt.n) { showToast(`חברי את כל הספרות (${mt.links.size}/${mt.n})`); return; }
+  mt.locked = true;
+  pendingAnswer = true;
+  let correct = 0;
+  mt.links.forEach((bi, ai) => {
+    const ok = mt.a[ai].v === mt.b[bi].v;
+    mt.res.set(ai, ok);
+    if (ok) correct++;
+  });
+  const all = correct === mt.n;
+  if (all) award(1);
+  else if (correct > 0) { award(correct / mt.n, true); sounds.partial(); }
+  else sounds.wrong();
+  drawMatch();
+  document.getElementById('match-actions').style.display = 'none';
+  showFeedback(all, currentQuestion.exp + (all ? '' : ` (${correct} מתוך ${mt.n} נכונים)`), currentQuestion.correctText);
+  document.getElementById('next-btn').classList.add('show');
 }
 
 // ===== FEEDBACK =====
